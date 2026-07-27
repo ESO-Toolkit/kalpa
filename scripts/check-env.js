@@ -43,7 +43,10 @@ check("Node.js", () => {
   const raw = run("node --version");
   if (!raw) return { ok: false, detail: "not found — install from https://nodejs.org/" };
   const major = parseInt(raw.replace("v", ""), 10);
-  if (major < 18) return { ok: false, detail: `${raw} found, but 18+ is required` };
+  // Keep in lockstep with the docs and CI: README says 22+, and every workflow
+  // pins actions/setup-node to 22. A lower gate here passed silently on a
+  // version the project does not actually build against.
+  if (major < 22) return { ok: false, detail: `${raw} found, but 22+ is required` };
   return { ok: true, detail: raw };
 });
 
