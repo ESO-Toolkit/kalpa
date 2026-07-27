@@ -26,6 +26,14 @@ if (-not $OutputDir) {
   $OutputDir = Join-Path $prototypeRoot "captures\verify"
 }
 
+# The preset is not just a memory knob: the software backend cannot draw
+# shadows, rounded clips or gradients, and the low-memory preset's opaque
+# panels are the mitigation for that. Pairing a preset with the wrong backend
+# renders something no baseline should be compared against, so the backend is
+# derived here rather than left to whatever the shell happens to export.
+# Mirrors default_backend_for_preset() in src/main.rs.
+$Backend = if ($Preset -eq "standard") { "winit-femtovg" } else { "winit-software" }
+
 $State = @($State | ForEach-Object { $_ -split "," } | Where-Object { $_ -ne "" })
 
 if ($Build) {
@@ -135,8 +143,16 @@ Add-Type -AssemblyName System.Windows.Forms
 function New-StateEnvironment {
   param([string]$Name)
 
+  # The child inherits this shell's whole environment, so both backend vars are
+  # overwritten unconditionally: a leftover SLINT_BACKEND would otherwise pick
+  # the renderer while -Preset still labelled the capture, which is exactly the
+  # mislabelled-capture case this harness must not produce. (The prototype now
+  # treats a blank value as unset, so an empty leftover no longer breaks
+  # startup — but it would still leave the renderer undeclared here.)
   $env = @{
     KALPA_RENDER_PRESET = $Preset
+    KALPA_SLINT_BACKEND = $Backend
+    SLINT_BACKEND = $Backend
     KALPA_REDUCED_MOTION = "1"
   }
 
@@ -567,6 +583,7 @@ function Capture-State {
       Width = $width
       Height = $height
       Preset = $Preset
+      Backend = $Backend
       WindowTitle = $window.Title
       WindowClass = $window.ClassName
       WindowVisible = $window.Visible
@@ -592,6 +609,10 @@ function Capture-State {
     }
   }
 }
+
+# -Preset defaults to low-memory, so say which renderer produced these images:
+# a reviewer cannot tell a software capture from a GPU one by looking at it.
+Write-Host "Renderer: preset=$Preset backend=$Backend"
 
 $results = @()
 foreach ($name in $State) {

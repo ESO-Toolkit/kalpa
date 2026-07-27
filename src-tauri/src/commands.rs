@@ -9183,8 +9183,7 @@ fn launch_native_shell_process(
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
 ) -> Result<(), String> {
-    let render_preset = native_shell_render_preset();
-    let render_backend = native_shell_backend_for_preset(&render_preset);
+    let (render_preset, render_backend) = native_shell_render_config();
     let mut command = std::process::Command::new(exe_path);
     // This process may itself carry re-entry flags from the launch that
     // created it (children inherit the full environment); never let them leak
@@ -9195,6 +9194,11 @@ fn launch_native_shell_process(
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
         "KALPA_FORCE_WEBVIEW",
+        // Slint reads this one itself. We pass KALPA_SLINT_BACKEND explicitly
+        // below and the sidecar prefers it, but leaving an inherited value in
+        // the child's environment means the renderer it ends up on is not
+        // decided solely here.
+        "SLINT_BACKEND",
     ] {
         command.env_remove(stale);
     }
@@ -9229,30 +9233,56 @@ fn launch_native_shell_process(
     }
 }
 
+const NATIVE_SHELL_STANDARD_PRESET: &str = "standard";
+const NATIVE_SHELL_LOW_MEMORY_PRESET: &str = "low-memory";
+
+/// Resolves the preset/backend pair handed to the sidecar. The two are decided
+/// together because they are not independent: Slint's software renderer has no
+/// drop shadows, no clip-to-border-radius and no layer opacity, and the standard
+/// preset's translucent panes expose the full-window SVG backdrop it cannot draw
+/// correctly. Software therefore always ships the low-memory UI — that preset is
+/// the software renderer's mitigation bundle, not merely a lighter skin.
+fn native_shell_render_config() -> (String, String) {
+    let requested_preset = native_shell_render_preset();
+    let backend = native_shell_backend_for_preset(&requested_preset);
+    let preset = if native_shell_backend_is_software(&backend) {
+        // Say so. The sidecar has the same clamp and logs when it fires, but it
+        // never sees the original request because we rewrite the value here, so
+        // without this the override would be silent on both sides.
+        if requested_preset != NATIVE_SHELL_LOW_MEMORY_PRESET {
+            eprintln!(
+                "[native-shell] backend '{backend}' is the software renderer; using the \
+                 low-memory preset instead of '{requested_preset}'."
+            );
+        }
+        NATIVE_SHELL_LOW_MEMORY_PRESET.to_string()
+    } else {
+        requested_preset
+    };
+
+    (preset, backend)
+}
+
 fn native_shell_render_preset() -> String {
-    std::env::var("KALPA_NATIVE_RENDER_PRESET")
-        .or_else(|_| std::env::var("KALPA_RENDER_PRESET"))
-        .map(|value| {
-            if value.trim().is_empty() {
-                "standard".to_string()
-            } else {
-                value
-            }
-        })
-        .unwrap_or_else(|_| "standard".to_string())
+    native_shell_env_override(["KALPA_NATIVE_RENDER_PRESET", "KALPA_RENDER_PRESET"])
+        .unwrap_or_else(|| NATIVE_SHELL_STANDARD_PRESET.to_string())
 }
 
 fn native_shell_backend_for_preset(render_preset: &str) -> String {
-    std::env::var("KALPA_NATIVE_SLINT_BACKEND")
-        .or_else(|_| std::env::var("KALPA_SLINT_BACKEND"))
-        .map(|value| {
-            if value.trim().is_empty() {
-                native_shell_default_backend(render_preset).to_string()
-            } else {
-                value
-            }
-        })
-        .unwrap_or_else(|_| native_shell_default_backend(render_preset).to_string())
+    native_shell_env_override(["KALPA_NATIVE_SLINT_BACKEND", "KALPA_SLINT_BACKEND"])
+        .unwrap_or_else(|| native_shell_default_backend(render_preset).to_string())
+}
+
+/// First of `names` that carries a real value. A variable that exists but is
+/// empty counts as unset: an empty backend string reaches Slint's backend
+/// selector verbatim and the sidecar fails to start.
+fn native_shell_env_override(names: [&str; 2]) -> Option<String> {
+    names.into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn native_shell_default_backend(render_preset: &str) -> &'static str {
@@ -9260,6 +9290,19 @@ fn native_shell_default_backend(render_preset: &str) -> &'static str {
         "standard" | "fidelity" | "quality" | "femtovg" | "skia" => "winit-femtovg",
         _ => "winit-software",
     }
+}
+
+fn native_shell_backend_is_software(backend: &str) -> bool {
+    // Slint backend strings are "<backend>-<renderer>" or a bare renderer, so
+    // match on the renderer half instead of enumerating every backend name.
+    // `sw` is included because the sidecar accepts it as a software spelling
+    // (see render_preset_for_backend); the two must agree, or the launcher
+    // would hand over `standard` and leave the sidecar to clamp it after the
+    // fact.
+    let backend = backend.trim().to_ascii_lowercase();
+    matches!(backend.as_str(), "software" | "sw")
+        || backend.ends_with("-software")
+        || backend.ends_with("-sw")
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -10977,5 +11020,85 @@ mod tests {
         assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
         std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
         std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+    }
+
+    #[test]
+    fn native_shell_software_backend_clamps_preset_to_low_memory() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+
+        // The software renderer cannot draw the standard preset's translucent
+        // chrome, so this pair must never leave the launcher.
+        for backend in ["winit-software", " Winit-Software ", "software"] {
+            std::env::set_var("KALPA_RENDER_PRESET", "standard");
+            std::env::set_var("KALPA_SLINT_BACKEND", backend);
+
+            let (preset, resolved_backend) = native_shell_render_config();
+
+            assert_eq!(preset, "low-memory", "{backend} must force low-memory");
+            assert_eq!(resolved_backend, backend.trim());
+        }
+
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+    }
+
+    #[test]
+    fn native_shell_gpu_backend_keeps_standard_preset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        assert_eq!(
+            native_shell_render_config(),
+            ("standard".to_string(), "winit-femtovg".to_string())
+        );
+
+        std::env::set_var("KALPA_SLINT_BACKEND", " winit-skia ");
+
+        assert_eq!(
+            native_shell_render_config(),
+            ("standard".to_string(), "winit-skia".to_string())
+        );
+
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+    }
+
+    #[test]
+    fn native_shell_empty_env_values_are_treated_as_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for name in [
+            "KALPA_NATIVE_RENDER_PRESET",
+            "KALPA_RENDER_PRESET",
+            "KALPA_NATIVE_SLINT_BACKEND",
+            "KALPA_SLINT_BACKEND",
+        ] {
+            std::env::set_var(name, "   ");
+        }
+
+        assert_eq!(
+            native_shell_render_config(),
+            ("standard".to_string(), "winit-femtovg".to_string())
+        );
+
+        // An empty high-priority override must not mask the lower-priority one.
+        std::env::set_var("KALPA_RENDER_PRESET", "low-memory");
+
+        assert_eq!(
+            native_shell_render_config(),
+            ("low-memory".to_string(), "winit-software".to_string())
+        );
+
+        for name in [
+            "KALPA_NATIVE_RENDER_PRESET",
+            "KALPA_RENDER_PRESET",
+            "KALPA_NATIVE_SLINT_BACKEND",
+            "KALPA_SLINT_BACKEND",
+        ] {
+            std::env::remove_var(name);
+        }
     }
 }

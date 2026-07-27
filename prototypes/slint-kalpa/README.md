@@ -7,31 +7,45 @@ It is intentionally mock-data only. The goal is to port the current UI
 component by component, compare against WebView screenshots, and measure native
 UI memory before porting application behavior.
 
-The prototype selects the `low-memory` render preset by default, which maps to
-Slint's `winit-software` backend. On this machine that is materially smaller
-than the GPU-backed renderers and is a better match for Kalpa's mostly static,
-dense desktop UI while visual parity is still being built.
+With no environment variables the prototype selects the `standard` preset and
+Slint's `winit-femtovg` backend, matching the production launcher's default.
+`low-memory` is the explicit opt-in to the software renderer.
 
 Render presets:
 
-- `KALPA_RENDER_PRESET=low-memory`: uses `winit-software`, simplified native
-  glass, pre-blurred/static assets, and ambient motion disabled unless explicitly
-  enabled.
-- `KALPA_RENDER_PRESET=standard`: uses `winit-femtovg` by default for this
-  prototype, enables ambient motion by default, and is the track for richer
-  glass/motion fidelity checks. Use `KALPA_SLINT_BACKEND=winit-skia` only on a
-  Slint build that exposes that renderer.
+- `KALPA_RENDER_PRESET=standard` (default): uses `winit-femtovg`, keeps the
+  translucent sidebar/panes, and is the track for richer glass/motion fidelity
+  checks. Use `KALPA_SLINT_BACKEND=winit-skia` only on a Slint build that exposes
+  that renderer.
+- `KALPA_RENDER_PRESET=low-memory`: uses `winit-software`, opaque sidebar/panes,
+  simplified native glass, smaller pre-blurred orb sprites, and zero-duration
+  transitions.
+
+Ambient backdrop motion is off by default in both presets; `KALPA_AMBIENT_MOTION=1`
+is the only way to turn it on.
+
+The preset and the backend are not independent. Slint 1.17's software renderer
+implements no drop shadows, no clip-to-border-radius and no transform-rotation,
+and the `standard` preset's translucent panes expose the full-window SVG backdrop
+that it cannot draw correctly. `low-memory` is that renderer's mitigation bundle
+rather than a lighter skin, so a software backend is always paired with the
+`low-memory` preset even when `standard` was requested.
 
 `KALPA_SLINT_BACKEND` or `SLINT_BACKEND` still override the backend directly for
-manual renderer checks.
+manual renderer checks, subject to that pairing.
 
-Current measured renderer memory on June 30, 2026:
+Current measured renderer memory on July 27, 2026 (private working set, release
+build, median of three cold launches after a 100s settle):
 
-- `winit-software`: about 36-38 MB working set, 18-20 MB private memory after the
-  animated backdrop, generated theme catalog, generated skin assets, tags, and
-  row-state pass. Latest local run: 36.66 MB working set / 19.18 MB private.
-- `winit-femtovg`: about 84 MB working set, 132 MB private memory.
-- `winit-skia`: about 86 MB working set, 132 MB private memory.
+- `winit-software` at the `low-memory` preset: 20.3 MB open, 6.1 MB minimized.
+- `winit-femtovg` at the `standard` preset: 78.6 MB open, 76.2 MB minimized. It
+  holds essentially its whole footprint while minimized because nothing releases
+  the working set on this branch.
+- `winit-skia` was not re-measured in this pass. The July 1, 2026 figure was
+  about 86 MB working set / 132 MB private and predates every change since.
+
+Measure with `scripts/measure-memory.ps1` from the repository root; never set
+`KALPA_DEMO_DATA` while measuring, as it inflates the sidecar.
 
 Porting is tracked in `PORTING.md`; the project-wide fidelity contract is in
 `../../docs/native-ui-port.md`.
@@ -44,8 +58,9 @@ cargo run --release
 
 from this directory.
 
-With no environment variables, the prototype uses the app's current
-`DEFAULT_THEME_ID` (`nordic-runestone`). To compare against the older ESO Gold
+With no environment variables, the prototype uses the persisted active theme if
+one has been saved, and otherwise the app's current `DEFAULT_THEME_ID`
+(`nordic-runestone`). To compare against the older ESO Gold
 reference screenshot, launch with `KALPA_THEME=eso-gold`.
 
 Useful launch options:
