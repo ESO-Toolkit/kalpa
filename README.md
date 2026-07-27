@@ -28,7 +28,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea on a native stack:
 
 - **18 MB installer**, Rust backend, no bundled Java runtime.
-- **Suspends itself while you play.** Minimize Kalpa and the webview deep-suspends to about 60 MB resident with no measurable CPU, measured on a 119-addon profile.
+- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 135 MB with the window open. Task Manager figures on a 119-addon profile.
 - **Dependency resolution that actually resolves**, including transitive dependencies, embedded libraries, and version checks.
 - **Pack Hub**, for publishing and installing shared addon collections. No other ESO manager has an equivalent.
 
@@ -112,7 +112,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 
 ### Also
 
-- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers. With the window open that cuts resident memory to about 130 MB from about 440 MB on the same 119-addon profile. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
+- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 85 MB from around 135 MB. The standard UI still wins once minimized, since the sidecar has no equivalent suspend. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
 - **Addon file browser** — read and edit an addon's Lua, XML, and text files in place, with a backup taken before each edit.
 - **Tags and filters** — preset and custom tags, live-counted filters, and built-in views for Addons, Libraries, Favorites, Outdated, and Issues. Sort by name, author, recently updated, or recently downloaded.
 - **API compatibility check** against the current game version.
