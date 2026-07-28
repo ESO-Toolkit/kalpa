@@ -313,9 +313,15 @@ fn merge_pending_dep(
 /// (which filters to required entries) and the "ask" prompt share one traversal.
 /// Required entries are returned first so the UI can render them above the
 /// unticked optional ones; order within each group is first-seen.
-/// Upper bound on how many held-back dependencies one operation may report.
-/// Generous next to real addons (the largest declare a handful) but finite, so a
-/// broken manifest cannot hand the UI an unbounded list to render and queue.
+/// Upper bound on how many held-back dependencies one operation may REPORT to
+/// the UI. Generous next to real addons (the largest declare a handful) but
+/// finite, so a broken manifest cannot hand the UI an unbounded list to render
+/// and queue.
+///
+/// Applied only on the "ask" path, where the cost is a rendered checkbox per
+/// row. Auto-resolution must never be truncated: silently installing some of an
+/// addon's required libraries and dropping the rest leaves it broken with no
+/// indication why.
 const MAX_PENDING_DEPENDENCIES: usize = 200;
 
 fn discover_missing_deps(
@@ -348,12 +354,6 @@ fn discover_missing_deps(
 
     // Stable sort keeps first-seen order inside each group.
     found.sort_by_key(|d| !d.required);
-    // Bound what a manifest can put in front of the user. A malformed or hostile
-    // DependsOn line can name arbitrarily many libraries, and this list is
-    // rendered as a checkbox per row and can be merged into a queue. Truncating
-    // after the required-first sort keeps the entries that matter; the cap is
-    // well above any real addon's dependency count.
-    found.truncate(MAX_PENDING_DEPENDENCIES);
     found
 }
 
@@ -373,11 +373,18 @@ fn resolve_deps_with_policy(
             // through `install_selected_dependencies`, which installs
             // transitively — a library's own libraries are an implementation
             // detail, so we never prompt twice mid-install under the lock.
-            pending_deps: discover_missing_deps(
-                addons_dir,
-                installed_folders,
-                &build_installed_set(addons_dir),
-            ),
+            // Truncated here rather than in the shared discovery helper: the
+            // auto path uses the same helper and must install every required
+            // library it finds.
+            pending_deps: {
+                let mut found = discover_missing_deps(
+                    addons_dir,
+                    installed_folders,
+                    &build_installed_set(addons_dir),
+                );
+                found.truncate(MAX_PENDING_DEPENDENCIES);
+                found
+            },
             ..ResolvedDeps::default()
         },
         // No disk walk, no network, nothing to report.

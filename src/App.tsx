@@ -879,19 +879,24 @@ function App() {
         const sameFolder = batches.find((batch) =>
           sameAddonsFolder(batch.addonsPath, sourceAddonsPath)
         );
-        if (sameFolder) {
-          // Bounded: the backend caps a single response, but repeated arrivals
-          // merge here, so without this the queue could grow without limit
-          // across a long Update All.
-          sameFolder.deps = dedupeDependencies([...sameFolder.deps, ...candidates]).slice(
-            0,
-            MAX_QUEUED_DEPENDENCIES
+        // Bounded: the backend caps a single response, but repeated arrivals
+        // merge here, so without this the queue could grow without limit across
+        // a long Update All. Say so when it bites — dropping libraries quietly
+        // is the failure mode this whole feature exists to avoid, and dedupe
+        // keeps required entries first so the cap sheds optional ones first.
+        const merged = sameFolder
+          ? dedupeDependencies([...sameFolder.deps, ...candidates])
+          : candidates;
+        if (merged.length > MAX_QUEUED_DEPENDENCIES) {
+          toast.warning(
+            `Too many pending libraries to offer at once; showing the first ${MAX_QUEUED_DEPENDENCIES}. Re-run the update afterwards to see the rest.`
           );
+        }
+        const capped = merged.slice(0, MAX_QUEUED_DEPENDENCIES);
+        if (sameFolder) {
+          sameFolder.deps = capped;
         } else {
-          batches.push({
-            addonsPath: sourceAddonsPath,
-            deps: candidates.slice(0, MAX_QUEUED_DEPENDENCIES),
-          });
+          batches.push({ addonsPath: sourceAddonsPath, deps: capped });
         }
         return;
       }
@@ -1039,6 +1044,13 @@ function App() {
         // treat a persistence failure as hard: don't switch the UI to a path that
         // won't survive a restart. (Cosmetic prefs below tolerate silent failure.)
         if (!(await setSetting("addonsPath", nextPath))) {
+          // The backend has already authorized nextPath, but the UI is staying
+          // on the old folder — put the backend back where the UI is, or they
+          // disagree about which folder is live and any command issued from the
+          // old view is rejected as "does not match the configured path".
+          if (addonsPathRef.current) {
+            void invokeResult("set_addons_path", { addonsPath: addonsPathRef.current });
+          }
           setError(
             "Could not save the AddOns folder location — free up disk space or check antivirus, then try again."
           );
@@ -1835,7 +1847,12 @@ function App() {
             const declined = pendingDeps
               .filter((dep) => !selected.has(dep.name))
               .map((dep) => dep.name);
-            if (declined.length > 0) await addSkippedDependencies(declined);
+            // Report a failed write. Otherwise the user ticked "don't offer
+            // these again", nothing was recorded, and the very next update
+            // offers them right back with no explanation.
+            if (declined.length > 0 && !(await addSkippedDependencies(declined))) {
+              toast.warning("Could not save your choice — these libraries may be offered again.");
+            }
           }
 
           if (selectedNames.length === 0) return;
