@@ -616,7 +616,7 @@ export function Packs({
     }
 
     // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps);
+    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
 
     // Apply SV settings from a v2 .esopack file after addons are installed
     if (importedFileSettings && Object.keys(importedFileSettings).length > 0) {
@@ -797,7 +797,7 @@ export function Packs({
     onRefresh();
 
     // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps);
+    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
   };
 
   // ── Voting ──────────────────────────────────────────────────────────

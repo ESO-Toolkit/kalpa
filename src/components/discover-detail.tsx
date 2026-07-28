@@ -179,7 +179,9 @@ function DiscoverDetailBase({
       toast.success(`Installed ${res.installedFolders.join(", ")}`);
       onInstalled();
       // Empty unless the policy is "ask"; the app-level picker owns the rest.
-      void resolvePendingDeps(res.pendingDeps);
+      // Same `addonsPath` this install was started with, so a folder switch
+      // while it ran can't redirect the deps to another instance.
+      void resolvePendingDeps(res.pendingDeps, addonsPath);
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
     } finally {

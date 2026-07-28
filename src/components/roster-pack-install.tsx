@@ -221,8 +221,9 @@ export function RosterPackInstall({
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
     }
 
-    // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps);
+    // One prompt for the whole pack; empty unless the policy is "ask". Pass the
+    // same folder the batch command installed into, not the live selection.
+    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
   }, [
     addonsToInstall,
     addonsPath,

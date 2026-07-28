@@ -15,7 +15,18 @@ import type { PendingDependency } from "@/types";
  * caller can fire this and let its own busy state clear. It never rejects:
  * failures surface as toasts, the same channel the install code already uses.
  */
-export type ResolvePendingDeps = (pending: PendingDependency[]) => Promise<void>;
+export type ResolvePendingDeps = (
+  pending: PendingDependency[],
+  /**
+   * The AddOns folder the caller passed to the install/update command that
+   * produced `pending`. Required, and deliberately not inferred from whatever
+   * folder is selected when this resolves: a command started for one game
+   * instance can finish after the user has switched to another, and reading the
+   * live path there would attribute one instance's missing libraries to a
+   * different instance's folder.
+   */
+  addonsPath: string
+) => Promise<void>;
 
 const [DependencyPromptProvider, useResolvePendingDeps] = getStrictContext<ResolvePendingDeps>(
   "DependencyPromptProvider"

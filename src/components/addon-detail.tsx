@@ -183,8 +183,10 @@ function AddonDetailBase({
       dependencyPolicy,
     });
     // Empty unless the policy is "ask". The picker is app-level and owns the
-    // install + refresh from here, so this update's busy state can clear.
-    void resolvePendingDeps(result.pendingDeps);
+    // install + refresh from here, so this update's busy state can clear. Hand it
+    // the same `addonsPath` this update ran against (closure-captured, so it stays
+    // this instance's folder even if the user switches instance mid-update).
+    void resolvePendingDeps(result.pendingDeps, addonsPath);
   };
 
   // Map of lowercased top-level folder name → its real on-disk spelling. ESO

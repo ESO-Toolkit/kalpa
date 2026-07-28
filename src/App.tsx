@@ -206,18 +206,14 @@ function App() {
   // trim, so the same physical folder can arrive with different casing or a
   // trailing separator; raw equality would split one folder into two batches
   // and defeat the installed-name filtering.
-  const sameAddonsFolder = useCallback(
-    (a: string, b: string) =>
-      a
-        .trim()
-        .replace(/[\\/]+$/, "")
-        .toLowerCase() ===
-      b
-        .trim()
-        .replace(/[\\/]+$/, "")
-        .toLowerCase(),
-    []
-  );
+  const sameAddonsFolder = useCallback((a: string, b: string) => {
+    // Separators too: settings store whatever the user typed, so the same
+    // folder can arrive with '/' or '\'. This is a staleness check, not a
+    // security boundary — the backend authorizes by canonical path.
+    const normalize = (value: string) =>
+      value.trim().replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+    return normalize(a) === normalize(b);
+  }, []);
   // Latched while a decision is settling, so the picker cannot be submitted
   // twice in the window between the click and the close.
   const depDecisionInFlightRef = useRef(false);
@@ -887,8 +883,8 @@ function App() {
   // Called straight after that install resolved, so the live path is still the
   // one those dependencies were resolved against — capture it here, once.
   const resolvePendingDeps = useCallback<ResolvePendingDeps>(
-    async (pending) => {
-      await presentDependencyBatch(pending, addonsPathRef.current);
+    async (pending, addonsPath) => {
+      await presentDependencyBatch(pending, addonsPath);
     },
     [presentDependencyBatch]
   );
@@ -907,8 +903,10 @@ function App() {
         toast.success(`Updated ${folderName}`);
         srAnnounce(`Updated ${folderName}`);
         handleAddonUpdated(ur.esouiId);
-        // Empty unless the policy is "ask"; the picker owns the rest.
-        void resolvePendingDeps(result.pendingDeps);
+        // Empty unless the policy is "ask"; the picker owns the rest. Pass the
+        // same folder this update wrote to, not the live one — the user may
+        // have switched instances while it ran.
+        void resolvePendingDeps(result.pendingDeps, addonsPath);
       } catch (e) {
         toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
       }
@@ -1007,6 +1005,25 @@ function App() {
       const nextPath = newPath.trim();
       if (!nextPath) return;
 
+      // Dependency prompts belong to the folder they were resolved for, and the
+      // backend registers exactly one AddOns path at a time, so nothing queued
+      // for the old folder can be acted on after this. Discard it here and say
+      // so, rather than leaving prompts that would silently vanish or offer an
+      // install the backend is bound to reject.
+      if (!sameAddonsFolder(nextPath, addonsPathRef.current)) {
+        const abandoned = queuedDepBatchesRef.current.length > 0 || depPromptOpenRef.current;
+        queuedDepBatchesRef.current = [];
+        // Closed inline rather than via closeDependencyPrompt, which is declared
+        // further down this component and would be in its temporal dead zone.
+        setDepPromptOpen(false);
+        depPromptOpenRef.current = false;
+        if (abandoned) {
+          toast.info(
+            "Pending dependency prompts were for the previous AddOns folder and have been dismissed."
+          );
+        }
+      }
+
       try {
         await invokeOrThrow("set_addons_path", { addonsPath: nextPath });
         // The AddOns path is the one setting the app can't function without, so
@@ -1032,7 +1049,7 @@ function App() {
         setErrorShowSettings(true);
       }
     },
-    [scanAndCheck]
+    [scanAndCheck, sameAddonsFolder]
   );
 
   const handleSortChange = useCallback((mode: SortMode) => {
@@ -1314,7 +1331,8 @@ function App() {
 
       // One prompt for the whole run: the backend returns a single list for the
       // batch, raised after the re-scan so the picker isn't competing with it.
-      void resolvePendingDeps(batch.data.pendingDeps);
+      // `path` is the folder this whole batch ran against.
+      void resolvePendingDeps(batch.data.pendingDeps, path);
     },
     [ensureEsoNotBlocking, resolvePendingDeps, scanAddons, srAnnounce]
   );
@@ -1669,11 +1687,12 @@ function App() {
       queuedDepBatchesRef.current = [];
       const handled = new Set(justInstalled.map((name) => name.toLowerCase()));
       for (const batch of batches) {
-        // Drop batches for a folder the user has left. Only one AddOns path is
-        // registered with the backend at a time, so a prompt for any other
-        // folder could never be acted on — showing it would offer an install
-        // that is guaranteed to fail.
-        if (!sameAddonsFolder(batch.addonsPath, addonsPathRef.current)) continue;
+        // No folder filter here. Switching instances discards the queue up front
+        // and tells the user, so anything still queued belongs to the current
+        // folder. Skipping silently at this point would drop required libraries
+        // on the floor with no message — the exact failure this feature exists
+        // to prevent.
+        //
         // An install only accounts for the folder it wrote to. The same library
         // name missing from a different instance is a different missing file.
         const remaining = sameAddonsFolder(batch.addonsPath, installedInPath)

@@ -89,7 +89,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
         onInstalled();
         // Empty unless the policy is "ask"; the app-level picker owns the rest.
-        void resolvePendingDeps(res.pendingDeps);
+        void resolvePendingDeps(res.pendingDeps, addonsPath);
       } catch (e) {
         toast.error(getTauriErrorMessage(e));
       } finally {
@@ -955,7 +955,7 @@ function UrlContent({
       toast.success(`Installed ${installResult.installedFolders.join(", ")}`);
       onInstalled();
       // Empty unless the policy is "ask"; the app-level picker owns the rest.
-      void resolvePendingDeps(installResult.pendingDeps);
+      void resolvePendingDeps(installResult.pendingDeps, addonsPath);
     } catch (e) {
       setError(getTauriErrorMessage(e));
       setState("error");
