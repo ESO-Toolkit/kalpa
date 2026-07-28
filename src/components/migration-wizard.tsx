@@ -445,14 +445,14 @@ function DiffSection({ title, color, items }: { title: string; color: string; it
     emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
     sky: "border-accent-sky/20 bg-accent-sky/[0.04] text-accent-sky",
     amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
-    white: "border-white/[0.08] bg-white/[0.02] text-white/60",
+    white: "border-white/[0.08] bg-white/[0.02] text-muted-foreground",
   };
   const classes = colorMap[color] ?? colorMap.white;
 
   return (
     <div className={`rounded-lg border p-2 ${classes}`}>
       <div className="text-xs font-medium mb-1">{title}</div>
-      <div className="text-xs opacity-80 space-y-0.5 max-h-[80px] overflow-y-auto">
+      <div className="text-xs space-y-0.5 max-h-[80px] overflow-y-auto">
         {items.map((item) => (
           <div key={item}>{item}</div>
         ))}
@@ -495,7 +495,7 @@ function CompletePhase({
           <div>
             Snapshot: {snapshot.fileCount} files ({formatBytes(snapshot.totalSize)})
           </div>
-          <div className="mt-1 text-[10px] font-mono text-white/40 break-all">
+          <div className="mt-1 text-xs font-mono text-muted-foreground break-all">
             SHA-256: {snapshot.archiveSha256}
           </div>
           <p className="mt-1">

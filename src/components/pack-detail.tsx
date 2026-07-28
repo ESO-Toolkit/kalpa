@@ -109,7 +109,7 @@ export function PackDetailView({
           </InfoPill>
         ))}
         {!pack.isAnonymous && (
-          <span className="text-xs text-muted-foreground/50">by {decodeHtml(pack.authorName)}</span>
+          <span className="text-xs text-muted-foreground">by {decodeHtml(pack.authorName)}</span>
         )}
         {/* Relative dates */}
         {(() => {
@@ -119,7 +119,7 @@ export function PackDetailView({
           const relative = dateIso ? formatRelativeDate(dateIso) : "";
           return relative ? (
             <SimpleTooltip content={dateIso}>
-              <span className="text-[10px] text-muted-foreground/40">
+              <span className="text-xs text-muted-foreground">
                 {label} {relative}
               </span>
             </SimpleTooltip>
@@ -169,7 +169,7 @@ export function PackDetailView({
                   variant="outline"
                   size="sm"
                   onClick={() => setShowDeleteConfirm(true)}
-                  className="text-red-400/60 hover:text-red-400 hover:border-red-500/30"
+                  className="text-red-400 hover:text-red-300 hover:border-red-500/30"
                 >
                   <TrashIcon className="size-3.5 mr-1.5" />
                   Delete
@@ -200,7 +200,7 @@ export function PackDetailView({
               votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
               pack.userVoted
                 ? "text-primary bg-primary/[0.15] border-primary/40 hover:bg-primary/[0.22] shadow-[0_0_14px_color-mix(in_oklab,var(--primary)_25%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_12%,transparent)]"
-                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
+                : "text-muted-foreground bg-white/[0.03] border-white/[0.08] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
             )}
           >
             <ArrowUpIcon
@@ -244,7 +244,7 @@ export function PackDetailView({
                     "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
                     shareMode === mode
                       ? "text-foreground"
-                      : "text-muted-foreground/60 hover:text-muted-foreground"
+                      : "text-muted-foreground hover:text-foreground"
                   )}
                 >
                   {mode === "private-link" ? "Private Link" : "Export File"}
@@ -254,7 +254,7 @@ export function PackDetailView({
 
             {shareMode === "private-link" ? (
               <div className="space-y-2">
-                <p className="text-[11px] text-muted-foreground/50">
+                <p className="text-xs text-muted-foreground">
                   Share privately — only people with this code can import this pack.
                 </p>
                 {shareResult ? (
@@ -278,7 +278,7 @@ export function PackDetailView({
                       </SimpleTooltip>
                     </div>
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground/60">
+                      <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground">
                         {shareResult.deepLink}
                       </code>
                       <SimpleTooltip content="Copy deep link">
@@ -296,7 +296,7 @@ export function PackDetailView({
                       </SimpleTooltip>
                     </div>
                     <div className="flex items-center justify-between">
-                      <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40">
+                      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                         <ClockIcon className="size-3" />
                         {shareResult.expiresAt
                           ? formatRelativeExpiry(shareResult.expiresAt)
@@ -304,7 +304,7 @@ export function PackDetailView({
                       </p>
                       <button
                         onClick={onRegenerateShareCode}
-                        className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+                        className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors"
                       >
                         Regenerate
                       </button>
@@ -329,7 +329,7 @@ export function PackDetailView({
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="text-[11px] text-muted-foreground/50">
+                <p className="text-xs text-muted-foreground">
                   Save as a .esopack file to share on Discord, forums, or privately.
                 </p>
                 <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -339,9 +339,7 @@ export function PackDetailView({
                     onChange={onToggleExportSettings}
                     className="size-3.5 accent-primary cursor-pointer"
                   />
-                  <span className="text-[11px] text-muted-foreground/70">
-                    Include addon settings (v2)
-                  </span>
+                  <span className="text-xs text-muted-foreground">Include addon settings (v2)</span>
                 </label>
                 <Button variant="outline" size="sm" onClick={onExportFile} className="w-full">
                   <FileDownIcon className="size-3.5 mr-1.5" />
@@ -416,7 +414,7 @@ export function PackDetailView({
         <div>
           <div className="flex items-center justify-between mb-2">
             <SectionHeader>Required</SectionHeader>
-            <span className="text-[10px] text-primary/60 font-medium">Always included</span>
+            <span className="text-xs text-primary font-medium">Always included</span>
           </div>
           <div className="space-y-1">
             {requiredAddons.map((addon) => (
@@ -443,7 +441,7 @@ export function PackDetailView({
               return (
                 <button
                   onClick={() => onSelectAllOptional(!allSelected)}
-                  className="text-[10px] text-accent-sky/60 font-medium hover:text-accent-sky transition-colors"
+                  className="text-xs text-accent-sky font-medium hover:text-accent-sky transition-colors"
                 >
                   {allSelected ? "Deselect all" : "Select all"}
                 </button>
@@ -547,12 +545,12 @@ function AddonRow({
               {addon.name}
             </span>
             {locked && (
-              <span className="text-[9px] font-semibold uppercase tracking-wider text-primary/50 shrink-0">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-primary shrink-0">
                 Required
               </span>
             )}
             {isInstalled && (
-              <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-400/60 shrink-0">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400 shrink-0">
                 Installed
               </span>
             )}
@@ -561,10 +559,10 @@ function AddonRow({
             )}
           </div>
           {addon.note && (
-            <p className="mt-0.5 text-xs text-muted-foreground/60 truncate">{addon.note}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground truncate">{addon.note}</p>
           )}
         </div>
-        <span className="flex items-center gap-1 text-xs text-muted-foreground/40 tabular-nums shrink-0">
+        <span className="flex items-center gap-1 text-xs text-muted-foreground tabular-nums shrink-0">
           #{addon.esouiId}
           <button
             type="button"

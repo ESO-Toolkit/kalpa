@@ -197,11 +197,11 @@ function OverviewTab({
       <div className="grid grid-cols-3 gap-2">
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]">
           <div className="text-lg font-heading font-semibold">{files.length}</div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Files</div>
+          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Files</div>
         </div>
         <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]">
           <div className="text-lg font-heading font-semibold">{formatBytes(totalSize)}</div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
             Total Size
           </div>
         </div>
@@ -219,7 +219,7 @@ function OverviewTab({
           >
             {orphaned.length}
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Orphaned</div>
+          <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Orphaned</div>
         </button>
       </div>
 
@@ -297,7 +297,7 @@ function OverviewTab({
               {filter !== "all" ? "No files match this filter." : "No SavedVariables files found."}
             </p>
             {filter === "all" && (
-              <p className="mt-1 text-xs text-muted-foreground/60">
+              <p className="mt-1 text-xs text-muted-foreground">
                 Make sure your ESO AddOns path is set correctly and you have launched the game at
                 least once.
               </p>
@@ -318,7 +318,7 @@ function OverviewTab({
                     style={{ width: `${Math.max((f.sizeBytes / maxSize) * 100, 2)}%` }}
                   />
                 </div>
-                <div className={`mt-0.5 text-[10px] text-center ${SIZE_COLORS[sc]}`}>
+                <div className={`mt-0.5 text-[11px] text-center ${SIZE_COLORS[sc]}`}>
                   {formatBytes(f.sizeBytes)}
                 </div>
               </div>
@@ -330,7 +330,7 @@ function OverviewTab({
                   {status === "orphaned" && <InfoPill color="amber">Orphaned</InfoPill>}
                   {status === "system" && <InfoPill color="muted">System</InfoPill>}
                 </div>
-                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                <div className="mt-0.5 text-xs text-muted-foreground">
                   {formatDate(f.lastModified)}
                   {f.characterKeys.length > 0 && (
                     <span>
@@ -486,7 +486,7 @@ function CleanupTab({
                 />
                 <div className="min-w-0 flex-1">
                   <div className="text-sm truncate">{f.addonName}</div>
-                  <div className="text-[11px] text-muted-foreground">
+                  <div className="text-xs text-muted-foreground">
                     {formatBytes(f.sizeBytes)} &middot; {formatDate(f.lastModified)}
                   </div>
                 </div>
@@ -542,7 +542,7 @@ function CleanupTab({
                 <div className="min-w-0">
                   <div className="text-sm truncate">{f.addonName}</div>
                   {f.characterKeys.length > 0 && (
-                    <div className="text-[11px] text-muted-foreground">
+                    <div className="text-xs text-muted-foreground">
                       {f.characterKeys.length} profile{f.characterKeys.length !== 1 ? "s" : ""}
                     </div>
                   )}
@@ -694,7 +694,7 @@ const NavTreeItem = memo(function NavTreeItem({
         className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-xs transition-all duration-150 ${
           isSelected
             ? "bg-white/[0.1] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_3px_rgba(0,0,0,0.15)] border border-white/[0.06]"
-            : "text-foreground/70 hover:bg-white/[0.04] hover:text-foreground border border-transparent"
+            : "text-foreground hover:bg-white/[0.04] hover:text-foreground border border-transparent"
         }`}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
@@ -708,7 +708,7 @@ const NavTreeItem = memo(function NavTreeItem({
           <div className="size-3 shrink-0" />
         )}
         <span className="truncate font-medium">{node.key}</span>
-        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/50">{entryCount}</span>
+        <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">{entryCount}</span>
         {context === "account-wide" && (
           <InfoPill color="sky" className="ml-1 !text-[9px] !px-1 !py-0">
             Account
@@ -808,7 +808,7 @@ function WidgetCustomizer({
       <PopoverTitle>Customize Widget</PopoverTitle>
 
       <div>
-        <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
           Widget Type
         </label>
         <select
@@ -831,7 +831,7 @@ function WidgetCustomizer({
       {(widgetType === "slider" || widgetType === "") && (
         <div className="flex gap-2">
           <div className="flex-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
               Min
             </label>
             <input
@@ -843,7 +843,7 @@ function WidgetCustomizer({
             />
           </div>
           <div className="flex-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
               Max
             </label>
             <input
@@ -855,7 +855,7 @@ function WidgetCustomizer({
             />
           </div>
           <div className="flex-1">
-            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
               Step
             </label>
             <input
@@ -871,7 +871,7 @@ function WidgetCustomizer({
 
       {widgetType === "dropdown" && (
         <div>
-          <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
             Options (comma-separated)
           </label>
           <input
@@ -889,7 +889,7 @@ function WidgetCustomizer({
       )}
 
       <div>
-        <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
           Label Override
         </label>
         <input
@@ -922,7 +922,7 @@ function WidgetCustomizer({
           render={
             <button
               onClick={handleReset}
-              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
             >
               <RotateCcwIcon className="size-3" />
               Reset to auto
@@ -1004,8 +1004,8 @@ function FieldRow({
     <div className="flex items-center gap-3 rounded-lg px-2.5 py-1.5 transition-colors duration-150 hover:bg-white/[0.03] group">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="text-xs font-medium text-foreground/80">{field.label}</span>
-          <span className="text-[10px] font-mono text-muted-foreground/40">{field.key}</span>
+          <span className="text-xs font-medium text-foreground">{field.label}</span>
+          <span className="text-[11px] font-mono text-muted-foreground">{field.key}</span>
         </div>
       </div>
       <div className="shrink-0">{renderWidget()}</div>
@@ -1189,7 +1189,7 @@ function DetailPanel({
         {/* Leaf settings */}
         {visibleFields.length > 0 && (
           <div>
-            <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+            <div className="mb-1.5 text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
               Settings
             </div>
             <div className="space-y-0.5">
@@ -1211,7 +1211,7 @@ function DetailPanel({
         {/* Color fields from table children */}
         {visibleColorFields.length > 0 && (
           <div>
-            <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+            <div className="mb-1.5 text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
               Colors
             </div>
             <div className="space-y-0.5">
@@ -1233,7 +1233,7 @@ function DetailPanel({
         {/* Sub-groups (navigable) */}
         {groupChildren.length > 0 && (
           <div>
-            <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+            <div className="mb-1.5 text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
               Groups
             </div>
             <div className="grid grid-cols-2 gap-1.5">
@@ -1261,7 +1261,7 @@ function DetailPanel({
                           </InfoPill>
                         )}
                       </div>
-                      <span className="text-[10px] text-muted-foreground/50">
+                      <span className="text-[11px] text-muted-foreground">
                         {entries} {entries === 1 ? "entry" : "entries"}
                       </span>
                     </div>
@@ -1350,10 +1350,10 @@ function SettingsSearchResults({
 
   return (
     <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
-      <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+      <div className="mb-1.5 text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
         {total} matching setting{total !== 1 ? "s" : ""}
         {total > results.length && (
-          <span className="ml-1 font-normal text-muted-foreground/50">
+          <span className="ml-1 font-normal text-muted-foreground">
             · showing first {results.length}
           </span>
         )}
@@ -1366,7 +1366,7 @@ function SettingsSearchResults({
               <button
                 onClick={() => onJumpTo(r.path.slice(0, -1))}
                 title="Go to group"
-                className="block w-full truncate px-2.5 text-left text-[10px] text-muted-foreground/50 transition-colors hover:text-accent-sky"
+                className="block w-full truncate px-2.5 text-left text-[11px] text-muted-foreground transition-colors hover:text-accent-sky"
               >
                 {breadcrumb}
               </button>
@@ -1782,7 +1782,7 @@ function EditorTab({
             className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
               !rawMode
                 ? "bg-white/[0.1] text-foreground border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)]"
-                : "text-muted-foreground/60 hover:text-muted-foreground"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <SettingsIcon className="mr-1 inline-block size-3" />
@@ -1793,7 +1793,7 @@ function EditorTab({
             className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
               rawMode
                 ? "bg-white/[0.1] text-foreground border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)]"
-                : "text-muted-foreground/60 hover:text-muted-foreground"
+                : "text-muted-foreground hover:text-foreground"
             }`}
           >
             <BracesIcon className="mr-1 inline-block size-3" />
@@ -1841,7 +1841,7 @@ function EditorTab({
                   <input
                     type="text"
                     placeholder="Search settings..."
-                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_rgba(0,0,0,0.1)]"
+                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_rgba(0,0,0,0.1)]"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
@@ -1868,13 +1868,13 @@ function EditorTab({
               <div className="flex gap-1 border-t border-white/[0.06] bg-white/[0.02] p-1.5">
                 <button
                   onClick={expandAll}
-                  className="flex-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-all duration-150 hover:bg-white/[0.06] hover:text-foreground"
+                  className="flex-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-all duration-150 hover:bg-white/[0.06] hover:text-foreground"
                 >
                   Expand All
                 </button>
                 <button
                   onClick={collapseAll}
-                  className="flex-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-all duration-150 hover:bg-white/[0.06] hover:text-foreground"
+                  className="flex-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-all duration-150 hover:bg-white/[0.06] hover:text-foreground"
                 >
                   Collapse All
                 </button>
@@ -1943,9 +1943,9 @@ function RawTreeView({ node, depth }: { node: SvTreeNode; depth: number }) {
       case "boolean":
         return "text-amber-400";
       case "nil":
-        return "text-muted-foreground/50";
+        return "text-muted-foreground";
       case "table":
-        return "text-muted-foreground/60";
+        return "text-muted-foreground";
       default:
         return "text-foreground";
     }
@@ -1971,8 +1971,8 @@ function RawTreeView({ node, depth }: { node: SvTreeNode; depth: number }) {
         ) : (
           <span className="inline-block size-4" />
         )}
-        <span className="text-foreground/70">{node.key}</span>
-        <span className="text-muted-foreground/40 mx-0.5">=</span>
+        <span className="text-foreground">{node.key}</span>
+        <span className="text-muted-foreground mx-0.5">=</span>
         <span className={valueColor()}>{valueDisplay()}</span>
       </div>
       {isTable &&
@@ -2161,7 +2161,7 @@ function CopyProfileTab({
               {destFromOtherFiles.map((k) => (
                 <SelectItem key={k} value={k}>
                   <span className="text-muted-foreground">{k}</span>
-                  <span className="ml-1 text-[10px] text-muted-foreground/50">(other file)</span>
+                  <span className="ml-1 text-[11px] text-muted-foreground">(other file)</span>
                 </SelectItem>
               ))}
               <SelectItem value="__custom__">+ Custom key...</SelectItem>
@@ -2279,19 +2279,19 @@ function DiffPreviewDialog({
                     {setting}
                   </span>
                   {change.changeType === "added" && (
-                    <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-emerald-400/80">
+                    <span className="shrink-0 text-[11px] font-medium uppercase tracking-wider text-emerald-400">
                       Added
                     </span>
                   )}
                   {change.changeType === "removed" && (
-                    <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-red-400/80">
+                    <span className="shrink-0 text-[11px] font-medium uppercase tracking-wider text-red-400">
                       Removed
                     </span>
                   )}
                 </div>
 
                 {location && (
-                  <div className="text-[10px] text-muted-foreground/50 mb-1.5 truncate">
+                  <div className="text-[11px] text-muted-foreground mb-1.5 truncate">
                     {location}
                   </div>
                 )}

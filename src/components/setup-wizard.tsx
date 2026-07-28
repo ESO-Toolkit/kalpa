@@ -152,7 +152,7 @@ function InstanceCard({
         </InfoPill>
         {instance.isOnedrive && <InfoPill color="amber">OneDrive</InfoPill>}
       </div>
-      <p className="truncate font-mono text-xs text-white/80">{instance.addonsPath}</p>
+      <p className="truncate font-mono text-xs text-foreground">{instance.addonsPath}</p>
       <p className="mt-1 text-xs text-muted-foreground">
         {instance.addonCount > 0
           ? `${instance.addonCount} addon${instance.addonCount !== 1 ? "s" : ""} detected`

@@ -348,7 +348,7 @@ export function Backups({
             <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">
               Your backups
               {backups.length > 0 && (
-                <span className="ml-2 normal-case tracking-normal font-normal text-white/40">
+                <span className="ml-2 normal-case tracking-normal font-normal text-muted-foreground">
                   {backups.length} · {formatBytes(totalSize)} total
                 </span>
               )}
@@ -435,7 +435,7 @@ function StatusHero({
         <ShieldAlert className="size-5 text-amber-400 shrink-0" />
         <div className="flex-1">
           <div className="text-sm font-medium text-amber-100">No backup yet</div>
-          <div className="text-xs text-amber-200/70">
+          <div className="text-xs text-amber-200">
             Your addon settings aren't protected. Create your first backup below.
           </div>
         </div>

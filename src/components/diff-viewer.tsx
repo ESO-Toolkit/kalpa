@@ -24,7 +24,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
 
   if (hunks.length === 0) {
     return (
-      <GlassPanel variant="subtle" className="p-4 text-center text-sm text-muted-foreground/60">
+      <GlassPanel variant="subtle" className="p-4 text-center text-sm text-muted-foreground">
         Files are identical
       </GlassPanel>
     );
@@ -33,8 +33,8 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
   return (
     <GlassPanel variant="subtle" className="overflow-hidden">
       <div className="flex border-b border-white/[0.06] text-xs">
-        <div className="flex-1 px-3 py-1.5 text-primary/80 font-medium">Your version</div>
-        <div className="flex-1 px-3 py-1.5 text-accent-sky/80 font-medium border-l border-white/[0.06]">
+        <div className="flex-1 px-3 py-1.5 text-primary font-medium">Your version</div>
+        <div className="flex-1 px-3 py-1.5 text-accent-sky font-medium border-l border-white/[0.06]">
           The update
         </div>
       </div>
@@ -42,7 +42,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
         {hunks.map((hunk, hi) => (
           <div key={hi}>
             {hi > 0 && (
-              <div className="border-y border-white/[0.04] bg-white/[0.01] px-3 py-0.5 text-muted-foreground/30 text-center text-[10px]">
+              <div className="border-y border-white/[0.04] bg-white/[0.01] px-3 py-0.5 text-muted-foreground text-center text-[11px]">
                 ···
               </div>
             )}
@@ -55,7 +55,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
                   <div key={`${hi}-${li}`} className="flex">
                     <div className="flex-1 bg-primary/[0.06] border-l-2 border-primary/30 px-3 whitespace-pre-wrap break-all">
                       <span className="text-primary/40 select-none mr-2">−</span>
-                      <span className="text-primary/80">{content}</span>
+                      <span className="text-primary">{content}</span>
                     </div>
                     <div className="flex-1 border-l border-white/[0.06]" />
                   </div>
@@ -68,7 +68,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
                     <div className="flex-1" />
                     <div className="flex-1 bg-accent-sky/[0.06] border-l-2 border-accent-sky/30 px-3 whitespace-pre-wrap break-all">
                       <span className="text-accent-sky/40 select-none mr-2">+</span>
-                      <span className="text-accent-sky/80">{content}</span>
+                      <span className="text-accent-sky">{content}</span>
                     </div>
                   </div>
                 );
@@ -76,11 +76,11 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
 
               return (
                 <div key={`${hi}-${li}`} className="flex">
-                  <div className="flex-1 px-3 text-muted-foreground/50 whitespace-pre-wrap break-all">
+                  <div className="flex-1 px-3 text-muted-foreground whitespace-pre-wrap break-all">
                     <span className="text-transparent select-none mr-2"> </span>
                     {content}
                   </div>
-                  <div className="flex-1 px-3 text-muted-foreground/50 border-l border-white/[0.06] whitespace-pre-wrap break-all">
+                  <div className="flex-1 px-3 text-muted-foreground border-l border-white/[0.06] whitespace-pre-wrap break-all">
                     <span className="text-transparent select-none mr-2"> </span>
                     {content}
                   </div>

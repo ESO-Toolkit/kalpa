@@ -110,7 +110,7 @@ export function UploadOptionsControl({
                 {suggestion}
               </button>
             )}
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/70">
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <Tag className="size-3" aria-hidden />
             </span>
             {RUN_TAGS.map((t) => (
@@ -188,7 +188,7 @@ export function UploadOptionsControl({
                 <div
                   className={cn(
                     "flex items-center gap-1.5 text-sm font-medium",
-                    active ? "text-accent-sky" : "text-foreground/80"
+                    active ? "text-accent-sky" : "text-foreground"
                   )}
                 >
                   <Icon className="size-3.5" aria-hidden />
@@ -199,7 +199,7 @@ export function UploadOptionsControl({
             );
           })}
         </div>
-        <p className="text-[11px] text-muted-foreground/80">
+        <p className="text-xs text-muted-foreground">
           {visibilityCaption(willUseNative, officialInstalled)}
         </p>
       </div>

@@ -86,7 +86,7 @@ function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
       className={`inline-flex animate-[fade-in_0.3s_ease-out] items-center gap-1.5 rounded-md border px-2 py-0.5 transition-colors duration-300 ease-out ${bgColor}`}
     >
       <PhaseIcon phase={phase} />
-      <span className="max-w-[120px] truncate text-[11px] font-medium text-white/70">{name}</span>
+      <span className="max-w-[120px] truncate text-[11px] font-medium text-foreground">{name}</span>
     </div>
   );
 }
@@ -116,19 +116,19 @@ function ChooserRow({
           update.remoteVersion || "unknown"
         }`}
       />
-      <span className="min-w-0 flex-1 truncate text-[13px] text-white/80" title={update.title}>
+      <span className="min-w-0 flex-1 truncate text-[13px] text-foreground" title={update.title}>
         {update.title}
       </span>
       <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums">
         <span
-          className="max-w-[88px] truncate text-white/30"
+          className="max-w-[88px] truncate text-muted-foreground"
           title={update.currentVersion || undefined}
         >
           {update.currentVersion || "—"}
         </span>
         <ArrowRightIcon className="h-3 w-3 text-white/20" aria-hidden="true" />
         <span
-          className="max-w-[88px] truncate font-medium text-primary/80"
+          className="max-w-[88px] truncate font-medium text-primary"
           title={update.remoteVersion || undefined}
         >
           {update.remoteVersion || "—"}
@@ -291,12 +291,12 @@ function UpdateBannerBase({
                     initiallyStable
                     transition={{ stiffness: 200, damping: 25 }}
                   />
-                  <span className="ml-1.5 text-xs text-white/30">{progressPct}%</span>
+                  <span className="ml-1.5 text-xs text-muted-foreground">{progressPct}%</span>
                 </span>
               </div>
 
               {/* Phase summary */}
-              <span className="text-xs text-white/40">
+              <span className="text-xs text-muted-foreground">
                 {allDone ? (
                   <span className="text-emerald-400 animate-[fade-in_0.3s_ease-out]">All done</span>
                 ) : updateProgress.failed > 0 ? (
@@ -366,7 +366,7 @@ function UpdateBannerBase({
                       onCheckedChange={toggleAll}
                       aria-label="Select all updates"
                     />
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-white/40">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       {selectedCount > 0 ? `${selectedCount} selected` : "Select all"}
                     </span>
                   </label>

@@ -5,7 +5,7 @@ function SectionHeader({ className, ...props }: React.ComponentProps<"h3">) {
     <h3
       data-slot="section-header"
       className={cn(
-        "font-heading text-[11px] font-bold uppercase tracking-[0.05em] text-muted-foreground/60",
+        "font-heading text-[11px] font-bold uppercase tracking-[0.05em] text-muted-foreground",
         className
       )}
       {...props}

@@ -132,7 +132,7 @@ export const HistoryPanel = memo(function HistoryPanel({
       {history.length === 0 ? (
         <div className="px-1 py-6 text-center">
           <FileText className="mx-auto mb-2 size-5 text-muted-foreground/30" aria-hidden />
-          <p className="text-xs text-muted-foreground/70">
+          <p className="text-xs text-muted-foreground">
             No uploads yet. Reports you create will appear here.
           </p>
         </div>
@@ -174,11 +174,11 @@ export const HistoryPanel = memo(function HistoryPanel({
                   <div className="min-w-0">
                     {/* Lead: the content name (zone · date), or the report title, or
                         a tidied file label — what the raider recognizes at a glance. */}
-                    <div className="truncate text-sm font-semibold text-foreground/90">{lead}</div>
+                    <div className="truncate text-sm font-semibold text-foreground">{lead}</div>
                     {/* The ESO Logs report title, only when distinct from the lead. */}
                     {showTitle && (
                       <div
-                        className="truncate text-xs text-foreground/65"
+                        className="truncate text-xs text-muted-foreground"
                         title={title ?? undefined}
                       >
                         {title}
@@ -190,7 +190,7 @@ export const HistoryPanel = memo(function HistoryPanel({
                     <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                       <SimpleTooltip content={loc.dir} side="top">
                         <span
-                          className="truncate font-mono text-[11px] text-muted-foreground/70"
+                          className="truncate font-mono text-xs text-muted-foreground"
                           title={loc.dir}
                         >
                           {r.fileName}

@@ -118,7 +118,7 @@ export function PackListView({
                 <AlertCircleIcon className="size-8 text-red-400/70" />
               </div>
               <p className="font-heading text-sm font-medium text-red-400">Could not load packs</p>
-              <p className="text-xs text-muted-foreground/60 max-w-[280px]">{error}</p>
+              <p className="text-xs text-muted-foreground max-w-[280px]">{error}</p>
               <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
                 <RefreshCwIcon className="size-3.5 mr-1.5" />
                 Retry
@@ -134,7 +134,7 @@ export function PackListView({
               <p className="font-heading text-sm font-medium">
                 {searchQuery ? "No packs match your search" : "The Pack Hub is empty"}
               </p>
-              <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+              <p className="text-xs text-muted-foreground max-w-[260px]">
                 {searchQuery
                   ? "Try different keywords or clear filters"
                   : "Be the first to share an addon pack with the community!"}
@@ -204,7 +204,7 @@ export function PackListView({
 
                     {/* Description sits under the title so it aligns to the baseline */}
                     {pack.description && (
-                      <p className="mt-1 text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
+                      <p className="mt-1 text-xs text-muted-foreground line-clamp-2 leading-relaxed">
                         {decodeHtml(pack.description)}
                       </p>
                     )}
@@ -230,7 +230,7 @@ export function PackListView({
                         votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
                         pack.userVoted
                           ? "text-primary bg-primary/[0.15] border-primary/40 hover:bg-primary/[0.22] shadow-[0_0_12px_color-mix(in_oklab,var(--primary)_25%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_10%,transparent)]"
-                          : "text-muted-foreground/50 bg-white/[0.03] border-white/[0.06] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
+                          : "text-muted-foreground bg-white/[0.03] border-white/[0.06] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
                       )}
                     >
                       <ArrowUpIcon
@@ -263,26 +263,26 @@ export function PackListView({
                   {pack.tags.length > 0 && pack.addons.length > 0 && (
                     <span className="text-muted-foreground/20 mx-0.5">·</span>
                   )}
-                  <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                     <PackageIcon className="size-3" />
                     {pack.addons.length} addon{pack.addons.length !== 1 ? "s" : ""}
                   </span>
                   {(pack.installCount ?? 0) > 0 && (
                     <>
                       <span className="text-muted-foreground/20 mx-0.5">·</span>
-                      <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                         <DownloadIcon className="size-3" />
                         {pack.installCount}
                       </span>
                     </>
                   )}
                   {!pack.isAnonymous && pack.authorName && (
-                    <span className="text-[11px] text-muted-foreground/40 ml-auto inline-flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground ml-auto inline-flex items-center gap-1.5">
                       <span
                         aria-hidden="true"
                         className={cn(
                           "inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold uppercase leading-none",
-                          "bg-gradient-to-b from-white/[0.14] to-white/[0.06] text-muted-foreground/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
+                          "bg-gradient-to-b from-white/[0.14] to-white/[0.06] text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
                         )}
                       >
                         {[...decodeHtml(pack.authorName)][0]}
@@ -302,7 +302,7 @@ export function PackListView({
             className={cn(
               "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
               "shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-all duration-200 hover:bg-white/[0.05] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.15)]",
-              "text-muted-foreground/60 hover:text-muted-foreground",
+              "text-muted-foreground hover:text-foreground",
               loadingMore && "opacity-60 cursor-wait"
             )}
           >

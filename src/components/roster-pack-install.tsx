@@ -291,7 +291,9 @@ export function RosterPackInstall({
           )}
 
           {pack && !loading && addonStates.length === 0 && (
-            <p className="py-4 text-center text-sm text-white/40">This pack has no addons.</p>
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              This pack has no addons.
+            </p>
           )}
 
           {pack && !loading && addonStates.length > 0 && (
@@ -321,7 +323,7 @@ export function RosterPackInstall({
                         {decodeHtml(addon.name)}
                       </span>
                       {addon.note && (
-                        <span className="truncate text-xs text-white/40">
+                        <span className="truncate text-xs text-muted-foreground">
                           {decodeHtml(addon.note)}
                         </span>
                       )}
@@ -355,7 +357,7 @@ export function RosterPackInstall({
                         }}
                       />
                     </div>
-                    <p className="mt-1 text-center text-xs text-white/40">
+                    <p className="mt-1 text-center text-xs text-muted-foreground">
                       <CountingNumber number={installProgress.completed + installProgress.failed} />{" "}
                       / <CountingNumber number={installProgress.total} initiallyStable />
                       {installProgress.failed > 0 && (

@@ -254,8 +254,8 @@ export function Profiles({
             {instanceLabel ? (
               <>
                 {" "}
-                for <span className="text-white/70">{instanceLabel}</span>. Each ESO instance keeps
-                its own profiles — switch instances from the header to manage another one.
+                for <span className="text-foreground">{instanceLabel}</span>. Each ESO instance
+                keeps its own profiles — switch instances from the header to manage another one.
               </>
             ) : (
               ". Each ESO instance keeps its own profiles."

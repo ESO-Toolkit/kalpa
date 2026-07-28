@@ -181,7 +181,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                     <div className="text-xs text-muted-foreground mt-0.5">
                       {s.fileCount} files &middot; {formatBytes(s.totalSize)} &middot; {s.createdAt}
                     </div>
-                    <div className="text-[10px] text-muted-foreground mt-0.5">
+                    <div className="mt-0.5 text-xs text-muted-foreground">
                       Includes: {s.sourcePaths.join(", ")}
                     </div>
                   </div>
@@ -397,7 +397,7 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
                   </span>
                 </div>
                 <div className="text-muted-foreground mt-0.5">{entry.details}</div>
-                <div className="text-[10px] text-white/30 mt-0.5">
+                <div className="text-xs text-muted-foreground mt-0.5">
                   {entry.startedAt} &rarr; {entry.finishedAt}
                   {entry.snapshotId && ` | Snapshot: ${entry.snapshotId}`}
                 </div>

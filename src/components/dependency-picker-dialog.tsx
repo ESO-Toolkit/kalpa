@@ -165,7 +165,7 @@ function DependencyPickerBody({
 
       <div className="flex max-h-[55vh] flex-col gap-3 overflow-y-auto pr-1">
         {pending.length === 0 ? (
-          <p className="py-4 text-center text-sm text-white/40">Nothing to install.</p>
+          <p className="py-4 text-center text-sm text-muted-foreground">Nothing to install.</p>
         ) : (
           <>
             <label className="flex cursor-pointer select-none items-center gap-2 self-start">
@@ -175,7 +175,7 @@ function DependencyPickerBody({
                 onCheckedChange={toggleAll}
                 aria-label={allSelected ? "Select no dependencies" : "Select all dependencies"}
               />
-              <span className="text-[11px] font-medium uppercase tracking-wide text-white/40">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 {selectedCount > 0
                   ? `${selectedCount} of ${pending.length} selected`
                   : "Select all"}

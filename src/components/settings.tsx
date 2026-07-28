@@ -517,7 +517,7 @@ export function Settings({
                                   {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
                                 </span>
                                 {isActive && (
-                                  <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-sky-400">
+                                  <span className="ml-auto text-[11px] font-semibold uppercase tracking-wider text-sky-400">
                                     active
                                   </span>
                                 )}

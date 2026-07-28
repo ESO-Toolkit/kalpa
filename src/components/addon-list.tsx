@@ -122,16 +122,14 @@ const AddonListItem = memo(function AddonListItem({
         {addon.title}
       </div>
       <div className="mt-0.5 flex items-center gap-1.5">
-        <span className="shrink-0 text-xs text-muted-foreground/50">
+        <span className="shrink-0 text-xs text-muted-foreground">
           {addon.version || `v${addon.addonVersion ?? "?"}`}
         </span>
         {dateLabel ? (
-          <span className="truncate text-xs text-muted-foreground/40">&middot; {dateLabel}</span>
+          <span className="truncate text-xs text-muted-foreground">&middot; {dateLabel}</span>
         ) : (
           addon.author && (
-            <span className="truncate text-xs text-muted-foreground/40">
-              &middot; {addon.author}
-            </span>
+            <span className="truncate text-xs text-muted-foreground">&middot; {addon.author}</span>
           )
         )}
         <div className="flex-1" />
@@ -170,7 +168,7 @@ const AddonListItem = memo(function AddonListItem({
         {addon.modifiedFileCount > 0 && (
           <Badge
             variant="outline"
-            className="border-primary/20 bg-primary/[0.04] text-primary/70 text-[10px]"
+            className="border-primary/20 bg-primary/[0.04] text-primary text-[10px]"
           >
             {addon.modifiedFileCount} edited
           </Badge>
@@ -204,7 +202,7 @@ const AddonListItem = memo(function AddonListItem({
       className={cn(
         "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_color-mix(in_oklab,var(--primary)_2%,transparent)] group",
         addon.disabled
-          ? "border-l-zinc-500 opacity-50"
+          ? "border-l-zinc-500 bg-zinc-500/[0.04]"
           : addon.missingDependencies.length > 0
             ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-error-strong)_10%,transparent)]"
             : addon.outdatedDependencies.length > 0
@@ -568,7 +566,7 @@ function AddonListBase({
                       "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                       isActive
                         ? "text-primary"
-                        : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                        : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                     )}
                     onClick={() => {
                       onFilterChange(mode);
@@ -584,7 +582,7 @@ function AddonListBase({
                     )}
                     <span className="relative z-10">
                       {label}
-                      <span className="ml-1 opacity-50">({filterCounts[mode]})</span>
+                      <span className="ml-1 font-normal">({filterCounts[mode]})</span>
                     </span>
                   </button>
                 );
@@ -605,7 +603,7 @@ function AddonListBase({
                         "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                         isActive
                           ? "text-accent-sky"
-                          : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                          : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                       )}
                       onClick={() => {
                         onFilterChange("all");
@@ -621,7 +619,7 @@ function AddonListBase({
                       )}
                       <span className="relative z-10">
                         {tag}
-                        <span className="ml-1 opacity-50">({count})</span>
+                        <span className="ml-1 font-normal">({count})</span>
                       </span>
                     </button>
                   );
@@ -630,7 +628,7 @@ function AddonListBase({
 
             {/* Sort + count bar */}
             <div className="flex items-center justify-between border-y border-white/[0.06] px-3 py-1.5">
-              <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
+              <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
                 {addons.length} {addons.length === 1 ? "addon" : "addons"}
                 {batchMode && (
                   <span className="text-primary font-medium normal-case tracking-normal">
@@ -642,7 +640,7 @@ function AddonListBase({
               <Select value={sortMode} onValueChange={(v) => onSortChange(v as SortMode)}>
                 <SelectTrigger
                   size="sm"
-                  className="h-6 w-auto gap-1 border-0 bg-transparent text-[11px] text-muted-foreground/50 hover:text-muted-foreground px-1.5"
+                  className="h-6 w-auto gap-1 border-0 bg-transparent text-[11px] text-muted-foreground hover:text-foreground px-1.5"
                   aria-label="Sort by"
                 >
                   <SelectValue />
@@ -680,7 +678,7 @@ function AddonListBase({
                       </div>
                       <div>
                         <p className="text-sm text-muted-foreground">No addons match</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground/50">
+                        <p className="mt-0.5 text-xs text-muted-foreground">
                           {searchQuery
                             ? `"${searchQuery}"`
                             : activeTagFilter
@@ -707,10 +705,10 @@ function AddonListBase({
                         <div className="flex flex-col items-center gap-4 relative">
                           <Logo size={36} className="opacity-60" />
                           <div className="text-center">
-                            <p className="font-heading text-sm font-medium text-foreground/80">
+                            <p className="font-heading text-sm font-medium text-foreground">
                               No addons installed yet
                             </p>
-                            <p className="mt-1 text-xs text-muted-foreground/50">
+                            <p className="mt-1 text-xs text-muted-foreground">
                               Get started with one of these options
                             </p>
                           </div>
@@ -726,10 +724,10 @@ function AddonListBase({
                                 <Globe className="size-3.5" />
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-xs font-medium text-foreground/80 group-hover:text-foreground">
+                                <p className="text-xs font-medium text-foreground group-hover:text-foreground">
                                   Browse the ESOUI catalog
                                 </p>
-                                <p className="text-[10px] text-muted-foreground/40">
+                                <p className="text-xs text-muted-foreground">
                                   Search and install from thousands of addons
                                 </p>
                               </div>
@@ -745,16 +743,16 @@ function AddonListBase({
                                 <Search className="size-3.5" />
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-xs font-medium text-foreground/80 group-hover:text-foreground">
+                                <p className="text-xs font-medium text-foreground group-hover:text-foreground">
                                   Paste an ESOUI URL
                                 </p>
-                                <p className="text-[10px] text-muted-foreground/40">
+                                <p className="text-xs text-muted-foreground">
                                   Install directly from a link
                                 </p>
                               </div>
                             </button>
                           </div>
-                          <p className="text-[10px] text-muted-foreground/30 tabular-nums">
+                          <p className="text-xs text-muted-foreground tabular-nums">
                             {modKeyLabel()}+B to browse &middot; {modKeyLabel()}+I to install by URL
                           </p>
                         </div>

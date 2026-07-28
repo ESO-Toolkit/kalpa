@@ -76,7 +76,7 @@ export const FightList = memo(function FightList({
             <div className="flex min-w-0 items-center gap-2.5">
               <Swords className="size-4 shrink-0 text-primary/70" aria-hidden />
               <div className="min-w-0">
-                <div className="truncate text-sm text-foreground/90">{f.title}</div>
+                <div className="truncate text-sm text-foreground">{f.title}</div>
                 <div className="truncate text-xs text-muted-foreground">{f.subtitle}</div>
               </div>
             </div>

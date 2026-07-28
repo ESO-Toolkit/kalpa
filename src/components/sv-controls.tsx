@@ -246,9 +246,7 @@ export function ColorControl({
         disabled={field.readOnly}
       />
       <span className="text-xs text-muted-foreground font-mono">{localHex}</span>
-      {a !== undefined && (
-        <span className="text-xs text-muted-foreground/60">a: {a.toFixed(2)}</span>
-      )}
+      {a !== undefined && <span className="text-xs text-muted-foreground">a: {a.toFixed(2)}</span>}
     </div>
   );
 }
@@ -435,7 +433,7 @@ export function DropdownControl({
 
 export function ReadonlyControl({ field }: { field: EffectiveField }) {
   return (
-    <span className="text-xs text-muted-foreground/60 italic">
+    <span className="text-xs text-muted-foreground italic">
       {field.value === null ? "nil" : String(field.value)}
     </span>
   );

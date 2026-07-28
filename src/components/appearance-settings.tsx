@@ -259,7 +259,7 @@ function ThemeCard({
           <span className="truncate text-xs font-medium text-white/90">{theme.name}</span>
           {active && <Check className="ml-auto size-3.5 shrink-0 text-primary" />}
         </div>
-        <p className="line-clamp-1 px-1 pb-0.5 text-[10px] text-muted-foreground">
+        <p className="line-clamp-1 px-1 pb-0.5 text-[11px] text-muted-foreground">
           {theme.description}
         </p>
       </button>
