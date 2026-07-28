@@ -7,6 +7,16 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+      # Production deps were ungrouped, so every one opened its own PR against
+      # the same package-lock.json — a queue whose members all conflict with
+      # each other, where merging any one forces the rest to rebase. Grouping
+      # collapses them into a single PR that is also tested as a set.
+      #
+      # It also keeps version-locked pairs together. react and react-dom must
+      # move in lockstep; dependabot split them into #306 and #308, and the
+      # half that raised react alone failed the frontend tests outright.
+      production-dependencies:
+        dependency-type: production
     open-pull-requests-limit: 10
     ignore:
       # TypeScript 7 (native compiler) drops the ts.Extension enum that
@@ -25,12 +35,21 @@ updates:
     directory: /backend/eso-packs-worker
     schedule:
       interval: weekly
+    groups:
+      worker-dependencies:
+        patterns: ["*"]
     open-pull-requests-limit: 5
 
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
       interval: weekly
+    groups:
+      # One Cargo.lock, so ungrouped bumps queue up conflicting with each other
+      # exactly like the npm ones did. The ignore rules below still apply — a
+      # grouped PR simply omits anything they exclude.
+      cargo-dependencies:
+        patterns: ["*"]
     open-pull-requests-limit: 5
     ignore:
       # windows + webview2-com must stay in lockstep with the copies tauri/wry
@@ -50,4 +69,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
     open-pull-requests-limit: 5
