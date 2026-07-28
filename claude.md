@@ -212,7 +212,13 @@ Use these components instead of re-rolling new ones:
 
 ### Visual Rules
 
-- Always-dark theme; no light mode.
+- Dark-first. Every theme shipped so far is dark, but light themes are **in
+  scope**, not forbidden — `context/40-design-system.md` specifies "dark-first
+  with light mode support". This line previously read "always-dark theme; no
+  light mode", which was added by `b72f8edb` ("docs: document implemented design
+  system primitives") to record what existed at the time and was then read as a
+  prohibition for four months. Colors must come from theme tokens; the blocker
+  for light themes is the ~391 hardcoded `white/[0.x]` utilities, not policy.
 - Glass morphism panels:
   - Three tiers: `primary`, `default`, `subtle`.
 - Typography:
