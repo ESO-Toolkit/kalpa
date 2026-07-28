@@ -30,9 +30,8 @@ The Vite dev server runs on port **1430** (configured in `.env.local` and `src-t
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (stable, MSVC toolchain on Windows)
-- [Node.js](https://nodejs.org/) 22.22.2+ — the supported range is `engines.node`
-  in `package.json` (`^22.22.2 || ^24.15.0 || >=26.0.0`). The odd-numbered 23.x
-  and 25.x lines are not supported. `nvm use` picks up the version in `.nvmrc`.
+- [Node.js](https://nodejs.org/) — `engines.node` in `package.json` is the
+  supported range; `.nvmrc` pins a known-good version for `nvm use`
 - On Windows: Visual Studio Build Tools with "Desktop development with C++" and the [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
 - On macOS: Xcode Command Line Tools (`xcode-select --install`)
 - On Linux (Debian/Ubuntu): `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libxdo-dev build-essential`
