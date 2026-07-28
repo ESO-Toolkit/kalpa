@@ -22,6 +22,18 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Six fields across five files carry the app version, and a bump has to
+      # land in every one of them. Nothing enforced that, and nine consecutive
+      # tags (alpha.8 through beta.9) shipped with package-lock.json still
+      # pinned to an older version. The release publish gate only compares
+      # tauri.conf.json to the tag, so a stale src-tauri/Cargo.toml sails
+      # straight past it and ships a binary that reports the wrong version.
+      # Sits ahead of npm ci and the Rust toolchain deliberately: it reads five
+      # files with zero dependencies, so drift fails the PR in seconds instead
+      # of at the end of the 20-minute Rust build.
+      - name: Version consistency
+        run: node scripts/check-versions.js
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:

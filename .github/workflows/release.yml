@@ -47,6 +47,15 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Same check CI runs on every PR, plus the tag comparison. The publish
+      # gate already asserts latest.json's version equals the tag, but only
+      # after all three platforms have built — so a tag cut before the bump
+      # landed burns an hour before failing. This fails it in seconds, on the
+      # first job, and additionally catches Cargo.toml drift that the publish
+      # gate cannot see.
+      - name: Version consistency
+        run: node scripts/check-versions.js --expect "${{ github.ref_name }}"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
