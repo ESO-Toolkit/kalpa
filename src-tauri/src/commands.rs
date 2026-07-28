@@ -313,6 +313,11 @@ fn merge_pending_dep(
 /// (which filters to required entries) and the "ask" prompt share one traversal.
 /// Required entries are returned first so the UI can render them above the
 /// unticked optional ones; order within each group is first-seen.
+/// Upper bound on how many held-back dependencies one operation may report.
+/// Generous next to real addons (the largest declare a handful) but finite, so a
+/// broken manifest cannot hand the UI an unbounded list to render and queue.
+const MAX_PENDING_DEPENDENCIES: usize = 200;
+
 fn discover_missing_deps(
     addons_dir: &Path,
     folders: &[String],
@@ -343,6 +348,12 @@ fn discover_missing_deps(
 
     // Stable sort keeps first-seen order inside each group.
     found.sort_by_key(|d| !d.required);
+    // Bound what a manifest can put in front of the user. A malformed or hostile
+    // DependsOn line can name arbitrarily many libraries, and this list is
+    // rendered as a checkbox per row and can be merged into a queue. Truncating
+    // after the required-first sort keeps the entries that matter; the cap is
+    // well above any real addon's dependency count.
+    found.truncate(MAX_PENDING_DEPENDENCIES);
     found
 }
 

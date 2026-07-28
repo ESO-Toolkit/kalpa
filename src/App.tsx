@@ -110,6 +110,11 @@ function dedupeDependencies(pending: PendingDependency[]): PendingDependency[] {
   );
 }
 
+/** Ceiling on a queued folder's dependency list. The backend already bounds a
+ * single response (MAX_PENDING_DEPENDENCIES in commands.rs); this bounds the
+ * repeated arrivals that merge into one batch during a long Update All. */
+const MAX_QUEUED_DEPENDENCIES = 200;
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -875,9 +880,18 @@ function App() {
           sameAddonsFolder(batch.addonsPath, sourceAddonsPath)
         );
         if (sameFolder) {
-          sameFolder.deps = dedupeDependencies([...sameFolder.deps, ...candidates]);
+          // Bounded: the backend caps a single response, but repeated arrivals
+          // merge here, so without this the queue could grow without limit
+          // across a long Update All.
+          sameFolder.deps = dedupeDependencies([...sameFolder.deps, ...candidates]).slice(
+            0,
+            MAX_QUEUED_DEPENDENCIES
+          );
         } else {
-          batches.push({ addonsPath: sourceAddonsPath, deps: candidates });
+          batches.push({
+            addonsPath: sourceAddonsPath,
+            deps: candidates.slice(0, MAX_QUEUED_DEPENDENCIES),
+          });
         }
         return;
       }
@@ -1052,6 +1066,11 @@ function App() {
         }
 
         setAddonsPath(nextPath);
+        // Sync the ref here rather than waiting for the effect that mirrors it.
+        // A dependency result from the old folder can land in between, and the
+        // open-time folder guard reads this ref — against a stale value it would
+        // wave through a batch for the folder we just left.
+        addonsPathRef.current = nextPath;
         setSelectedAddon(null);
         setSelectedFolders(new Set());
         setUpdateResults([]);
