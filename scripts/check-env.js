@@ -9,7 +9,38 @@
  */
 
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { platform } from "node:os";
+
+// package.json's engines.node is the single source of truth for the supported
+// range, so this reads it rather than restating it. The range only ever uses
+// `^x.y.z` and `>=x.y.z` terms, which is a small enough subset of semver to
+// evaluate here instead of adding a dependency for one preflight check.
+const NODE_RANGE = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf-8")
+).engines.node;
+
+function parseVersion(text) {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isAtLeast(version, floor) {
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== floor[i]) return version[i] > floor[i];
+  }
+  return true;
+}
+
+function satisfiesNodeRange(version) {
+  return NODE_RANGE.split("||").some((clause) => {
+    const term = clause.trim();
+    const floor = parseVersion(term);
+    if (!floor || !isAtLeast(version, floor)) return false;
+    // `^x.y.z` also caps at the next major; `>=x.y.z` has no ceiling.
+    return term.startsWith("^") ? version[0] === floor[0] : true;
+  });
+}
 
 const isWindows = platform() === "win32";
 const isMac = platform() === "darwin";
@@ -42,11 +73,15 @@ console.log("\nKalpa — environment check\n");
 check("Node.js", () => {
   const raw = run("node --version");
   if (!raw) return { ok: false, detail: "not found — install from https://nodejs.org/" };
-  const major = parseInt(raw.replace("v", ""), 10);
-  // Keep in lockstep with the docs and CI: README says 22+, and every workflow
-  // pins actions/setup-node to 22. A lower gate here passed silently on a
-  // version the project does not actually build against.
-  if (major < 22) return { ok: false, detail: `${raw} found, but 22+ is required` };
+  const version = parseVersion(raw);
+  if (!version) return { ok: false, detail: `could not parse version from "${raw}"` };
+  // A bare `major >= 22` gate passed on versions the dependency tree rejects:
+  // jsdom 30 needs ^22.22.2 || ^24.15.0 || >=26.0.0, so 22.13 and 24.0 both
+  // install "fine" and then fail somewhere inside the test run instead. Check
+  // the real range so the failure lands here, with the version printed.
+  if (!satisfiesNodeRange(version)) {
+    return { ok: false, detail: `${raw} found, but ${NODE_RANGE} is required` };
+  }
   return { ok: true, detail: raw };
 });
 
