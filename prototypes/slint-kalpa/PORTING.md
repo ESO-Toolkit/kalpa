@@ -165,11 +165,15 @@ Current detail status:
   rows still use in-memory prototype behavior.
 - Tag chips now include the React-style active glow/inset highlight while keeping
   the inactive main-reference chip state quiet.
-- Small chips/pills now avoid 1px stroked outlines in the software renderer.
-  Slint software AA made the old `All`, folder-name, ESOUI, and tag chip borders
-  look pixelated; the prototype now uses low-alpha fills plus subtle highlights
-  instead. Skia improves AA only slightly here and measured too high for the
-  memory target.
+- Only `RowBadge` drops its outline under the software renderer
+  (`border-width: Tokens.low-memory-preset ? 0px : 1px`); it is the single
+  component in `ui/kalpa.slint` that gates a border on the preset. The `All`
+  filter tab is borderless by construction and shows its active state as a shared
+  low-alpha fill. The folder-name and ESOUI chips are `Pill` instances, and
+  `TagChip` is its own component; all three keep a hard-coded 1px border on every
+  preset and only keep the border alpha low. Software AA still stipples those
+  hairlines, so this is an open fidelity gap rather than a solved one. Skia
+  improves AA only slightly here and measured too high for the memory target.
 - Detail title has a native two-layer approximation of the React gradient text.
 - Detail glass panels now use the textured-theme opacity rule so skin motifs do
   not sit directly behind body text.
@@ -371,14 +375,15 @@ Current backdrop status:
   inspection mode.
 - The previous native-only bottom darkening layer was removed because it created
   a blockier lower-right surface than the WebView background.
-- Tiny rounded chips and pills use theme-aware nine-slice backplates generated
-  from the active theme in Rust. This keeps custom themes intact while avoiding
-  the worst software-rendered hairline artifacts on chip borders.
-- The sidebar `All / Addons / Libs` filter now uses one shared animated
-  backplate that slides/resizes between tabs, matching the React shared-layout
+- Tiny rounded chips and pills are plain rounded Slint rectangles with low-alpha
+  fills and low-alpha borders. There is no generated backplate or nine-slice
+  asset: the only image Rust generates from the active theme is the pre-blurred
+  ambient orb sprite (`blurred_orb_skin`).
+- The sidebar `All / Addons / Libs` filter now uses one shared animated indicator
+  rectangle that slides/resizes between tabs, matching the React shared-layout
   indicator pattern more closely than per-tab active repainting.
 - The Discover `Search / Popular / Categories / URL` sub-tabs now use the same
-  shared animated backplate approach. The `Popular` tab was verified to move the
+  shared animated indicator approach. The `Popular` tab was verified to move the
   indicator and switch the native Discover list state.
 
 ## Rules
@@ -389,24 +394,27 @@ Current backdrop status:
 - Capture and compare after each component family.
 - Defer release memory measurements until the active surface is visually and
   functionally acceptable.
-- Test renderer tradeoffs explicitly. `KALPA_RENDER_PRESET=low-memory` maps to
-  `winit-software`; `KALPA_RENDER_PRESET=standard` maps to `winit-femtovg` in
-  this prototype unless `KALPA_SLINT_BACKEND` overrides it for a manual renderer
-  check. Use `winit-skia` only when the active Slint build exposes it.
-- Treat glass/border work as one native material system: pre-blurred assets,
-  generated nine-slice/backplate assets, low-alpha fills, and carefully limited
-  highlights. Do not keep chasing CSS `backdrop-filter` with per-component hacks.
+- Test renderer tradeoffs explicitly. `standard` is the default and maps to
+  `winit-femtovg`; `KALPA_RENDER_PRESET=low-memory` maps to `winit-software`.
+  `KALPA_SLINT_BACKEND` overrides the backend for a manual renderer check, but a
+  software backend always runs the `low-memory` UI: Slint 1.17's software
+  renderer has no drop shadows, no clip-to-border-radius and no
+  transform-rotation, and `standard`'s translucent panes expose the full-window
+  SVG backdrop it cannot draw. That preset is the mitigation bundle, not a
+  lighter skin. Use `winit-skia` only when the active Slint build exposes it.
+- Treat glass/border work as one native material system: pre-blurred generated
+  sprites, low-alpha fills, and carefully limited highlights. Do not keep chasing
+  CSS `backdrop-filter` with per-component hacks.
 - OS window blur/mica/acrylic remains a follow-up via the Slint winit-window
   access path; do not fake it inside component code.
-- Historical renderer memory notes from July 1, 2026, for later re-check after
-  visual/feature parity:
+- Current renderer memory lives in `README.md`; the numbers below are the
+  superseded July 1, 2026 notes, kept only for trend context:
   `winit-software` ~39.5-43.4 MB working set / 21.1-23.5 MB private after
-  theme-aware nine-slice chip backplates, downsized animated pre-blurred orb
-  sprites, and the shared sidebar filter indicator during a clean release
-  restart/wait. Repeated desktop capture/visual-QA can temporarily warm the
-  process to ~55 MB working set, so workload memory should be measured
-  separately from capture tooling. A Skia renderer spot-check for chip AA
-  measured ~104 MB working set / 159 MB private and is not the default
+  downsized pre-blurred orb sprites and the shared sidebar filter indicator
+  during a clean release restart/wait. Repeated desktop capture/visual-QA can
+  temporarily warm the process to ~55 MB working set, so workload memory should
+  be measured separately from capture tooling. A Skia renderer spot-check for
+  chip AA measured ~104 MB working set / 159 MB private and is not the default
   low-memory path.
   `winit-femtovg`
   ~84 MB / 132 MB, `winit-skia` ~86 MB / 132 MB.
@@ -439,12 +447,15 @@ Current backdrop status:
   overlay.
 - Launch with `KALPA_UPLOADER_OPEN=1` and optional
   `KALPA_UPLOADER_VIEW=manual|live` to inspect the native Log Uploader overlay.
-- Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
-  `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
-  on Slint builds that support those renderer names.
+- `KALPA_RENDER_PRESET=standard` is the default for visual-fidelity checks;
+  launch with `KALPA_RENDER_PRESET=low-memory` to inspect the software-renderer
+  UI, or `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend
+  checks on Slint builds that support those renderer names.
 - Launch with `KALPA_THEME=<theme-id>` to inspect supported native seed themes.
-  The prototype launches with `eso-gold` when no theme env var is set so the
-  saved main-screen reference and native demo start from the same clean palette.
+  With no theme env var the prototype falls back to the persisted active theme,
+  then to the catalog default (`nordic-runestone`) — not to `eso-gold`. Pass
+  `KALPA_THEME=eso-gold` explicitly to start from the saved main-screen
+  reference palette.
 - Regenerate built-in native theme seeds with `npm run export:native-themes`.
 - Regenerate built-in native skin assets with `npm run export:native-skins`.
 - Regenerate both with `npm run export:native-assets`.

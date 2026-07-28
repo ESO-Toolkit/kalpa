@@ -1191,6 +1191,16 @@ fn main() -> Result<(), slint::PlatformError> {
         .backend_name(render_config.backend.clone())
         .select()?;
 
+    // The preset stays whatever the backend name implied, and that is sound here.
+    // Slint 1.17 exposes no supported way to ask which renderer was actually
+    // selected (`slint::Window` has no accessor, `WinitWindowAccessor` reaches
+    // only the winit window, `BackendSelector::renderer_name` is write-only), but
+    // it never silently swaps in the software renderer either: winit's fallback
+    // list is tried via `GlutinFemtoVGRenderer::new_suspended`, which only builds
+    // a struct and cannot fail, so the software entry after it is unreachable.
+    // Real GL context creation happens later in `resume()` and propagates its
+    // error instead of substituting a renderer, which surfaces as a failed launch
+    // and lets the app fall back to the WebView UI.
     let ui = KalpaWindow::new()?;
     place_demo_window(&ui);
     let custom_themes = Rc::new(RefCell::new(read_custom_themes()));
@@ -1279,14 +1289,46 @@ fn render_config_from_inputs(
     backend_env: Option<&str>,
     slint_backend_env: Option<&str>,
 ) -> NativeRenderConfig {
-    let explicit_preset = preset_env.and_then(parse_render_preset);
-    let backend = backend_env
-        .or(slint_backend_env)
+    let explicit_preset = env_override(preset_env).and_then(parse_render_preset);
+    let backend = env_override(backend_env)
+        .or(env_override(slint_backend_env))
         .map(str::to_string)
         .unwrap_or_else(|| default_backend_for_preset(explicit_preset.unwrap_or_default()).into());
-    let preset = explicit_preset.unwrap_or_else(|| render_preset_for_backend(&backend));
+    let backend_preset = render_preset_for_backend(&backend);
+
+    // The Standard preset makes the sidebar and all three panes transparent,
+    // which puts the full-window feTurbulence SVG backdrop on the interaction
+    // path, and it leans on drop shadows, clip-to-border-radius and gradient
+    // fills — none of which the software renderer implements. LowMemory is
+    // therefore the software renderer's mitigation bundle, not a taste knob, so
+    // an explicit `standard` on a software backend is clamped rather than
+    // honoured: obeying it would render a visibly broken window.
+    let preset = match (explicit_preset, backend_preset) {
+        (Some(NativeRenderPreset::Standard), NativeRenderPreset::LowMemory) => {
+            // Echo back what was actually set. `standard` has several accepted
+            // spellings (fidelity, quality, skia, femtovg), so naming a literal
+            // "standard" would quote a value the user never typed.
+            eprintln!(
+                "Ignoring KALPA_RENDER_PRESET={}: backend '{backend}' is the software \
+                 renderer, which cannot draw the standard preset. Using low-memory.",
+                env_override(preset_env).unwrap_or("standard")
+            );
+            NativeRenderPreset::LowMemory
+        }
+        (Some(preset), _) => preset,
+        (None, derived) => derived,
+    };
 
     NativeRenderConfig { backend, preset }
+}
+
+/// `std::env::var` hands back `Ok("")` for a variable that is set but empty, and
+/// an empty backend name reaches `BackendSelector` and stops the sidecar
+/// starting outright. Blank (or whitespace-only) means "unset" for every
+/// renderer knob; trimming here also keeps `KALPA_SLINT_BACKEND=" winit "` from
+/// being handed to Slint verbatim, which it would fail to parse.
+fn env_override(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn parse_render_preset(value: &str) -> Option<NativeRenderPreset> {
@@ -1309,9 +1351,24 @@ fn default_backend_for_preset(preset: NativeRenderPreset) -> &'static str {
 }
 
 fn render_preset_for_backend(backend: &str) -> NativeRenderPreset {
-    match backend.to_ascii_lowercase().as_str() {
-        "winit-skia" | "skia" | "winit-femtovg" | "femtovg" => NativeRenderPreset::Standard,
-        _ => NativeRenderPreset::LowMemory,
+    // Mirrors i-slint-backend-selector's `parse_backend_env_var`: everything
+    // after the first `-` names the renderer, and a bare name means the
+    // backend's default renderer — which is a GPU one for `winit`/`gl`/`qt`.
+    // Listing GPU spellings instead would silently demote those to LowMemory,
+    // and an unrecognised renderer name makes winit fall back to its GPU
+    // default too, so only the software spellings map to LowMemory.
+    let backend = backend.trim().to_ascii_lowercase();
+    let renderer = match backend.split_once('-') {
+        Some((_, renderer)) => renderer,
+        None => match backend.as_str() {
+            "sw" | "software" => "software",
+            _ => "",
+        },
+    };
+
+    match renderer {
+        "sw" | "software" | "skia-software" => NativeRenderPreset::LowMemory,
+        _ => NativeRenderPreset::Standard,
     }
 }
 
@@ -19399,6 +19456,67 @@ mod tests {
         assert_eq!(
             render_config_from_inputs(None, Some("winit-software"), None).preset,
             NativeRenderPreset::LowMemory
+        );
+    }
+
+    #[test]
+    fn render_config_clamps_standard_preset_on_the_software_renderer() {
+        for backend in ["winit-software", "software", "sw", "  WINIT-SOFTWARE  "] {
+            assert_eq!(
+                render_config_from_inputs(Some("standard"), Some(backend), None).preset,
+                NativeRenderPreset::LowMemory,
+                "standard must be clamped on {backend}"
+            );
+        }
+        // The clamp is one-way: low-memory on a GPU backend is plain, not broken.
+        assert_eq!(
+            render_config_from_inputs(Some("low-memory"), Some("winit-femtovg"), None).preset,
+            NativeRenderPreset::LowMemory
+        );
+    }
+
+    #[test]
+    fn render_config_treats_bare_winit_spellings_as_gpu_backends() {
+        for backend in ["winit", "gl", " winit ", "GL", "winit-skia-opengl"] {
+            assert_eq!(
+                render_config_from_inputs(None, Some(backend), None).preset,
+                NativeRenderPreset::Standard,
+                "{backend} selects winit's default GPU renderer"
+            );
+        }
+    }
+
+    #[test]
+    fn render_config_ignores_blank_env_vars() {
+        assert_eq!(
+            render_config_from_inputs(Some(""), Some(""), Some("  ")),
+            NativeRenderConfig {
+                backend: "winit-femtovg".to_string(),
+                preset: NativeRenderPreset::Standard,
+            }
+        );
+        // A blank primary override must not shadow the SLINT_BACKEND fallback.
+        assert_eq!(
+            render_config_from_inputs(None, Some(""), Some("winit-software")),
+            NativeRenderConfig {
+                backend: "winit-software".to_string(),
+                preset: NativeRenderPreset::LowMemory,
+            }
+        );
+    }
+
+    #[test]
+    fn render_config_trims_backend_names_before_handing_them_to_slint() {
+        assert_eq!(
+            render_config_from_inputs(None, Some(" winit-femtovg\n"), None),
+            NativeRenderConfig {
+                backend: "winit-femtovg".to_string(),
+                preset: NativeRenderPreset::Standard,
+            }
+        );
+        assert_eq!(
+            render_config_from_inputs(Some(" standard "), None, None).preset,
+            NativeRenderPreset::Standard
         );
     }
 
