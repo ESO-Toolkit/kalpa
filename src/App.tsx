@@ -197,9 +197,11 @@ function App() {
   // picker is already up before its own async store read lands, which state
   // read inside a stable callback can't tell it.
   const depPromptOpenRef = useRef(false);
-  // Dependencies that arrived while a picker was already up. Drained when it
-  // closes so a concurrent install's libraries are offered rather than dropped.
-  const queuedDepsRef = useRef<PendingDependency[]>([]);
+  // Dependency batches that arrived while a picker was already up, drained when
+  // it closes so a concurrent install's libraries are offered rather than
+  // dropped. Each batch carries the AddOns folder it was resolved against, so a
+  // batch cannot be installed into whichever instance is selected later.
+  const queuedDepBatchesRef = useRef<{ addonsPath: string; deps: PendingDependency[] }[]>([]);
   // Latched while a decision is settling, so the picker cannot be submitted
   // twice in the window between the click and the close.
   const depDecisionInFlightRef = useRef(false);
@@ -806,44 +808,70 @@ function App() {
     return prompt;
   }, []);
 
+  // Present (or park) one batch of held-back dependencies. The AddOns folder
+  // travels WITH the batch rather than being read from the live path when the
+  // prompt opens: a batch resolved against one game instance can sit in the
+  // queue while the user switches to another, and these libraries belong to the
+  // addon that asked for them. Tracking the path separately re-pinned a queued
+  // instance-A batch to instance B on drain and installed it into the wrong
+  // folder.
+  const presentDependencyBatch = useCallback(
+    async (pending: PendingDependency[], sourceAddonsPath: string) => {
+      if (pending.length === 0) return;
+
+      // Drop anything the user has already declined, so Update All doesn't
+      // re-ask for the same library on every patch day.
+      //
+      // Only optional entries are filtered. The skip list is keyed by name
+      // alone, so a library turned down while it was OPTIONAL would otherwise
+      // stay hidden when a different addon later declares it REQUIRED —
+      // silently leaving that addon unable to load, with no prompt and no
+      // warning. A required dependency is load-bearing enough to be worth
+      // re-offering; declining it again is one click.
+      const skipped = await getSkippedDependencies();
+      const candidates = dedupeDependencies(pending).filter(
+        (dep) => dep.required || !isDependencySkipped(dep.name, skipped)
+      );
+      if (candidates.length === 0) return;
+
+      // One picker at a time — a second would replace the first's list
+      // mid-decision. Park the extras instead of dropping them, so a Discover
+      // install landing mid-Update-All still gets its dependencies offered.
+      // Queue while a decision is settling too: the picker closes the instant
+      // it is submitted but the install runs on for seconds, and anything
+      // arriving in that window would otherwise escape the filtering that
+      // drops what the in-flight decision installs.
+      if (depPromptOpenRef.current || depDecisionInFlightRef.current) {
+        const batches = queuedDepBatchesRef.current;
+        // Merge only within the same folder. Two instances can legitimately
+        // need the same library name, and they are separate installs.
+        const sameFolder = batches.find((batch) => batch.addonsPath === sourceAddonsPath);
+        if (sameFolder) {
+          sameFolder.deps = dedupeDependencies([...sameFolder.deps, ...candidates]);
+        } else {
+          batches.push({ addonsPath: sourceAddonsPath, deps: candidates });
+        }
+        return;
+      }
+
+      depPromptOpenRef.current = true;
+      depPromptPathRef.current = sourceAddonsPath;
+      setPendingDeps(candidates);
+      setDepPromptOpen(true);
+    },
+    []
+  );
+
   // Shared entry point for every install/update that came back with dependencies
   // the backend held for the user ("ask" policy). See dependency-prompt-context.
-  const resolvePendingDeps = useCallback<ResolvePendingDeps>(async (pending) => {
-    if (pending.length === 0) return;
-
-    // Drop anything the user has already declined, so Update All doesn't re-ask
-    // for the same library on every patch day.
-    //
-    // Only optional entries are filtered. The skip list is keyed by name alone,
-    // so a library turned down while it was OPTIONAL would otherwise stay hidden
-    // when a different addon later declares it REQUIRED — silently leaving that
-    // addon unable to load, with no prompt and no warning. A required dependency
-    // is load-bearing enough to be worth re-offering; declining it again is one
-    // click.
-    const skipped = await getSkippedDependencies();
-    const candidates = dedupeDependencies(pending).filter(
-      (dep) => dep.required || !isDependencySkipped(dep.name, skipped)
-    );
-    if (candidates.length === 0) return;
-
-    // One picker at a time — a second would replace the first's list mid-decision.
-    // Park the extras instead of dropping them: the queue drains when the open
-    // dialog closes, so a Discover install that lands mid-Update-All still gets
-    // its dependencies offered rather than silently skipped.
-    // Also queue while a decision is still settling. The picker closes the
-    // instant it is submitted, but the install runs on for seconds after that;
-    // without this, anything arriving in that window opens its own prompt and
-    // escapes the filtering that drops what the in-flight decision installs.
-    if (depPromptOpenRef.current || depDecisionInFlightRef.current) {
-      queuedDepsRef.current = dedupeDependencies([...queuedDepsRef.current, ...candidates]);
-      return;
-    }
-
-    depPromptOpenRef.current = true;
-    depPromptPathRef.current = addonsPathRef.current;
-    setPendingDeps(candidates);
-    setDepPromptOpen(true);
-  }, []);
+  // Called straight after that install resolved, so the live path is still the
+  // one those dependencies were resolved against — capture it here, once.
+  const resolvePendingDeps = useCallback<ResolvePendingDeps>(
+    async (pending) => {
+      await presentDependencyBatch(pending, addonsPathRef.current);
+    },
+    [presentDependencyBatch]
+  );
 
   const handleSingleUpdate = useCallback(
     async (folderName: string) => {
@@ -1615,16 +1643,23 @@ function App() {
   // before that install, so without this the same library is offered again
   // moments after being installed.
   const drainQueuedDeps = useCallback(
-    async (justInstalled: readonly string[] = []) => {
-      const queued = queuedDepsRef.current;
-      if (queued.length === 0) return;
-      queuedDepsRef.current = [];
+    async (justInstalled: readonly string[] = [], installedInPath = "") => {
+      const batches = queuedDepBatchesRef.current;
+      if (batches.length === 0) return;
+      queuedDepBatchesRef.current = [];
       const handled = new Set(justInstalled.map((name) => name.toLowerCase()));
-      const remaining = queued.filter((dep) => !handled.has(dep.name.toLowerCase()));
-      if (remaining.length === 0) return;
-      await resolvePendingDeps(remaining);
+      for (const batch of batches) {
+        // An install only accounts for the folder it wrote to. The same library
+        // name missing from a different instance is a different missing file.
+        const remaining =
+          batch.addonsPath === installedInPath
+            ? batch.deps.filter((dep) => !handled.has(dep.name.toLowerCase()))
+            : batch.deps;
+        if (remaining.length === 0) continue;
+        await presentDependencyBatch(remaining, batch.addonsPath);
+      }
     },
-    [resolvePendingDeps]
+    [presentDependencyBatch]
   );
 
   // Only ever a dismissal now: the dialog's own buttons no longer close it, so
@@ -1750,7 +1785,7 @@ function App() {
           // decision has fully landed. In a `finally` so a throw in the
           // persistence step above cannot strand the picker shut forever.
           depDecisionInFlightRef.current = false;
-          await drainQueuedDeps(installedNames);
+          await drainQueuedDeps(installedNames, targetAddonsPath);
         }
       })();
     },
