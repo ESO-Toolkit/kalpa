@@ -40,6 +40,7 @@ Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea 
 
 Kalpa finds your AddOns folder on first run and parses every manifest it contains, following embedded libraries up to three levels deep. Paste an ESOUI URL or addon ID to install, and anything the addon depends on is pulled in with it.
 
+- **Choose which libraries get installed** — by default Kalpa asks before pulling in an addon's dependencies, listing required ones ticked and optional ones unticked so you can take all, some, or none. Turn the prompt off (always install, or never) in Settings. Skipping a required library warns you but never blocks.
 - **Bulk updates** — update everything at once or pick a subset. Large updates report per-addon progress and can be stopped partway.
 - **Update conflicts** — if an update would overwrite a file you edited locally, Kalpa shows a per-file diff and lets you choose which side wins for each one.
 - **Removal warnings** — removing an addon that others depend on tells you before it happens, not after.

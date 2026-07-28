@@ -4,7 +4,22 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-_Nothing yet._
+### Features
+
+- **You choose which libraries get installed.** Kalpa used to pull in every dependency an addon declared, transitively, with no say in the matter. It now asks: required libraries come pre-ticked, optional ones (`OptionalDependsOn`, which Kalpa previously ignored entirely) are listed unticked, and you take all, some, or none. Settings has an "install automatically / ask me / never" control, and a way to clear libraries you told it to stop offering. Skipping a required library warns you but never blocks. Update All asks once for the whole run rather than once per addon. ([#305](https://github.com/ESO-Toolkit/kalpa/pull/305))
+- **Every release now ships SHA-256 checksums.** A `SHA256SUMS.txt` covering every file is generated and attached before the release goes live, so the checksum verification [the download docs](docs/verify-download.md) describe is now always available rather than occasionally. ([#301](https://github.com/ESO-Toolkit/kalpa/pull/301))
+
+### Bug Fixes
+
+- **The native performance UI now releases its memory when minimized.** It previously held its whole footprint while minimized — the state you leave it in while playing. Measured on a release build: 76.2 MB → 10.9 MB minimized, which now also beats the standard WebView UI's 18 MB. ([#303](https://github.com/ESO-Toolkit/kalpa/pull/303))
+- **The native UI can no longer start in a broken rendering mode.** Slint's software renderer draws no shadows, ignores rounded-corner clipping and cannot rotate, so pairing it with the full-fidelity preset produced a visibly wrong window. That combination is now impossible to select, and three latent environment-variable bugs were fixed alongside it — including one where a set-but-empty backend variable stopped the native UI starting at all. ([#304](https://github.com/ESO-Toolkit/kalpa/pull/304))
+- **`npm run check:env` now checks for the Node version the project actually needs.** It only failed below Node 18 while everything else requires 22, so it passed on versions Kalpa does not build against. ([#302](https://github.com/ESO-Toolkit/kalpa/pull/302))
+
+### Documentation
+
+- **The privacy policy now describes a data flow it had omitted.** Published Pack Hub packs are copied into the same database that powers esotk.com; the policy said only the Pack Hub. It now states exactly what crosses, including that an anonymous pack's display name is replaced but its numeric author ID is not. The "delete my data" claim was also overstated — deletion never touched the backup snapshots, so the non-expiring one is now scrubbed on deletion and the remaining 90-day window is stated plainly. Storage paths are documented per platform and the Windows path was corrected (`%APPDATA%`, not `%LOCALAPPDATA%`), which means the "delete your local data" instructions previously pointed at the wrong folder. ([#299](https://github.com/ESO-Toolkit/kalpa/pull/299))
+- **Security reports now go somewhere that works.** `SECURITY.md` pointed at GitHub private vulnerability reporting, which is not enabled on this repository, with no fallback. It now points at Discord, drops a 48-hour response promise no single maintainer can keep, and cites the actual review write-ups instead of implying a third-party audit. ([#300](https://github.com/ESO-Toolkit/kalpa/pull/300))
+- **`package.json` uses a valid SPDX license identifier** (`BUSL-1.1`; `BSL-1.1` is not registered). ([#302](https://github.com/ESO-Toolkit/kalpa/pull/302))
 
 ## [0.1.0-beta.12] — 2026-07-16
 
