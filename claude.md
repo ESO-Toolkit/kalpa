@@ -152,12 +152,25 @@ Use **Conventional Commits**:
 
 When preparing a new release:
 
-1. Bump the version in:
-   - `tauri.conf.json`
-   - `Cargo.toml`
+1. Bump the version. Six fields across five files carry it, and every one has to
+   move together — listing only the first three is how nine consecutive tags
+   (alpha.8 through beta.9) shipped with a stale `package-lock.json`:
+   - `src-tauri/tauri.conf.json`
+   - `src-tauri/Cargo.toml`
    - `package.json`
-2. Push a tag `v*` (for example `v0.3.0`).
-3. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
+   - `package-lock.json` (**twice** — top level and `packages[""]`)
+   - `src-tauri/Cargo.lock` (the `[[package]]` block named `kalpa`)
+
+   The lockfiles are easiest to get right by tool rather than by hand:
+   `npm version <v> --no-git-tag-version` updates `package.json` and both
+   `package-lock.json` fields; `cargo update --workspace` rewrites only the
+   local crate's `Cargo.lock` entry. Run `npm run check:versions` to confirm —
+   CI runs the same check, and `release.yml` also compares the result to the tag.
+2. Rewrite the per-release "Changed:" section of `releaseBody` in
+   `.github/workflows/release.yml`. It is shared by every tag, so it otherwise
+   ships the previous release's headline.
+3. Push a tag `v*` (for example `v0.3.0`).
+4. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
 
 ### Cross-Platform Notes
 
