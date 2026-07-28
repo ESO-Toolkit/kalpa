@@ -4,7 +4,12 @@
 
 If you discover a security vulnerability in Kalpa, please report it responsibly.
 
-**Do not open a public issue.** Instead, use [GitHub's private vulnerability reporting](https://github.com/ESO-Toolkit/kalpa/security/advisories/new) to submit your report.
+**Do not open a public issue.** Report privately on **Discord: `@spike_jones`**.
+
+GitHub's private vulnerability reporting is **not currently enabled** on this
+repository, so the "Report a vulnerability" button and the
+`/security/advisories/new` URL will not work. Previous versions of this file
+pointed there; Discord is the channel that actually reaches a maintainer.
 
 Please include:
 
@@ -13,7 +18,11 @@ Please include:
 - Potential impact
 - Suggested fix (if any)
 
-You should receive a response within 48 hours. We will work with you to understand the issue and coordinate a fix before any public disclosure.
+Kalpa is maintained by one person in their spare time, so please treat the
+timeline as best-effort rather than a guarantee: expect an acknowledgement
+within about a week. If you have heard nothing after that, ping on Discord —
+it means the report was missed, not ignored. We will work with you to
+understand the issue and coordinate a fix before any public disclosure.
 
 ## Supported Versions
 
@@ -23,8 +32,23 @@ You should receive a response within 48 hours. We will work with you to understa
 
 ## Auditing and Dependencies
 
-The 0.1.0 beta shipped after a comprehensive security audit covering path
-validation, ZIP handling, CSP, and the Pack Hub worker. Dependencies are audited
+Kalpa has been reviewed internally, and the write-ups are in the repository so
+you can judge them yourself rather than take a claim on trust:
+
+- [`docs/audit-2026-07.md`](docs/audit-2026-07.md) — a full-repository review
+  (July 2026) covering the Rust backend, the React frontend, the Pack Hub
+  worker, and CI/CD. Includes the path-validation, ZIP-extraction and CSP
+  analysis, with `file:line` evidence for every finding.
+- [`docs/audits/log-uploader-audit.md`](docs/audits/log-uploader-audit.md) — a
+  review of the ESO Logs uploader (July 2026). All 25 findings were implemented
+  in PR #220.
+
+These are **internal reviews by the project, not a third-party security audit**,
+and they postdate the first 0.1.0 beta rather than gating it. Treat them as
+evidence of what has been looked at and what was found — not as external
+assurance.
+
+Dependencies are audited
 in CI on every push and pull request: `npm audit --omit=dev --audit-level=high`
 for both the desktop client and the Pack Hub worker (production dependencies
 only — the flagged advisories are in dev/build tooling that never ships), and
