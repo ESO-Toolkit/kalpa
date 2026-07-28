@@ -402,6 +402,16 @@ Current backdrop status:
   transform-rotation, and `standard`'s translucent panes expose the full-window
   SVG backdrop it cannot draw. That preset is the mitigation bundle, not a
   lighter skin. Use `winit-skia` only when the active Slint build exposes it.
+- **Decided (2026-07-28): `standard`/`winit-femtovg` stays the shipped default.**
+  This had been carried forward as an open product question across several
+  handoffs, so it is recorded here rather than re-litigated. After #303 the gap
+  is 82.0 MB open / 10.9 MB minimized on femtovg versus 20.3 / 6.1 on software —
+  about 5 MB in the minimized state a player is actually in while raiding, and
+  ~62 MB only while the window is open, which is the sole state where the
+  missing shadows, clipping and rotation are visible. Roughly 5 MB is not worth
+  shipping the flatter look by default. `KALPA_RENDER_PRESET=low-memory` remains
+  available for anyone who wants the trade. Reopen this only if the minimized
+  gap grows materially — the open-window figure is not the one that matters.
 - Treat glass/border work as one native material system: pre-blurred generated
   sprites, low-alpha fills, and carefully limited highlights. Do not keep chasing
   CSS `backdrop-filter` with per-component hacks.
