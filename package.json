@@ -4,7 +4,7 @@
   "private": true,
   "description": "A source-available desktop addon manager for Elder Scrolls Online",
   "author": "ESO-Toolkit",
-  "license": "BSL-1.1",
+  "license": "BUSL-1.1",
   "keywords": [
     "tauri",
     "addon-manager",
