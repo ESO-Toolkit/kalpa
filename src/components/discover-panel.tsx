@@ -20,6 +20,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import {
@@ -53,6 +55,7 @@ interface DiscoverPanelProps {
 
 function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+  const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
   const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
 
@@ -80,17 +83,20 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           esouiId: id,
           esouiTitle: info.title,
           esouiVersion: info.version,
+          dependencyPolicy: await getDependencyPolicy(),
         });
         setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
         onInstalled();
+        // Empty unless the policy is "ask"; the app-level picker owns the rest.
+        void resolvePendingDeps(res.pendingDeps, addonsPath);
       } catch (e) {
         toast.error(getTauriErrorMessage(e));
       } finally {
         setInstallingId(null);
       }
     },
-    [addonsPath, onInstalled, ensureEsoNotBlocking]
+    [addonsPath, onInstalled, ensureEsoNotBlocking, resolvePendingDeps]
   );
 
   return { installingId, installedIds, install };
@@ -902,6 +908,7 @@ function UrlContent({
   installedEsouiIds: Set<number>;
 }) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+  const resolvePendingDeps = useResolvePendingDeps();
   const [input, setInput] = useState("");
   const [state, setState] = useState<
     "idle" | "resolving" | "resolved" | "installing" | "installed" | "error"
@@ -941,11 +948,14 @@ function UrlContent({
         esouiId: addonInfo.id,
         esouiTitle: addonInfo.title,
         esouiVersion: addonInfo.version,
+        dependencyPolicy: await getDependencyPolicy(),
       });
       setResult(installResult);
       setState("installed");
       toast.success(`Installed ${installResult.installedFolders.join(", ")}`);
       onInstalled();
+      // Empty unless the policy is "ask"; the app-level picker owns the rest.
+      void resolvePendingDeps(installResult.pendingDeps, addonsPath);
     } catch (e) {
       setError(getTauriErrorMessage(e));
       setState("error");

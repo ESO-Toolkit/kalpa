@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
@@ -45,6 +47,7 @@ function DiscoverDetailBase({
   isOffline,
 }: DiscoverDetailProps) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+  const resolvePendingDeps = useResolvePendingDeps();
   const [detail, setDetail] = useState<EsouiAddonDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -170,10 +173,15 @@ function DiscoverDetailBase({
         esouiId: result.id,
         esouiTitle: title,
         esouiVersion: version,
+        dependencyPolicy: await getDependencyPolicy(),
       });
       setInstallSuccess(res);
       toast.success(`Installed ${res.installedFolders.join(", ")}`);
       onInstalled();
+      // Empty unless the policy is "ask"; the app-level picker owns the rest.
+      // Same `addonsPath` this install was started with, so a folder switch
+      // while it ran can't redirect the deps to another instance.
+      void resolvePendingDeps(res.pendingDeps, addonsPath);
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
     } finally {

@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
 import {
@@ -129,6 +130,7 @@ export function Packs({
 
   // Installation — selected addons (esouiId set)
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+  const resolvePendingDeps = useResolvePendingDeps();
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState<{
     completed: number;
@@ -613,6 +615,9 @@ export function Packs({
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
     }
 
+    // One prompt for the whole pack; empty unless the policy is "ask".
+    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
+
     // Apply SV settings from a v2 .esopack file after addons are installed
     if (importedFileSettings && Object.keys(importedFileSettings).length > 0) {
       setApplyingSettings(true);
@@ -790,6 +795,9 @@ export function Packs({
     }
 
     onRefresh();
+
+    // One prompt for the whole pack; empty unless the policy is "ask".
+    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
   };
 
   // ── Voting ──────────────────────────────────────────────────────────

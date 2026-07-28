@@ -151,6 +151,9 @@ pub struct InstallResult {
     pub installed_deps: Vec<String>,
     pub failed_deps: Vec<String>,
     pub skipped_deps: Vec<String>,
+    /// Dependencies Kalpa found but deliberately did NOT install because the
+    /// user's `dependencyPolicy` is "ask". Empty under "auto" and "skip".
+    pub pending_deps: Vec<PendingDependency>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,10 +217,179 @@ fn record_installed_folders(
     }
 }
 
+/// A dependency Kalpa discovered but did not install, handed to the frontend so
+/// it can prompt. Required entries come from a manifest's `DependsOn` (the addon
+/// will not load without them); optional ones from `OptionalDependsOn` and are
+/// listed unticked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDependency {
+    pub name: String,
+    pub required: bool,
+    /// Titles of the addons in this round that asked for this dependency, so the
+    /// prompt can say which addon breaks if the user declines.
+    pub required_by: Vec<String>,
+    /// Strictest `AddOnVersion` floor any requester declared, if any.
+    pub min_version: Option<u32>,
+}
+
+/// How Kalpa handles missing dependencies during an install or update.
+///
+/// Modelled on the existing `conflictPolicy` preference: the frontend stores a
+/// string and passes it down; the Rust side parses it here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyPolicy {
+    /// Install required dependencies transitively, silently (historic behaviour).
+    Auto,
+    /// Install nothing; return one round of missing dependencies for the UI to
+    /// prompt on.
+    Ask,
+    /// Do nothing at all — no disk walk, no network.
+    Skip,
+}
+
+impl DependencyPolicy {
+    /// Parse the stored preference. Anything unrecognised — including a caller
+    /// that passes nothing at all — falls back to `Auto`, which is exactly
+    /// today's behaviour, so every pre-existing caller keeps working unchanged.
+    /// Only the *stored* frontend preference defaults to "ask".
+    pub(crate) fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("ask") => Self::Ask,
+            Some("skip") => Self::Skip,
+            _ => Self::Auto,
+        }
+    }
+}
+
+#[derive(Default)]
 struct ResolvedDeps {
     installed_deps: Vec<String>,
     failed_deps: Vec<String>,
     skipped_deps: Vec<String>,
+    pending_deps: Vec<PendingDependency>,
+}
+
+/// Fold one manifest dependency into the round's accumulator, deduping by the
+/// same case-insensitive normalization ESO uses for addon names.
+fn merge_pending_dep(
+    found: &mut Vec<PendingDependency>,
+    index: &mut HashMap<String, usize>,
+    dep: &manifest::Dependency,
+    required: bool,
+    requester: &str,
+) {
+    let key = normalize_addon_name(&dep.name);
+    let existing = index.get(&key).copied();
+    let Some(slot) = existing else {
+        index.insert(key, found.len());
+        found.push(PendingDependency {
+            name: dep.name.clone(),
+            required,
+            required_by: vec![requester.to_string()],
+            min_version: dep.min_version,
+        });
+        return;
+    };
+
+    let entry = &mut found[slot];
+    // Required wins: if ANY addon lists this as a hard dependency, declining it
+    // breaks that addon — another addon treating it as optional doesn't change that.
+    entry.required |= required;
+    // Keep the strictest version floor, since satisfying the highest satisfies all.
+    entry.min_version = match (entry.min_version, dep.min_version) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    if !entry.required_by.iter().any(|r| r == requester) {
+        entry.required_by.push(requester.to_string());
+    }
+}
+
+/// One breadth-first round of dependency discovery: everything `folders`
+/// declares that is not already present in `installed`.
+///
+/// Pure disk walk — no network, no installation — so both the "auto" resolver
+/// (which filters to required entries) and the "ask" prompt share one traversal.
+/// Required entries are returned first so the UI can render them above the
+/// unticked optional ones; order within each group is first-seen.
+/// Upper bound on how many held-back dependencies one operation may REPORT to
+/// the UI. Generous next to real addons (the largest declare a handful) but
+/// finite, so a broken manifest cannot hand the UI an unbounded list to render
+/// and queue.
+///
+/// Applied only on the "ask" path, where the cost is a rendered checkbox per
+/// row. Auto-resolution must never be truncated: silently installing some of an
+/// addon's required libraries and dropping the rest leaves it broken with no
+/// indication why.
+const MAX_PENDING_DEPENDENCIES: usize = 200;
+
+fn discover_missing_deps(
+    addons_dir: &Path,
+    folders: &[String],
+    installed: &HashSet<String>,
+) -> Vec<PendingDependency> {
+    let mut found: Vec<PendingDependency> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+
+    for folder in folders {
+        let Some(addon) =
+            find_manifest(addons_dir, folder).and_then(|p| manifest::parse_manifest(folder, &p))
+        else {
+            continue;
+        };
+        // `title` falls back to the folder name in the parser, so it is always a
+        // usable label for the "<Addon> won't load without this" warning.
+        for dep in &addon.depends_on {
+            if !installed.contains(&normalize_addon_name(&dep.name)) {
+                merge_pending_dep(&mut found, &mut index, dep, true, &addon.title);
+            }
+        }
+        for dep in &addon.optional_depends_on {
+            if !installed.contains(&normalize_addon_name(&dep.name)) {
+                merge_pending_dep(&mut found, &mut index, dep, false, &addon.title);
+            }
+        }
+    }
+
+    // Stable sort keeps first-seen order inside each group.
+    found.sort_by_key(|d| !d.required);
+    found
+}
+
+/// Apply the user's dependency policy to a freshly installed/updated set of
+/// folders. `Auto` reproduces the historic transitive install exactly; `Ask`
+/// installs nothing and reports one round for the UI; `Skip` does nothing.
+fn resolve_deps_with_policy(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    policy: DependencyPolicy,
+) -> ResolvedDeps {
+    match policy {
+        DependencyPolicy::Auto => resolve_transitive_deps(addons_dir, installed_folders, store),
+        DependencyPolicy::Ask => ResolvedDeps {
+            // Nothing is installed here. Whatever the user accepts comes back
+            // through `install_selected_dependencies`, which installs
+            // transitively — a library's own libraries are an implementation
+            // detail, so we never prompt twice mid-install under the lock.
+            // Truncated here rather than in the shared discovery helper: the
+            // auto path uses the same helper and must install every required
+            // library it finds.
+            pending_deps: {
+                let mut found = discover_missing_deps(
+                    addons_dir,
+                    installed_folders,
+                    &build_installed_set(addons_dir),
+                );
+                found.truncate(MAX_PENDING_DEPENDENCIES);
+                found
+            },
+            ..ResolvedDeps::default()
+        },
+        // No disk walk, no network, nothing to report.
+        DependencyPolicy::Skip => ResolvedDeps::default(),
+    }
 }
 
 fn resolve_transitive_deps(
@@ -236,19 +408,15 @@ fn resolve_transitive_deps(
     let mut seen: HashSet<String> = HashSet::new();
 
     while !folders_to_scan.is_empty() {
-        let mut missing_deps: Vec<String> = Vec::new();
-        for folder in &folders_to_scan {
-            let addon = find_manifest(addons_dir, folder)
-                .and_then(|p| manifest::parse_manifest(folder, &p));
-            if let Some(addon) = addon {
-                for dep in &addon.depends_on {
-                    let key = normalize_addon_name(&dep.name);
-                    if !all_installed.contains(&key) && seen.insert(key) {
-                        missing_deps.push(dep.name.clone());
-                    }
-                }
-            }
-        }
+        // Auto-resolution installs REQUIRED dependencies only. Optional
+        // (`OptionalDependsOn`) entries are surfaced by the "ask" flow and are
+        // never installed behind the user's back.
+        let missing_deps: Vec<String> =
+            discover_missing_deps(addons_dir, &folders_to_scan, &all_installed)
+                .into_iter()
+                .filter(|d| d.required && seen.insert(normalize_addon_name(&d.name)))
+                .map(|d| d.name)
+                .collect();
 
         if missing_deps.is_empty() {
             break;
@@ -287,6 +455,8 @@ fn resolve_transitive_deps(
         installed_deps,
         failed_deps,
         skipped_deps,
+        // "auto" resolved everything it could; nothing is left for the UI to ask about.
+        pending_deps: Vec::new(),
     }
 }
 
@@ -1124,6 +1294,7 @@ pub async fn search_esoui_addons(query: String) -> Result<Vec<EsouiSearchResult>
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn install_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
@@ -1132,6 +1303,8 @@ pub async fn install_addon(
     esoui_id: u32,
     esoui_title: String,
     esoui_version: String,
+    // Option so existing callers (and tests) keep the historic "auto" behaviour.
+    dependency_policy: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
@@ -1141,6 +1314,7 @@ pub async fn install_addon(
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
 
+    let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
         // Download outside the lock — network I/O doesn't touch kalpa.json
@@ -1157,12 +1331,14 @@ pub async fn install_addon(
             esoui_id,
             &esoui_title,
             &esoui_version,
+            dep_policy,
         )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_addon_blocking(
     addons_dir: &Path,
     tmp_file: NamedTempFile,
@@ -1170,6 +1346,7 @@ fn install_addon_blocking(
     esoui_id: u32,
     esoui_title: &str,
     esoui_version: &str,
+    dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
@@ -1195,7 +1372,7 @@ fn install_addon_blocking(
         0, // esoui_last_update will be populated during next update check
     );
 
-    let resolved = resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
+    let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
     metadata::save_metadata(addons_dir, &store)?;
 
@@ -1204,6 +1381,7 @@ fn install_addon_blocking(
         installed_deps: resolved.installed_deps,
         failed_deps: resolved.failed_deps,
         skipped_deps: resolved.skipped_deps,
+        pending_deps: resolved.pending_deps,
     })
 }
 
@@ -1348,6 +1526,9 @@ fn install_dependency_blocking(
         metadata::record_install(&mut store, f, dep_id, &dep_version, &dep_info.download_url);
     }
 
+    // Hard-wired to "auto": the user explicitly asked for THIS library, and its
+    // own libraries are an implementation detail — prompting again here would be
+    // a second modal for something they already accepted.
     let resolved = resolve_transitive_deps(addons_dir, &dep_folders, &mut store);
     metadata::save_metadata(addons_dir, &store)?;
     Ok(InstallResult {
@@ -1355,7 +1536,108 @@ fn install_dependency_blocking(
         installed_deps: resolved.installed_deps,
         failed_deps: resolved.failed_deps,
         skipped_deps: resolved.skipped_deps,
+        pending_deps: resolved.pending_deps,
     })
+}
+
+/// Upper bound on a single accept-prompt. Every name costs at least an ESOUI
+/// search + detail fetch + download, so a malformed manifest declaring hundreds
+/// of `DependsOn` tokens must not be able to drive an unbounded request loop.
+const MAX_SELECTED_DEPENDENCIES: usize = 50;
+
+/// Longest dependency name we will look up. ESOUI addon names are short; a
+/// pathological token is a manifest bug, not something to send to the server.
+const MAX_DEPENDENCY_NAME_LEN: usize = 128;
+
+/// Install exactly the dependencies the user ticked in the "ask" prompt, plus
+/// their own transitive requirements.
+///
+/// Paired with `DependencyPolicy::Ask`: the install/update path returned
+/// `pending_deps` without touching the network, the user chose, and this command
+/// applies that choice. Declined entries are simply absent from `dep_names` —
+/// declining a required dependency warns in the UI but never blocks.
+#[tauri::command]
+pub async fn install_selected_dependencies(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
+    addons_path: String,
+    dep_names: Vec<String>,
+) -> Result<InstallResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    if dep_names.is_empty() {
+        return Err("No dependencies selected.".to_string());
+    }
+    if dep_names.len() > MAX_SELECTED_DEPENDENCIES {
+        return Err(format!(
+            "Too many dependencies selected (limit {MAX_SELECTED_DEPENDENCIES})."
+        ));
+    }
+    let names: Vec<String> = dep_names.iter().map(|n| n.trim().to_string()).collect();
+    if names.iter().any(|n| n.is_empty()) {
+        return Err("Dependency name cannot be empty.".to_string());
+    }
+    if names.iter().any(|n| n.len() > MAX_DEPENDENCY_NAME_LEN) {
+        return Err("Dependency name is too long.".to_string());
+    }
+
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        // Hold the lock across the whole install: `try_install_dep` mutates the
+        // store in memory and one save at the end persists every dependency,
+        // matching how `resolve_transitive_deps` is driven elsewhere.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        let mut store = metadata::load_metadata(&addons_dir);
+
+        let mut installed_folders: Vec<String> = Vec::new();
+        let mut installed_deps: Vec<String> = Vec::new();
+        let mut failed_deps: Vec<String> = Vec::new();
+        let mut skipped_deps: Vec<String> = Vec::new();
+
+        for (i, dep_name) in names.iter().enumerate() {
+            // Same inter-request delay the transitive resolver uses, so a long
+            // accepted list is no harsher on ESOUI than auto-resolution.
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            match try_install_dep(dep_name, &addons_dir, &mut store) {
+                Ok(dep_folders) => {
+                    for f in &dep_folders {
+                        if !installed_folders.contains(f) {
+                            installed_folders.push(f.clone());
+                        }
+                    }
+                    installed_deps.push(dep_name.clone());
+                }
+                Err("not_found") => skipped_deps.push(dep_name.clone()),
+                Err(_) => failed_deps.push(dep_name.clone()),
+            }
+        }
+
+        // A library's own libraries are an implementation detail: resolve them
+        // transitively rather than prompting again while the lock is held.
+        // Guarded so a fully-failed selection skips the whole-folder disk walk.
+        if !installed_folders.is_empty() {
+            let resolved = resolve_transitive_deps(&addons_dir, &installed_folders, &mut store);
+            installed_deps.extend(resolved.installed_deps);
+            failed_deps.extend(resolved.failed_deps);
+            skipped_deps.extend(resolved.skipped_deps);
+        }
+
+        metadata::save_metadata(&addons_dir, &store)?;
+
+        Ok(InstallResult {
+            installed_folders,
+            installed_deps,
+            failed_deps,
+            skipped_deps,
+            pending_deps: Vec::new(),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1633,8 +1915,11 @@ pub async fn update_addon(
     esoui_id: u32,
     api_version: Option<String>,
     operation_id: Option<String>,
+    // Option so existing callers (and tests) keep the historic "auto" behaviour.
+    dependency_policy: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
     let lock = meta_lock.0.clone();
     let registry = cancels.0.clone();
     let operation_id = operation_id.unwrap_or_default();
@@ -1665,12 +1950,14 @@ pub async fn update_addon(
             info,
             tmp_file,
             hooks,
+            dep_policy,
         )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_addon_blocking(
     addons_dir: &Path,
     esoui_id: u32,
@@ -1678,6 +1965,7 @@ fn update_addon_blocking(
     info: EsouiAddonInfo,
     tmp_file: NamedTempFile,
     hooks: installer::ExtractHooks,
+    dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
     // Extract the downloaded ZIP
     let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
@@ -1715,7 +2003,7 @@ fn update_addon_blocking(
         0, // preserved from existing metadata
     );
 
-    let resolved = resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
+    let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
     metadata::save_metadata(addons_dir, &store)?;
 
@@ -1724,6 +2012,7 @@ fn update_addon_blocking(
         installed_deps: resolved.installed_deps,
         failed_deps: resolved.failed_deps,
         skipped_deps: resolved.skipped_deps,
+        pending_deps: resolved.pending_deps,
     })
 }
 
@@ -2350,6 +2639,8 @@ pub struct StreamingBatchResult {
     pub installed_deps: Vec<String>,
     pub failed_deps: Vec<String>,
     pub skipped_deps: Vec<String>,
+    /// Dependencies found but NOT installed because `dependencyPolicy` is "ask".
+    pub pending_deps: Vec<PendingDependency>,
 }
 
 /// One downloaded addon handed from a download worker to the extractor. The
@@ -2375,6 +2666,7 @@ struct StreamedDownload {
 ///   zips are kept in `PendingUpdates` and returned for the interactive modal,
 ///   exactly like `scan_batch_conflicts` + `update_addon_with_decisions`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_batch_with_decisions(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
@@ -2383,8 +2675,11 @@ pub async fn update_batch_with_decisions(
     addons_path: String,
     updates: Vec<BatchUpdateEntry>,
     conflict_policy: String,
+    // Option so existing callers (and tests) keep the historic "auto" behaviour.
+    dependency_policy: Option<String>,
 ) -> Result<StreamingBatchResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
     let lock = meta_lock.0.clone();
     let pending = pending.0.clone();
 
@@ -2481,6 +2776,7 @@ pub async fn update_batch_with_decisions(
             &conflict_policy,
             &pending,
             rx,
+            dep_policy,
         );
 
         // The producer has finished sending by the time the channel drained;
@@ -2516,6 +2812,7 @@ fn download_thread_count(addon_count: usize) -> usize {
 /// Consumer side of the streaming pipeline. Holds the metadata store in memory,
 /// extracts each download as it arrives, resolves all transitive deps once at
 /// the end, and saves the store once.
+#[allow(clippy::too_many_arguments)]
 fn extract_streamed_downloads(
     addons_dir: &Path,
     app: &tauri::AppHandle,
@@ -2524,6 +2821,7 @@ fn extract_streamed_downloads(
     conflict_policy: &str,
     pending: &Arc<Mutex<HashMap<String, crate::PendingUpdate>>>,
     rx: std::sync::mpsc::Receiver<(usize, String, Result<StreamedDownload, String>)>,
+    dep_policy: DependencyPolicy,
 ) -> StreamingBatchResult {
     let mut store = metadata::load_metadata(addons_dir);
     let mut completed: Vec<String> = Vec::new();
@@ -2719,13 +3017,9 @@ fn extract_streamed_downloads(
     // resolver dedups via its own seen/all_installed sets, so a single pass over
     // the whole batch produces the same end state as N per-addon passes.
     let resolved = if all_installed_folders.is_empty() {
-        ResolvedDeps {
-            installed_deps: Vec::new(),
-            failed_deps: Vec::new(),
-            skipped_deps: Vec::new(),
-        }
+        ResolvedDeps::default()
     } else {
-        resolve_transitive_deps(addons_dir, &all_installed_folders, &mut store)
+        resolve_deps_with_policy(addons_dir, &all_installed_folders, &mut store, dep_policy)
     };
 
     if let Err(e) = metadata::save_metadata(addons_dir, &store) {
@@ -2751,6 +3045,7 @@ fn extract_streamed_downloads(
         installed_deps: resolved.installed_deps,
         failed_deps: resolved.failed_deps,
         skipped_deps: resolved.skipped_deps,
+        pending_deps: resolved.pending_deps,
     }
 }
 
@@ -2861,11 +3156,14 @@ pub async fn update_addon_with_decisions(
     session_id: String,
     decisions: Vec<FileDecision>,
     operation_id: Option<String>,
+    // Option so existing callers (and tests) keep the historic "auto" behaviour.
+    dependency_policy: Option<String>,
 ) -> Result<InstallResult, String> {
     for d in &decisions {
         validate_relative_path(&d.relative_path)?;
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
     let pending_clone = pending.0.clone();
     let lock = meta_lock.0.clone();
     let registry = cancels.0.clone();
@@ -2907,7 +3205,7 @@ pub async fn update_addon_with_decisions(
             cancel: Some(cancel.flag()),
             progress: Some(&progress),
         };
-        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks);
+        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks, dep_policy);
 
         // Delete the kept temp ZIP first, then drop the pending entry. If the
         // delete genuinely fails (e.g. another process briefly holds the file),
@@ -2937,6 +3235,7 @@ fn update_with_decisions_inner(
     pu: &crate::PendingUpdate,
     decisions: &[FileDecision],
     hooks: installer::ExtractHooks,
+    dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
     let kept_files: Vec<String> = decisions
         .iter()
@@ -3044,7 +3343,7 @@ fn update_with_decisions_inner(
         0,
     );
 
-    let resolved = resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
+    let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
     metadata::save_metadata(addons_dir, &store)?;
 
@@ -3053,6 +3352,7 @@ fn update_with_decisions_inner(
         installed_deps: resolved.installed_deps,
         failed_deps: resolved.failed_deps,
         skipped_deps: resolved.skipped_deps,
+        pending_deps: resolved.pending_deps,
     })
 }
 
@@ -4035,6 +4335,8 @@ pub struct PackInstallResult {
     pub installed_deps: Vec<String>,
     pub failed_deps: Vec<String>,
     pub skipped_deps: Vec<String>,
+    /// Dependencies found but NOT installed because `dependencyPolicy` is "ask".
+    pub pending_deps: Vec<PendingDependency>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub errors: HashMap<u32, String>,
 }
@@ -4059,8 +4361,11 @@ pub async fn batch_install_pack_addons(
     app: tauri::AppHandle,
     addons_path: String,
     entries: Vec<PackInstallEntry>,
+    // Option so existing callers (and tests) keep the historic "auto" behaviour.
+    dependency_policy: Option<String>,
 ) -> Result<PackInstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
     let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -4228,8 +4533,10 @@ pub async fn batch_install_pack_addons(
             }
         }
 
-        // One transitive-dependency pass over everything the pack installed.
-        let resolved = resolve_transitive_deps(&addons_dir, &union_folders, &mut store);
+        // One dependency pass over everything the pack installed, honouring the
+        // user's policy.
+        let resolved =
+            resolve_deps_with_policy(&addons_dir, &union_folders, &mut store, dep_policy);
 
         if let Err(e) = metadata::save_metadata(&addons_dir, &store) {
             // The addons were extracted to disk, but kalpa.json didn't persist
@@ -4253,6 +4560,7 @@ pub async fn batch_install_pack_addons(
             installed_deps: resolved.installed_deps,
             failed_deps: resolved.failed_deps,
             skipped_deps: resolved.skipped_deps,
+            pending_deps: resolved.pending_deps,
             errors,
         })
     })
@@ -9950,6 +10258,128 @@ mod tests {
         assert_ne!(
             normalize_addon_name("Lui\u{200B}Media"),
             normalize_addon_name("LuiMedia")
+        );
+    }
+
+    // ── Dependency policy ────────────────────────────────────────────────
+
+    /// Write a minimal addon folder declaring required and/or optional deps.
+    /// Either string may be empty to omit that manifest line.
+    fn write_dep_addon(addons_dir: &Path, folder: &str, required: &str, optional: &str) {
+        let dir = addons_dir.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        let mut manifest = format!("## Title: {folder}\n");
+        if !required.is_empty() {
+            manifest.push_str(&format!("## DependsOn: {required}\n"));
+        }
+        if !optional.is_empty() {
+            manifest.push_str(&format!("## OptionalDependsOn: {optional}\n"));
+        }
+        fs::write(dir.join(format!("{folder}.txt")), manifest).unwrap();
+    }
+
+    #[test]
+    fn dependency_policy_defaults_to_auto() {
+        // The WIRE default is "auto": an absent or unrecognized argument must
+        // behave exactly as it did before this feature existed, so every
+        // pre-existing caller keeps working. Only the STORED frontend
+        // preference defaults to "ask".
+        assert_eq!(DependencyPolicy::parse(None), DependencyPolicy::Auto);
+        assert_eq!(DependencyPolicy::parse(Some("")), DependencyPolicy::Auto);
+        assert_eq!(
+            DependencyPolicy::parse(Some("auto")),
+            DependencyPolicy::Auto
+        );
+        assert_eq!(
+            DependencyPolicy::parse(Some("nonsense")),
+            DependencyPolicy::Auto
+        );
+        assert_eq!(DependencyPolicy::parse(Some("ask")), DependencyPolicy::Ask);
+        // Tolerate the stored value arriving padded or differently cased.
+        assert_eq!(
+            DependencyPolicy::parse(Some(" SKIP ")),
+            DependencyPolicy::Skip
+        );
+    }
+
+    #[test]
+    fn discover_missing_deps_splits_required_and_optional() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_dep_addon(tmp.path(), "AddonA", "LibRequired>=32", "LibOptional");
+        // Already on disk, so it must not be reported as missing at all.
+        write_dep_addon(tmp.path(), "LibPresent", "", "");
+        write_dep_addon(tmp.path(), "AddonB", "LibPresent", "");
+
+        let installed = build_installed_set(tmp.path());
+        let found = discover_missing_deps(
+            tmp.path(),
+            &["AddonA".to_string(), "AddonB".to_string()],
+            &installed,
+        );
+
+        assert_eq!(found.len(), 2, "only the two absent deps are reported");
+        // Required entries sort first so the UI lists them above the optionals.
+        assert_eq!(found[0].name, "LibRequired");
+        assert!(found[0].required);
+        assert_eq!(found[0].min_version, Some(32));
+        assert_eq!(found[0].required_by, vec!["AddonA".to_string()]);
+
+        assert_eq!(found[1].name, "LibOptional");
+        assert!(!found[1].required, "OptionalDependsOn is never required");
+        assert_eq!(found[1].min_version, None);
+    }
+
+    #[test]
+    fn discover_missing_deps_upgrades_optional_to_required() {
+        // One addon treats LibShared as optional, another as required. The
+        // required declaration must win: declining it breaks that second addon.
+        let tmp = tempfile::tempdir().unwrap();
+        write_dep_addon(tmp.path(), "AddonOptional", "", "LibShared");
+        write_dep_addon(tmp.path(), "AddonRequired", "libshared>=7", "");
+
+        let installed = build_installed_set(tmp.path());
+        let found = discover_missing_deps(
+            tmp.path(),
+            &["AddonOptional".to_string(), "AddonRequired".to_string()],
+            &installed,
+        );
+
+        assert_eq!(found.len(), 1, "case-insensitive dedup into one entry");
+        assert!(found[0].required);
+        assert_eq!(found[0].min_version, Some(7), "strictest floor is kept");
+        assert_eq!(
+            found[0].required_by,
+            vec!["AddonOptional".to_string(), "AddonRequired".to_string()],
+            "every requester is aggregated so the warning can name them"
+        );
+    }
+
+    #[test]
+    fn skip_policy_installs_nothing_and_reports_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_dep_addon(tmp.path(), "AddonA", "LibMissing", "LibAlsoMissing");
+        let folders = vec!["AddonA".to_string()];
+        let mut store = metadata::MetadataStore::default();
+
+        let skipped =
+            resolve_deps_with_policy(tmp.path(), &folders, &mut store, DependencyPolicy::Skip);
+
+        assert!(skipped.installed_deps.is_empty());
+        assert!(skipped.failed_deps.is_empty());
+        assert!(skipped.skipped_deps.is_empty());
+        assert!(
+            skipped.pending_deps.is_empty(),
+            "skip must not even surface deps — no disk walk, no network"
+        );
+
+        // Sanity check that the same input DOES produce pending deps under
+        // "ask", so the assertions above prove the policy and not a bad fixture.
+        let asked =
+            resolve_deps_with_policy(tmp.path(), &folders, &mut store, DependencyPolicy::Ask);
+        assert_eq!(asked.pending_deps.len(), 2);
+        assert!(
+            asked.installed_deps.is_empty(),
+            "ask installs nothing itself"
         );
     }
 

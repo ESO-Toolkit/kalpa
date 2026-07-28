@@ -4,6 +4,15 @@ import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { exampleAddonsPath } from "@/lib/platform";
+import {
+  clearSkippedDependencies,
+  getSkippedDependencies,
+  getDependencyPolicy,
+  DEFAULT_DEPENDENCY_POLICY,
+  // Aliased: the local useState setter below already owns the plain name.
+  setDependencyPolicy as saveDependencyPolicy,
+  type DependencyPolicy,
+} from "@/lib/dependency-policy";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -97,6 +106,13 @@ export function Settings({
   const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
   const [copying, setCopying] = useState(false);
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
+  const [dependencyPolicy, setDependencyPolicy] =
+    useState<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY);
+  // Names the user answered "don't ask again" for. Kept as the full list (not just
+  // a count) so the row can name them in a tooltip — otherwise "3 libraries" is an
+  // opaque thing to be asked to clear.
+  const [skippedDependencies, setSkippedDependencies] = useState<string[]>([]);
+  const [clearingSkippedDependencies, setClearingSkippedDependencies] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
@@ -123,6 +139,11 @@ export function Settings({
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
       setConflictPolicy
     );
+    // Via the module's reader, which narrows: settings.json is user-editable and
+    // survives downgrades, so a bad value must fall back rather than leave every
+    // radio unselected while the app quietly behaves as the default.
+    void getDependencyPolicy().then(setDependencyPolicy);
+    void getSkippedDependencies().then(setSkippedDependencies);
     void invokeResult<boolean>("detect_minion").then((result) => {
       if (result.ok) {
         setMinionDetected(result.data);
@@ -269,6 +290,23 @@ export function Settings({
       toast.error(`Failed to delete account data: ${getTauriErrorMessage(e)}`);
     } finally {
       setDeletingAccount(false);
+    }
+  };
+
+  const handleClearSkippedDependencies = async () => {
+    setClearingSkippedDependencies(true);
+    try {
+      // Mirrors setSetting's contract: false means the write failed, so the list
+      // is still there — say so rather than falsely reporting success.
+      const cleared = await clearSkippedDependencies();
+      if (cleared === false) {
+        toast.error("Couldn't clear that list — try again.");
+        return;
+      }
+      setSkippedDependencies([]);
+      toast.success("Kalpa will ask about those libraries again.");
+    } finally {
+      setClearingSkippedDependencies(false);
     }
   };
 
@@ -708,6 +746,74 @@ export function Settings({
                         <span className="text-sm text-white/80">{label}</span>
                       </button>
                     ))}
+                  </GlassPanel>
+
+                  {/* Dependency policy — deliberately shaped as the conflict policy's
+                    sibling (same radio rows, same read/save path) because both answer
+                    the same kind of question: what should an install do on your behalf. */}
+                  <GlassPanel variant="subtle" className="p-3 space-y-2">
+                    <SectionHeader>When an addon needs other libraries</SectionHeader>
+                    {(
+                      [
+                        ["auto", "Install them automatically"],
+                        ["ask", "Ask me which ones to install (default)"],
+                        ["skip", "Never install them"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className="flex items-center gap-3 cursor-pointer w-full text-left"
+                        onClick={() => {
+                          setDependencyPolicy(value);
+                          void saveDependencyPolicy(value);
+                        }}
+                      >
+                        <span
+                          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                            dependencyPolicy === value
+                              ? "border-[#c4a44a] bg-[#c4a44a]/20"
+                              : "border-white/20 bg-white/[0.03]"
+                          }`}
+                        >
+                          {dependencyPolicy === value && (
+                            <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
+                          )}
+                        </span>
+                        <span className="text-sm text-white/80">{label}</span>
+                      </button>
+                    ))}
+
+                    {dependencyPolicy === "skip" && (
+                      <p className="text-xs text-muted-foreground">
+                        Addons that depend on a missing library won&apos;t load until you install it
+                        yourself.
+                      </p>
+                    )}
+
+                    {/* Escape hatch for “don’t ask again”: that choice is otherwise
+                      permanent and invisible, so the prompt could never come back.
+                      Hidden while the list is empty so it stays quiet. */}
+                    {skippedDependencies.length > 0 && (
+                      <div className="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+                        <p
+                          className="text-xs text-muted-foreground"
+                          title={skippedDependencies.join(", ")}
+                        >
+                          {skippedDependencies.length}{" "}
+                          {skippedDependencies.length === 1 ? "library" : "libraries"} set to “don’t
+                          ask again”
+                        </p>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          disabled={clearingSkippedDependencies}
+                          onClick={() => void handleClearSkippedDependencies()}
+                        >
+                          {clearingSkippedDependencies ? "Clearing..." : "Clear"}
+                        </Button>
+                      </div>
+                    )}
                   </GlassPanel>
                 </motion.div>
               )}
