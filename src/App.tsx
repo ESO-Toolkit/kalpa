@@ -842,6 +842,18 @@ function App() {
       // silently leaving that addon unable to load, with no prompt and no
       // warning. A required dependency is load-bearing enough to be worth
       // re-offering; declining it again is one click.
+      // Refuse outright for a folder that is no longer the active one. A command
+      // started before an instance switch can land after it, and the backend
+      // registers exactly one AddOns path, so such a prompt could never be
+      // fulfilled — its Install button would be refused. Say so once here rather
+      // than opening a dialog whose primary action cannot work.
+      if (!sameAddonsFolder(sourceAddonsPath, addonsPathRef.current)) {
+        toast.info(
+          `${pending.length} ${pending.length === 1 ? "library was" : "libraries were"} needed by the previous AddOns folder. Switch back and reinstall to add ${pending.length === 1 ? "it" : "them"}.`
+        );
+        return;
+      }
+
       const skipped = await getSkippedDependencies();
       const candidates = dedupeDependencies(pending).filter(
         (dep) => dep.required || !isDependencySkipped(dep.name, skipped)
@@ -1005,24 +1017,7 @@ function App() {
       const nextPath = newPath.trim();
       if (!nextPath) return;
 
-      // Dependency prompts belong to the folder they were resolved for, and the
-      // backend registers exactly one AddOns path at a time, so nothing queued
-      // for the old folder can be acted on after this. Discard it here and say
-      // so, rather than leaving prompts that would silently vanish or offer an
-      // install the backend is bound to reject.
-      if (!sameAddonsFolder(nextPath, addonsPathRef.current)) {
-        const abandoned = queuedDepBatchesRef.current.length > 0 || depPromptOpenRef.current;
-        queuedDepBatchesRef.current = [];
-        // Closed inline rather than via closeDependencyPrompt, which is declared
-        // further down this component and would be in its temporal dead zone.
-        setDepPromptOpen(false);
-        depPromptOpenRef.current = false;
-        if (abandoned) {
-          toast.info(
-            "Pending dependency prompts were for the previous AddOns folder and have been dismissed."
-          );
-        }
-      }
+      const switchingFolder = !sameAddonsFolder(nextPath, addonsPathRef.current);
 
       try {
         await invokeOrThrow("set_addons_path", { addonsPath: nextPath });
@@ -1036,6 +1031,26 @@ function App() {
           setErrorShowSettings(true);
           return;
         }
+        // Only now that the switch has actually committed. Dependency prompts
+        // belong to the folder they were resolved for, and the backend registers
+        // exactly one AddOns path at a time, so nothing queued for the old
+        // folder can be acted on. Discarding earlier would have thrown away the
+        // current folder's prompts whenever set_addons_path or the settings
+        // write failed and left the app where it was.
+        if (switchingFolder) {
+          const abandoned = queuedDepBatchesRef.current.length > 0 || depPromptOpenRef.current;
+          queuedDepBatchesRef.current = [];
+          // Inline rather than closeDependencyPrompt, which is declared further
+          // down this component and would be in its temporal dead zone here.
+          setDepPromptOpen(false);
+          depPromptOpenRef.current = false;
+          if (abandoned) {
+            toast.info(
+              "Pending dependency prompts were for the previous AddOns folder and have been dismissed."
+            );
+          }
+        }
+
         setAddonsPath(nextPath);
         setSelectedAddon(null);
         setSelectedFolders(new Set());
