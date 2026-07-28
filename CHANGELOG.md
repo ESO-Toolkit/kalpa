@@ -4,6 +4,12 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0-beta.13] — 2026-07-28
+
+Dependency installation becomes something you choose rather than something that happens to you, the native performance UI stops holding memory it isn't using, and a documentation audit replaced the claims that could not be substantiated.
+
 ### Features
 
 - **You choose which libraries get installed.** Kalpa used to pull in every dependency an addon declared, transitively, with no say in the matter. It now asks: required libraries come pre-ticked, optional ones (`OptionalDependsOn`, which Kalpa previously ignored entirely) are listed unticked, and you take all, some, or none. Settings has an "install automatically / ask me / never" control, and a way to clear libraries you told it to stop offering. Skipping a required library warns you but never blocks. Update All asks once for the whole run rather than once per addon. ([#305](https://github.com/ESO-Toolkit/kalpa/pull/305))
@@ -19,7 +25,15 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 - **The privacy policy now describes a data flow it had omitted.** Published Pack Hub packs are copied into the same database that powers esotk.com; the policy said only the Pack Hub. It now states exactly what crosses, including that an anonymous pack's display name is replaced but its numeric author ID is not. The "delete my data" claim was also overstated — deletion never touched the backup snapshots, so the non-expiring one is now scrubbed on deletion and the remaining 90-day window is stated plainly. Storage paths are documented per platform and the Windows path was corrected (`%APPDATA%`, not `%LOCALAPPDATA%`), which means the "delete your local data" instructions previously pointed at the wrong folder. ([#299](https://github.com/ESO-Toolkit/kalpa/pull/299))
 - **Security reports now go somewhere that works.** `SECURITY.md` pointed at GitHub private vulnerability reporting, which is not enabled on this repository, with no fallback. It now points at Discord, drops a 48-hour response promise no single maintainer can keep, and cites the actual review write-ups instead of implying a third-party audit. ([#300](https://github.com/ESO-Toolkit/kalpa/pull/300))
-- **`package.json` uses a valid SPDX license identifier** (`BUSL-1.1`; `BSL-1.1` is not registered). ([#302](https://github.com/ESO-Toolkit/kalpa/pull/302))
+- **Both package manifests use a valid SPDX license identifier** (`BUSL-1.1`; `BSL-1.1` is not registered). ([#302](https://github.com/ESO-Toolkit/kalpa/pull/302), [#319](https://github.com/ESO-Toolkit/kalpa/pull/319))
+- **Kalpa is described as source-available, not open source.** BSL 1.1 is not an OSI-approved licence, and the README, privacy policy, both package manifests, project docs and this changelog's own alpha.1 entry all said otherwise. ([#294](https://github.com/ESO-Toolkit/kalpa/pull/294), [#297](https://github.com/ESO-Toolkit/kalpa/pull/297), [#319](https://github.com/ESO-Toolkit/kalpa/pull/319))
+- **The README's security section no longer claims protections that do not exist.** There are two path validators, not one, and ZIP extraction has no recursion cap — zip bombs are stopped by a 500 MB cap and traversal by per-component validation. The installer size (the Linux AppImage is 84 MB, not 18 MB), the claim that every installer ships a `.sig` (the `.dmg` does not) and the dependency-audit cadence were corrected at the same time. ([#298](https://github.com/ESO-Toolkit/kalpa/pull/298))
+- **The performance numbers are measured rather than asserted.** The idle CPU and memory figures were inherited from an older release and did not reproduce; the downloads badge was counting auto-updater polls (838 of 895 "downloads" were `latest.json` fetches) and is gone. The replacements use private working set — Task Manager's Memory column — because summing each process's total working set double-counts pages shared across the seven WebView2 processes and inflated the comparison roughly threefold. ([#295](https://github.com/ESO-Toolkit/kalpa/pull/295), [#296](https://github.com/ESO-Toolkit/kalpa/pull/296))
+- **All 14 README screenshots were recaptured from the running app** (33 MB of PNGs down to 626 KB of WebP), and the ESO Logs uploader, custom themes and native UI — none of which the README mentioned — are now documented. ([#294](https://github.com/ESO-Toolkit/kalpa/pull/294))
+
+### Under the Hood
+
+- Dependabot updates are grouped per ecosystem, so a week's bumps arrive as one pull request per lane instead of a queue of individually-opened ones that all edit the same lockfile and conflict with each other. It also keeps version-locked pairs such as `react` and `react-dom` moving together. ([#315](https://github.com/ESO-Toolkit/kalpa/pull/315))
 
 ## [0.1.0-beta.12] — 2026-07-16
 
@@ -401,9 +415,28 @@ First public alpha release of **Kalpa** — a source-available desktop addon man
 - GitHub Actions CI/CD with tag-triggered Windows release builds
 - Code of Conduct (Contributor Covenant v2.1)
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.4...HEAD
-[0.1.0-beta.4]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.3...v0.1.0-beta.4
-[0.1.0-beta.3]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...v0.1.0-beta.3
+<!--
+Version headings are link references; a heading without a definition below
+renders as literal bracketed text, which is how beta.5 through beta.12 read
+until this release.
+
+beta.3 was never tagged (the repo goes v0.1.0-beta.2 → v0.1.0-beta.4), so its
+changes are only reachable inside the beta.4 range and both headings resolve
+to it.
+-->
+
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.13...HEAD
+[0.1.0-beta.13]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.12...v0.1.0-beta.13
+[0.1.0-beta.12]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.11...v0.1.0-beta.12
+[0.1.0-beta.11]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.10...v0.1.0-beta.11
+[0.1.0-beta.10]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.9...v0.1.0-beta.10
+[0.1.0-beta.9]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.8...v0.1.0-beta.9
+[0.1.0-beta.8]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.7...v0.1.0-beta.8
+[0.1.0-beta.7]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.6...v0.1.0-beta.7
+[0.1.0-beta.6]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.5...v0.1.0-beta.6
+[0.1.0-beta.5]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.4...v0.1.0-beta.5
+[0.1.0-beta.4]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...v0.1.0-beta.4
+[0.1.0-beta.3]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...v0.1.0-beta.4
 [0.1.0-beta.2]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.8...v0.1.0-beta.1
 [0.1.0-alpha.8]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.3...v0.1.0-alpha.8
