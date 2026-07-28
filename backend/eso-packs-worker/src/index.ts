@@ -800,6 +800,65 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
 }
 
 // ── DELETE /account ────────────────────────────────────────────
+
+/**
+ * Scrub a deleted user's records out of the non-expiring `backup:latest`
+ * snapshot.
+ *
+ * The daily `backup:YYYY-MM-DD` snapshots carry a 90-day TTL, so a deleted
+ * user's data ages out of those on its own. `backup:latest` is deliberately
+ * written WITHOUT a TTL (it is the floor that survives a >90-day backup gap),
+ * so without this it would retain the packs and votes of a user who asked for
+ * deletion — indefinitely, and invisibly to them. Rewriting this one key bounds
+ * the retention of deleted data to the dailies' 90-day window, which is what
+ * PRIVACY.md commits to.
+ *
+ * Mirrors handleDeleteAccount's treatment of live data exactly: it drops the
+ * user's own packs and their own votes, and deliberately does NOT drop votes
+ * other users cast on those packs (live deletion leaves those in place, and a
+ * restore must not silently discard other people's records).
+ *
+ * Best-effort. The live data is already gone by the time this runs, so a
+ * failure here must not fail the deletion request — it is logged and swallowed.
+ * A concurrent scheduled backup cannot reintroduce the user, because it
+ * snapshots the live index, which no longer contains them.
+ */
+async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void> {
+  try {
+    const raw = await env.ESO_PACKS.get("backup:latest");
+    if (!raw) return;
+
+    const snapshot = JSON.parse(raw) as PackBackupSnapshot;
+
+    const keptPacks = (snapshot.packs ?? []).filter((p) => p.author_id !== userId);
+    const keptBodies: Record<string, Pack> = {};
+    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
+      if (pack?.author_id !== userId) keptBodies[id] = pack;
+    }
+    const keptVotes: Record<string, VoteRecord> = {};
+    for (const [key, vote] of Object.entries(snapshot.votes ?? {})) {
+      if (vote?.userId !== userId) keptVotes[key] = vote;
+    }
+
+    const removed =
+      (snapshot.packs?.length ?? 0) - keptPacks.length +
+      (Object.keys(snapshot.packBodies ?? {}).length - Object.keys(keptBodies).length) +
+      (Object.keys(snapshot.votes ?? {}).length - Object.keys(keptVotes).length);
+    if (removed === 0) return; // nothing of theirs in the snapshot — skip the write
+
+    const scrubbed: PackBackupSnapshot = {
+      created_at: snapshot.created_at,
+      packs: keptPacks,
+      packBodies: keptBodies,
+      votes: keptVotes,
+    };
+    await env.ESO_PACKS.put("backup:latest", JSON.stringify(scrubbed));
+    console.log(`Purged ${removed} record(s) for deleted user from backup:latest`);
+  } catch (err) {
+    console.error("Failed to purge deleted user from backup:latest:", err);
+  }
+}
+
 async function handleDeleteAccount(request: Request, env: Env, url: URL): Promise<Response> {
   const user = await validateBearerToken(request);
   if (!user) return unauthorized(request);
@@ -871,6 +930,10 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   if (userPacks.length > 0) {
     await invalidatePackListCache(url);
   }
+
+  // 4. Scrub them from the one backup key that never expires. The dated
+  // snapshots keep their 90-day TTL and age out on their own.
+  await purgeUserFromLatestBackup(env, userId);
 
   return json(request, {
     deleted: {

@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated:** 2026-07-03
+**Last updated:** 2026-07-27
 
 Kalpa is a source-available desktop application for managing Elder Scrolls Online (ESO) addons. This policy explains what data Kalpa collects, how it is used, and your rights.
 
@@ -14,18 +14,47 @@ In accordance with the Elder Scrolls Online Terms of Service, users must be at l
 
 ### Data stored on your computer
 
+Kalpa keeps its own files in a per-user application-data directory, referred to
+below as **`{app data}`**. Its location depends on your operating system:
+
+| Platform | `{app data}` |
+|---|---|
+| Windows | `%APPDATA%\com.kalpa.desktop\` |
+| macOS | `~/Library/Application Support/com.kalpa.desktop/` |
+| Linux | `~/.local/share/com.kalpa.desktop/` (or `$XDG_DATA_HOME/com.kalpa.desktop/`) |
+
 | Data | Location | Purpose |
 |------|----------|---------|
 | Addon metadata (ESOUI IDs, versions, tags) | `{AddOns folder}/kalpa.json` | Track installed addons |
-| User preferences (sort mode, theme, paths) | `%LOCALAPPDATA%\com.kalpa.desktop\settings.json` | Remember your settings |
+| User preferences (sort mode, theme, paths) | `{app data}/settings.json` | Remember your settings |
 | Addon profiles | `{AddOns folder}/kalpa-profiles.json` | Addon profile switching |
 | SavedVariables backups | `{ESO folder}/kalpa-backups/` | Backup/restore functionality |
 | File hash manifests | `{AddOns folder}/.kalpa-hashes/` | Detect user-modified files |
-| Manifest cache (SQLite) | `%LOCALAPPDATA%\com.kalpa.desktop\` | Speed up addon scanning |
-| Auth tokens | Windows Credential Manager | Sign in to Pack Hub |
-| Upload session cookie | Windows Credential Manager | Direct upload to ESO Logs |
+| Manifest cache (SQLite) | `{app data}/manifest-cache.db` | Speed up addon scanning |
+| Upload history | `{app data}/upload-history.json` | Show past uploads in the uploader panel |
+| Auth tokens | OS credential store | Sign in to Pack Hub |
+| Upload session cookie | OS credential store | Direct upload to ESO Logs |
 
-**Auth tokens** (ESO Logs OAuth access and refresh tokens) and **Upload session cookie** (`wcl_session` for ESO Logs authentication) are stored in the Windows Credential Manager, which encrypts them using your Windows account credentials. They are not stored in plaintext files. The upload session cookie is removed when you sign out.
+**Upload history** records the uploads you have made from Kalpa: the local path
+and file name of the log you uploaded, the resulting ESO Logs report code and
+URL, the zone and fight count, and the build-evidence summary described below.
+It stays on your computer — it is a local record of uploads you already made,
+not a separate transmission — and is capped at the 200 most recent entries.
+
+**Auth tokens** (ESO Logs OAuth access and refresh tokens) and **Upload session
+cookie** (`wcl_session` for ESO Logs authentication) are stored in your
+operating system's credential store rather than in plaintext files:
+
+| Platform | Credential store |
+|---|---|
+| Windows | Credential Manager (encrypted with your Windows account credentials) |
+| macOS | Keychain |
+| Linux | Secret Service (GNOME Keyring / KWallet, via D-Bus) |
+
+On Linux systems with no Secret Service daemon running, credential storage is
+unavailable and Kalpa simply asks you to sign in again each launch — nothing is
+written to disk as a fallback. The upload session cookie is removed when you
+sign out.
 
 ### Data sent to ESOUI
 
@@ -56,6 +85,32 @@ The Pack Hub (`kalpa-pack-hub.eso-toolkit.workers.dev`) powers community addon c
 
 **When you export a `.esopack` file with settings:**
 - SavedVariables data is scrubbed of personal information (account names, character names, character IDs, and world names are replaced with placeholders) before export
+
+#### Published packs are also copied to the ESO Log Aggregator's database
+
+The Pack Hub does not keep published packs to itself. When a pack's status is
+**published**, the Pack Hub worker writes a copy of it into `roster-hub-db` —
+the same Cloudflare D1 database that powers [esotk.com](https://esotk.com) — so
+the website can list community packs alongside the desktop app. This happens
+inline with the write, not as a separate opt-in.
+
+**What is copied:** the pack's ID, title, description, pack type, addon list
+(ESOUI IDs, names, required flags, notes), tags, and its author fields.
+
+**What this means for anonymous packs:** if you mark a pack anonymous, your ESO
+Logs **display name is not copied** — it is replaced with "Anonymous" before the
+write, and esotk.com never renders a name for it. Your numeric ESO Logs **user
+ID is still copied**, because the row is keyed to it for ownership. So an
+anonymous pack is anonymous to readers of the site, but the copy is not
+un-linkable from your account inside the database itself.
+
+**What is not copied:** individual vote records stay in the Pack Hub's own
+storage and are never written to the shared database. Neither are share codes or
+the install-count rate-limit keys.
+
+**Drafts and deletions:** a pack that is a draft, or that you switch back to
+draft, is actively removed from the shared database rather than copied to it.
+Deleting a pack, or deleting your Pack Hub data, deletes the copied row too.
 
 ### Data sent to ESO Logs
 
@@ -114,10 +169,12 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 | Data | Retention |
 |------|-----------|
 | Published packs | Indefinite (until you delete them) |
+| Copies of published packs in the ESO Log Aggregator database | Deleted together with the pack |
 | Votes | Indefinite (until you remove your vote) |
 | Share codes | 7 days (auto-deleted) |
 | Install rate-limit keys (IP) | 1 hour (auto-deleted) |
-| Pack Hub daily backups | 90 days (auto-deleted) |
+| Pack Hub dated daily backups | 90 days (auto-deleted) |
+| Pack Hub "latest" backup snapshot | Overwritten daily, no expiry; scrubbed of your data when you delete it |
 | Build-evidence records (ESO Log Aggregator) | Indefinite — no automatic deletion yet (see *Your Rights*) |
 | Local backups | Until you delete them manually |
 
@@ -129,11 +186,28 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 
 You can delete all your data from the Pack Hub at any time:
 
-1. Open Kalpa Settings
-2. In the Account section, click **Delete My Pack Hub Data**
-3. Confirm the deletion
+1. Sign in to the Pack Hub (the option is only shown while signed in)
+2. Open Kalpa Settings
+3. In the **Pack Hub Data** section, click **Delete My Pack Hub Data**
+4. Confirm the deletion
 
-This permanently removes all your packs, votes, and share codes from our servers.
+This immediately removes your packs, your votes, and your share codes from the
+Pack Hub's live data, and deletes the copies of your published packs from the
+ESO Log Aggregator's database.
+
+**What happens to backups:** the Pack Hub takes a daily snapshot of its pack
+data for disaster recovery. Deleting your data also scrubs you from the
+non-expiring "latest" snapshot at the time of deletion, but the **dated daily
+snapshots are not rewritten** — your packs and votes remain in those until they
+expire on their own, within **90 days**. Those snapshots are only ever read to
+restore the service after data loss.
+
+Two further limits worth stating plainly:
+
+- Votes **other people** cast on your packs are not deleted, since they are
+  other users' records. They are left behind as orphans once your packs are gone.
+- Pack vote totals shown elsewhere are denormalized counters and are not
+  recalculated when your votes are removed.
 
 ### Remove build-evidence records
 
@@ -141,11 +215,21 @@ Build-evidence records published to the ESO Log Aggregator are keyed to the ESO 
 
 ### Sign out
 
-Signing out removes your auth tokens from the Windows Credential Manager. No tokens are retained after sign-out.
+Signing out removes your auth tokens from your operating system's credential
+store (Credential Manager, Keychain, or Secret Service). No tokens are retained
+after sign-out.
 
 ### Local data
 
-All local data (addon metadata, backups, profiles, cache) is stored on your computer and can be deleted by uninstalling the app or removing the `%LOCALAPPDATA%\com.kalpa.desktop\` directory and the `kalpa-*` folders in your ESO AddOns directory.
+All local data (addon metadata, backups, profiles, cache, upload history) is
+stored on your computer. To remove it, uninstall the app and delete the
+`{app data}` directory for your platform — see the table under *Data stored on
+your computer* — along with the `kalpa-*` files and folders in your ESO AddOns
+directory and the `kalpa-backups` folder in your ESO folder.
+
+On Windows, note that Kalpa's data lives in `%APPDATA%` (roaming), not
+`%LOCALAPPDATA%`; the `%LOCALAPPDATA%\com.kalpa.desktop\` folder holds only the
+WebView2 browser cache.
 
 ---
 
@@ -155,7 +239,7 @@ All local data (addon metadata, backups, profiles, cache) is stored on your comp
 |---------|---------|---------------------|
 | ESOUI | Addon catalog and downloads | [esoui.com](https://www.esoui.com) |
 | ESO Logs | Authentication (OAuth) and log uploads | [esologs.com](https://www.esologs.com) |
-| ESO Log Aggregator (esotk.com) | Build-evidence sidecar for public/unlisted direct uploads | [esotk.com](https://esotk.com) |
+| ESO Log Aggregator (esotk.com) | Build-evidence sidecar for public/unlisted direct uploads; hosts the shared database that published Pack Hub packs are copied into | [esotk.com](https://esotk.com) |
 | Cloudflare | Pack Hub and ESO Log Aggregator hosting, rate limiting | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) |
 | GitHub | App update distribution | [github.com/privacy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) |
 
