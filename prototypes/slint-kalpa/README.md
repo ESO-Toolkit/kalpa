@@ -38,9 +38,19 @@ Current measured renderer memory on July 27, 2026 (private working set, release
 build, median of three cold launches after a 100s settle):
 
 - `winit-software` at the `low-memory` preset: 20.3 MB open, 6.1 MB minimized.
-- `winit-femtovg` at the `standard` preset: 78.6 MB open, 76.2 MB minimized. It
-  holds essentially its whole footprint while minimized because nothing releases
-  the working set on this branch.
+- `winit-femtovg` at the `standard` preset: 78.6 MB open, 76.2 MB minimized.
+
+Those minimized figures predate #303, which trims the working set on minimize.
+Re-measured on the sidecar binary after that change, `winit-femtovg` holds
+82.0 MB open and **10.9 MB minimized**. Treat 76.2 as historical: the sentence
+that used to sit here — that nothing releases the working set on this branch —
+stopped being true when #303 landed.
+
+The gap that remains is therefore almost entirely in the window-open state
+(82.0 vs 20.3 MB), not the minimized one (10.9 vs 6.1 MB). That matters when
+weighing the renderers against each other, because minimized is the state a
+player is in while raiding and open is the state where the software renderer's
+missing shadows, clips and rotations are actually visible.
 - `winit-skia` was not re-measured in this pass. The July 1, 2026 figure was
   about 86 MB working set / 132 MB private and predates every change since.
 
