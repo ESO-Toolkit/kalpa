@@ -202,13 +202,31 @@ function App() {
   // dropped. Each batch carries the AddOns folder it was resolved against, so a
   // batch cannot be installed into whichever instance is selected later.
   const queuedDepBatchesRef = useRef<{ addonsPath: string; deps: PendingDependency[] }[]>([]);
+  // Compare AddOns folders leniently. Paths reach us from settings as a bare
+  // trim, so the same physical folder can arrive with different casing or a
+  // trailing separator; raw equality would split one folder into two batches
+  // and defeat the installed-name filtering.
+  const sameAddonsFolder = useCallback(
+    (a: string, b: string) =>
+      a
+        .trim()
+        .replace(/[\\/]+$/, "")
+        .toLowerCase() ===
+      b
+        .trim()
+        .replace(/[\\/]+$/, "")
+        .toLowerCase(),
+    []
+  );
   // Latched while a decision is settling, so the picker cannot be submitted
   // twice in the window between the click and the close.
   const depDecisionInFlightRef = useRef(false);
   // The AddOns folder the open prompt's dependencies were resolved against.
-  // Pinned because the user can switch game instances while a prompt is open or
-  // an install is still running, and these libraries belong to the addon that
-  // asked for them — not to whatever instance happens to be selected later.
+  // Recorded to detect staleness, NOT to install elsewhere: the backend allows
+  // exactly one registered AddOns path at a time (require_allowed_path in
+  // commands.rs) and rejects anything else, so a prompt belonging to a folder
+  // the user has since switched away from cannot be fulfilled at all. Such
+  // prompts are discarded rather than silently installed into the wrong place.
   const depPromptPathRef = useRef("");
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
@@ -845,7 +863,9 @@ function App() {
         const batches = queuedDepBatchesRef.current;
         // Merge only within the same folder. Two instances can legitimately
         // need the same library name, and they are separate installs.
-        const sameFolder = batches.find((batch) => batch.addonsPath === sourceAddonsPath);
+        const sameFolder = batches.find((batch) =>
+          sameAddonsFolder(batch.addonsPath, sourceAddonsPath)
+        );
         if (sameFolder) {
           sameFolder.deps = dedupeDependencies([...sameFolder.deps, ...candidates]);
         } else {
@@ -859,7 +879,7 @@ function App() {
       setPendingDeps(candidates);
       setDepPromptOpen(true);
     },
-    []
+    [sameAddonsFolder]
   );
 
   // Shared entry point for every install/update that came back with dependencies
@@ -1649,17 +1669,21 @@ function App() {
       queuedDepBatchesRef.current = [];
       const handled = new Set(justInstalled.map((name) => name.toLowerCase()));
       for (const batch of batches) {
+        // Drop batches for a folder the user has left. Only one AddOns path is
+        // registered with the backend at a time, so a prompt for any other
+        // folder could never be acted on — showing it would offer an install
+        // that is guaranteed to fail.
+        if (!sameAddonsFolder(batch.addonsPath, addonsPathRef.current)) continue;
         // An install only accounts for the folder it wrote to. The same library
         // name missing from a different instance is a different missing file.
-        const remaining =
-          batch.addonsPath === installedInPath
-            ? batch.deps.filter((dep) => !handled.has(dep.name.toLowerCase()))
-            : batch.deps;
+        const remaining = sameAddonsFolder(batch.addonsPath, installedInPath)
+          ? batch.deps.filter((dep) => !handled.has(dep.name.toLowerCase()))
+          : batch.deps;
         if (remaining.length === 0) continue;
         await presentDependencyBatch(remaining, batch.addonsPath);
       }
     },
-    [presentDependencyBatch]
+    [presentDependencyBatch, sameAddonsFolder]
   );
 
   // Only ever a dismissal now: the dialog's own buttons no longer close it, so
@@ -1714,11 +1738,22 @@ function App() {
         );
       }
 
-      // Pin the destination before anything can await. Switching instances is a
-      // click away and the install runs for seconds after the picker closes, so
-      // reading the live path down there could drop these libraries into a
-      // different game install than the addon that needs them.
+      // Read the destination before anything can await, and refuse if the user
+      // has since switched instances. These libraries belong to the folder they
+      // were resolved for, and the backend registers exactly one allowed AddOns
+      // path at a time (require_allowed_path), so installing them elsewhere is
+      // both wrong and impossible — the command would reject the call. Say so
+      // rather than firing a request that can only fail.
       const targetAddonsPath = depPromptPathRef.current || addonsPathRef.current;
+      if (!sameAddonsFolder(targetAddonsPath, addonsPathRef.current)) {
+        toast.warning(
+          "Those dependencies were for the previous AddOns folder. Switch back and reinstall the addon to add them."
+        );
+        closeDependencyPrompt();
+        depDecisionInFlightRef.current = false;
+        void drainQueuedDeps();
+        return;
+      }
 
       // Close now, synchronously — nothing below should leave the user looking
       // at a modal while an install runs, and it closes the double-click window.
@@ -1789,7 +1824,7 @@ function App() {
         }
       })();
     },
-    [handleRefresh, pendingDeps, closeDependencyPrompt, drainQueuedDeps]
+    [handleRefresh, pendingDeps, closeDependencyPrompt, drainQueuedDeps, sameAddonsFolder]
   );
 
   if (setupInstances !== null) {
