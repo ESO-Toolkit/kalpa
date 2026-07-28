@@ -447,7 +447,7 @@ function DiscoverDetailBase({
                   </div>
 
                   {/* Counter */}
-                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-white/70">
+                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-foreground">
                     {safeIdx + 1} / {detail.screenshots.length}
                   </div>
                 </>

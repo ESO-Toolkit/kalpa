@@ -2001,7 +2001,7 @@ function LiveSessionMiniBar({
               )}
             </span>
             <div className="min-w-0">
-              <div className="truncate font-heading text-sm font-semibold text-foreground/95">
+              <div className="truncate font-heading text-sm font-semibold text-foreground">
                 {title}
               </div>
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
@@ -2581,7 +2581,7 @@ function LiveCore({
       {startMs !== null && (
         <SessionTimer
           startMs={startMs}
-          className="text-xl leading-tight font-semibold text-foreground/95"
+          className="text-xl leading-tight font-semibold text-foreground"
         />
       )}
       <span className="text-xs text-muted-foreground">
@@ -2765,7 +2765,7 @@ function LogSummaryCard({
               <Swords className="size-4" aria-hidden />
             </span>
             <div className="min-w-0">
-              <div className="truncate text-base font-semibold text-foreground/95">
+              <div className="truncate text-base font-semibold text-foreground">
                 {zone ?? "Combat log"}
               </div>
               <div className="truncate font-mono text-xs text-muted-foreground" title={fileName}>
@@ -2857,7 +2857,7 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
           <LogIn className="size-7" aria-hidden />
         </div>
         <div>
-          <div className="font-heading text-lg font-semibold text-foreground/95">
+          <div className="font-heading text-lg font-semibold text-foreground">
             Connect your ESO Logs account
           </div>
           <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
@@ -2960,7 +2960,7 @@ function DirectUploadSection({
           <div className="flex min-w-0 items-start gap-2.5">
             <Zap className="mt-0.5 size-4 shrink-0 text-accent-sky" aria-hidden />
             <div className="min-w-0">
-              <p className="text-sm font-medium text-white/90">Upload faster, in-app</p>
+              <p className="text-sm font-medium text-foreground">Upload faster, in-app</p>
               <p className="text-xs text-muted-foreground">
                 Send logs straight from Kalpa and see the report here — no second window. Unofficial
                 method; falls back to the official uploader automatically.
@@ -3004,7 +3004,7 @@ function DirectUploadSection({
   return (
     <GlassPanel variant="subtle" className="flex items-center justify-between gap-3 p-3">
       <div className="min-w-0">
-        <p className="text-sm font-medium text-white/90">Finish enabling direct upload</p>
+        <p className="text-sm font-medium text-foreground">Finish enabling direct upload</p>
         <p className="text-xs text-muted-foreground">
           Sign in to ESO Logs once inside Kalpa — same account as above. This is optional; it just
           enables the faster in-app path.
@@ -3051,7 +3051,7 @@ function DirectUploadDisclosure({
           </p>
           <p>
             It works by talking to ESO Logs' uploader endpoints directly — an{" "}
-            <span className="font-medium text-white/90">unofficial method</span>. The ESO Logs
+            <span className="font-medium text-foreground">unofficial method</span>. The ESO Logs
             operator has said this is fine, but it isn't an officially supported integration, so it
             could stop working if ESO Logs changes how their uploader works.
           </p>

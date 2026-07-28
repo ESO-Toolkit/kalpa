@@ -328,12 +328,12 @@ export function Backups({
               >
                 <div className="text-xs text-muted-foreground space-y-1.5 pl-4 border-l border-white/[0.08]">
                   <p>
-                    Your <span className="text-white/80">addon settings</span> — every
+                    Your <span className="text-foreground">addon settings</span> — every
                     customization, keybind, and configuration each addon remembers between sessions
                     (technically, the SavedVariables folder).
                   </p>
                   <p>
-                    <span className="text-white/80">Not included:</span> the addons themselves
+                    <span className="text-foreground">Not included:</span> the addons themselves
                     (those come from ESOUI and can be reinstalled), or your ESO game saves.
                   </p>
                 </div>

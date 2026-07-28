@@ -297,7 +297,7 @@ function DependencyRow({
           aria-describedby={showWarning ? warningId : undefined}
         />
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-sm font-medium text-white/90">{dep.name}</span>
+          <span className="truncate text-sm font-medium text-foreground">{dep.name}</span>
           {dep.requiredBy.length > 0 && (
             <span className="truncate text-xs text-muted-foreground">
               Needed by {joinNames(dep.requiredBy)}

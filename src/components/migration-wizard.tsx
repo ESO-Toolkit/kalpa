@@ -307,7 +307,7 @@ function CheckItem({ ok, label, warn }: { ok: boolean; label: string; warn?: boo
       <span className={ok ? "text-emerald-400" : warn ? "text-amber-400" : "text-red-400"}>
         {ok ? "\u2713" : warn ? "!" : "\u2717"}
       </span>
-      <span className={ok ? "text-white/80" : warn ? "text-amber-400" : "text-red-400"}>
+      <span className={ok ? "text-foreground" : warn ? "text-amber-400" : "text-red-400"}>
         {label}
       </span>
     </div>
@@ -428,7 +428,7 @@ function DryRunPhase({
       {(dryRun.willTrack.length > 0 || dryRun.missingOnDisk.length > 0) && confirmed && (
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
           <p className="text-xs text-muted-foreground mb-2">
-            This will only write to <code className="text-white/70">kalpa.json</code>. No addon
+            This will only write to <code className="text-foreground">kalpa.json</code>. No addon
             folders, SavedVariables, or game settings will be touched.
           </p>
           <Button onClick={onExecute} disabled={loading}>
@@ -491,7 +491,7 @@ function CompletePhase({
 
       {snapshot && (
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
-          <div className="font-medium text-white/80 mb-1">Restore point saved</div>
+          <div className="font-medium text-foreground mb-1">Restore point saved</div>
           <div>
             Snapshot: {snapshot.fileCount} files ({formatBytes(snapshot.totalSize)})
           </div>

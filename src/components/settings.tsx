@@ -467,7 +467,7 @@ export function Settings({
                             <button
                               key={inst.id}
                               type="button"
-                              className="flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-white/80 transition-all duration-150 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                              className="flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-foreground transition-all duration-150 hover:border-white/[0.12] hover:bg-white/[0.04]"
                               onClick={() => {
                                 setPath(inst.addonsPath);
                                 setRedetectedInstances(null);
@@ -501,7 +501,7 @@ export function Settings({
                                 className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
                                   isActive
                                     ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
-                                    : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                                    : "border-white/[0.06] bg-white/[0.02] text-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
                                 }`}
                                 onClick={() => {
                                   if (!isActive) {
@@ -542,7 +542,7 @@ export function Settings({
                         {copyTarget && (
                           <Fade>
                             <div className="space-y-2 rounded-lg border border-primary/25 bg-primary/[0.04] px-3 py-2">
-                              <p className="text-xs text-white/80">
+                              <p className="text-xs text-foreground">
                                 Copy all enabled addons from the active instance into{" "}
                                 <span className="font-medium text-primary">
                                   {copyTarget.displayLabel}
@@ -586,7 +586,7 @@ export function Settings({
                         }}
                       />
                       <div>
-                        <p className="text-sm font-medium text-white/90">Auto-update on launch</p>
+                        <p className="text-sm font-medium text-foreground">Auto-update on launch</p>
                         <p className="text-xs text-muted-foreground">
                           Automatically update all addons when Kalpa starts
                         </p>
@@ -610,7 +610,9 @@ export function Settings({
                       <Gauge className="size-4 shrink-0 text-[#c4a44a]" />
                       <div>
                         <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium text-white/90">Native performance UI</p>
+                          <p className="text-sm font-medium text-foreground">
+                            Native performance UI
+                          </p>
                           <InfoPill color="amber" className="text-[10px]">
                             Beta
                           </InfoPill>
@@ -637,7 +639,7 @@ export function Settings({
                         }}
                       />
                       <div>
-                        <p className="text-sm font-medium text-white/90">
+                        <p className="text-sm font-medium text-foreground">
                           Warn when ESO is running
                         </p>
                         <p className="text-xs text-muted-foreground">
@@ -675,7 +677,7 @@ export function Settings({
                         }}
                       />
                       <div>
-                        <p className="text-sm font-medium text-white/90">
+                        <p className="text-sm font-medium text-foreground">
                           Use the official ESO Logs uploader
                         </p>
                         <p className="text-xs text-muted-foreground">
@@ -701,7 +703,7 @@ export function Settings({
                         }}
                       />
                       <div>
-                        <p className="text-sm font-medium text-white/90">
+                        <p className="text-sm font-medium text-foreground">
                           Open analysis after upload
                         </p>
                         <p className="text-xs text-muted-foreground">
@@ -743,7 +745,7 @@ export function Settings({
                             <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
                           )}
                         </span>
-                        <span className="text-sm text-white/80">{label}</span>
+                        <span className="text-sm text-foreground">{label}</span>
                       </button>
                     ))}
                   </GlassPanel>
@@ -780,7 +782,7 @@ export function Settings({
                             <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
                           )}
                         </span>
-                        <span className="text-sm text-white/80">{label}</span>
+                        <span className="text-sm text-foreground">{label}</span>
                       </button>
                     ))}
 
@@ -1031,7 +1033,7 @@ function ToolItem({
         <Icon className="size-4" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-white/90">{label}</p>
+        <p className="text-sm font-medium text-foreground">{label}</p>
         <p className="text-xs text-muted-foreground">{description}</p>
       </div>
       <ChevronRight className="size-4 text-muted-foreground/40 group-hover:text-muted-foreground transition-colors duration-150" />

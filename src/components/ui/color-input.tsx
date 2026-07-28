@@ -73,7 +73,7 @@ export function ColorInput({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
-          <label htmlFor={id} className="text-xs font-medium text-white/85">
+          <label htmlFor={id} className="text-xs font-medium text-foreground">
             {label}
           </label>
           {hint && <span className="truncate text-[11px] text-muted-foreground">{hint}</span>}

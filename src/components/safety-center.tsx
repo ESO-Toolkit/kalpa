@@ -389,7 +389,7 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
             <Fade key={`${entry.startedAt}-${i}`} delay={i * 40}>
               <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="font-medium text-white/80">{entry.operation}</span>
+                  <span className="font-medium text-foreground">{entry.operation}</span>
                   <span
                     className={entry.status === "success" ? "text-emerald-400" : "text-red-400"}
                   >

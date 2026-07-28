@@ -163,7 +163,7 @@ export function AppearanceSettings() {
               }}
             />
             <div>
-              <p className="text-sm font-medium text-white/90">Ambient animations</p>
+              <p className="text-sm font-medium text-foreground">Ambient animations</p>
               <p className="text-xs text-muted-foreground">
                 Background orb drift and dialog shimmer. Turn off for the lowest possible CPU and
                 GPU use while playing — the decorative layer goes fully static. Either way,
@@ -256,7 +256,7 @@ function ThemeCard({
       >
         <ThemeSwatch colors={theme.colors} active={active} />
         <div className="flex items-center gap-1 px-1 pt-1.5">
-          <span className="truncate text-xs font-medium text-white/90">{theme.name}</span>
+          <span className="truncate text-xs font-medium text-foreground">{theme.name}</span>
           {active && <Check className="ml-auto size-3.5 shrink-0 text-primary" />}
         </div>
         <p className="line-clamp-1 px-1 pb-0.5 text-[11px] text-muted-foreground">

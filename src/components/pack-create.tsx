@@ -386,7 +386,7 @@ export function PackCreateView({
               step === s.key
                 ? "text-primary"
                 : s.key === "addons" && !canProceed
-                  ? "text-muted-foreground/30 cursor-not-allowed"
+                  ? "text-muted-foreground cursor-not-allowed"
                   : "text-muted-foreground hover:text-foreground cursor-pointer"
             )}
           >

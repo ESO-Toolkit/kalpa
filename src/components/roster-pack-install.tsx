@@ -319,7 +319,7 @@ export function RosterPackInstall({
 
                     {/* Addon info */}
                     <div className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-sm font-medium text-white/90">
+                      <span className="truncate text-sm font-medium text-foreground">
                         {decodeHtml(addon.name)}
                       </span>
                       {addon.note && (
