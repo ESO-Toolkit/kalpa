@@ -13589,6 +13589,39 @@ fn tag_label(tag_id: &str, active: bool) -> String {
 
 const PRESET_TAGS: [&str; 5] = ["favorite", "testing", "broken", "essential", "raid"];
 
+/// Ask Windows to release this process's working set.
+///
+/// The sidecar is sold on using less memory than the WebView2 UI while the
+/// player is in-game — that is, while its window is minimized. But the GPU
+/// renderer's buffers keep the working set pinned when minimized: measured on a
+/// release build, femtovg sat at 83.1 MB minimized against the webview's 18 MB,
+/// because WebView2 trims on hide and Slint does nothing.
+///
+/// `SetProcessWorkingSetSize` with `(SIZE_T)-1` for both bounds is the
+/// documented way to release it. The pages move to the standby list rather than
+/// being freed outright, which is exactly what is wanted here: they become
+/// reclaimable by other processes (the game) without a pagefile round-trip, and
+/// fault back in on restore. Measured on the same build: 83.1 MB minimized ->
+/// 7.6 MB after the trim, returning to 32.4 MB once restored — the restore does
+/// not pull the whole original footprint back in.
+#[cfg(windows)]
+fn trim_working_set() {
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn SetProcessWorkingSetSize(
+            process: *mut std::ffi::c_void,
+            min_bytes: usize,
+            max_bytes: usize,
+        ) -> i32;
+    }
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that owns nothing and
+    // needs no closing; SetProcessWorkingSetSize only reads it. usize::MAX is
+    // the documented (SIZE_T)-1 sentinel for "trim as much as possible".
+    unsafe {
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 fn wire_window_controls(ui: &KalpaWindow) {
     let minimize_ui = ui.as_weak();
     ui.on_minimize_requested(move || {
@@ -13634,6 +13667,11 @@ fn wire_window_controls(ui: &KalpaWindow) {
     {
         use i_slint_backend_winit::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
         let ev_ui = ui.as_weak();
+        // Fire the minimize trim once per transition, not on every event that
+        // arrives while the window sits minimized (it keeps receiving a steady
+        // stream of RedrawRequested).
+        #[cfg(windows)]
+        let was_minimized = std::cell::Cell::new(false);
         ui.window().on_winit_window_event(move |window, event| {
             // One-time native Windows 11 frame: DWM clips the window to ~8px
             // rounded corners and draws a crisp ESO-gold border that follows the
@@ -13654,6 +13692,30 @@ fn wire_window_controls(ui: &KalpaWindow) {
                         winit_window.set_border_color(None);
                     });
                 });
+            }
+            // Release the working set when the window is minimized — the case
+            // this whole sidecar is sold on, since that is where the player
+            // leaves it while raiding.
+            //
+            // Detect it from the window's own minimized state rather than by
+            // matching an event variant. winit 0.30 does NOT report a minimize
+            // as `Resized(0, 0)` here: it emits `Moved(-32000, -32000)` and a
+            // `Resized` carrying the taskbar button's size (measured: 276x45),
+            // so an event-shape guard silently never fires. Hooking the state
+            // also covers every route into it — the custom title bar button,
+            // the taskbar, Win+D, Win+M — where `on_minimize_requested` only
+            // covers the first.
+            #[cfg(windows)]
+            {
+                let minimized = window
+                    .with_winit_window(|w| w.is_minimized().unwrap_or(false))
+                    .unwrap_or(false);
+                if minimized != was_minimized.get() {
+                    was_minimized.set(minimized);
+                    if minimized {
+                        trim_working_set();
+                    }
+                }
             }
             if matches!(event, WindowEvent::Resized(_)) {
                 window.with_winit_window(|winit_window| winit_window.request_redraw());

@@ -112,7 +112,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 
 ### Also
 
-- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 85 MB from around 135 MB. The standard UI still wins once minimized, since the sidecar has no equivalent suspend. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
+- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 85 MB from around 135 MB. It suspends when minimized too, releasing its working set and dropping to about 11 MB — measured on the sidecar binary itself, so expect a little more with a large addon list loaded. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
 - **Addon file browser** — read and edit an addon's Lua, XML, and text files in place, with a backup taken before each edit.
 - **Tags and filters** — preset and custom tags, live-counted filters, and built-in views for Addons, Libraries, Favorites, Outdated, and Issues. Sort by name, author, recently updated, or recently downloaded.
 - **API compatibility check** against the current game version.
