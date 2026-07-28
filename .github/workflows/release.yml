@@ -119,6 +119,11 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "${{ github.ref_name }}"
           args: ${{ matrix.args }}
+          # This body is shared by every tag, so the per-release "Changed:"
+          # section below has to be rewritten as part of the version bump.
+          # It is not, by default: beta.12's headline was still sitting here
+          # when beta.13 was cut, ready to tell users about a feature that had
+          # shipped a release earlier. Everything above it is version-agnostic.
           releaseBody: |
             See [CHANGELOG.md](https://github.com/ESO-Toolkit/kalpa/blob/main/CHANGELOG.md) for full details.
 
@@ -132,8 +137,10 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
-            ## New: Native performance UI (beta, Windows)
-            This release adds an opt-in **native UI** that uses less memory than the standard WebView. Turn it on in **Settings → Native performance UI**; switch back anytime from the native app's Settings. It's experimental and Windows-only for now — if it can't start, Kalpa falls back to the standard UI automatically.
+            ## Changed: Kalpa now asks before installing libraries
+            Kalpa used to install every dependency an addon declared, transitively and silently. **If you are upgrading, you will now see a picker** the first time an addon needs libraries: required ones come pre-ticked, optional ones are listed unticked, and you take all, some, or none. Prefer the old behaviour? **Settings → install automatically** restores it. Skipping a required library warns you but never blocks the install.
+
+            The **native performance UI** (beta, Windows — **Settings → Native performance UI**) now releases its memory while minimized and can no longer start in a broken rendering mode.
 
             ## Verify your download
             Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
