@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{Emitter, LogicalSize, Manager};
+use tauri::{Emitter, Manager, PhysicalSize, WebviewWindow};
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -9636,6 +9636,7 @@ fn clamp_text_zoom(factor: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 pub fn text_zoom_from_path(path: &Path) -> Result<f64, String> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -9652,46 +9653,81 @@ pub fn text_zoom_from_path(path: &Path) -> Result<f64, String> {
         .unwrap_or(TEXT_ZOOM_MIN))
 }
 
-pub fn apply_text_zoom(app: &tauri::AppHandle, factor: f64) -> Result<(), String> {
-    let clamped = clamp_text_zoom(factor);
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Main window not found.".to_string())?;
+#[cfg(windows)]
+fn set_webview_zoom(window: &WebviewWindow, factor: f64, wait: bool) -> Result<(), String> {
+    if wait {
+        let (tx, rx) = std::sync::mpsc::channel();
+        window
+            .with_webview(move |webview| {
+                let result = unsafe { webview.controller().SetZoomFactor(factor) }
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(result);
+            })
+            .map_err(|error| format!("Failed to dispatch text zoom: {error}"))?;
 
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .map_err(|error| format!("Timed out applying text zoom: {error}"))?
+            .map_err(|error| format!("Failed to set text zoom: {error}"))
+    } else {
+        window
+            .with_webview(move |webview| {
+                if let Err(error) = unsafe { webview.controller().SetZoomFactor(factor) } {
+                    eprintln!("Failed to set text zoom: {error}");
+                }
+            })
+            .map_err(|error| format!("Failed to dispatch text zoom: {error}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn set_webview_zoom(window: &WebviewWindow, factor: f64, _wait: bool) -> Result<(), String> {
     window
-        .set_zoom(clamped)
-        .map_err(|error| format!("Failed to set text zoom: {error}"))?;
+        .set_zoom(factor)
+        .map_err(|error| format!("Failed to set text zoom: {error}"))
+}
 
-    let min_width = TEXT_ZOOM_BASE_MIN_WIDTH * clamped;
-    let min_height = TEXT_ZOOM_BASE_MIN_HEIGHT * clamped;
-    let min_size = LogicalSize::new(min_width, min_height);
+fn apply_text_zoom_to_window(
+    window: &WebviewWindow,
+    factor: f64,
+    wait_for_zoom: bool,
+) -> Result<(), String> {
+    let clamped = clamp_text_zoom(factor);
+    let scale_factor = window
+        .scale_factor()
+        .map_err(|error| format!("Failed to read window scale factor: {error}"))?;
+    let min_width = (TEXT_ZOOM_BASE_MIN_WIDTH * clamped * scale_factor).ceil() as u32;
+    let min_height = (TEXT_ZOOM_BASE_MIN_HEIGHT * clamped * scale_factor).ceil() as u32;
+    let min_size = PhysicalSize::new(min_width, min_height);
+
     window
         .set_min_size(Some(min_size))
         .map_err(|error| format!("Failed to set text zoom minimum size: {error}"))?;
 
-    let scale_factor = window
-        .scale_factor()
-        .map_err(|error| format!("Failed to read window scale factor: {error}"))?;
     let current_size = window
         .inner_size()
-        .map_err(|error| format!("Failed to read window size: {error}"))?
-        .to_logical::<f64>(scale_factor);
+        .map_err(|error| format!("Failed to read window size: {error}"))?;
 
     if current_size.width < min_width || current_size.height < min_height {
         window
-            .set_size(LogicalSize::new(
+            .set_size(PhysicalSize::new(
                 current_size.width.max(min_width),
                 current_size.height.max(min_height),
             ))
             .map_err(|error| format!("Failed to grow window for text zoom: {error}"))?;
     }
 
-    Ok(())
+    set_webview_zoom(window, clamped, wait_for_zoom)
 }
 
 #[tauri::command]
-pub fn set_text_zoom(app: tauri::AppHandle, factor: f64) -> Result<(), String> {
-    apply_text_zoom(&app, factor)
+pub async fn set_text_zoom(window: WebviewWindow, factor: f64) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err(format!(
+            "Text zoom can only be applied to the main window, not '{}'.",
+            window.label()
+        ));
+    }
+    apply_text_zoom_to_window(&window, factor, true)
 }
 fn native_performance_mode_enabled_from_value(value: &serde_json::Value) -> Option<bool> {
     match value.as_str()?.trim().to_ascii_lowercase().as_str() {

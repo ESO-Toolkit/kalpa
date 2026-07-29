@@ -3,8 +3,8 @@ import { getSetting, setSetting } from "@/lib/store";
 
 /**
  * User text-size control backed by Tauri WebView zoom. Rust applies the durable
- * value before the page paints; this module only hydrates the synchronous value
- * that Settings and keyboard shortcuts use after React starts.
+ * value during native setup; this module reapplies it once the Tauri bridge is
+ * live so WebView2 navigation/window-state timing cannot leave stale zoom behind.
  */
 const STORE_KEY = "appearance.textZoom";
 const MIN_TEXT_ZOOM = 1;
@@ -20,9 +20,14 @@ function clampTextZoom(factor: number): number {
   return Math.min(MAX_TEXT_ZOOM, Math.max(MIN_TEXT_ZOOM, factor));
 }
 
-/** Read the persisted preference at startup without applying zoom again. */
+/** Read the persisted preference at startup and apply it after the bridge is live. */
 export async function hydrateTextZoom(): Promise<void> {
   currentTextZoom = clampTextZoom(await getSetting<number>(STORE_KEY, MIN_TEXT_ZOOM));
+  try {
+    await invoke("set_text_zoom", { factor: currentTextZoom });
+  } catch (err) {
+    console.warn("[text-zoom] Failed to apply startup text zoom:", err);
+  }
 }
 
 /** Current effective zoom factor (valid once hydrated - synchronous read). */
