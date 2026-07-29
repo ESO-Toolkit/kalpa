@@ -4,11 +4,16 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0-beta.14] — 2026-07-28
+
 A player with low vision reported that Kalpa's text was too faint and too small ([#199](https://github.com/ESO-Toolkit/kalpa/issues/199)). The faintness turned out to be a bug affecting every theme, and the rest of this release follows from investigating it.
 
 ### Bug Fixes
 
 - **Text now keeps the contrast its theme promises.** Every theme defined muted text that met the WCAG AA 4.5:1 floor, and no theme delivered it: components faded that text with an opacity multiplier _after_ the theme had chosen the colour, so the value the contrast checker validated was never the value on screen. Measured across all 48 themes, 48 passed as defined and **0 passed as rendered** — the worst case painted at 1.9:1 in a theme reporting 5.1:1. That is why trying a different theme did not help: the fade sat on top of whichever one was active. 240 sites across 50 files now paint at full strength, hierarchy is carried by which token is used rather than by opacity, and a test fails the build if readable text starts fading again. ([#327](https://github.com/ESO-Toolkit/kalpa/pull/327))
+- **A fatal error is now readable on a light theme.** The crash overlay printed its heading in hardcoded white, so an error on a light background showed an invisible message — the one screen that most needs to be legible. It renders before the theme loads and no single colour clears 4.5:1 against both white and near-black, so it now uses a fixed mid-slate that is readable either way. Found by the same sweep that caught a fifth class of dark-only hardcoding: raw brand hex written straight into text, bypassing the darker `primary` and `accent` the light themes deliberately define. Three of the four earlier classes had been found only after someone opened a screen and saw it broken. ([#331](https://github.com/ESO-Toolkit/kalpa/pull/331))
 
 ### Features
 
