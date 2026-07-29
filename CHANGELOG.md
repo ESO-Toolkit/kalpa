@@ -4,7 +4,22 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-_Nothing yet._
+A player with low vision reported that Kalpa's text was too faint and too small ([#199](https://github.com/ESO-Toolkit/kalpa/issues/199)). The faintness turned out to be a bug affecting every theme, and the rest of this release follows from investigating it.
+
+### Bug Fixes
+
+- **Text now keeps the contrast its theme promises.** Every theme defined muted text that met the WCAG AA 4.5:1 floor, and no theme delivered it: components faded that text with an opacity multiplier _after_ the theme had chosen the colour, so the value the contrast checker validated was never the value on screen. Measured across all 48 themes, 48 passed as defined and **0 passed as rendered** — the worst case painted at 1.9:1 in a theme reporting 5.1:1. That is why trying a different theme did not help: the fade sat on top of whichever one was active. 240 sites across 50 files now paint at full strength, hierarchy is carried by which token is used rather than by opacity, and a test fails the build if readable text starts fading again. ([#327](https://github.com/ESO-Toolkit/kalpa/pull/327))
+
+### Features
+
+- **A text size control**, in Settings → Appearance at 100%, 110%, 125% or 150%, and on `Ctrl`/`⌘` with `+`, `-` and `0`. It scales the whole interface rather than body text alone, which matters here: 132 of Kalpa's 140 fixed-pixel type sizes are 11px or smaller, so a font-size slider would have enlarged the text that was already legible and left the smallest labels untouched — widening the gap it was meant to close. At 150% the minimum window grows to 1200 × 750 so the layout keeps the space it needs; that still fits a 1366 × 768 laptop.
+- **Light and high-contrast themes.** A new Accessibility category, placed ahead of the decorative sets so it is not forty themes down, with two high-contrast dark themes clearing 12:1 on every pair the contrast checker measures, plus Paper White, Soft Grey and Warm Parchment. Light themes work because borders, dividers, panel fills, overlays and status colours now follow the active theme's lightness instead of assuming a dark background — 944 hardcoded values in all. Dark themes are unchanged: each token resolves to exactly the value it replaced. ([#329](https://github.com/ESO-Toolkit/kalpa/pull/329))
+- **Every keyboard shortcut is now listed in the app**, on `?` or from Settings → Appearance. Kalpa had twelve and showed three, two of which only appeared in an empty state that renders when no addons are installed.
+- **A way to report problems without leaving Kalpa.** Settings → Tools and the Accessibility theme section both link to the issue tracker and to Discord. There was previously no in-app route at all: the person who filed [#199](https://github.com/ESO-Toolkit/kalpa/issues/199) had to go and find the repository unaided. Accessibility reports also have their own issue template now — #199 arrived as a feature request and read as a nice-to-have for a month, while being a bug affecting all 48 themes.
+
+### Internal
+
+- **A verification gate that runs the packaged build.** CI produced the production bundle and never executed it, so every lazily-loaded dialog shipped unexercised. That is not hypothetical: the text size control passed type-checking, linting, formatting, `cargo check`, clippy and 400 tests while being completely inert, because zoom was applied before the WebView2 dispatcher existed. `npm run test:packaged` builds the app, owns the launch — necessary, because the single-instance plugin silently focuses an existing window, so a test that merely attaches can pass against a dev server — and proves every emitted chunk loads from the bundled origin.
 
 ## [0.1.0-beta.13] — 2026-07-28
 
