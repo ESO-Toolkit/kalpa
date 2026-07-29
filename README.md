@@ -272,7 +272,7 @@ Staying signed in to ESO Logs needs a Secret Service keyring (GNOME Keyring or K
 
 ### Build from source
 
-Every platform needs [Rust](https://rustup.rs/) (stable) and [Node.js](https://nodejs.org/) 22+.
+Every platform needs [Rust](https://rustup.rs/) (stable) and [Node.js](https://nodejs.org/). `engines.node` in `package.json` is the supported range, `.nvmrc` records a known-good version, and `npm run check:env` tells you whether yours qualifies.
 
 **Windows** also needs the MSVC toolchain via [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload, plus the [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (already present on Windows 11).
 

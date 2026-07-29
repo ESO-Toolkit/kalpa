@@ -9,7 +9,62 @@
  */
 
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { platform } from "node:os";
+
+// package.json's engines.node is the single source of truth for the supported
+// range, so this reads it rather than restating it.
+function readNodeRange() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
+    const range = pkg.engines?.node;
+    return typeof range === "string" && range.trim() ? range : null;
+  } catch {
+    return null;
+  }
+}
+
+const NODE_RANGE = readNodeRange();
+
+// Only `^x.y.z` and `>=x.y.z` are understood. Anything else throws rather than
+// being silently treated as a bare floor: `~22.22.2` or `>=22 <23` would
+// otherwise evaluate as unbounded and quietly accept versions the range
+// excludes, which is worse than refusing to answer.
+const TERM = /^(\^|>=)(\d+)\.(\d+)\.(\d+)$/;
+
+function parseVersion(text) {
+  // Anchored, and it keeps the prerelease tag. `v22.22.2-rc.1` sorts BELOW
+  // 22.22.2, so reading it as [22,22,2] would reintroduce exactly the kind of
+  // false pass this check exists to remove — and that RC predates the 22.22.2
+  // fix jsdom 30 needs.
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(text.trim());
+  if (!match) return null;
+  return {
+    version: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ?? null,
+  };
+}
+
+function isAtLeast(version, floor) {
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== floor[i]) return version[i] > floor[i];
+  }
+  return true;
+}
+
+function satisfiesNodeRange(version) {
+  return NODE_RANGE.split("||").some((clause) => {
+    const term = clause.trim();
+    const match = TERM.exec(term);
+    if (!match) {
+      throw new Error(`engines.node term "${term}" is not \`^x.y.z\` or \`>=x.y.z\``);
+    }
+    const floor = [Number(match[2]), Number(match[3]), Number(match[4])];
+    if (!isAtLeast(version, floor)) return false;
+    // `^x.y.z` also caps at the next major; `>=x.y.z` has no ceiling.
+    return match[1] === "^" ? version[0] === floor[0] : true;
+  });
+}
 
 const isWindows = platform() === "win32";
 const isMac = platform() === "darwin";
@@ -42,11 +97,23 @@ console.log("\nKalpa — environment check\n");
 check("Node.js", () => {
   const raw = run("node --version");
   if (!raw) return { ok: false, detail: "not found — install from https://nodejs.org/" };
-  const major = parseInt(raw.replace("v", ""), 10);
-  // Keep in lockstep with the docs and CI: README says 22+, and every workflow
-  // pins actions/setup-node to 22. A lower gate here passed silently on a
-  // version the project does not actually build against.
-  if (major < 22) return { ok: false, detail: `${raw} found, but 22+ is required` };
+  if (!NODE_RANGE) return { ok: false, detail: "package.json declares no engines.node to check" };
+  const parsed = parseVersion(raw);
+  if (!parsed) return { ok: false, detail: `could not parse version from "${raw}"` };
+  if (parsed.prerelease) {
+    return { ok: false, detail: `${raw} is a prerelease; ${NODE_RANGE} is required` };
+  }
+  // A bare `major >= 22` gate passed on versions the dependency tree rejects:
+  // jsdom 30 needs ^22.22.2 || ^24.15.0 || >=26.0.0, so 22.13 and 24.0 both
+  // install "fine" and then fail somewhere inside the test run instead. Check
+  // the real range so the failure lands here, with the version printed.
+  try {
+    if (!satisfiesNodeRange(parsed.version)) {
+      return { ok: false, detail: `${raw} found, but ${NODE_RANGE} is required` };
+    }
+  } catch (error) {
+    return { ok: false, detail: error.message };
+  }
   return { ok: true, detail: raw };
 });
 
