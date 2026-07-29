@@ -69,6 +69,10 @@
     "--status-info": "#38bdf8",
     "--status-info-soft": "#7dd3fc",
     "--status-info-strong": "#0ea5e9",
+    "--status-warning-readable": "#d9a441",
+    "--brand-gold-readable": "#c4a44a",
+    "--brand-cyan-readable": "#4dc2e6",
+    "--addon-disabled": "#6b7280",
     "--status-error": "#f87171",
     "--status-error-strong": "#ef4444"
   };
@@ -95,7 +99,11 @@
     "--status-library-strong": "#8b5cf6",
     "--status-info": "#38bdf8",
     "--status-info-soft": "#7dd3fc",
-    "--status-info-strong": "#0ea5e9"
+    "--status-info-strong": "#0ea5e9",
+    "--status-warning-readable": "#d9a441",
+    "--brand-gold-readable": "#c4a44a",
+    "--brand-cyan-readable": "#4dc2e6",
+    "--addon-disabled": "#6b7280",
   };
   var LIGHT_STATUS_VARS = {
     "--status-success": "#022c22",
@@ -117,12 +125,18 @@
     "--status-library-strong": "#6d28d9",
     "--status-info": "#0369a1",
     "--status-info-soft": "#0369a1",
-    "--status-info-strong": "#075985"
+    "--status-info-strong": "#075985",
+    "--status-warning-readable": "#451a03",
   };
 
   function relativeLuminance(hex) {
-    var h = String(hex || "").trim().replace(/^#/, "");
-    if (h.length === 3) h = h.replace(/./g, function (c) { return c + c; });
+    var h = String(hex || "")
+      .trim()
+      .replace(/^#/, "");
+    if (h.length === 3)
+      h = h.replace(/./g, function (c) {
+        return c + c;
+      });
     if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return 0;
     function channel(i) {
       var s = parseInt(h.slice(i, i + 2), 16) / 255;
@@ -131,12 +145,20 @@
     return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
   }
 
-  function statusVarsForBackground(background) {
-    var source = relativeLuminance(background) >= LIGHT_THEME_BACKGROUND_LUMINANCE
-      ? LIGHT_STATUS_VARS
-      : DARK_STATUS_VARS;
+  function statusVarsForTheme(themeVars) {
+    var isLight = relativeLuminance(themeVars["--background"]) >= LIGHT_THEME_BACKGROUND_LUMINANCE;
+    var source = isLight ? LIGHT_STATUS_VARS : DARK_STATUS_VARS;
     var vars = {};
     for (var name in source) vars[name] = source[name];
+    vars["--brand-gold-readable"] = isLight
+      ? themeVars["--primary"]
+      : DARK_STATUS_VARS["--brand-gold-readable"];
+    vars["--brand-cyan-readable"] = isLight
+      ? themeVars["--accent-sky"]
+      : DARK_STATUS_VARS["--brand-cyan-readable"];
+    vars["--addon-disabled"] = isLight
+      ? themeVars["--muted-foreground"]
+      : DARK_STATUS_VARS["--addon-disabled"];
     vars["--status-error"] = source["--status-danger"];
     vars["--status-error-strong"] = source["--status-danger-strong"];
     return vars;
@@ -173,7 +195,7 @@
   // and its data-textured flag arrive together at hydration).
   if (mirror && applied >= FORCED_VERSION) {
     var textured = apply(mirror);
-    apply(statusVarsForBackground(mirror["--background"]));
+    apply(statusVarsForTheme(mirror));
     if (textured) root.dataset.textured = "true";
   } else {
     apply(DEFAULT_VARS);

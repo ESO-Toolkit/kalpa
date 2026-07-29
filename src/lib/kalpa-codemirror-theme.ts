@@ -1,5 +1,8 @@
 import { createTheme } from "@uiw/codemirror-themes";
 import { tags as t } from "@lezer/highlight";
+import { relativeLuminance } from "./theme-color";
+import { LIGHT_THEME_BACKGROUND_LUMINANCE } from "./theme-apply";
+import type { ThemeColors } from "./theme-types";
 
 /**
  * CodeMirror theme for the addon-file editor.
@@ -11,40 +14,51 @@ import { tags as t } from "@lezer/highlight";
  * harmonizes with the rest of the UI; chrome (bg/caret/selection/gutter) tracks
  * the theme surface and accents.
  */
-export const kalpaTheme = createTheme({
-  theme: "dark",
-  settings: {
-    background: "color-mix(in oklab, var(--card) 55%, transparent)",
-    foreground: "var(--foreground)",
-    caret: "var(--accent-sky)",
-    selection: "color-mix(in oklab, var(--accent-sky) 22%, transparent)",
-    selectionMatch: "color-mix(in oklab, var(--accent-sky) 12%, transparent)",
-    lineHighlight: "color-mix(in oklab, var(--primary) 8%, transparent)",
-    gutterBackground: "transparent",
-    gutterForeground: "color-mix(in oklab, var(--foreground) 35%, transparent)",
-    gutterBorder: "transparent",
-  },
-  styles: [
-    { tag: [t.keyword, t.operatorKeyword], color: "var(--primary)" },
-    { tag: [t.string, t.special(t.string)], color: "var(--status-success-strong)" },
-    { tag: t.number, color: "var(--status-warning-strong)" },
-    { tag: t.bool, color: "var(--primary)" },
-    { tag: [t.variableName, t.self], color: "var(--accent-sky)" },
-    { tag: [t.propertyName], color: "var(--foreground)" },
-    { tag: [t.function(t.variableName)], color: "var(--status-library)" },
-    {
-      tag: [t.comment, t.lineComment, t.blockComment],
-      color: "color-mix(in oklab, var(--foreground) 38%, transparent)",
-      fontStyle: "italic",
+function createKalpaTheme(theme: "dark" | "light") {
+  return createTheme({
+    theme,
+    settings: {
+      background: "color-mix(in oklab, var(--card) 55%, transparent)",
+      foreground: "var(--foreground)",
+      caret: "var(--accent-sky)",
+      selection: "color-mix(in oklab, var(--accent-sky) 22%, transparent)",
+      selectionMatch: "color-mix(in oklab, var(--accent-sky) 12%, transparent)",
+      lineHighlight: "color-mix(in oklab, var(--primary) 8%, transparent)",
+      gutterBackground: "transparent",
+      gutterForeground: "color-mix(in oklab, var(--foreground) 35%, transparent)",
+      gutterBorder: "transparent",
     },
-    {
-      tag: [t.operator, t.punctuation],
-      color: "color-mix(in oklab, var(--foreground) 55%, transparent)",
-    },
-    { tag: [t.bracket], color: "color-mix(in oklab, var(--foreground) 45%, transparent)" },
-    { tag: [t.tagName], color: "var(--primary)" },
-    { tag: [t.attributeName], color: "var(--accent-sky)" },
-    { tag: [t.attributeValue], color: "var(--status-success-strong)" },
-    { tag: t.null, color: "var(--status-danger-strong)" },
-  ],
-});
+    styles: [
+      { tag: [t.keyword, t.operatorKeyword], color: "var(--primary)" },
+      { tag: [t.string, t.special(t.string)], color: "var(--status-success-strong)" },
+      { tag: t.number, color: "var(--status-warning-strong)" },
+      { tag: t.bool, color: "var(--primary)" },
+      { tag: [t.variableName, t.self], color: "var(--accent-sky)" },
+      { tag: [t.propertyName], color: "var(--foreground)" },
+      { tag: [t.function(t.variableName)], color: "var(--status-library)" },
+      {
+        tag: [t.comment, t.lineComment, t.blockComment],
+        color: "color-mix(in oklab, var(--foreground) 38%, transparent)",
+        fontStyle: "italic",
+      },
+      {
+        tag: [t.operator, t.punctuation],
+        color: "color-mix(in oklab, var(--foreground) 55%, transparent)",
+      },
+      { tag: [t.bracket], color: "color-mix(in oklab, var(--foreground) 45%, transparent)" },
+      { tag: [t.tagName], color: "var(--primary)" },
+      { tag: [t.attributeName], color: "var(--accent-sky)" },
+      { tag: [t.attributeValue], color: "var(--status-success-strong)" },
+      { tag: t.null, color: "var(--status-danger-strong)" },
+    ],
+  });
+}
+
+export const kalpaDarkTheme = createKalpaTheme("dark");
+export const kalpaLightTheme = createKalpaTheme("light");
+
+export function kalpaThemeForColors(colors: ThemeColors) {
+  return relativeLuminance(colors.background) >= LIGHT_THEME_BACKGROUND_LUMINANCE
+    ? kalpaLightTheme
+    : kalpaDarkTheme;
+}

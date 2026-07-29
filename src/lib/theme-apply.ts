@@ -52,6 +52,10 @@ const DARK_STATUS_VARS = {
   "--status-info": "#38bdf8",
   "--status-info-soft": "#7dd3fc",
   "--status-info-strong": "#0ea5e9",
+  "--status-warning-readable": "#d9a441",
+  "--brand-gold-readable": "#c4a44a",
+  "--brand-cyan-readable": "#4dc2e6",
+  "--addon-disabled": "#6b7280",
 } as const;
 
 const LIGHT_STATUS_VARS = {
@@ -75,6 +79,7 @@ const LIGHT_STATUS_VARS = {
   "--status-info": "#0369a1",
   "--status-info-soft": "#0369a1",
   "--status-info-strong": "#075985",
+  "--status-warning-readable": "#451a03",
 } as const;
 
 const STATUS_ALIAS_VARS = ["--status-error", "--status-error-strong"] as const;
@@ -103,13 +108,14 @@ export function scrimInkForTheme(colors: ThemeColors): "0 0 0" | "255 255 255" {
 }
 
 export function statusVarsForTheme(colors: ThemeColors): Record<string, string> {
-  const vars =
-    relativeLuminance(colors.background) >= LIGHT_THEME_BACKGROUND_LUMINANCE
-      ? LIGHT_STATUS_VARS
-      : DARK_STATUS_VARS;
+  const isLight = relativeLuminance(colors.background) >= LIGHT_THEME_BACKGROUND_LUMINANCE;
+  const vars = isLight ? LIGHT_STATUS_VARS : DARK_STATUS_VARS;
 
   return {
     ...vars,
+    "--brand-gold-readable": isLight ? colors.primary : DARK_STATUS_VARS["--brand-gold-readable"],
+    "--brand-cyan-readable": isLight ? colors.accent : DARK_STATUS_VARS["--brand-cyan-readable"],
+    "--addon-disabled": isLight ? colors.mutedForeground : DARK_STATUS_VARS["--addon-disabled"],
     "--status-error": vars["--status-danger"],
     "--status-error-strong": vars["--status-danger-strong"],
   };

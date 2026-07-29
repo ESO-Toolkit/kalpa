@@ -3,7 +3,8 @@ import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { lua } from "@codemirror/legacy-modes/mode/lua";
 import { xml } from "@codemirror/lang-xml";
-import { kalpaTheme } from "@/lib/kalpa-codemirror-theme";
+import { kalpaThemeForColors } from "@/lib/kalpa-codemirror-theme";
+import { useTheme } from "@/lib/use-theme";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
@@ -58,6 +59,7 @@ export function AddonFileEditor({
   onClose,
   onSaved,
 }: AddonFileEditorProps) {
+  const { activeTheme } = useTheme();
   const [content, setContent] = useState<string | null>(null);
   const [originalContent, setOriginalContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -204,7 +206,7 @@ export function AddonFileEditor({
         <CodeMirror
           value={content ?? ""}
           onChange={editable ? setContent : undefined}
-          theme={kalpaTheme}
+          theme={kalpaThemeForColors(activeTheme.colors)}
           extensions={extensions}
           readOnly={!editable}
           basicSetup={BASIC_SETUP}

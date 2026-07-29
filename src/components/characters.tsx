@@ -126,7 +126,7 @@ export function Characters({
         </p>
 
         {!loading && skippedFiles > 0 && (
-          <p className="text-xs text-[#d9a441]">
+          <p className="text-xs text-status-warning-readable">
             {skippedFiles} SavedVariables file{skippedFiles !== 1 ? "s" : ""} couldn&apos;t be fully
             read (locked, permission denied, or malformed), so a character may be missing from this
             list.

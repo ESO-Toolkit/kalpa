@@ -226,7 +226,7 @@ function PhaseIndicator({ current }: { current: MigrationPhase }) {
               i < currentIndex
                 ? "bg-status-success-strong/20 text-status-success"
                 : i === currentIndex
-                  ? "bg-[#4dc2e6]/20 text-[#4dc2e6]"
+                  ? "bg-brand-cyan-readable/20 text-brand-cyan-readable"
                   : "bg-structure-06 text-muted-foreground"
             }`}
           >
