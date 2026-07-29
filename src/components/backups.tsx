@@ -277,7 +277,7 @@ export function Backups({
             <button
               type="button"
               onClick={() => setShowLabelField(true)}
-              className="text-xs text-muted-foreground hover:text-white/80 transition-colors underline-offset-2 hover:underline"
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors underline-offset-2 hover:underline"
             >
               Add a custom label (optional)
             </button>
@@ -309,7 +309,7 @@ export function Backups({
           <button
             type="button"
             onClick={() => setShowWhatExpanded((v) => !v)}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-white/80 transition-colors"
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
             <Info className="size-3" />
             What gets backed up?
@@ -532,7 +532,7 @@ function BackupRow({
         <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
           <Clock className="size-3" />
           {formatRelativeFromEpoch(backup.createdAtEpoch)}
-          <span className="text-white/20">·</span>
+          <span className="text-muted-foreground">·</span>
           {describeBackup(backup)}
         </div>
       </div>

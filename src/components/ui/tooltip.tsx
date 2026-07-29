@@ -39,7 +39,7 @@ function TooltipContent({
         <TooltipPopup
           className={cn(
             "z-50 inline-flex w-fit max-w-xs origin-(--transform-origin) items-center gap-1.5",
-            "rounded-lg border border-structure-08 bg-surface-overlay px-3 py-1.5 shadow-[0_8px_32px_rgba(0,0,0,0.4),0_1px_0_var(--structure-06)_inset] backdrop-blur-xl backdrop-saturate-[1.3]",
+            "rounded-lg border border-structure-08 bg-surface-overlay px-3 py-1.5 shadow-[0_8px_32px_var(--scrim-40),0_1px_0_var(--structure-06)_inset] backdrop-blur-xl backdrop-saturate-[1.3]",
             "text-xs font-medium text-foreground",
             "has-data-[slot=kbd]:pr-1.5 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-[4px] **:data-[slot=kbd]:border **:data-[slot=kbd]:border-structure-10 **:data-[slot=kbd]:bg-structure-06 **:data-[slot=kbd]:px-1.5 **:data-[slot=kbd]:py-0.5 **:data-[slot=kbd]:text-[11px] **:data-[slot=kbd]:font-mono **:data-[slot=kbd]:text-foreground",
             className

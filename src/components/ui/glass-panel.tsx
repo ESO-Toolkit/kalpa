@@ -7,8 +7,8 @@ const glassPanelVariants = cva(
     variants: {
       variant: {
         primary:
-          "bg-glass-bg border border-structure-09 shadow-[0_8px_32px_rgba(0,0,0,0.32),inset_0_1px_0_var(--structure-05)]",
-        default: "bg-glass-bg-light border border-structure-06 shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
+          "bg-glass-bg border border-structure-09 shadow-[0_8px_32px_var(--scrim-32),inset_0_1px_0_var(--structure-05)]",
+        default: "bg-glass-bg-light border border-structure-06 shadow-[0_4px_16px_var(--scrim-20)]",
         subtle:
           "bg-structure-02 border border-structure-04 shadow-[inset_0_1px_0_var(--structure-03)] hover:border-structure-07 transition-colors duration-200",
       },

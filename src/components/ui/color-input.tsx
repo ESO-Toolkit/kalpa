@@ -101,7 +101,7 @@ export function ColorInput({
         <button
           type="button"
           onClick={pickWithEyeDropper}
-          className="flex size-7 shrink-0 items-center justify-center rounded-md border border-structure-08 bg-structure-03 text-muted-foreground transition-colors duration-150 hover:border-structure-15 hover:text-white/80"
+          className="flex size-7 shrink-0 items-center justify-center rounded-md border border-structure-08 bg-structure-03 text-muted-foreground transition-colors duration-150 hover:border-structure-15 hover:text-foreground"
           aria-label={`Sample a color for ${label} from the screen`}
           title="Sample a color from the screen"
         >

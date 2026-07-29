@@ -43,7 +43,7 @@ export function ToggleControl({
       <motion.span
         layout
         transition={{ type: "spring", stiffness: 500, damping: 30 }}
-        className={`inline-block size-3.5 rounded-full bg-white shadow ${
+        className={`inline-block size-3.5 rounded-full bg-foreground shadow ${
           checked ? "translate-x-[18px]" : "translate-x-[3px]"
         }`}
       />

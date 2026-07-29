@@ -124,7 +124,7 @@ const OPTIONS_KEY = "kalpa.uploader.options";
  *  quieter than the primary picker/action. Used for fights, options, history so
  *  the elevation order reads: canvas < these < picker/action. */
 const WORK_PANEL =
-  "rounded-2xl border border-structure-08 bg-gradient-to-b from-structure-045 to-structure-015 shadow-[0_8px_28px_-14px_rgba(0,0,0,0.65),inset_0_1px_0_var(--structure-05)]";
+  "rounded-2xl border border-structure-08 bg-gradient-to-b from-structure-045 to-structure-015 shadow-[0_8px_28px_-14px_var(--scrim-65),inset_0_1px_0_var(--structure-05)]";
 
 /** Open a report URL in the user's browser, surfacing failures instead of
  *  swallowing them. The opener plugin rejects a URL outside the capability's
@@ -1638,7 +1638,7 @@ export function UploaderWorkspace({
           // elevate from a surface the same color as everything else). The
           // negative margins bleed it to the dialog edges; a top inset shadow
           // sells the "sunken work surface" depth.
-          <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[var(--bg-base)] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_rgba(0,0,0,0.6)]">
+          <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[var(--bg-base)] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_var(--scrim-60)]">
             <div className="space-y-3.5">
               <WhatGetsUploaded />
 
@@ -1660,7 +1660,7 @@ export function UploaderWorkspace({
               {/* Mode tabs — a segmented control sitting in a recessed track, so
                   the active tab reads as raised out of the well, not as two equal
                   panels. */}
-              <div className="grid grid-cols-2 gap-1.5 rounded-2xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]">
+              <div className="grid grid-cols-2 gap-1.5 rounded-2xl border border-scrim-40 bg-scrim-25 p-1.5 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]">
                 <ModeTab
                   buttonRef={firstTabRef}
                   active={mode === "manual"}
@@ -1978,7 +1978,7 @@ function LiveSessionMiniBar({
       <GlassPanel
         variant="primary"
         className={cn(
-          "border p-3.5 shadow-[0_18px_48px_-18px_rgba(0,0,0,0.85),inset_0_1px_0_var(--structure-06)]",
+          "border p-3.5 shadow-[0_18px_48px_-18px_var(--scrim-85),inset_0_1px_0_var(--structure-06)]",
           tone === "emerald"
             ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.08] to-structure-015"
             : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.08] to-structure-015"
@@ -2750,7 +2750,7 @@ function LogSummaryCard({
   return (
     <GlassPanel
       variant="primary"
-      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-structure-01 p-4 shadow-[0_12px_36px_-14px_rgba(0,0,0,0.7),inset_0_1px_0_var(--structure-06)]"
+      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-structure-01 p-4 shadow-[0_12px_36px_-14px_var(--scrim-70),inset_0_1px_0_var(--structure-06)]"
     >
       <div className="mb-2.5 flex items-center gap-1.5">
         <CheckCircle2 className="size-3.5 text-emerald-400" aria-hidden />
@@ -3106,7 +3106,7 @@ function ModeTab({
             // (not the lift), and an inset top highlight catches the light. The
             // sky accents are tokenized (accent-sky) so the active tab follows
             // the theme.
-            "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] ring-1 ring-inset ring-accent-sky/25 shadow-[0_1px_2px_rgba(0,0,0,0.5),0_8px_20px_-8px_rgba(0,0,0,0.55),0_0_22px_-12px_color-mix(in_oklab,var(--accent-sky)_55%,transparent),inset_0_1px_0_var(--structure-14)]"
+            "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] ring-1 ring-inset ring-accent-sky/25 shadow-[0_1px_2px_var(--scrim-50),0_8px_20px_-8px_var(--scrim-55),0_0_22px_-12px_color-mix(in_oklab,var(--accent-sky)_55%,transparent),inset_0_1px_0_var(--structure-14)]"
           : // FLAT in the well: no fill, no border — just sits in the recess.
             "text-muted-foreground hover:bg-structure-04"
       )}
@@ -3203,7 +3203,7 @@ function LogPicker({
     <div
       className={cn(
         "relative rounded-2xl border border-structure-10 bg-gradient-to-b from-structure-07 to-structure-025 p-3.5 transition-colors duration-150",
-        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_var(--structure-08)]",
+        "shadow-[0_12px_40px_-16px_var(--scrim-70),inset_0_1px_0_var(--structure-08)]",
         dragOver && "border-accent-sky/60 from-accent-sky/[0.1] to-accent-sky/[0.03]"
       )}
     >
@@ -3392,7 +3392,7 @@ function LogPicker({
         </div>
       ) : (
         <ul
-          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]"
+          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-scrim-40 bg-scrim-25 p-1.5 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]"
           aria-label="Log files"
           // Lightweight roving navigation: Up/Down/Home/End move focus between
           // log rows so a long folder isn't N Tab presses. Tab still works as a
@@ -3887,7 +3887,7 @@ function Toggle({
       >
         <span
           className={cn(
-            "absolute top-0.5 size-4 rounded-full bg-white transition-transform duration-200",
+            "absolute top-0.5 size-4 rounded-full bg-foreground transition-transform duration-200",
             checked ? "translate-x-4" : "translate-x-0.5"
           )}
         />
@@ -3939,7 +3939,7 @@ function ManualActions({
     // The climax — the MOST raised surface, and the only WARM (gold) one, so it
     // reads as the destination of the whole flow against the cool-blue inputs
     // above it. Strong outer shadow + gold top highlight lift it off the canvas.
-    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),0_0_40px_-20px_color-mix(in_oklab,var(--primary)_40%,transparent),inset_0_1px_0_var(--structure-08)]">
+    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_var(--scrim-75),0_0_40px_-20px_color-mix(in_oklab,var(--primary)_40%,transparent),inset_0_1px_0_var(--structure-08)]">
       <span
         className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-primary/0 via-primary/60 to-primary/0"
         aria-hidden
@@ -3986,7 +3986,7 @@ function CopyChip({ text }: { text: string }) {
           /* clipboard may be blocked; the visible text is still copyable manually */
         }
       }}
-      className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-black/30 px-2 py-1 font-mono text-xs text-foreground transition-colors hover:border-structure-15 hover:bg-black/40"
+      className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-scrim-30 px-2 py-1 font-mono text-xs text-foreground transition-colors hover:border-structure-15 hover:bg-scrim-40"
       aria-label={`Copy ${text}`}
     >
       {copied ? (

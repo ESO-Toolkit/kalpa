@@ -23,7 +23,7 @@ function DialogOverlay({ className, ...props }: DialogBackdropProps) {
   return (
     <DialogBackdrop
       className={cn(
-        "fixed inset-0 isolate z-50 bg-[radial-gradient(ellipse_at_center,rgba(0,0,0,0.45)_0%,rgba(0,0,0,0.7)_100%)] backdrop-blur-sm",
+        "fixed inset-0 isolate z-50 bg-[radial-gradient(ellipse_at_center,var(--scrim-45)_0%,var(--scrim-70)_100%)] backdrop-blur-sm",
         className
       )}
       transition={{ duration: 0.15 }}
@@ -46,7 +46,7 @@ function DialogContent({
       <DialogOverlay />
       <DialogPopup
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-2xl bg-surface-overlay backdrop-blur-2xl backdrop-saturate-[1.3] p-5 text-sm text-popover-foreground border border-structure-08 shadow-[0_24px_80px_rgba(0,0,0,0.6),0_0_0_1px_var(--structure-03),inset_0_1px_0_var(--structure-06)] outline-none sm:max-w-sm",
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-2xl bg-surface-overlay backdrop-blur-2xl backdrop-saturate-[1.3] p-5 text-sm text-popover-foreground border border-structure-08 shadow-[0_24px_80px_var(--scrim-60),0_0_0_1px_var(--structure-03),inset_0_1px_0_var(--structure-06)] outline-none sm:max-w-sm",
           className
         )}
         transition={{ type: "spring", stiffness: 400, damping: 30 }}

@@ -10,9 +10,9 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-gradient-to-b from-primary-hover to-primary text-primary-foreground font-semibold border-primary/50 shadow-[inset_0_1px_0_var(--structure-20),0_1px_3px_rgba(0,0,0,0.3)] hover:brightness-110 hover:shadow-[inset_0_1px_0_var(--structure-25),0_0_12px_var(--primary-glow),0_2px_6px_rgba(0,0,0,0.3)] focus-visible:ring-3 focus-visible:ring-primary/40",
+          "bg-gradient-to-b from-primary-hover to-primary text-primary-foreground font-semibold border-primary/50 shadow-[inset_0_1px_0_var(--structure-20),0_1px_3px_var(--scrim-30)] hover:brightness-110 hover:shadow-[inset_0_1px_0_var(--structure-25),0_0_12px_var(--primary-glow),0_2px_6px_var(--scrim-30)] focus-visible:ring-3 focus-visible:ring-primary/40",
         outline:
-          "bg-structure-04 border-structure-10 text-foreground shadow-[inset_0_1px_0_var(--structure-04),0_1px_2px_rgba(0,0,0,0.15)] hover:bg-structure-08 hover:border-structure-15 hover:shadow-[inset_0_1px_0_var(--structure-06),0_2px_4px_rgba(0,0,0,0.2)] aria-expanded:bg-structure-08 aria-expanded:border-structure-15 focus-visible:border-accent-sky/40 focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+          "bg-structure-04 border-structure-10 text-foreground shadow-[inset_0_1px_0_var(--structure-04),0_1px_2px_var(--scrim-15)] hover:bg-structure-08 hover:border-structure-15 hover:shadow-[inset_0_1px_0_var(--structure-06),0_2px_4px_var(--scrim-20)] aria-expanded:bg-structure-08 aria-expanded:border-structure-15 focus-visible:border-accent-sky/40 focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         secondary:
           "bg-structure-06 border-structure-08 text-foreground hover:bg-structure-10 hover:border-structure-12 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
         ghost:

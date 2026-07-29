@@ -189,6 +189,29 @@
   --color-structure-50: var(--structure-50);
   --color-structure-60: var(--structure-60);
   --color-structure-70: var(--structure-70);
+  --color-scrim-0: var(--scrim-0);
+  --color-scrim-05: var(--scrim-05);
+  --color-scrim-10: var(--scrim-10);
+  --color-scrim-12: var(--scrim-12);
+  --color-scrim-15: var(--scrim-15);
+  --color-scrim-16: var(--scrim-16);
+  --color-scrim-18: var(--scrim-18);
+  --color-scrim-20: var(--scrim-20);
+  --color-scrim-22: var(--scrim-22);
+  --color-scrim-25: var(--scrim-25);
+  --color-scrim-30: var(--scrim-30);
+  --color-scrim-32: var(--scrim-32);
+  --color-scrim-34: var(--scrim-34);
+  --color-scrim-40: var(--scrim-40);
+  --color-scrim-44: var(--scrim-44);
+  --color-scrim-45: var(--scrim-45);
+  --color-scrim-50: var(--scrim-50);
+  --color-scrim-55: var(--scrim-55);
+  --color-scrim-60: var(--scrim-60);
+  --color-scrim-65: var(--scrim-65);
+  --color-scrim-70: var(--scrim-70);
+  --color-scrim-75: var(--scrim-75);
+  --color-scrim-85: var(--scrim-85);
   /* Card alt */
   --color-card-alt: var(--card-alt);
 
@@ -251,6 +274,33 @@
   --structure-50: rgb(var(--structure-rgb) / 0.5);
   --structure-60: rgb(var(--structure-rgb) / 0.6);
   --structure-70: rgb(var(--structure-rgb) / 0.7);
+
+  /* Theme-aware scrim/depth wash. Dark seeds resolve to the exact old black-alpha
+   * colors; light seeds switch to white-alpha via --scrim-rgb. */
+  --scrim-rgb: 0 0 0;
+  --scrim-0: rgb(var(--scrim-rgb) / 0);
+  --scrim-05: rgb(var(--scrim-rgb) / 0.05);
+  --scrim-10: rgb(var(--scrim-rgb) / 0.1);
+  --scrim-12: rgb(var(--scrim-rgb) / 0.12);
+  --scrim-15: rgb(var(--scrim-rgb) / 0.15);
+  --scrim-16: rgb(var(--scrim-rgb) / 0.16);
+  --scrim-18: rgb(var(--scrim-rgb) / 0.18);
+  --scrim-20: rgb(var(--scrim-rgb) / 0.2);
+  --scrim-22: rgb(var(--scrim-rgb) / 0.22);
+  --scrim-25: rgb(var(--scrim-rgb) / 0.25);
+  --scrim-30: rgb(var(--scrim-rgb) / 0.3);
+  --scrim-32: rgb(var(--scrim-rgb) / 0.32);
+  --scrim-34: rgb(var(--scrim-rgb) / 0.34);
+  --scrim-40: rgb(var(--scrim-rgb) / 0.4);
+  --scrim-44: rgb(var(--scrim-rgb) / 0.44);
+  --scrim-45: rgb(var(--scrim-rgb) / 0.45);
+  --scrim-50: rgb(var(--scrim-rgb) / 0.5);
+  --scrim-55: rgb(var(--scrim-rgb) / 0.55);
+  --scrim-60: rgb(var(--scrim-rgb) / 0.6);
+  --scrim-65: rgb(var(--scrim-rgb) / 0.65);
+  --scrim-70: rgb(var(--scrim-rgb) / 0.7);
+  --scrim-75: rgb(var(--scrim-rgb) / 0.75);
+  --scrim-85: rgb(var(--scrim-rgb) / 0.85);
   /* ============================================================
      DERIVED TOKENS (computed from the 12 base vars)
      ============================================================ */
@@ -319,8 +369,8 @@
   --glass-border: var(--structure-09);
   --glass-border-subtle: var(--structure-04);
   --glass-blur: 16px;
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), 0 1px 0 var(--structure-05) inset;
-  --glass-shadow-light: 0 4px 16px rgba(0, 0, 0, 0.2);
+  --glass-shadow: 0 8px 32px var(--scrim-32), 0 1px 0 var(--structure-05) inset;
+  --glass-shadow-light: 0 4px 16px var(--scrim-20);
 
   /* === Scrollbar (accent-tinted) === */
   --scrollbar-track: color-mix(in oklab, var(--card) 50%, transparent);

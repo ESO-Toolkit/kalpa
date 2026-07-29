@@ -40,7 +40,7 @@ function SelectTrigger({
       data-slot="select-trigger"
       data-size={size}
       className={cn(
-        "flex w-fit items-center justify-between gap-1.5 rounded-[10px] border border-structure-08 bg-structure-04 py-2 pr-2 pl-2.5 text-sm whitespace-nowrap shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_var(--structure-02)] transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] outline-none select-none hover:border-structure-15 hover:bg-structure-06 focus-visible:border-accent-sky/50 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-placeholder:text-muted-foreground data-[size=default]:h-8 data-[size=sm]:h-7 data-[size=sm]:rounded-[min(var(--radius-md),10px)] *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "flex w-fit items-center justify-between gap-1.5 rounded-[10px] border border-structure-08 bg-structure-04 py-2 pr-2 pl-2.5 text-sm whitespace-nowrap shadow-[inset_0_1px_2px_var(--scrim-20),0_1px_0_var(--structure-02)] transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] outline-none select-none hover:border-structure-15 hover:bg-structure-06 focus-visible:border-accent-sky/50 focus-visible:shadow-[inset_0_1px_2px_var(--scrim-20),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-placeholder:text-muted-foreground data-[size=default]:h-8 data-[size=sm]:h-7 data-[size=sm]:rounded-[min(var(--radius-md),10px)] *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       {...props}
@@ -91,7 +91,7 @@ function SelectContent({
             />
           }
           className={cn(
-            "relative isolate z-50 max-h-(--available-height) w-(--anchor-width) min-w-36 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-xl border border-structure-08 bg-surface-overlay text-popover-foreground shadow-[0_16px_48px_rgba(0,0,0,0.5),0_0_0_1px_var(--structure-03),inset_0_1px_0_var(--structure-06)] backdrop-blur-2xl",
+            "relative isolate z-50 max-h-(--available-height) w-(--anchor-width) min-w-36 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-xl border border-structure-08 bg-surface-overlay text-popover-foreground shadow-[0_16px_48px_var(--scrim-50),0_0_0_1px_var(--structure-03),inset_0_1px_0_var(--structure-06)] backdrop-blur-2xl",
             className
           )}
           {...props}

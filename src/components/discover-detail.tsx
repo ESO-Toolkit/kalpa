@@ -409,7 +409,7 @@ function DiscoverDetailBase({
                 <>
                   {/* Navigation arrows */}
                   <button
-                    className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                    className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-scrim-50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-scrim-70"
                     onClick={() =>
                       setScreenshotIdx((prev) =>
                         prev > 0 ? prev - 1 : detail.screenshots.length - 1
@@ -420,7 +420,7 @@ function DiscoverDetailBase({
                     <ChevronLeft className="size-4" />
                   </button>
                   <button
-                    className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-scrim-50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-scrim-70"
                     onClick={() =>
                       setScreenshotIdx((prev) =>
                         prev < detail.screenshots.length - 1 ? prev + 1 : 0
@@ -432,7 +432,7 @@ function DiscoverDetailBase({
                   </button>
 
                   {/* Dot indicators */}
-                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-2 py-1">
+                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5 bg-scrim-40 backdrop-blur-sm rounded-full px-2 py-1">
                     {detail.screenshots.map((_, i) => (
                       <button
                         key={i}
@@ -449,7 +449,7 @@ function DiscoverDetailBase({
                   </div>
 
                   {/* Counter */}
-                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-foreground">
+                  <div className="absolute top-2 right-2 bg-scrim-50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-foreground">
                     {safeIdx + 1} / {detail.screenshots.length}
                   </div>
                 </>
