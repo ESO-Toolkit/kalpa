@@ -94,7 +94,7 @@ function FileTreeNode({
       <div>
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-sm hover:bg-white/[0.04] transition-colors"
+          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-sm hover:bg-structure-04 transition-colors"
           style={{ paddingLeft: `${depth * 16 + 6}px` }}
         >
           {expanded ? (
@@ -131,7 +131,7 @@ function FileTreeNode({
         "flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors group",
         isSelected
           ? "bg-accent-sky/[0.08] border-l-2 border-accent-sky/40"
-          : "hover:bg-white/[0.04]"
+          : "hover:bg-structure-04"
       )}
       style={{ paddingLeft: `${depth * 16 + 6}px` }}
     >
@@ -270,7 +270,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   if (loadState === "loading" && !fileTree) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary mr-2" />
         Loading files...
       </div>
     );
@@ -340,7 +340,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
         <Suspense
           fallback={
             <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary mr-2" />
               Loading editor...
             </div>
           }

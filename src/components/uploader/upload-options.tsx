@@ -83,7 +83,7 @@ export function UploadOptionsControl({
     // Hairline dividers between the three groups read as one cohesive form rather
     // than flat siblings — without over-containering (no nested boxes inside the
     // already-raised options panel).
-    <div className="divide-y divide-white/[0.06]">
+    <div className="divide-y divide-structure-06">
       {/* Report name only has effect on the DIRECT upload path — the official
           uploader/CLI ignores options.description. Show it only when direct
           upload is the intended path so a typed name never silently does nothing. */}
@@ -120,7 +120,7 @@ export function UploadOptionsControl({
                 disabled={disabled}
                 title={t.hint}
                 onClick={() => setName(withTag(name || suggestion, t.id))}
-                className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-white/[0.16] hover:text-foreground/80 disabled:opacity-50"
+                className="rounded-md border border-structure-08 bg-structure-03 px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-structure-16 hover:text-foreground/80 disabled:opacity-50"
               >
                 {t.label}
               </button>
@@ -149,7 +149,7 @@ export function UploadOptionsControl({
                 "disabled:opacity-50",
                 options.region === r.id
                   ? "border-accent-sky/40 bg-accent-sky/[0.06] text-foreground"
-                  : "border-white/[0.06] bg-white/[0.02] text-muted-foreground hover:border-white/[0.12]"
+                  : "border-structure-06 bg-structure-02 text-muted-foreground hover:border-structure-12"
               )}
             >
               {r.label}
@@ -182,7 +182,7 @@ export function UploadOptionsControl({
                   // mode tabs, visibility); gold is reserved for primary actions.
                   active
                     ? "border-accent-sky/40 bg-accent-sky/[0.06]"
-                    : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                    : "border-structure-06 bg-structure-02 hover:border-structure-12"
                 )}
               >
                 <div

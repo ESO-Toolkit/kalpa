@@ -227,7 +227,7 @@ function PhaseIndicator({ current }: { current: MigrationPhase }) {
                 ? "bg-emerald-500/20 text-emerald-400"
                 : i === currentIndex
                   ? "bg-[#4dc2e6]/20 text-[#4dc2e6]"
-                  : "bg-white/[0.06] text-muted-foreground"
+                  : "bg-structure-06 text-muted-foreground"
             }`}
           >
             {i < currentIndex ? "\u2713" : i + 1}
@@ -237,7 +237,7 @@ function PhaseIndicator({ current }: { current: MigrationPhase }) {
           >
             {p.label}
           </span>
-          {i < phases.length - 1 && <div className="mx-1 h-px w-4 bg-white/[0.1]" />}
+          {i < phases.length - 1 && <div className="mx-1 h-px w-4 bg-structure-10" />}
         </div>
       ))}
     </div>
@@ -332,7 +332,7 @@ function SnapshotPhase({
         be used to restore your exact pre-migration state at any time.
       </p>
 
-      <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-2">
+      <div className="rounded-lg border border-structure-06 bg-structure-02 p-3 space-y-2">
         <SectionHeader className="text-xs">Snapshot will include:</SectionHeader>
         <div className="space-y-1 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
@@ -426,7 +426,7 @@ function DryRunPhase({
       )}
 
       {(dryRun.willTrack.length > 0 || dryRun.missingOnDisk.length > 0) && confirmed && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+        <div className="rounded-lg border border-structure-06 bg-structure-02 p-3">
           <p className="text-xs text-muted-foreground mb-2">
             This will only write to <code className="text-foreground">kalpa.json</code>. No addon
             folders, SavedVariables, or game settings will be touched.
@@ -445,7 +445,7 @@ function DiffSection({ title, color, items }: { title: string; color: string; it
     emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
     sky: "border-accent-sky/20 bg-accent-sky/[0.04] text-accent-sky",
     amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
-    white: "border-white/[0.08] bg-white/[0.02] text-muted-foreground",
+    white: "border-structure-08 bg-structure-02 text-muted-foreground",
   };
   const classes = colorMap[color] ?? colorMap.white;
 
@@ -490,7 +490,7 @@ function CompletePhase({
       </div>
 
       {snapshot && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
+        <div className="rounded-lg border border-structure-06 bg-structure-02 p-3 text-xs text-muted-foreground">
           <div className="font-medium text-foreground mb-1">Restore point saved</div>
           <div>
             Snapshot: {snapshot.fileCount} files ({formatBytes(snapshot.totalSize)})

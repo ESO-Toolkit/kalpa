@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { BUILTIN_THEMES } from "../theme-presets";
 import { evaluateContrast } from "../theme-contrast";
+import { LIGHT_THEME_BACKGROUND_LUMINANCE, structureInkForTheme } from "../theme-apply";
 import { relativeLuminance, contrastRatio, hexToRgb, mix } from "../theme-color";
 import { THEME_COLOR_KEYS } from "../theme-types";
 
@@ -18,17 +19,26 @@ describe("built-in themes", () => {
     }
   });
 
-  it("are genuinely dark (the component layer assumes dark surfaces)", () => {
+  it("keeps each preset in a coherent lightness family", () => {
     for (const theme of BUILTIN_THEMES) {
-      // bgBase / background / surface must be low-luminance.
-      expect(relativeLuminance(theme.colors.bgBase), `${theme.id} bgBase`).toBeLessThan(0.12);
-      expect(relativeLuminance(theme.colors.background), `${theme.id} background`).toBeLessThan(
-        0.12
-      );
-      expect(relativeLuminance(theme.colors.surface), `${theme.id} surface`).toBeLessThan(0.16);
+      const background = relativeLuminance(theme.colors.background);
+      const isLight = background >= LIGHT_THEME_BACKGROUND_LUMINANCE;
+
+      if (isLight) {
+        expect(relativeLuminance(theme.colors.bgBase), `${theme.id} bgBase`).toBeGreaterThan(0.7);
+        expect(background, `${theme.id} background`).toBeGreaterThan(0.7);
+        expect(relativeLuminance(theme.colors.surface), `${theme.id} surface`).toBeGreaterThan(0.7);
+        expect(structureInkForTheme(theme.colors), `${theme.id} structural ink`).toBe("0 0 0");
+      } else {
+        expect(relativeLuminance(theme.colors.bgBase), `${theme.id} bgBase`).toBeLessThan(0.12);
+        expect(background, `${theme.id} background`).toBeLessThan(0.12);
+        expect(relativeLuminance(theme.colors.surface), `${theme.id} surface`).toBeLessThan(0.16);
+        expect(structureInkForTheme(theme.colors), `${theme.id} structural ink`).toBe(
+          "255 255 255"
+        );
+      }
     }
   });
-
   it("meet WCAG 2 contrast minimums on every checked pair", () => {
     for (const theme of BUILTIN_THEMES) {
       for (const check of evaluateContrast(theme.colors)) {

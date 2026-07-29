@@ -96,7 +96,7 @@ function InstanceBadge({
           aria-label={`Managing ${label}${switchable ? " — switch instance" : ""}`}
           aria-expanded={open}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300",
+            "inline-flex items-center gap-1.5 rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300",
             switchable
               ? "cursor-pointer hover:border-accent-sky/20 hover:text-white/70"
               : "cursor-default"
@@ -110,7 +110,7 @@ function InstanceBadge({
         </button>
       </SimpleTooltip>
       {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-xl border border-white/[0.06] bg-surface-overlay p-1 shadow-lg backdrop-blur-xl">
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-xl border border-structure-06 bg-surface-overlay p-1 shadow-lg backdrop-blur-xl">
           {instances.map((inst) => {
             const isActive = inst.addonsPath === activeAddonsPath;
             return (
@@ -122,7 +122,7 @@ function InstanceBadge({
                   if (!isActive) onSwitchInstance(inst.addonsPath);
                 }}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium transition-colors hover:bg-white/[0.06]",
+                  "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium transition-colors hover:bg-structure-06",
                   isActive ? "text-sky-300" : "text-muted-foreground"
                 )}
               >
@@ -195,7 +195,7 @@ function AppHeaderBase({
         if ((e.target as HTMLElement).closest('button, a, input, [role="button"]')) return;
         void getCurrentWindow().toggleMaximize();
       }}
-      className={`relative z-20 flex items-center border-b border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2] ${
+      className={`relative z-20 flex items-center border-b border-structure-06 bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_var(--structure-05)] backdrop-blur-xl backdrop-saturate-[1.2] ${
         // Clear the macOS traffic-light overlay on the left.
         isMac() ? "pr-4 pl-20" : "px-4"
       }`}
@@ -207,10 +207,10 @@ function AppHeaderBase({
           <h1 className="bg-gradient-to-r from-primary via-primary-hover to-primary bg-clip-text font-heading text-[13px] font-bold uppercase tracking-[0.15em] text-transparent">
             Kalpa
           </h1>
-          <div className="h-3 w-px bg-white/[0.12]" />
+          <div className="h-3 w-px bg-structure-12" />
           <button
             onClick={() => void openUrl("https://esotk.com")}
-            className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-white/60 cursor-pointer"
+            className="inline-flex items-center rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-white/60 cursor-pointer"
           >
             esotk.com
           </button>
@@ -259,7 +259,7 @@ function AppHeaderBase({
                 Tag
               </Button>
               {tagMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.06] bg-surface-overlay backdrop-blur-xl p-1 shadow-lg">
+                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-structure-06 bg-surface-overlay backdrop-blur-xl p-1 shadow-lg">
                   {PRESET_TAGS.map((tag) => (
                     <button
                       key={tag}
@@ -269,7 +269,7 @@ function AppHeaderBase({
                         setCustomTagInput("");
                       }}
                       className={cn(
-                        "w-full text-left rounded px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-white/[0.06]",
+                        "w-full text-left rounded px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-structure-06",
                         tag === "favorite"
                           ? "text-primary"
                           : tag === "broken"
@@ -284,7 +284,7 @@ function AppHeaderBase({
                       {tag}
                     </button>
                   ))}
-                  <div className="border-t border-white/[0.06] mt-1 pt-1">
+                  <div className="border-t border-structure-06 mt-1 pt-1">
                     <form
                       onSubmit={(e) => {
                         e.preventDefault();
@@ -301,13 +301,13 @@ function AppHeaderBase({
                         value={customTagInput}
                         onChange={(e) => setCustomTagInput(e.target.value)}
                         placeholder="Custom tag..."
-                        className="flex-1 min-w-0 rounded-[10px] bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.15] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-accent-sky/40"
+                        className="flex-1 min-w-0 rounded-[10px] bg-structure-04 border border-structure-06 hover:border-structure-15 px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-accent-sky/40"
                         autoFocus
                       />
                       <button
                         type="submit"
                         disabled={!customTagInput.trim()}
-                        className="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground disabled:opacity-30 disabled:pointer-events-none"
+                        className="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-structure-06 hover:text-foreground disabled:opacity-30 disabled:pointer-events-none"
                         aria-label="Add custom tag"
                       >
                         <Plus className="size-3.5" />
@@ -340,7 +340,7 @@ function AppHeaderBase({
               {checkingUpdates && (
                 <span className="ml-1 inline-flex items-center gap-1">
                   ·
-                  <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+                  <span className="inline-block size-3 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
                 </span>
               )}
             </span>
@@ -400,7 +400,7 @@ function AppHeaderBase({
           <SimpleTooltip content="Minimize" side="bottom">
             <button
               onClick={() => void getCurrentWindow().minimize()}
-              className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+              className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-structure-06 hover:text-foreground"
               aria-label="Minimize"
             >
               <MinusIcon className="size-3.5" />
@@ -409,7 +409,7 @@ function AppHeaderBase({
           <SimpleTooltip content="Maximize" side="bottom">
             <button
               onClick={() => void getCurrentWindow().toggleMaximize()}
-              className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+              className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-structure-06 hover:text-foreground"
               aria-label="Maximize"
             >
               <SquareIcon className="size-3" />

@@ -32,9 +32,9 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
 
   return (
     <GlassPanel variant="subtle" className="overflow-hidden">
-      <div className="flex border-b border-white/[0.06] text-xs">
+      <div className="flex border-b border-structure-06 text-xs">
         <div className="flex-1 px-3 py-1.5 text-primary font-medium">Your version</div>
-        <div className="flex-1 px-3 py-1.5 text-accent-sky font-medium border-l border-white/[0.06]">
+        <div className="flex-1 px-3 py-1.5 text-accent-sky font-medium border-l border-structure-06">
           The update
         </div>
       </div>
@@ -42,7 +42,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
         {hunks.map((hunk, hi) => (
           <div key={hi}>
             {hi > 0 && (
-              <div className="border-y border-white/[0.04] bg-white/[0.01] px-3 py-0.5 text-muted-foreground text-center text-[11px]">
+              <div className="border-y border-structure-04 bg-structure-01 px-3 py-0.5 text-muted-foreground text-center text-[11px]">
                 ···
               </div>
             )}
@@ -57,7 +57,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
                       <span className="text-primary/40 select-none mr-2">−</span>
                       <span className="text-primary">{content}</span>
                     </div>
-                    <div className="flex-1 border-l border-white/[0.06]" />
+                    <div className="flex-1 border-l border-structure-06" />
                   </div>
                 );
               }
@@ -80,7 +80,7 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
                     <span className="text-transparent select-none mr-2"> </span>
                     {content}
                   </div>
-                  <div className="flex-1 px-3 text-muted-foreground border-l border-white/[0.06] whitespace-pre-wrap break-all">
+                  <div className="flex-1 px-3 text-muted-foreground border-l border-structure-06 whitespace-pre-wrap break-all">
                     <span className="text-transparent select-none mr-2"> </span>
                     {content}
                   </div>

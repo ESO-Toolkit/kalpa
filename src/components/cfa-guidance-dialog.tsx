@@ -79,7 +79,7 @@ export function CfaGuidanceDialog({
         <ol className="space-y-2 text-sm text-foreground">
           {steps.map((step, i) => (
             <li key={i} className="flex gap-2.5">
-              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-white/[0.06] text-xs font-medium text-foreground">
+              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-structure-06 text-xs font-medium text-foreground">
                 {i + 1}
               </span>
               <span>{step}</span>
@@ -88,7 +88,7 @@ export function CfaGuidanceDialog({
         </ol>
 
         {exePath && (
-          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] p-2">
+          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-structure-06 bg-structure-03 p-2">
             <code
               className="min-w-0 flex-1 truncate font-mono text-xs text-foreground"
               title={exePath}

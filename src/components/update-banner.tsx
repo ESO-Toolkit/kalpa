@@ -104,7 +104,7 @@ function ChooserRow({
   return (
     <label
       className={cn(
-        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors duration-150 ease-out hover:bg-white/[0.04]",
+        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors duration-150 ease-out hover:bg-structure-04",
         checked && "bg-primary/[0.04]"
       )}
     >
@@ -267,7 +267,7 @@ function UpdateBannerBase({
                       cy="10"
                       r="8"
                       fill="none"
-                      stroke="rgba(255,255,255,0.06)"
+                      stroke="var(--structure-06)"
                       strokeWidth="2"
                     />
                     <circle
@@ -355,7 +355,7 @@ function UpdateBannerBase({
                 id="update-chooser"
                 role="region"
                 aria-label="Choose which addons to update"
-                className="border-t border-white/[0.06] px-5 pt-2.5 pb-3"
+                className="border-t border-structure-06 px-5 pt-2.5 pb-3"
               >
                 {/* Toolbar: select-all + scoped update action */}
                 <div className="flex items-center justify-between gap-3 pb-1.5">
@@ -416,7 +416,7 @@ function UpdateBannerBase({
         {/* Segmented progress bar */}
         {updatingAll && total > 0 && (
           <div
-            className="relative h-[3px] bg-white/[0.04]"
+            className="relative h-[3px] bg-structure-04"
             role="progressbar"
             aria-valuenow={Number(progressPct)}
             aria-valuemin={0}
@@ -434,7 +434,7 @@ function UpdateBannerBase({
                 className="absolute inset-y-0 left-0 overflow-hidden transition-all duration-500 ease-out"
                 style={{ width: `${progressPct}%` }}
               >
-                <div className="h-full w-full animate-[shimmer_1.5s_ease-in-out_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+                <div className="h-full w-full animate-[shimmer_1.5s_ease-in-out_infinite] bg-gradient-to-r from-transparent via-structure-20 to-transparent" />
               </div>
             )}
           </div>

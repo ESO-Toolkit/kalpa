@@ -41,7 +41,7 @@ export const PACK_TYPE_ACCENT: Record<
     hoverBg: "hover:bg-primary/[0.08]",
     text: "text-primary",
     hoverGlow:
-      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_var(--structure-06)]",
   },
   "build-pack": {
     border: "border-l-accent-sky/70",
@@ -49,7 +49,7 @@ export const PACK_TYPE_ACCENT: Record<
     hoverBg: "hover:bg-accent-sky/[0.08]",
     text: "text-accent-sky",
     hoverGlow:
-      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_var(--structure-06)]",
   },
   "roster-pack": {
     border: "border-l-violet-400/70",
@@ -57,7 +57,7 @@ export const PACK_TYPE_ACCENT: Record<
     hoverBg: "hover:bg-violet-400/[0.08]",
     text: "text-violet-400",
     hoverGlow:
-      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--status-library)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--status-library)_10%,transparent),inset_0_1px_0_var(--structure-06)]",
   },
 };
 

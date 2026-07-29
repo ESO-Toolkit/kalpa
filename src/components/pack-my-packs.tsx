@@ -139,9 +139,9 @@ export function MyPacksView({
   return (
     <div className="flex flex-col gap-3 min-h-0">
       {/* Sub-tab toggle: Created / Installed */}
-      <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+      <div className="relative flex p-0.5 rounded-lg bg-structure-03 border border-structure-06">
         <div
-          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
+          className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-08 shadow-sm transition-[left] duration-200 ease-out"
           style={{
             left: subTab === "created" ? "2px" : "calc(50% + 2px)",
             width: "calc(50% - 4px)",
@@ -267,14 +267,14 @@ export function MyPacksView({
                       }}
                       style={identity.cardStyle}
                       className={cn(
-                        "group w-full text-left rounded-xl border border-white/[0.1] p-3",
+                        "group w-full text-left rounded-xl border border-structure-10 p-3",
                         "border-l-[3px] cursor-pointer",
                         "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
                         // Real elevation so the opaque card sits clearly above the background.
-                        "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.07)]",
+                        "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_var(--structure-07)]",
                         accent.border,
-                        "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.1)]",
-                        "hover:border-white/[0.18] motion-safe:hover:-translate-y-[2px]",
+                        "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_var(--structure-10)]",
+                        "hover:border-structure-18 motion-safe:hover:-translate-y-[2px]",
                         "motion-reduce:transition-none",
                         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                       )}
@@ -435,15 +435,15 @@ export function MyPacksView({
                 onClick={onLoadMore}
                 disabled={loadingMore}
                 className={cn(
-                  "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
-                  "shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-all duration-200 hover:bg-white/[0.05] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.15)]",
+                  "w-full py-2.5 rounded-xl border border-structure-06 bg-structure-02 text-xs font-semibold",
+                  "shadow-[inset_0_1px_0_var(--structure-03)] transition-all duration-200 hover:bg-structure-05 hover:border-structure-12 hover:shadow-[inset_0_1px_0_var(--structure-05),0_2px_8px_rgba(0,0,0,0.15)]",
                   "text-muted-foreground hover:text-foreground",
                   loadingMore && "opacity-60 cursor-wait"
                 )}
               >
                 {loadingMore ? (
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
                     Loading...
                   </span>
                 ) : (
@@ -493,14 +493,14 @@ export function MyPacksView({
                   }}
                   style={identity.cardStyle}
                   className={cn(
-                    "group w-full text-left rounded-xl border border-white/[0.1] p-3",
+                    "group w-full text-left rounded-xl border border-structure-10 p-3",
                     "border-l-[3px] cursor-pointer",
                     "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
                     // Real elevation so the opaque card sits clearly above the background.
-                    "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.07)]",
+                    "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_var(--structure-07)]",
                     accent.border,
-                    "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.1)]",
-                    "hover:border-white/[0.18] motion-safe:hover:-translate-y-[2px]",
+                    "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_var(--structure-10)]",
+                    "hover:border-structure-18 motion-safe:hover:-translate-y-[2px]",
                     "motion-reduce:transition-none",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                   )}

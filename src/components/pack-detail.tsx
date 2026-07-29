@@ -200,7 +200,7 @@ export function PackDetailView({
               votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
               pack.userVoted
                 ? "text-primary bg-primary/[0.15] border-primary/40 hover:bg-primary/[0.22] shadow-[0_0_14px_color-mix(in_oklab,var(--primary)_25%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_12%,transparent)]"
-                : "text-muted-foreground bg-white/[0.03] border-white/[0.08] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
+                : "text-muted-foreground bg-structure-03 border-structure-08 hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
             )}
           >
             <ArrowUpIcon
@@ -226,11 +226,11 @@ export function PackDetailView({
           offset={12}
           transition={{ type: "spring", stiffness: 300, damping: 25 }}
         >
-          <div className="rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
+          <div className="rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_var(--structure-04),0_4px_16px_rgba(0,0,0,0.15)]">
             {/* Segmented control: Private Link vs Export File */}
-            <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <div className="relative flex p-0.5 rounded-lg bg-structure-03 border border-structure-06">
               <div
-                className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-08 shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
                 style={{
                   left: shareMode === "private-link" ? "2px" : "calc(50% + 2px)",
                   width: "calc(50% - 4px)",
@@ -278,7 +278,7 @@ export function PackDetailView({
                       </SimpleTooltip>
                     </div>
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground">
+                      <code className="flex-1 truncate rounded-md bg-structure-05 px-3 py-1.5 text-xs text-muted-foreground">
                         {shareResult.deepLink}
                       </code>
                       <SimpleTooltip content="Copy deep link">
@@ -388,7 +388,7 @@ export function PackDetailView({
                 <span className="text-emerald-400 font-medium">Installed successfully</span>
               </div>
             )}
-            <div className="h-1.5 rounded-full bg-white/[0.06]">
+            <div className="h-1.5 rounded-full bg-structure-06">
               <div
                 className={cn(
                   "h-full rounded-full transition-all duration-300 ease-out",
@@ -523,7 +523,7 @@ function AddonRow({
               ? "bg-primary/15 border-primary/40"
               : checked
                 ? "bg-primary/20 border-primary/50 shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_15%,transparent)]"
-                : "border-white/20 bg-white/[0.03] group-hover:border-accent-sky/40 group-hover:bg-accent-sky/[0.06]"
+                : "border-structure-20 bg-structure-03 group-hover:border-accent-sky/40 group-hover:bg-accent-sky/[0.06]"
           )}
         >
           {(checked || locked) && (

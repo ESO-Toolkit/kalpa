@@ -1,7 +1,8 @@
+import { relativeLuminance } from "./theme-color";
 import type { ThemeColors, ThemeSkin } from "./theme-types";
 
 /**
- * Applies a theme by writing only the 12 BASE CSS variables to the document root.
+ * Applies a theme by writing the 12 BASE CSS variables plus derived structural ink to the document root.
  *
  * Every other token (card-alt, muted, secondary, glass tints, scrollbar, sidebar,
  * primary-hover, glow, …) is derived from these 12 in `index.css` using
@@ -27,7 +28,20 @@ const VAR_MAP: Record<keyof ThemeColors, string> = {
   orb3: "--orb-3",
 };
 
-const MANAGED_VARS = Object.values(VAR_MAP);
+const STRUCTURE_RGB_VAR = "--structure-rgb";
+
+const MANAGED_VARS = [...Object.values(VAR_MAP), STRUCTURE_RGB_VAR];
+
+/** Background luminance at/above this point reads as a light theme, so translucent
+ * structural affordances (hairlines, fill plates, dividers) should use black ink.
+ * Below it, keep the original white ink exactly. */
+export const LIGHT_THEME_BACKGROUND_LUMINANCE = 0.45;
+
+export function structureInkForTheme(colors: ThemeColors): "0 0 0" | "255 255 255" {
+  return relativeLuminance(colors.background) >= LIGHT_THEME_BACKGROUND_LUMINANCE
+    ? "0 0 0"
+    : "255 255 255";
+}
 
 /** Resolve a theme's seed colors into the `{ "--css-var": value }` map applied to
  * the root. Used both to apply at runtime and to mirror to localStorage for the
@@ -37,6 +51,7 @@ export function themeColorsToVars(colors: ThemeColors): Record<string, string> {
   for (const key of Object.keys(VAR_MAP) as (keyof ThemeColors)[]) {
     vars[VAR_MAP[key]] = colors[key];
   }
+  vars[STRUCTURE_RGB_VAR] = structureInkForTheme(colors);
   return vars;
 }
 

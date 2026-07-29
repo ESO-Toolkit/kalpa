@@ -118,7 +118,7 @@ function NoCandidates({ onSelect }: { onSelect: (path: string) => void }) {
       <p className="text-sm text-muted-foreground">
         We couldn&apos;t automatically detect your ESO AddOns folder. It&apos;s usually located at:
       </p>
-      <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 font-mono text-xs text-muted-foreground break-all">
+      <div className="rounded-lg border border-structure-06 bg-structure-02 px-3 py-2 font-mono text-xs text-muted-foreground break-all">
         {exampleAddonsPath()}
       </div>
       <p className="text-xs text-muted-foreground">
@@ -142,7 +142,7 @@ function InstanceCard({
   return (
     <GlassPanel
       variant="subtle"
-      className="p-3 transition-colors duration-150 hover:border-white/[0.12]"
+      className="p-3 transition-colors duration-150 hover:border-structure-12"
     >
       <div className="mb-1 flex items-center gap-2">
         {recommended && <InfoPill color="gold">Recommended</InfoPill>}

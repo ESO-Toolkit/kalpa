@@ -149,7 +149,7 @@ export function UpdateConflictPanel({
                 <div className="mt-1">
                   {loadingDiff ? (
                     <div className="flex items-center justify-center py-4 text-muted-foreground text-sm">
-                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary mr-2" />
                       Loading differences...
                     </div>
                   ) : diffData?.isBinary ? (

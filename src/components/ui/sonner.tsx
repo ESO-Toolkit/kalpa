@@ -7,13 +7,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
       className="toaster group"
       toastOptions={{
         className:
-          "!bg-surface-overlay !border-white/[0.08] !text-foreground !backdrop-blur-2xl !shadow-[0_16px_48px_rgba(0,0,0,0.5),0_0_0_1px_rgba(255,255,255,0.03),inset_0_1px_0_rgba(255,255,255,0.06)]",
+          "!bg-surface-overlay !border-structure-08 !text-foreground !backdrop-blur-2xl !shadow-[0_16px_48px_rgba(0,0,0,0.5),0_0_0_1px_var(--structure-03),inset_0_1px_0_var(--structure-06)]",
       }}
       style={
         {
           "--normal-bg": "var(--surface-overlay)",
           "--normal-text": "var(--foreground)",
-          "--normal-border": "rgba(255, 255, 255, 0.08)",
+          "--normal-border": "var(--structure-08)",
           "--border-radius": "0.875rem",
         } as React.CSSProperties
       }

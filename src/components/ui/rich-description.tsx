@@ -61,7 +61,7 @@ export function RichDescription({ text, className }: RichDescriptionProps) {
   return (
     <div
       className={[
-        "rounded-xl border border-white/[0.06] bg-gradient-to-b from-white/[0.03] to-white/[0.01] p-4 text-sm text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+        "rounded-xl border border-structure-06 bg-gradient-to-b from-structure-03 to-structure-01 p-4 text-sm text-foreground shadow-[inset_0_1px_0_var(--structure-04)]",
         className,
       ]
         .filter(Boolean)

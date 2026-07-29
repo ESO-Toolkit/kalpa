@@ -145,7 +145,7 @@ export function Characters({
           />
         </div>
 
-        <div className="border-t border-white/[0.06]" />
+        <div className="border-t border-structure-06" />
 
         <div className="max-h-[350px] overflow-y-auto space-y-4">
           {loading ? (
@@ -187,7 +187,7 @@ export function Characters({
                             key={`${char.server}-${char.name}`}
                             delay={serverIdx * 80 + charIdx * 40}
                           >
-                            <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+                            <div className="flex items-center justify-between rounded-xl border border-structure-06 bg-structure-02 p-3 transition-all duration-200 hover:border-structure-10">
                               <span className="text-sm font-medium">{char.name}</span>
                               <Button
                                 size="sm"

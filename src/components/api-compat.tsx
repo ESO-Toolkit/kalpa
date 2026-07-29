@@ -54,7 +54,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
         {loading ? (
           <Fade>
             <div className="flex items-center justify-center py-8">
-              <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+              <span className="inline-block size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
               <span className="ml-2 text-muted-foreground">Checking compatibility...</span>
             </div>
           </Fade>
@@ -100,7 +100,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
               )}
 
               {info.outdatedAddons.length > 0 && info.upToDateAddons.length > 0 && (
-                <div className="border-t border-white/[0.06]" />
+                <div className="border-t border-structure-06" />
               )}
 
               {info.upToDateAddons.length > 0 && (

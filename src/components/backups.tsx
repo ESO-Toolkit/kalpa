@@ -326,7 +326,7 @@ export function Backups({
                 transition={{ duration: 0.18 }}
                 className="overflow-hidden"
               >
-                <div className="text-xs text-muted-foreground space-y-1.5 pl-4 border-l border-white/[0.08]">
+                <div className="text-xs text-muted-foreground space-y-1.5 pl-4 border-l border-structure-08">
                   <p>
                     Your <span className="text-foreground">addon settings</span> — every
                     customization, keybind, and configuration each addon remembers between sessions
@@ -423,7 +423,7 @@ function StatusHero({
   loaded: boolean;
 }) {
   if (!loaded) {
-    return <div className="h-[68px] rounded-xl bg-white/[0.02] border border-white/[0.04]" />;
+    return <div className="h-[68px] rounded-xl bg-structure-02 border border-structure-04" />;
   }
 
   if (protection === "none") {
@@ -509,8 +509,8 @@ function BackupRow({
   return (
     <div
       className={cn(
-        "flex items-center justify-between rounded-xl border bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.12]",
-        isSafety ? "border-violet-400/15 bg-violet-400/[0.025]" : "border-white/[0.06]"
+        "flex items-center justify-between rounded-xl border bg-structure-02 p-3 transition-all duration-200 hover:border-structure-12",
+        isSafety ? "border-violet-400/15 bg-violet-400/[0.025]" : "border-structure-06"
       )}
     >
       <div className="min-w-0 flex-1 pr-3">
@@ -643,7 +643,7 @@ function RestoreConfirmDialog({
         )}
 
         {backup && (
-          <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-3 space-y-1">
+          <div className="rounded-xl border border-structure-08 bg-structure-02 p-3 space-y-1">
             <div className="text-sm font-medium truncate" title={backup.name}>
               {backup.kind === "autoBeforeRestore"
                 ? "Auto-saved before restore"

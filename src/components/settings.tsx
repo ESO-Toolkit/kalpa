@@ -380,7 +380,7 @@ export function Settings({
           </DialogHeader>
 
           {/* Tab bar */}
-          <div className="relative flex gap-1 rounded-lg bg-white/[0.03] border border-white/[0.04] p-1">
+          <div className="relative flex gap-1 rounded-lg bg-structure-03 border border-structure-04 p-1">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               const active = activeTab === tab.id;
@@ -392,13 +392,13 @@ export function Settings({
                   className={`relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
                     active
                       ? "text-white"
-                      : "text-muted-foreground hover:text-white/70 hover:bg-white/[0.03]"
+                      : "text-muted-foreground hover:text-white/70 hover:bg-structure-03"
                   }`}
                 >
                   {active && (
                     <motion.span
                       layoutId="settings-tab-indicator"
-                      className="absolute inset-0 rounded-md bg-white/[0.08] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
+                      className="absolute inset-0 rounded-md bg-structure-08 shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-04)]"
                       transition={{ type: "spring", stiffness: 400, damping: 30 }}
                     />
                   )}
@@ -467,7 +467,7 @@ export function Settings({
                             <button
                               key={inst.id}
                               type="button"
-                              className="flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-foreground transition-all duration-150 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                              className="flex w-full items-center gap-2 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2 text-left text-xs text-foreground transition-all duration-150 hover:border-structure-12 hover:bg-structure-04"
                               onClick={() => {
                                 setPath(inst.addonsPath);
                                 setRedetectedInstances(null);
@@ -501,7 +501,7 @@ export function Settings({
                                 className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
                                   isActive
                                     ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
-                                    : "border-white/[0.06] bg-white/[0.02] text-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
+                                    : "border-structure-06 bg-structure-02 text-foreground hover:border-structure-12 hover:bg-structure-04"
                                 }`}
                                 onClick={() => {
                                   if (!isActive) {
@@ -738,7 +738,7 @@ export function Settings({
                           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
                             conflictPolicy === value
                               ? "border-[#c4a44a] bg-[#c4a44a]/20"
-                              : "border-white/20 bg-white/[0.03]"
+                              : "border-structure-20 bg-structure-03"
                           }`}
                         >
                           {conflictPolicy === value && (
@@ -775,7 +775,7 @@ export function Settings({
                           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
                             dependencyPolicy === value
                               ? "border-[#c4a44a] bg-[#c4a44a]/20"
-                              : "border-white/20 bg-white/[0.03]"
+                              : "border-structure-20 bg-structure-03"
                           }`}
                         >
                           {dependencyPolicy === value && (
@@ -797,7 +797,7 @@ export function Settings({
                       permanent and invisible, so the prompt could never come back.
                       Hidden while the list is empty so it stays quiet. */}
                     {skippedDependencies.length > 0 && (
-                      <div className="flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+                      <div className="flex items-center justify-between gap-2 border-t border-structure-06 pt-2">
                         <p
                           className="text-xs text-muted-foreground"
                           title={skippedDependencies.join(", ")}
@@ -1020,14 +1020,14 @@ function ToolItem({
       className={`group flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-all duration-150 hover:-translate-y-px ${
         accent === "gold"
           ? "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] hover:border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.06]"
-          : "border-white/[0.04] bg-white/[0.02] hover:border-white/[0.08] hover:bg-white/[0.04]"
+          : "border-structure-04 bg-structure-02 hover:border-structure-08 hover:bg-structure-04"
       }`}
     >
       <div
         className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
           accent === "gold"
             ? "bg-[#c4a44a]/10 text-[#c4a44a]"
-            : "bg-white/[0.04] text-muted-foreground group-hover:text-white/70"
+            : "bg-structure-04 text-muted-foreground group-hover:text-white/70"
         } transition-colors duration-150`}
       >
         <Icon className="size-4" />

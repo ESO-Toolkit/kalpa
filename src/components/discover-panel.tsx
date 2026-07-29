@@ -128,7 +128,7 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   return (
     <div
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-white/[0.04] group",
+        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-structure-04 group",
         selected &&
           "bg-primary/[0.06] border-l-primary! shadow-[inset_4px_0_16px_-4px_color-mix(in_oklab,var(--primary)_15%,transparent),inset_0_0_0_1px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
       )}
@@ -141,7 +141,7 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
               "shrink-0 size-6 flex items-center justify-center rounded-md text-[11px] font-bold font-heading tabular-nums",
               rank <= 3
                 ? "bg-primary/12 text-primary border border-primary/20"
-                : "bg-white/[0.03] text-muted-foreground border border-white/[0.06]"
+                : "bg-structure-03 text-muted-foreground border border-structure-06"
             )}
           >
             {rank}
@@ -330,14 +330,14 @@ export function DiscoverPanel({
               "relative flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
               activeTab === tab
                 ? "text-primary"
-                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-transparent"
             )}
             onClick={() => onTabChange(tab)}
           >
             {activeTab === tab && (
               <motion.span
                 layoutId="discover-tab-indicator"
-                className="absolute inset-0 rounded-lg bg-primary/15 border border-primary/25 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                className="absolute inset-0 rounded-lg bg-primary/15 border border-primary/25 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_var(--structure-05)]"
                 transition={{ type: "spring", stiffness: 400, damping: 30 }}
               />
             )}
@@ -647,7 +647,7 @@ function PopularContent({
               "flex-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all duration-150 flex items-center justify-center gap-1.5",
               sortBy === "downloads"
                 ? "bg-primary/15 text-primary border border-primary/25"
-                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-white/[0.06]"
+                : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-structure-06"
             )}
             onClick={() => handleSortChange("downloads")}
           >
@@ -659,7 +659,7 @@ function PopularContent({
               "flex-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all duration-150 flex items-center justify-center gap-1.5",
               sortBy === "newest"
                 ? "bg-primary/15 text-primary border border-primary/25"
-                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-white/[0.06]"
+                : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-structure-06"
             )}
             onClick={() => handleSortChange("newest")}
           >
@@ -990,20 +990,20 @@ function UrlContent({
         />
       </div>
 
-      <div className="rounded-xl border border-white/[0.04] bg-white/[0.02] p-3 space-y-2">
+      <div className="rounded-xl border border-structure-04 bg-structure-02 p-3 space-y-2">
         <div className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
           Supported formats
         </div>
         <div className="space-y-1 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
             <span className="text-primary">1.</span>
-            <code className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[11px]">
+            <code className="rounded bg-structure-04 px-1.5 py-0.5 text-[11px]">
               https://esoui.com/downloads/info123
             </code>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-primary">2.</span>
-            <code className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[11px]">123</code>
+            <code className="rounded bg-structure-04 px-1.5 py-0.5 text-[11px]">123</code>
             <span className="text-muted-foreground">(addon ID)</span>
           </div>
         </div>
@@ -1094,7 +1094,7 @@ function EmptyState({
   return (
     <Fade transition={{ type: "spring", stiffness: 200, damping: 25 }}>
       <div className="flex flex-col items-center justify-center py-12 gap-3 px-6">
-        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
+        <div className="rounded-2xl bg-structure-03 border border-structure-06 p-4 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
           {icon}
         </div>
         <div className="text-center">
