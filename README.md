@@ -9,6 +9,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#features">Features</a> ·
+  <a href="#accessibility">Accessibility</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#security--privacy">Security</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -76,9 +77,17 @@ A pack is a named set of addons that someone can install in one click. Packs com
 
 ### Themes
 
-Forty-nine built-in themes live under Settings → Appearance: eight Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora and others), ESO faction palettes, and editor classics like Dracula, Nord, and Catppuccin.
+Fifty-four built-in themes live under Settings → Appearance: eight Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora and others), ESO faction palettes, editor classics like Dracula, Nord, and Catppuccin, and five built for legibility.
 
 The theme builder takes twelve seed colors and previews the result live, with a WCAG AA contrast check to catch unreadable combinations. Themes copy and paste as plain text. Whichever theme is active is applied before the window first paints, so there's no flash of the wrong palette on launch.
+
+### Accessibility
+
+A player with low vision reported that Kalpa's text was both too faint and too small ([#199](https://github.com/ESO-Toolkit/kalpa/issues/199)). Three things came out of it.
+
+- **Text that keeps its theme's contrast.** Every theme defined readable muted text and none of them delivered it: components faded that text with an opacity multiplier _after_ the theme had chosen the color. The worst case rendered at 1.9:1 in a theme that measured 5.1:1, and trying a different theme could not help, because the fade sat on top of whichever one was active. Readable text now paints at full strength, and a test fails if any of it starts fading again.
+- **A text size control** in Settings → Appearance — 100%, 110%, 125% or 150%, also on `Ctrl`/`⌘` with `+`, `-` and `0`. It scales the whole interface rather than body copy alone: Kalpa's smallest labels are set in fixed pixels, so a font-size slider would have skipped exactly the text that was hard to read. At 150% the minimum window grows to 1200 × 750, which still fits a 1366 × 768 laptop.
+- **Light and high-contrast themes.** A new Accessibility category, placed third in the gallery so it sits ahead of the decorative sets, holds two high-contrast dark themes that clear 12:1 on every pair the contrast checker measures, plus three light ones: Paper White, Soft Grey and Warm Parchment. Light themes render correctly because borders, dividers, panel fills and status colors now follow the theme's own lightness instead of assuming a dark background.
 
 ### Profiles
 
@@ -190,6 +199,14 @@ The theme gallery in Settings → Appearance, with Nordic Runestone active.
   <img src=".screenshots/themes.webp" alt="Theme gallery showing Elder Scrolls skins as preview cards, Nordic Runestone marked active" width="800" />
 </p>
 
+### Text size and light themes
+
+Settings → Appearance in the Paper White theme, with the interface scale control and its keyboard shortcuts.
+
+<p align="center">
+  <img src=".screenshots/accessibility.webp" alt="Kalpa's Appearance settings in a light theme, showing an interface scale control set to 100% with 110, 125 and 150 percent options, a line explaining the Ctrl-plus and Ctrl-minus shortcuts, and the start of the theme gallery" width="800" />
+</p>
+
 ### SavedVariables
 
 An addon's settings tree beside its editable values, labeled from the addon's own LibAddonMenu definitions.
@@ -241,11 +258,11 @@ The General tab: AddOns folder, the detected NA/EU/PTS installs, and the native 
 
 ### Platform support
 
-| Platform | Status | Download | Notes |
-|---|---|---|---|
-| **Windows** 10 (1803+) / 11 | Stable | `.exe` (NSIS) | WebView2 ships with Win 11 and is bootstrapped on Win 10 |
-| **macOS** 10.15+ | Beta | `.dmg` (universal) | Intel and Apple Silicon. See [first launch](#macos-first-launch) |
-| **Linux** x86_64 | Beta | `.AppImage` / `.deb` / `.rpm` | AppImage self-updates. Detects ESO under Steam Proton |
+| Platform                    | Status | Download                      | Notes                                                            |
+| --------------------------- | ------ | ----------------------------- | ---------------------------------------------------------------- |
+| **Windows** 10 (1803+) / 11 | Stable | `.exe` (NSIS)                 | WebView2 ships with Win 11 and is bootstrapped on Win 10         |
+| **macOS** 10.15+            | Beta   | `.dmg` (universal)            | Intel and Apple Silicon. See [first launch](#macos-first-launch) |
+| **Linux** x86_64            | Beta   | `.AppImage` / `.deb` / `.rpm` | AppImage self-updates. Detects ESO under Steam Proton            |
 
 > [!IMPORTANT]
 > Each release ships a `.sig` updater signature for every auto-updatable artifact, plus one shared `latest.json`. The `.dmg` is the exception: macOS updates ship as the `.app.tar.gz`, so that is what gets signed. [Verify your download](docs/verify-download.md) explains how to check what you downloaded.
@@ -298,34 +315,34 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 
 ### Troubleshooting
 
-| Problem | Solution |
-|---|---|
-| **"MSVC toolchain not found"** | `rustup default stable-x86_64-pc-windows-msvc` |
-| **Linker errors during build** | Install Visual Studio Build Tools with the "Desktop development with C++" workload |
-| **WebView2 not found at runtime** | Run the [Evergreen Bootstrapper](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) |
-| **Antivirus blocks the app** | Add an exception for `kalpa.exe` or its install directory |
+| Problem                                                         | Solution                                                                                                                                            |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **"MSVC toolchain not found"**                                  | `rustup default stable-x86_64-pc-windows-msvc`                                                                                                      |
+| **Linker errors during build**                                  | Install Visual Studio Build Tools with the "Desktop development with C++" workload                                                                  |
+| **WebView2 not found at runtime**                               | Run the [Evergreen Bootstrapper](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)                                                    |
+| **Antivirus blocks the app**                                    | Add an exception for `kalpa.exe` or its install directory                                                                                           |
 | **Updates fail with "access denied", or addons vanish in-game** | Windows Controlled Folder Access is blocking writes. Kalpa offers a guided fix, or allow `kalpa.exe` under Windows Security → Ransomware protection |
-| **`npm run tauri dev` fails** | `npm run check:env` reports which prerequisite is missing |
-| **macOS: "Kalpa is damaged and can't be opened"** | Not notarized yet: `xattr -dr com.apple.quarantine /Applications/Kalpa.app` |
-| **Linux: sign-in doesn't persist** | Install or enable a Secret Service keyring (GNOME Keyring or KWallet) |
-| **Linux: ESO install not detected** | Kalpa scans Steam Proton prefixes, including Flatpak and Snap. Launch ESO once so the prefix exists, or set the AddOns path manually in Settings |
-| **White screen on launch** | Check WebView2 is installed and current; reinstalling it usually fixes this |
+| **`npm run tauri dev` fails**                                   | `npm run check:env` reports which prerequisite is missing                                                                                           |
+| **macOS: "Kalpa is damaged and can't be opened"**               | Not notarized yet: `xattr -dr com.apple.quarantine /Applications/Kalpa.app`                                                                         |
+| **Linux: sign-in doesn't persist**                              | Install or enable a Secret Service keyring (GNOME Keyring or KWallet)                                                                               |
+| **Linux: ESO install not detected**                             | Kalpa scans Steam Proton prefixes, including Flatpak and Snap. Launch ESO once so the prefix exists, or set the AddOns path manually in Settings    |
+| **White screen on launch**                                      | Check WebView2 is installed and current; reinstalling it usually fixes this                                                                         |
 
 ---
 
 ## How it works
 
-| Layer | What it does |
-|---|---|
-| **Manifest parser** | Reads `.txt` and `.addon` files from each addon folder, extracting title, version, author, dependencies, and API version |
-| **Manifest cache** | SQLite-backed, so rescans don't re-parse every file |
-| **Dependency resolver** | Walks the AddOns tree three levels deep to find installed libraries, including ones embedded inside other addons |
-| **ESOUI client** | Fetches metadata from ESOUI's public JSON API and public pages |
-| **Metadata tracker** | Persists ESOUI IDs, versions, tags, and install dates in `kalpa.json` inside your AddOns folder |
-| **File hash tracker** | Detects locally edited files, which is what drives update conflict resolution |
-| **SavedVariables parser** | Reads and writes ESO's Lua settings files with change tracking |
-| **Log uploader** | Scans, splits, encodes, and uploads `Encounter.log` sessions, including live streaming |
-| **Pack Hub worker** | Cloudflare Worker plus KV backing pack sharing, voting, and share codes |
+| Layer                     | What it does                                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Manifest parser**       | Reads `.txt` and `.addon` files from each addon folder, extracting title, version, author, dependencies, and API version |
+| **Manifest cache**        | SQLite-backed, so rescans don't re-parse every file                                                                      |
+| **Dependency resolver**   | Walks the AddOns tree three levels deep to find installed libraries, including ones embedded inside other addons         |
+| **ESOUI client**          | Fetches metadata from ESOUI's public JSON API and public pages                                                           |
+| **Metadata tracker**      | Persists ESOUI IDs, versions, tags, and install dates in `kalpa.json` inside your AddOns folder                          |
+| **File hash tracker**     | Detects locally edited files, which is what drives update conflict resolution                                            |
+| **SavedVariables parser** | Reads and writes ESO's Lua settings files with change tracking                                                           |
+| **Log uploader**          | Scans, splits, encodes, and uploads `Encounter.log` sessions, including live streaming                                   |
+| **Pack Hub worker**       | Cloudflare Worker plus KV backing pack sharing, voting, and share codes                                                  |
 
 ---
 

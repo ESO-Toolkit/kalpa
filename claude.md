@@ -85,12 +85,14 @@ When adding new logic, pick the closest existing file that matches the concern b
 The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`) that is completely separate from the ESO Toolkit website API (`roster-hub-api`).
 
 ### NEVER do these:
+
 - **NEVER deploy to `roster-hub-api`** — that is the ESO Toolkit website's full API (D1, Discord, AI). Deploying pack hub code there will overwrite the entire website API.
 - **NEVER change the `name` field in `wrangler.toml`** from `kalpa-pack-hub`.
 - **NEVER deploy to `eso-packs-worker`** — that was an old name and is now deleted.
 - **NEVER run `wrangler deploy` without running `tsc --noEmit` first.**
 
 ### Architecture:
+
 - **Worker URL**: `https://kalpa-pack-hub.eso-toolkit.workers.dev`
 - **Storage**: Cloudflare KV (`ESO_PACKS` namespace)
 - **API format**: snake_case JSON matching Rust `HubPack` struct in `commands.rs`
@@ -99,6 +101,7 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`) that is com
 - **CI**: `.github/workflows/deploy-worker.yml` — auto-deploys on push to main, with typecheck + name guard + health check
 
 ### Rust integration:
+
 - `commands.rs` calls `kalpa-pack-hub.eso-toolkit.workers.dev` (see `pack_hub_url()` and `share_worker_url()`)
 - Response format: `{ packs: [...], page, sort }` for list, `{ pack: {...} }` for detail
 - Pack fields are snake_case: `title`, `pack_type`, `author_id`, `author_name`, `is_anonymous`, `vote_count`, etc.
@@ -166,11 +169,16 @@ When preparing a new release:
    `package-lock.json` fields; `cargo update --workspace` rewrites only the
    local crate's `Cargo.lock` entry. Run `npm run check:versions` to confirm —
    CI runs the same check, and `release.yml` also compares the result to the tag.
+
 2. Rewrite the per-release "Changed:" section of `releaseBody` in
    `.github/workflows/release.yml`. It is shared by every tag, so it otherwise
    ships the previous release's headline.
-3. Push a tag `v*` (for example `v0.3.0`).
-4. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
+3. Run the packaged build verification gate on Windows: `npm run test:packaged`.
+   It is deliberately local-only because it needs WebView2, launches the debug
+   packaged binary itself, and fails if it connects to the Vite dev server instead
+   of `http://tauri.localhost/`.
+4. Push a tag `v*` (for example `v0.3.0`).
+5. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
 
 ### Cross-Platform Notes
 
@@ -262,10 +270,12 @@ When performing changes, follow this workflow:
 Kalpa's Vite dev server uses **port 1430** (overriding Tauri's default 1420) so it doesn't collide with other Tauri projects running on the same machine.
 
 Port configuration lives in two places that must stay in sync:
+
 - `.env.local` → `VITE_PORT=1430` (read by `vite.config.ts` via `loadEnv`)
 - `src-tauri/tauri.conf.json` → `"devUrl": "http://localhost:1430"`
 
 If you need to change the port:
+
 1. Update `VITE_PORT` in `.env.local`
 2. Update `devUrl` in `src-tauri/tauri.conf.json` to match
 3. **Do not commit `.env.local`** — it is gitignored and machine-local.

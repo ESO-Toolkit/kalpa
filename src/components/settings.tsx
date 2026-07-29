@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { exampleAddonsPath } from "@/lib/platform";
-import { FEEDBACK_ISSUES_URL } from "@/lib/feedback";
+import { FEEDBACK_DISCORD_URL, FEEDBACK_ISSUES_URL } from "@/lib/feedback";
 import {
   clearSkippedDependencies,
   getSkippedDependencies,
@@ -47,6 +47,8 @@ import {
   Trash2,
   Palette,
   MessageSquareText,
+  Bug,
+  MessageCircle,
 } from "lucide-react";
 import { AppearanceSettings } from "./appearance-settings";
 
@@ -870,12 +872,7 @@ export function Settings({
                     description="See if a newer version of Kalpa is available"
                     onClick={onCheckForAppUpdate}
                   />
-                  <ToolItem
-                    icon={MessageSquareText}
-                    label="Report a Problem or Request"
-                    description="Open Kalpa's GitHub templates for bugs, accessibility issues, and ideas"
-                    onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
-                  />
+                  <FeedbackToolGroup />
                   {minionDetected && (
                     <ToolItem
                       icon={Sparkles}
@@ -1008,6 +1005,46 @@ export function Settings({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+function FeedbackToolGroup() {
+  return (
+    <GlassPanel variant="subtle" className="space-y-2 p-3">
+      <div className="flex items-start gap-3">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-structure-04 text-muted-foreground">
+          <MessageSquareText className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-foreground">Feedback and Support</p>
+          <p className="text-xs text-muted-foreground">
+            Choose GitHub templates for tracked issues or Discord for lower-friction help.
+          </p>
+        </div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="justify-start"
+          onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
+        >
+          <Bug className="size-3.5" />
+          GitHub Issues
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="justify-start"
+          onClick={() => void openUrl(FEEDBACK_DISCORD_URL)}
+        >
+          <MessageCircle className="size-3.5" />
+          Discord
+        </Button>
+      </div>
+    </GlassPanel>
   );
 }
 

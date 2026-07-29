@@ -44,7 +44,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test --grep-invert \"@packaged\"",
+    "test:packaged": "node scripts/verify-packaged-build.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

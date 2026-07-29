@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
-import { Check, Plus, ClipboardPaste, Pencil, CopyPlus } from "lucide-react";
+import { Check, Plus, ClipboardPaste, Pencil, CopyPlus, Bug, MessageCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -18,7 +18,7 @@ import { ThemeEditor } from "@/components/theme-editor";
 import { useTheme } from "@/lib/use-theme";
 import { newCustomThemeId, isBuiltin } from "@/lib/theme-manager";
 import { CATEGORY_ORDER } from "@/lib/theme-presets";
-import { FEEDBACK_ISSUES_URL } from "@/lib/feedback";
+import { FEEDBACK_DISCORD_URL, FEEDBACK_ISSUES_URL } from "@/lib/feedback";
 import { THEME_COLOR_KEYS } from "@/lib/theme-types";
 import { isHexColor, normalizeHex } from "@/lib/theme-color";
 import { modKeyLabel } from "@/lib/platform";
@@ -293,17 +293,29 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
             ))}
           </div>
           {category === "Accessibility" && (
-            <p className="text-xs text-foreground">
-              If a theme is hard to see or use,{" "}
-              <button
-                type="button"
-                onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
-                className="font-medium text-accent-sky underline underline-offset-2 transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky"
-              >
-                tell us what would help
-              </button>
-              .
-            </p>
+            <div className="rounded-lg border border-structure-06 bg-structure-02 p-2">
+              <p className="text-xs text-foreground">If a theme is hard to see or use:</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
+                >
+                  <Bug className="size-3" />
+                  GitHub Issues
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  onClick={() => void openUrl(FEEDBACK_DISCORD_URL)}
+                >
+                  <MessageCircle className="size-3" />
+                  Discord
+                </Button>
+              </div>
+            </div>
           )}
         </section>
       ))}

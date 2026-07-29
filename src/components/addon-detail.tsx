@@ -28,11 +28,14 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-react";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
-import { AddonFileBrowser } from "@/components/addon-file-browser";
 
-// Conflict resolution pulls in the `diff` package (structuredPatch + DiffViewer).
-// It only renders on the rare update-conflict path, so lazy-load it to keep `diff`
-// out of the always-mounted AddonDetail's eager bundle.
+// The Files tab and conflict resolver pull in heavier editor/diff surfaces.
+// Keep them out of AddonDetail's first paint and let the packaged gate prove
+// their emitted chunks load from the bundled app origin.
+const AddonFileBrowser = lazy(() =>
+  import("@/components/addon-file-browser").then((m) => ({ default: m.AddonFileBrowser }))
+);
+
 const UpdateConflictPanel = lazy(() =>
   import("@/components/update-conflict-panel").then((m) => ({ default: m.UpdateConflictPanel }))
 );
@@ -923,7 +926,16 @@ function AddonDetailBase({
         </TabsContent>
 
         <TabsContent value="files" className="pt-4">
-          <AddonFileBrowser addonsPath={addonsPath} folderName={addon.folderName} />
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+                <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+                Loading files...
+              </div>
+            }
+          >
+            <AddonFileBrowser addonsPath={addonsPath} folderName={addon.folderName} />
+          </Suspense>
         </TabsContent>
       </Tabs>
 

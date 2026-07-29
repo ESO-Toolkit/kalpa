@@ -1,9 +1,17 @@
-import { useDeferredValue, useEffect, useState, useCallback, useRef, useMemo } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useMemo,
+  lazy,
+  Suspense,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useAppUpdate } from "./components/app-update";
 import { AddonList } from "./components/addon-list";
-import { AddonDetail } from "./components/addon-detail";
 import { AppBackground } from "./components/app-background";
 import { AppDialogs } from "./components/app-dialogs";
 import { AppHeader } from "./components/app-header";
@@ -53,6 +61,10 @@ import type {
   ViewMode,
   DiscoverTab,
 } from "./types";
+
+const AddonDetail = lazy(() =>
+  import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
+);
 
 type ActiveDialog =
   | "settings"
@@ -2039,23 +2051,32 @@ function App() {
             />
 
             {viewMode === "installed" ? (
-              <AddonDetail
-                key={selectedAddon?.folderName ?? "none"}
-                addon={selectedAddon}
-                installedAddons={addons}
-                addonsPath={addonsPath}
-                onRemove={handleDetailRemove}
-                onRemoveAddon={handleSingleRemove}
-                onToggleDisable={handleToggleDisable}
-                updateResult={selectedUpdateResult}
-                onAddonUpdated={handleAddonUpdated}
-                onTagsChange={handleTagsChange}
-                isOffline={isOffline}
-                pendingConflict={
-                  selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+              <Suspense
+                fallback={
+                  <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                    <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+                    Loading addon details...
+                  </div>
                 }
-                onConflictResolved={handleConflictResolved}
-              />
+              >
+                <AddonDetail
+                  key={selectedAddon?.folderName ?? "none"}
+                  addon={selectedAddon}
+                  installedAddons={addons}
+                  addonsPath={addonsPath}
+                  onRemove={handleDetailRemove}
+                  onRemoveAddon={handleSingleRemove}
+                  onToggleDisable={handleToggleDisable}
+                  updateResult={selectedUpdateResult}
+                  onAddonUpdated={handleAddonUpdated}
+                  onTagsChange={handleTagsChange}
+                  isOffline={isOffline}
+                  pendingConflict={
+                    selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+                  }
+                  onConflictResolved={handleConflictResolved}
+                />
+              </Suspense>
             ) : (
               <DiscoverDetail
                 key={selectedDiscoverResult?.id ?? "none"}
