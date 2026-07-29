@@ -754,6 +754,7 @@ function AddonListBase({
                           </div>
                           <p className="text-xs text-muted-foreground tabular-nums">
                             {modKeyLabel()}+B to browse &middot; {modKeyLabel()}+I to install by URL
+                            &middot; ? for all shortcuts
                           </p>
                         </div>
                       </GlassPanel>

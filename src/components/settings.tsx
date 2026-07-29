@@ -67,6 +67,7 @@ interface SettingsProps {
   onShowCharacters: () => void;
   onShowMigrationWizard: () => void;
   onShowSafetyCenter: () => void;
+  onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
 }
 
@@ -91,6 +92,7 @@ export function Settings({
   onShowCharacters,
   onShowMigrationWizard,
   onShowSafetyCenter,
+  onShowShortcuts,
   onCheckForAppUpdate,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
@@ -831,7 +833,7 @@ export function Settings({
                   exit={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.08 }}
                 >
-                  <AppearanceSettings />
+                  <AppearanceSettings onShowShortcuts={onShowShortcuts} />
                 </motion.div>
               )}
 

@@ -64,6 +64,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "shortcuts"
   | "log-upload"
   | null;
 
@@ -232,6 +233,8 @@ function App() {
   const depPromptPathRef = useRef("");
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
+  const activeDialogRef = useRef<ActiveDialog>(null);
+  const setupInstancesRef = useRef<GameInstance[] | null>(null);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
   // events arrive faster than renders during Update All, and deriving the
   // progress counts inside the state updater would call a second setter from
@@ -248,6 +251,8 @@ function App() {
     addonsPathRef.current = addonsPath;
     viewModeRef.current = viewMode;
     updatingAllRef.current = updatingAll;
+    activeDialogRef.current = activeDialog;
+    setupInstancesRef.current = setupInstances;
   });
 
   useEffect(() => {
@@ -625,6 +630,20 @@ function App() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.isComposing) return;
+
+      if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const active = document.activeElement;
+        if (
+          active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          (active instanceof HTMLElement && active.isContentEditable)
+        ) {
+          return;
+        }
+        if (activeDialogRef.current !== null || setupInstancesRef.current !== null) return;
+        event.preventDefault();
+        setActiveDialog("shortcuts");
+      }
 
       if (isModKey(event) && event.key === "r") {
         event.preventDefault();

@@ -4,7 +4,8 @@
 
 If you discover a security vulnerability in Kalpa, please report it responsibly.
 
-**Do not open a public issue.** Report privately on **Discord: `@spike_jones`**.
+**Do not open a public issue.** Report privately on Discord — join at
+<https://discord.gg/cMumdw6cSE> and message **`@spike_jones`**.
 
 GitHub's private vulnerability reporting is **not currently enabled** on this
 repository, so the "Report a vulnerability" button and the

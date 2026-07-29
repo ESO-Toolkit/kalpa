@@ -21,6 +21,8 @@ import { CATEGORY_ORDER } from "@/lib/theme-presets";
 import { FEEDBACK_ISSUES_URL } from "@/lib/feedback";
 import { THEME_COLOR_KEYS } from "@/lib/theme-types";
 import { isHexColor, normalizeHex } from "@/lib/theme-color";
+import { modKeyLabel } from "@/lib/platform";
+import { Kbd } from "@/components/ui/kbd";
 import type { Theme, ThemeColors } from "@/lib/theme-types";
 
 type Mode = { view: "gallery" } | { view: "editor"; draft: Theme; isNew: boolean };
@@ -55,7 +57,7 @@ function parseImportedTheme(raw: string): Theme | null {
   };
 }
 
-export function AppearanceSettings() {
+export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () => void }) {
   const {
     activeThemeId,
     activeTheme,
@@ -199,6 +201,17 @@ export function AppearanceSettings() {
               })}
             </div>
           </div>
+          <p className="text-xs leading-relaxed text-foreground">
+            Press <Kbd>{modKeyLabel()}</Kbd> with <Kbd>+</Kbd> or <Kbd>{"\u2212"}</Kbd> to change
+            this anywhere in Kalpa, or <Kbd>{modKeyLabel()}</Kbd> with <Kbd>0</Kbd> to reset it.{" "}
+            <button
+              type="button"
+              onClick={onShowShortcuts}
+              className="font-medium text-accent-sky underline underline-offset-2 transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky"
+            >
+              See all keyboard shortcuts
+            </button>
+          </p>
           {textZoom >= 1.5 && (
             <p className="rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2 text-xs text-amber-200">
               At 150%, Kalpa widens its minimum window to 1200 x 750 so the addon list stays usable.
