@@ -18,7 +18,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import type {
   FightSummary,
   LiveEvent,
@@ -278,55 +278,19 @@ export function useLiveSession({
     // the readouts in any split/degraded state.
     const preferOfficial = forceHandoff || (await usesOfficialUploader());
 
-    // Native needs the in-app ESO Logs upload session (the wcl_session cookie), which
-    // is SEPARATE from the profile login that gates this dialog (authUser/isLoggedIn).
-    // A user can be "signed in" to the dialog yet have no upload session — the old
-    // behaviour then silently handed off to the official uploader, which is exactly the
-    // surprise we're fixing. So when native is wanted but there's no session, prompt the
-    // capture inline and proceed native once it lands; only fall back to handoff if the
-    // user cancels/the capture fails.
-    let liveHasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
+    // Native needs the ESO Logs upload session (the wcl_session cookie), which is
+    // separate from the profile identity in the header. If the faster path is not
+    // ready, live logging still works by handing off to the official uploader.
+    const liveHasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
     if (!preferOfficial && !liveHasSession) {
-      // Bail if the start was superseded while we were checking (mirror of the
-      // pre-start abort check below) before opening a sign-in window.
-      if (liveSessionIdRef.current !== sessionId) {
-        startingRef.current = false;
-        setStarting(false);
-        return;
-      }
-      setLiveNeedsAttention(true);
-      const signedIn = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs")
-        .then((r) => {
-          warnIfSessionNotPersisted(r);
-          return true;
-        })
-        .catch(() => false);
-      // Re-read the session: the capture either populated the cookie or it didn't.
-      liveHasSession = signedIn
-        ? await invokeOrThrow<boolean>("uploader_has_session").catch(() => false)
-        : false;
-      // Keep the lifted state in sync so the header readout/Direct Upload section
-      // reflect the freshly captured (or still-missing) session.
       void refreshNativeState();
-      // A stop / mode-switch could have landed during the sign-in window.
-      if (liveSessionIdRef.current !== sessionId) {
-        startingRef.current = false;
-        setStarting(false);
-        return;
-      }
-      // Toast AFTER the abort re-check (and only for the still-current session) so a
-      // Stop-during-sign-in doesn't emit a "streaming via the official uploader"
-      // message for a start that's about to be abandoned.
-      if (!liveHasSession) {
-        toast.info(
-          "Streaming via the official ESO Logs uploader (sign in to ESO Logs for the faster path)."
-        );
-      }
+      toast.info(
+        "Streaming via the official ESO Logs uploader. Turn on direct upload above to keep supported logs in Kalpa."
+      );
       setLiveNeedsAttention(false);
     }
-
-    // Final native decision: wanted AND we have a session (either pre-existing or just
-    // captured). Without a session even after prompting, fall back to the handoff.
+    // Final native decision: wanted AND we have a session. Without one, fall back to
+    // the official uploader handoff.
     const nativeOptIn = !preferOfficial && liveHasSession;
 
     // Native only: peek whether a fresh logging session is coming, so the waiting
