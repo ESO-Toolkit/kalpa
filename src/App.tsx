@@ -22,6 +22,7 @@ import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner, type BannerUpdate } from "./components/update-banner";
+import { UploaderIntroCard } from "./components/uploader-intro-card";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { DependencyPickerDialog } from "./components/dependency-picker-dialog";
 import { getSetting, setSetting } from "@/lib/store";
@@ -61,6 +62,7 @@ import type {
   ViewMode,
   DiscoverTab,
 } from "./types";
+import type { LogPathDetection } from "@/types/uploader";
 
 const AddonDetail = lazy(() =>
   import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
@@ -166,6 +168,9 @@ function App() {
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authVerifying, setAuthVerifying] = useState(true);
+  const [uploaderIntroDismissed, setUploaderIntroDismissed] = useState(true);
+  const [uploaderIntroHasLog, setUploaderIntroHasLog] = useState(false);
   const [deepLinkPackId, setDeepLinkPackId] = useState<string | null>(null);
   const [deepLinkShareCode, setDeepLinkShareCode] = useState<string | null>(null);
   const [rosterPackInstallId, setRosterPackInstallId] = useState<string | null>(null);
@@ -539,32 +544,56 @@ function App() {
     [scanAddons]
   );
 
+  const refreshUploaderIntroDetection = useCallback(async () => {
+    const dismissed = await getSetting<boolean>("uploaderIntroDismissed", false);
+    setUploaderIntroDismissed(dismissed === true);
+    if (dismissed) {
+      setUploaderIntroHasLog(false);
+      return;
+    }
+
+    const detection = await invokeResult<LogPathDetection>("uploader_detect_path");
+    setUploaderIntroHasLog(detection.ok ? detection.data.encounterLogExists === true : false);
+  }, []);
+
   const initializeApp = useCallback(async () => {
-    // Restoring the signed-in user only feeds the header avatar and can cost
-    // up to two sequential 15 s HTTPS round trips (auth.rs). Fire it without
-    // awaiting so it never blocks the addon scan.
-    void invokeResult<AuthUser | null>("auth_get_user").then((authResult) => {
-      if (authResult.ok) {
-        setAuthUser(authResult.data ?? null);
-        warnIfSessionNotPersisted(authResult.data);
-      } else {
-        toast.error(`Could not restore sign-in: ${authResult.error}`);
-      }
-    });
+    // Restore cached account identity first so an already-signed-in user never
+    // sees a signed-out flash while the network verification runs.
+    void invokeResult<AuthUser | null>("auth_cached_user")
+      .then((cachedResult) => {
+        if (cachedResult.ok) {
+          setAuthUser(cachedResult.data ?? null);
+        } else {
+          console.error(`[tauri:auth_cached_user] ${cachedResult.error}`);
+        }
+        return invokeResult<AuthUser | null>("auth_get_user");
+      })
+      .then((authResult) => {
+        if (authResult.ok) {
+          setAuthUser(authResult.data ?? null);
+          warnIfSessionNotPersisted(authResult.data);
+        } else {
+          setAuthUser(null);
+          toast.error(`Could not restore sign-in: ${authResult.error}`);
+        }
+      })
+      .finally(() => setAuthVerifying(false));
 
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
-    const [savedSort, savedFilter, savedPath, autoUpdate] = await Promise.all([
+    const [savedSort, savedFilter, savedPath, autoUpdate, introDismissed] = await Promise.all([
       getSetting<string>("sortMode", "name"),
       getSetting<string>("filterMode", "all"),
       getSetting<string>("addonsPath", ""),
       getSetting<boolean>("autoUpdate", false),
+      getSetting<boolean>("uploaderIntroDismissed", false),
     ]);
 
     const normalizedSort = isSortMode(savedSort) ? savedSort : "name";
     const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";
     setSortMode(normalizedSort);
     setFilterMode(normalizedFilter);
+    setUploaderIntroDismissed(introDismissed === true);
     if (normalizedSort !== savedSort) {
       void setSetting("sortMode", normalizedSort);
     }
@@ -577,6 +606,7 @@ function App() {
       try {
         setAddonsPath(savedPath);
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
+        void refreshUploaderIntroDetection();
         // Scan (disk) and update check (metadata + network) touch different
         // state and locks, so run them concurrently instead of in series.
         await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, autoUpdate, false)]);
@@ -614,6 +644,7 @@ function App() {
           const path = instances[0]!.addonsPath;
           setAddonsPath(path);
           await invokeOrThrow("set_addons_path", { addonsPath: path });
+          void refreshUploaderIntroDetection();
           // Best-effort persist: this is auto-detection, so if the write fails it
           // self-heals — the same instance is re-detected and re-selected next launch.
           void setSetting("addonsPath", path);
@@ -631,7 +662,7 @@ function App() {
         setLoading(false);
       }
     }
-  }, [checkForUpdates, runAutoLink, scanAddons]);
+  }, [checkForUpdates, refreshUploaderIntroDetection, runAutoLink, scanAddons]);
 
   useEffect(() => {
     if (initRan.current) return;
@@ -744,6 +775,7 @@ function App() {
           return;
         }
         setAddonsPath(path);
+        void refreshUploaderIntroDetection();
         setSetupInstances(null);
         setErrorShowSettings(false);
         setLoading(true);
@@ -757,7 +789,7 @@ function App() {
         setErrorShowSettings(true);
       }
     },
-    [checkForUpdates, runAutoLink, scanAddons]
+    [checkForUpdates, refreshUploaderIntroDetection, runAutoLink, scanAddons]
   );
 
   const handleRefresh = useCallback(() => {
@@ -1130,6 +1162,7 @@ function App() {
         // open-time folder guard reads this ref — against a stale value it would
         // wave through a batch for the folder we just left.
         addonsPathRef.current = nextPath;
+        void refreshUploaderIntroDetection();
         setSelectedAddon(null);
         setSelectedFolders(new Set());
         setUpdateResults([]);
@@ -1142,7 +1175,7 @@ function App() {
         setErrorShowSettings(true);
       }
     },
-    [scanAndCheck, sameAddonsFolder]
+    [refreshUploaderIntroDetection, scanAndCheck, sameAddonsFolder]
   );
 
   const handleSortChange = useCallback((mode: SortMode) => {
@@ -1682,6 +1715,27 @@ function App() {
   );
 
   const batchMode = selectedFolders.size > 0 && viewMode === "installed";
+  const showUploaderIntro =
+    uploaderIntroHasLog && authUser === null && !uploaderIntroDismissed && !authVerifying;
+
+  const dismissUploaderIntro = useCallback(() => {
+    setUploaderIntroDismissed(true);
+    setUploaderIntroHasLog(false);
+    void setSetting("uploaderIntroDismissed", true);
+  }, []);
+
+  const handleAuthChange = useCallback(
+    (user: AuthUser | null) => {
+      setAuthUser(user);
+      if (user) {
+        dismissUploaderIntro();
+        srAnnounce(`Signed in as ${user.userName}`);
+      } else {
+        srAnnounce("Signed out of ESO Logs");
+      }
+    },
+    [dismissUploaderIntro, srAnnounce]
+  );
 
   const handleOpenDialog = useCallback((dialog: Exclude<ActiveDialog, null>) => {
     if (dialog === "log-upload") setLogUploaderMounted(true);
@@ -1710,9 +1764,10 @@ function App() {
   const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
   const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
   const handleOpenLogUpload = useCallback(() => {
+    dismissUploaderIntro();
     setLogUploaderMounted(true);
     setActiveDialog("log-upload");
-  }, []);
+  }, [dismissUploaderIntro]);
   const handleUpdateAddonClick = useCallback(
     (folderName: string) => void handleSingleUpdate(folderName),
     [handleSingleUpdate]
@@ -1971,6 +2026,8 @@ function App() {
             selectedCount={selectedFolders.size}
             updatingAll={updatingAll}
             isOffline={isOffline}
+            authUser={authUser}
+            authVerifying={authVerifying}
             instances={knownInstances}
             activeAddonsPath={addonsPath}
             onSwitchInstance={handlePathChangeClick}
@@ -1984,6 +2041,7 @@ function App() {
             onOpenSavedVars={handleOpenSavedVars}
             onOpenSettings={handleOpenSettings}
             onOpenLogUpload={handleOpenLogUpload}
+            onAuthChange={handleAuthChange}
             onRefresh={handleRefresh}
           />
 
@@ -2006,6 +2064,13 @@ function App() {
             onUpdateSelected={handleUpdateSelected}
             isOffline={isOffline}
           />
+
+          {showUploaderIntro && (
+            <UploaderIntroCard
+              onOpenLogUpload={handleOpenLogUpload}
+              onDismiss={dismissUploaderIntro}
+            />
+          )}
 
           {pendingConflicts.size > 0 && (
             <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-status-warning-strong/20 bg-status-warning-strong/[0.04] px-3 py-2 text-xs text-status-warning">
@@ -2105,11 +2170,12 @@ function App() {
             addons={addons}
             addonsPath={addonsPath}
             authUser={authUser}
+            authVerifying={authVerifying}
             deepLinkPackId={deepLinkPackId}
             deepLinkShareCode={deepLinkShareCode}
             knownInstances={knownInstances}
             logUploaderMounted={logUploaderMounted}
-            onAuthChange={setAuthUser}
+            onAuthChange={handleAuthChange}
             onCheckForAppUpdate={handleCheckForAppUpdateClick}
             onCloseDialog={handleCloseDialog}
             onInstancesDetected={setKnownInstances}

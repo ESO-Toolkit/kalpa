@@ -7531,6 +7531,28 @@ pub async fn auth_logout(
     Ok(())
 }
 
+/// Return the signed-in user known from the locally stored token only.
+///
+/// This deliberately does not refresh or validate the token: it lets the UI paint
+/// the right account shape immediately on launch, while `auth_get_user` remains
+/// the network-verified authority and may overwrite or clear this state.
+#[tauri::command]
+pub fn auth_cached_user(state: tauri::State<'_, AuthState>) -> Result<Option<AuthUser>, String> {
+    let tokens = {
+        let guard = state
+            .tokens
+            .lock()
+            .map_err(|e| format!("Auth lock poisoned: {e}"))?;
+        guard.clone()
+    };
+
+    Ok(tokens.map(|tokens| AuthUser {
+        user_id: tokens.user_id,
+        user_name: tokens.user_name,
+        session_persisted: None,
+    }))
+}
+
 #[tauri::command]
 pub async fn auth_get_user(
     state: tauri::State<'_, AuthState>,

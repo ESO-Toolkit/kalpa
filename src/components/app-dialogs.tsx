@@ -65,6 +65,7 @@ interface AppDialogsProps {
   addons: AddonManifest[];
   addonsPath: string;
   authUser: AuthUser | null;
+  authVerifying: boolean;
   deepLinkPackId: string | null;
   deepLinkShareCode: string | null;
   knownInstances: GameInstance[];
@@ -107,6 +108,7 @@ function AppDialogsBase({
   addons,
   addonsPath,
   authUser,
+  authVerifying,
   deepLinkPackId,
   deepLinkShareCode,
   knownInstances,
@@ -195,6 +197,7 @@ function AppDialogsBase({
             <Settings
               addonsPath={addonsPath}
               authUser={authUser}
+              authVerifying={authVerifying}
               knownInstances={knownInstances}
               onAuthChange={onAuthChange}
               onInstancesDetected={onInstancesDetected}
@@ -208,6 +211,10 @@ function AppDialogsBase({
               onShowSafetyCenter={() => onShowDialog("safety-center")}
               onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}
+              onOpenLogUpload={() => {
+                onCloseDialog();
+                onShowDialog("log-upload");
+              }}
             />
           )}
 

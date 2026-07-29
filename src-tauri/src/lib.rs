@@ -738,6 +738,7 @@ pub fn run() {
             commands::auth_login,
             commands::auth_logout,
             commands::auth_get_user,
+            commands::auth_cached_user,
             commands::consume_initial_deep_link,
             commands::create_pack,
             commands::update_pack,

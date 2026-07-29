@@ -50,6 +50,7 @@ import {
   Bug,
   MessageCircle,
 } from "lucide-react";
+import { AccountSettings } from "./account-settings";
 import { AppearanceSettings } from "./appearance-settings";
 
 type SettingsTab = "general" | "appearance" | "tools" | "data";
@@ -58,12 +59,14 @@ type PerformanceMode = "webview" | "native-slint";
 interface SettingsProps {
   addonsPath: string;
   authUser: AuthUser | null;
+  authVerifying: boolean;
   knownInstances: GameInstance[];
   onAuthChange: (user: AuthUser | null) => void;
   onInstancesDetected: (instances: GameInstance[]) => void;
   onPathChange: (path: string) => void;
   onClose: () => void;
   onRefresh: () => void;
+  onOpenLogUpload: () => void;
   onShowBackups: () => void;
   onShowApiCompat: () => void;
   onShowCharacters: () => void;
@@ -83,12 +86,14 @@ const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
 export function Settings({
   addonsPath,
   authUser,
+  authVerifying,
   knownInstances,
   onAuthChange,
   onInstancesDetected,
   onPathChange,
   onClose,
   onRefresh,
+  onOpenLogUpload,
   onShowBackups,
   onShowApiCompat,
   onShowCharacters,
@@ -430,6 +435,13 @@ export function Settings({
                   transition={{ duration: 0.08 }}
                   className="space-y-3"
                 >
+                  <AccountSettings
+                    authUser={authUser}
+                    authVerifying={authVerifying}
+                    onAuthChange={onAuthChange}
+                    onOpenLogUpload={onOpenLogUpload}
+                  />
+
                   {/* Path configuration */}
                   <GlassPanel variant="subtle" className="p-3 space-y-3">
                     <SectionHeader>AddOns Folder</SectionHeader>
