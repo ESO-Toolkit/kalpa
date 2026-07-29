@@ -2881,8 +2881,8 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
             Connect your ESO Logs account
           </div>
           <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
-            Sign in to upload your combat logs and get your reports. It's the same account Kalpa
-            uses for Pack Hub — no extra password needed.
+            Sign in with your ESO Logs account for uploads and Pack Hub. ESO Logs sign-in is handled
+            through esotk.com, so that browser domain is expected.
           </p>
         </div>
         {/* Outline (not gold): a connect action, deliberately distinct from the
@@ -2958,12 +2958,12 @@ function DirectUploadSection({
             </span>
             <div className="min-w-0 space-y-1">
               <p className="text-sm font-semibold text-status-warning-readable">
-                Send logs straight from Kalpa
+                Optional: direct upload from Kalpa
               </p>
               <p className="text-xs leading-relaxed text-foreground">
-                Uploads still work through the official ESO Logs uploader. Enable direct upload to
-                use Kalpa's faster path; ESO Logs opens once so Kalpa can capture the upload
-                session.
+                Skipping is fine - uploads still work through the official ESO Logs uploader. Enable
+                direct upload for supported logs; ESO Logs opens once so Kalpa can capture the
+                upload session.
               </p>
             </div>
           </div>
@@ -2973,7 +2973,7 @@ function DirectUploadSection({
             onClick={() => setDisclosureOpen(true)}
           >
             <Zap className="size-3.5" />
-            Use direct upload
+            Set up direct upload
           </Button>
         </GlassPanel>
         <DirectUploadDisclosure
@@ -3012,11 +3012,12 @@ function DirectUploadSection({
         </span>
         <div className="min-w-0 space-y-1">
           <p className="text-sm font-semibold text-status-warning-readable">
-            Finish direct upload setup
+            Optional next step: direct upload
           </p>
           <p className="text-xs leading-relaxed text-foreground">
-            Uploads still work through the official uploader. Kalpa opens ESO Logs once and captures
-            the upload session, then supported logs can upload from Kalpa.
+            Skipping is fine - uploads still work through the official uploader handoff. Open ESO
+            Logs once when you want Kalpa to capture the upload session for supported direct
+            uploads.
           </p>
         </div>
       </div>
@@ -3054,7 +3055,8 @@ function DirectUploadDisclosure({
           </p>
           <p>
             Kalpa opens an ESO Logs window once to capture the upload session for this faster path.
-            That setup is separate from the profile identity shown in the header.
+            That uses the same ESO Logs account, but a separate upload session from the profile
+            identity shown in the header.
           </p>
           <p>
             It works by talking to ESO Logs' uploader endpoints directly - an{" "}

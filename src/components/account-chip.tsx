@@ -56,12 +56,13 @@ export function AccountChip({
   const [directOptIn, setDirectOptIn] = useState(false);
   const [directHasSession, setDirectHasSession] = useState(false);
   const [directReadFailed, setDirectReadFailed] = useState(false);
+  const [directNextStep, setDirectNextStep] = useState(false);
 
   const signedIn = authUser !== null;
   const verifyingSignedIn = signedIn && authVerifying;
   const tooltip = signedIn
     ? "ESO Logs profile and upload routing"
-    : "Sign in to ESO Logs - upload combat logs and publish packs";
+    : "Sign in to ESO Logs for Pack Hub and log uploads";
   const sessionPersisted = authUser?.sessionPersisted;
   const directReady = directOptIn && directHasSession && !directReadFailed;
 
@@ -126,12 +127,9 @@ export function AccountChip({
     try {
       const user = await invokeOrThrow<AuthUser>("auth_login");
       onAuthChange(user);
-      toast.success(`Signed in as ${user.userName}`, {
-        action: {
-          label: "Upload a log",
-          onClick: onOpenLogUpload,
-        },
-      });
+      setDirectNextStep(true);
+      setOpen(true);
+      toast.success(`Signed in as ${user.userName}`);
       warnIfSessionNotPersisted(user);
     } catch (e) {
       toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
@@ -173,6 +171,7 @@ export function AccountChip({
       const hasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
       await refreshDirectUploadState();
       if (hasSession) {
+        setDirectNextStep(false);
         toast.success("Direct upload ready - logs can go straight from Kalpa.");
       } else {
         toast.info("Direct upload is still off - Kalpa will use the official uploader.");
@@ -185,25 +184,56 @@ export function AccountChip({
     }
   };
 
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (!nextOpen) setDirectNextStep(false);
+  };
+
   if (!signedIn) {
     return (
-      <SimpleTooltip content={tooltip} side="bottom">
-        <button
-          type="button"
-          onClick={() => void handleLogin()}
-          disabled={loggingIn}
-          aria-label="Sign in to ESO Logs"
-          className={chipClassName}
-        >
-          {loggingIn ? <Loader2 className="size-3 animate-spin" /> : <LogIn className="size-3" />}
-          <span className="hidden min-[860px]:inline">Sign in</span>
-        </button>
-      </SimpleTooltip>
+      <Popover open={open} onOpenChange={handleOpenChange}>
+        <SimpleTooltip content={tooltip} side="bottom">
+          <PopoverTrigger
+            className={chipClassName}
+            aria-label="ESO Logs account sign-in"
+            aria-haspopup="dialog"
+            aria-expanded={open}
+          >
+            {loggingIn ? <Loader2 className="size-3 animate-spin" /> : <LogIn className="size-3" />}
+            <span className="hidden min-[860px]:inline">ESO Logs</span>
+          </PopoverTrigger>
+        </SimpleTooltip>
+        <PopoverContent side="bottom" align="end" className="w-72 space-y-3">
+          <div>
+            <PopoverTitle>ESO Logs account</PopoverTitle>
+            <PopoverDescription>
+              One account for Pack Hub and log uploads; sign-in is handled through esotk.com.
+            </PopoverDescription>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Installing, updating, profiles, backups and SavedVariables work without signing in.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void handleLogin()}
+            disabled={loggingIn}
+            className="w-full justify-start"
+          >
+            {loggingIn ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <LogIn className="size-3.5" />
+            )}
+            {loggingIn ? "Opening ESO Logs..." : "Sign in with ESO Logs"}
+          </Button>
+        </PopoverContent>
+      </Popover>
     );
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <SimpleTooltip content={tooltip} side="bottom">
         <PopoverTrigger
           className={chipClassName}
@@ -224,7 +254,7 @@ export function AccountChip({
           <PopoverDescription>
             {sessionPersisted === false
               ? "Kalpa couldn't save this sign-in securely - you'll need to sign in again next time you open Kalpa."
-              : "Profile identity for Pack Hub and upload ownership."}
+              : "One ESO Logs account for Pack Hub and log uploads; sign-in is handled through esotk.com."}
           </PopoverDescription>
         </div>
 
@@ -253,15 +283,17 @@ export function AccountChip({
         <div className="rounded-lg border border-structure-06 bg-structure-02 p-2.5">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="text-xs font-medium text-foreground">Direct upload</p>
+              <p className="text-xs font-medium text-foreground">
+                {directNextStep && !directReady ? "Optional next step" : "Direct upload"}
+              </p>
               <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
                 {directReady
                   ? "Logs can go straight from Kalpa."
                   : directReadFailed
                     ? "Kalpa could not confirm upload routing."
                     : directOptIn
-                      ? "Off until Kalpa captures the upload session."
-                      : "Off - logs use the official uploader."}
+                      ? "Open ESO Logs once to capture the upload session. Skipping is fine - the official uploader still works."
+                      : "Set it up for supported logs, or skip it and keep using the official uploader handoff."}
               </p>
             </div>
             <InfoPill
@@ -272,21 +304,34 @@ export function AccountChip({
             </InfoPill>
           </div>
           {!directReady && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void handleEnableDirectUpload()}
-              disabled={directChecking || directEnabling}
-              className="mt-2 w-full justify-start"
-            >
-              {directEnabling ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <Zap className="size-3.5" />
+            <div className="mt-2 flex gap-1.5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void handleEnableDirectUpload()}
+                disabled={directChecking || directEnabling}
+                className="min-w-0 flex-1 justify-start"
+              >
+                {directEnabling ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Zap className="size-3.5" />
+                )}
+                {directEnabling ? "Opening ESO Logs..." : "Enable direct upload"}
+              </Button>
+              {directNextStep && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDirectNextStep(false)}
+                  className="shrink-0"
+                >
+                  Skip
+                </Button>
               )}
-              {directEnabling ? "Opening ESO Logs..." : "Enable direct upload"}
-            </Button>
+            </div>
           )}
         </div>
 
