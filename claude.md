@@ -212,7 +212,7 @@ Use these components instead of re-rolling new ones:
 
 ### Visual Rules
 
-- Always-dark theme; no light mode.
+- Dark-first; light themes are in scope. All colors come from theme tokens.
 - Glass morphism panels:
   - Three tiers: `primary`, `default`, `subtle`.
 - Typography:
