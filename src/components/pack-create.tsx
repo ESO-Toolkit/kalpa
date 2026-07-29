@@ -418,7 +418,7 @@ export function PackCreateView({
           {/* Title */}
           <div>
             <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block">
-              Pack Name <span className="text-red-400">*</span>
+              Pack Name <span className="text-status-danger">*</span>
             </label>
             <Input
               placeholder="e.g. Trial Essentials, PvP Toolkit"
@@ -495,7 +495,7 @@ export function PackCreateView({
                         "ring-1 ring-accent-sky/15 shadow-[0_0_16px_color-mix(in_oklab,var(--accent-sky)_6%,transparent),inset_0_1px_0_var(--structure-06)]",
                       isSelected &&
                         pt === "roster-pack" &&
-                        "ring-1 ring-violet-400/15 shadow-[0_0_16px_color-mix(in_oklab,var(--status-library)_6%,transparent),inset_0_1px_0_var(--structure-06)]",
+                        "ring-1 ring-status-library/15 shadow-[0_0_16px_color-mix(in_oklab,var(--status-library)_6%,transparent),inset_0_1px_0_var(--structure-06)]",
                       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                     )}
                   >
@@ -533,7 +533,7 @@ export function PackCreateView({
               <span
                 className={cn(
                   "text-[10px] tabular-nums",
-                  selectedTags.length >= 5 ? "text-amber-400" : "text-muted-foreground"
+                  selectedTags.length >= 5 ? "text-status-warning" : "text-muted-foreground"
                 )}
               >
                 {selectedTags.length}/5
@@ -784,7 +784,7 @@ export function PackCreateView({
                         <SimpleTooltip content="Remove">
                           <button
                             onClick={() => handleRemoveAddon(addon.esouiId)}
-                            className="text-muted-foreground/20 hover:text-red-400 transition-colors p-0.5 opacity-0 group-hover/item:opacity-100"
+                            className="text-muted-foreground/20 hover:text-status-danger transition-colors p-0.5 opacity-0 group-hover/item:opacity-100"
                           >
                             <XIcon className="size-3" />
                           </button>

@@ -37,7 +37,7 @@ export function SetupWizard({ instances, onSelect }: SetupWizardProps) {
             </div>
 
             {hasOneDriveWarning && (
-              <div className="mb-4 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-xs text-amber-400">
+              <div className="mb-4 rounded-lg border border-status-warning/20 bg-status-warning/[0.04] px-3 py-2 text-xs text-status-warning">
                 One or more detected folders are inside OneDrive. Cloud sync can sometimes cause
                 missing or outdated addons — consider disabling sync for this folder if you see
                 issues.

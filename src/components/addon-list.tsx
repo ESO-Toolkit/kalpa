@@ -115,7 +115,7 @@ const AddonListItem = memo(function AddonListItem({
       <div className="truncate text-sm font-medium">
         {addon.tags.includes("favorite") && <span className="text-primary mr-1">{"★"}</span>}
         {addon.isLibrary && (
-          <span className="text-violet-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
+          <span className="text-status-library mr-1 text-[10px] font-medium uppercase tracking-wide">
             LIB
           </span>
         )}
@@ -136,7 +136,7 @@ const AddonListItem = memo(function AddonListItem({
         {hasUpdate && (
           <Badge
             variant="outline"
-            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+            className="border-status-warning/20 bg-status-warning/[0.04] text-status-warning text-[10px]"
           >
             Update
           </Badge>
@@ -152,7 +152,7 @@ const AddonListItem = memo(function AddonListItem({
         {addon.missingDependencies.length > 0 && (
           <Badge
             variant="outline"
-            className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+            className="border-status-danger/20 bg-status-danger/[0.04] text-status-danger text-[10px]"
           >
             {addon.missingDependencies.length} missing
           </Badge>
@@ -160,7 +160,7 @@ const AddonListItem = memo(function AddonListItem({
         {addon.outdatedDependencies.length > 0 && (
           <Badge
             variant="outline"
-            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+            className="border-status-warning/20 bg-status-warning/[0.04] text-status-warning text-[10px]"
           >
             {addon.outdatedDependencies.length} outdated
           </Badge>
@@ -176,7 +176,7 @@ const AddonListItem = memo(function AddonListItem({
         {addon.tags.includes("broken") && (
           <Badge
             variant="outline"
-            className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+            className="border-status-danger/20 bg-status-danger/[0.04] text-status-danger text-[10px]"
           >
             Broken
           </Badge>
@@ -184,7 +184,7 @@ const AddonListItem = memo(function AddonListItem({
         {addon.tags.includes("testing") && (
           <Badge
             variant="outline"
-            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+            className="border-status-warning/20 bg-status-warning/[0.04] text-status-warning text-[10px]"
           >
             Testing
           </Badge>
@@ -204,13 +204,13 @@ const AddonListItem = memo(function AddonListItem({
         addon.disabled
           ? "border-l-addon-disabled bg-addon-disabled/[0.04]"
           : addon.missingDependencies.length > 0
-            ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-error-strong)_10%,transparent)]"
+            ? "border-l-status-danger-strong shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-danger-strong)_10%,transparent)]"
             : addon.outdatedDependencies.length > 0
-              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
+              ? "border-l-status-warning-strong shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
               : addon.isLibrary
-                ? "border-l-violet-400 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-library)_8%,transparent)]"
+                ? "border-l-status-library shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-library)_8%,transparent)]"
                 : hasUpdate
-                  ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
+                  ? "border-l-status-warning-strong shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
                   : "border-l-transparent",
         isCurrent &&
           !batchMode &&

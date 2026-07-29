@@ -500,7 +500,7 @@ export function Settings({
                                 type="button"
                                 className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
                                   isActive
-                                    ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
+                                    ? "border-status-info/30 bg-status-info/[0.06] text-status-info-soft"
                                     : "border-structure-06 bg-structure-02 text-foreground hover:border-structure-12 hover:bg-structure-04"
                                 }`}
                                 onClick={() => {
@@ -517,7 +517,7 @@ export function Settings({
                                   {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
                                 </span>
                                 {isActive && (
-                                  <span className="ml-auto text-[11px] font-semibold uppercase tracking-wider text-sky-400">
+                                  <span className="ml-auto text-[11px] font-semibold uppercase tracking-wider text-status-info">
                                     active
                                   </span>
                                 )}
@@ -913,7 +913,7 @@ export function Settings({
                         {importing ? "Importing..." : "Import from Clipboard"}
                       </Button>
                     </div>
-                    {exportStatus && <p className="text-xs text-emerald-400">{exportStatus}</p>}
+                    {exportStatus && <p className="text-xs text-status-success">{exportStatus}</p>}
                     {importError && (
                       <Alert variant="destructive" className="mt-1">
                         {importError}
@@ -922,7 +922,7 @@ export function Settings({
                     {importResult && (
                       <div className="space-y-2">
                         {importResult.installed.length > 0 && (
-                          <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-2 text-xs text-emerald-400">
+                          <div className="rounded-lg border border-status-success/20 bg-status-success/[0.04] p-2 text-xs text-status-success">
                             Installed: {importResult.installed.join(", ")}
                           </div>
                         )}
@@ -956,15 +956,15 @@ export function Settings({
                         <Button
                           variant="outline"
                           size="sm"
-                          className="border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
+                          className="border-status-danger-strong/30 text-status-danger hover:bg-status-danger-strong/10 hover:border-status-danger-strong/50"
                           onClick={() => setDeleteConfirmOpen(true)}
                         >
                           <Trash2 className="size-3.5" />
                           Delete My Pack Hub Data
                         </Button>
                       ) : (
-                        <div className="space-y-2 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
-                          <p className="text-xs font-medium text-red-400">
+                        <div className="space-y-2 rounded-lg border border-status-danger-strong/20 bg-status-danger-strong/[0.04] p-3">
+                          <p className="text-xs font-medium text-status-danger">
                             Are you sure? This will permanently delete all your packs, votes, and
                             share codes. You will also be signed out.
                           </p>

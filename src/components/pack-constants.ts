@@ -52,10 +52,10 @@ export const PACK_TYPE_ACCENT: Record<
       "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_var(--structure-06)]",
   },
   "roster-pack": {
-    border: "border-l-violet-400/70",
-    bg: "bg-violet-400/[0.03]",
-    hoverBg: "hover:bg-violet-400/[0.08]",
-    text: "text-violet-400",
+    border: "border-l-status-library/70",
+    bg: "bg-status-library/[0.03]",
+    hoverBg: "hover:bg-status-library/[0.08]",
+    text: "text-status-library",
     hoverGlow:
       "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--status-library)_10%,transparent),inset_0_1px_0_var(--structure-06)]",
   },
@@ -106,7 +106,7 @@ export const PACK_IDENTITY_VARS = [
   "--accent-cyan", // cyan
   "--status-success", // emerald
   "--status-warning", // amber
-  "--status-error", // rose/red
+  "--status-danger", // rose/red
   "--status-library", // violet
 ] as const;
 

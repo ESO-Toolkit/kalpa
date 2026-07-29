@@ -177,7 +177,7 @@ export const LogPicker = memo(function LogPicker({
                 )}
               </div>
             ) : (
-              <div className="text-[11px] text-amber-400/90">{detection?.message}</div>
+              <div className="text-[11px] text-status-warning/90">{detection?.message}</div>
             )}
           </div>
         </div>
@@ -268,8 +268,8 @@ export const LogPicker = memo(function LogPicker({
       {listError ? (
         // On-brand error card: 3px red left-accent, icon + headline + raw detail,
         // so a folder-access failure reads as an intentional state, not a glitch.
-        <div className="rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.04] p-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-red-300/90">
+        <div className="rounded-lg border border-status-danger-strong/15 border-l-[3px] border-l-status-danger-strong bg-status-danger-strong/[0.04] p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-status-danger-soft/90">
             <AlertTriangle className="size-4 shrink-0" aria-hidden />
             Couldn't read this folder
           </div>
@@ -415,7 +415,7 @@ export const LogPicker = memo(function LogPicker({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className="size-7 text-muted-foreground/70 hover:text-red-400"
+                      className="size-7 text-muted-foreground/70 hover:text-status-danger"
                       disabled={log.isActive}
                       onClick={(e) => {
                         e.stopPropagation();

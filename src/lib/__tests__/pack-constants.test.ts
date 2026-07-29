@@ -62,8 +62,8 @@ describe("PACK_TYPE_ACCENT", () => {
     expect(PACK_TYPE_ACCENT["build-pack"].text).toContain("accent-sky");
   });
 
-  it("uses violet for roster-pack", () => {
-    expect(PACK_TYPE_ACCENT["roster-pack"].text).toContain("violet");
+  it("uses the library status accent for roster-pack", () => {
+    expect(PACK_TYPE_ACCENT["roster-pack"].text).toContain("status-library");
   });
 });
 

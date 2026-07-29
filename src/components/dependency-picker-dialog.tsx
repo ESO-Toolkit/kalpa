@@ -212,9 +212,9 @@ function DependencyPickerBody({
           </>
         )}
         {overLimit && (
-          <Alert className="border-amber-400/20 bg-amber-400/[0.06] text-amber-300 shadow-none">
+          <Alert className="border-status-warning/20 bg-status-warning/[0.06] text-status-warning-soft shadow-none">
             <AlertTriangleIcon />
-            <AlertDescription className="text-amber-300/90">
+            <AlertDescription className="text-status-warning-soft/90">
               {selectedCount} selected, but only {MAX_SELECTED_DEPENDENCIES} can be installed at
               once. Untick a few and run the rest afterwards.
             </AlertDescription>
@@ -227,9 +227,9 @@ function DependencyPickerBody({
             consequence up front whenever any required entry is unticked, which
             includes the skip-everything case. */}
         {declinedRequiredCount > 0 && (
-          <Alert className="border-amber-400/20 bg-amber-400/[0.06] text-amber-300 shadow-none">
+          <Alert className="border-status-warning/20 bg-status-warning/[0.06] text-status-warning-soft shadow-none">
             <AlertTriangleIcon />
-            <AlertDescription className="text-amber-300/90">
+            <AlertDescription className="text-status-warning-soft/90">
               Skipping {declinedRequiredCount} required{" "}
               {declinedRequiredCount === 1 ? "library" : "libraries"}. The addons that need{" "}
               {declinedRequiredCount === 1 ? "it" : "them"} won&apos;t load until{" "}
@@ -314,10 +314,10 @@ function DependencyRow({
       {showWarning && (
         <Alert
           id={warningId}
-          className="border-amber-400/20 bg-amber-400/[0.06] text-amber-300 shadow-none"
+          className="border-status-warning/20 bg-status-warning/[0.06] text-status-warning-soft shadow-none"
         >
           <AlertTriangleIcon />
-          <AlertDescription className="text-amber-300/90">
+          <AlertDescription className="text-status-warning-soft/90">
             {/* Deliberately not naming requiredBy here: that list aggregates
                 every addon that mentions this library, including any that
                 declared it OPTIONAL, so naming them would claim breakage for

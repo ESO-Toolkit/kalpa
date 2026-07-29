@@ -313,7 +313,7 @@ export function MyPacksView({
                                   e.stopPropagation();
                                   onPublish(pack);
                                 }}
-                                className="rounded-md p-1.5 text-muted-foreground/40 hover:text-emerald-400 hover:bg-emerald-400/[0.08] transition-all duration-150"
+                                className="rounded-md p-1.5 text-muted-foreground/40 hover:text-status-success hover:bg-status-success/[0.08] transition-all duration-150"
                               >
                                 <ArrowUpIcon className="size-3.5" />
                               </button>
@@ -351,8 +351,8 @@ export function MyPacksView({
                                 className={cn(
                                   "rounded-md p-1.5 transition-all duration-150",
                                   isConfirmingDelete
-                                    ? "text-red-400 bg-red-400/[0.1]"
-                                    : "text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08]"
+                                    ? "text-status-danger bg-status-danger/[0.1]"
+                                    : "text-muted-foreground/40 hover:text-status-danger hover:bg-status-danger/[0.08]"
                                 )}
                               >
                                 <TrashIcon className="size-3.5" />
@@ -401,8 +401,8 @@ export function MyPacksView({
                           transition={{ duration: 0.15 }}
                           className="overflow-hidden"
                         >
-                          <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
-                            <span className="text-xs text-red-400 font-medium">
+                          <div className="mt-1 flex items-center justify-between rounded-lg border border-status-danger-strong/25 bg-status-danger-strong/[0.08] px-3 py-2 shadow-[0_0_12px_color-mix(in_oklab,var(--status-danger-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-danger-strong)_4%,transparent)]">
+                            <span className="text-xs text-status-danger font-medium">
                               Delete this pack?
                             </span>
                             <div className="flex items-center gap-2">
@@ -417,7 +417,7 @@ export function MyPacksView({
                                   setConfirmDeleteId(null);
                                   onDelete(pack.id);
                                 }}
-                                className="text-xs font-semibold text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
+                                className="text-xs font-semibold text-status-danger hover:text-status-danger-soft bg-status-danger-strong/10 hover:bg-status-danger-strong/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
                               >
                                 Delete
                               </button>
@@ -534,7 +534,7 @@ export function MyPacksView({
                           e.stopPropagation();
                           onRemoveInstalledRef(ref.packId);
                         }}
-                        className="rounded-md p-1.5 text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08] transition-all duration-150"
+                        className="rounded-md p-1.5 text-muted-foreground/40 hover:text-status-danger hover:bg-status-danger/[0.08] transition-all duration-150"
                       >
                         <XIcon className="size-3.5" />
                       </button>

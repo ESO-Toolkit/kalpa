@@ -46,10 +46,102 @@
     "--border": "#3a3f46",
     "--orb-1": "#d2a14e",
     "--orb-2": "#5d8aa8",
-    "--orb-3": "#4a5a52"
+    "--orb-3": "#4a5a52",
+    "--structure-rgb": "255 255 255",
+    "--scrim-rgb": "0 0 0",
+    "--status-success": "#34d399",
+    "--status-success-soft": "#6ee7b7",
+    "--status-success-muted": "#a7f3d0",
+    "--status-success-faint": "#d1fae5",
+    "--status-success-strong": "#10b981",
+    "--status-warning": "#fbbf24",
+    "--status-warning-soft": "#fcd34d",
+    "--status-warning-muted": "#fde68a",
+    "--status-warning-faint": "#fef3c7",
+    "--status-warning-strong": "#f59e0b",
+    "--status-danger": "#f87171",
+    "--status-danger-soft": "#fca5a5",
+    "--status-danger-muted": "#fecaca",
+    "--status-danger-faint": "#fee2e2",
+    "--status-danger-strong": "#ef4444",
+    "--status-library": "#a78bfa",
+    "--status-library-strong": "#8b5cf6",
+    "--status-info": "#38bdf8",
+    "--status-info-soft": "#7dd3fc",
+    "--status-info-strong": "#0ea5e9",
+    "--status-error": "#f87171",
+    "--status-error-strong": "#ef4444"
   };
 
   var root = document.documentElement;
+  var LIGHT_THEME_BACKGROUND_LUMINANCE = 0.45;
+  var DARK_STATUS_VARS = {
+    "--status-success": "#34d399",
+    "--status-success-soft": "#6ee7b7",
+    "--status-success-muted": "#a7f3d0",
+    "--status-success-faint": "#d1fae5",
+    "--status-success-strong": "#10b981",
+    "--status-warning": "#fbbf24",
+    "--status-warning-soft": "#fcd34d",
+    "--status-warning-muted": "#fde68a",
+    "--status-warning-faint": "#fef3c7",
+    "--status-warning-strong": "#f59e0b",
+    "--status-danger": "#f87171",
+    "--status-danger-soft": "#fca5a5",
+    "--status-danger-muted": "#fecaca",
+    "--status-danger-faint": "#fee2e2",
+    "--status-danger-strong": "#ef4444",
+    "--status-library": "#a78bfa",
+    "--status-library-strong": "#8b5cf6",
+    "--status-info": "#38bdf8",
+    "--status-info-soft": "#7dd3fc",
+    "--status-info-strong": "#0ea5e9"
+  };
+  var LIGHT_STATUS_VARS = {
+    "--status-success": "#022c22",
+    "--status-success-soft": "#022c22",
+    "--status-success-muted": "#022c22",
+    "--status-success-faint": "#022c22",
+    "--status-success-strong": "#022c22",
+    "--status-warning": "#451a03",
+    "--status-warning-soft": "#451a03",
+    "--status-warning-muted": "#451a03",
+    "--status-warning-faint": "#451a03",
+    "--status-warning-strong": "#451a03",
+    "--status-danger": "#450a0a",
+    "--status-danger-soft": "#450a0a",
+    "--status-danger-muted": "#450a0a",
+    "--status-danger-faint": "#450a0a",
+    "--status-danger-strong": "#450a0a",
+    "--status-library": "#6d28d9",
+    "--status-library-strong": "#6d28d9",
+    "--status-info": "#0369a1",
+    "--status-info-soft": "#0369a1",
+    "--status-info-strong": "#075985"
+  };
+
+  function relativeLuminance(hex) {
+    var h = String(hex || "").trim().replace(/^#/, "");
+    if (h.length === 3) h = h.replace(/./g, function (c) { return c + c; });
+    if (h.length !== 6 || /[^0-9a-fA-F]/.test(h)) return 0;
+    function channel(i) {
+      var s = parseInt(h.slice(i, i + 2), 16) / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    }
+    return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+  }
+
+  function statusVarsForBackground(background) {
+    var source = relativeLuminance(background) >= LIGHT_THEME_BACKGROUND_LUMINANCE
+      ? LIGHT_STATUS_VARS
+      : DARK_STATUS_VARS;
+    var vars = {};
+    for (var name in source) vars[name] = source[name];
+    vars["--status-error"] = source["--status-danger"];
+    vars["--status-error-strong"] = source["--status-danger-strong"];
+    return vars;
+  }
+
   function apply(vars) {
     var textured = false;
     for (var name in vars) {
@@ -80,7 +172,9 @@
   // forced migration; otherwise paint the factory default (colors only — the skin
   // and its data-textured flag arrive together at hydration).
   if (mirror && applied >= FORCED_VERSION) {
-    if (apply(mirror)) root.dataset.textured = "true";
+    var textured = apply(mirror);
+    apply(statusVarsForBackground(mirror["--background"]));
+    if (textured) root.dataset.textured = "true";
   } else {
     apply(DEFAULT_VARS);
   }

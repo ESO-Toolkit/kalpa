@@ -278,7 +278,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
 
   if (error) {
     return (
-      <GlassPanel variant="subtle" className="p-4 text-sm text-red-400">
+      <GlassPanel variant="subtle" className="p-4 text-sm text-status-danger">
         Failed to load files: {error}
       </GlassPanel>
     );

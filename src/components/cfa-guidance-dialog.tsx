@@ -65,7 +65,7 @@ export function CfaGuidanceDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <ShieldAlert className="size-5 text-amber-400" />
+            <ShieldAlert className="size-5 text-status-warning" />
             Windows is blocking Kalpa
           </DialogTitle>
           <DialogDescription>
@@ -96,7 +96,7 @@ export function CfaGuidanceDialog({
               {exePath}
             </code>
             <Button variant="ghost" size="icon-sm" onClick={copyPath} aria-label="Copy path">
-              {copied ? <Check className="text-emerald-400" /> : <Copy />}
+              {copied ? <Check className="text-status-success" /> : <Copy />}
             </Button>
           </div>
         )}

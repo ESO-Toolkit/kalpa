@@ -196,7 +196,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                           transition={{ duration: 0.15 }}
                           className="flex items-center gap-1"
                         >
-                          <span className="text-xs text-amber-400 mr-1">Restore?</span>
+                          <span className="text-xs text-status-warning mr-1">Restore?</span>
                           <Button
                             size="sm"
                             variant="destructive"
@@ -328,14 +328,14 @@ function IntegrityTab({ addonsPath }: { addonsPath: string }) {
                 {result.issues.map((issue) => (
                   <div
                     key={issue}
-                    className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-1.5 text-xs text-amber-400"
+                    className="rounded-lg border border-status-warning/20 bg-status-warning/[0.04] px-3 py-1.5 text-xs text-status-warning"
                   >
                     {issue}
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] px-3 py-2 text-xs text-emerald-400">
+              <div className="rounded-lg border border-status-success/20 bg-status-success/[0.04] px-3 py-2 text-xs text-status-success">
                 All checks passed. No issues found.
               </div>
             )}
@@ -349,7 +349,7 @@ function IntegrityTab({ addonsPath }: { addonsPath: string }) {
 function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 text-xs ${ok ? "text-emerald-400" : "text-red-400"}`}
+      className={`inline-flex items-center gap-1 text-xs ${ok ? "text-status-success" : "text-status-danger"}`}
     >
       {ok ? "\u2713" : "\u2717"} {label}
     </span>
@@ -391,7 +391,9 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
                 <div className="flex items-center justify-between">
                   <span className="font-medium text-foreground">{entry.operation}</span>
                   <span
-                    className={entry.status === "success" ? "text-emerald-400" : "text-red-400"}
+                    className={
+                      entry.status === "success" ? "text-status-success" : "text-status-danger"
+                    }
                   >
                     {entry.status}
                   </span>

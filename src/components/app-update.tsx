@@ -162,11 +162,11 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
         )}
         {state.status === "ready" && (
           <>
-            <DownloadIcon className="h-3.5 w-3.5 text-emerald-400" />
-            <span className="text-emerald-400">Update ready</span>
+            <DownloadIcon className="h-3.5 w-3.5 text-status-success" />
+            <span className="text-status-success">Update ready</span>
             <button
               onClick={onRestart}
-              className="ml-auto rounded-md bg-emerald-400/20 px-2 py-0.5 text-emerald-400 transition-colors hover:bg-emerald-400/30"
+              className="ml-auto rounded-md bg-status-success/20 px-2 py-0.5 text-status-success transition-colors hover:bg-status-success/30"
             >
               Restart Now
             </button>

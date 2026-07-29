@@ -123,7 +123,7 @@ function InstanceBadge({
                 }}
                 className={cn(
                   "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium transition-colors hover:bg-structure-06",
-                  isActive ? "text-sky-300" : "text-muted-foreground"
+                  isActive ? "text-status-info-soft" : "text-muted-foreground"
                 )}
               >
                 <Monitor className="size-3 shrink-0 text-muted-foreground" />
@@ -131,7 +131,7 @@ function InstanceBadge({
                 <span className="text-[10px] text-muted-foreground">
                   {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
                 </span>
-                {isActive && <Check className="size-3 shrink-0 text-sky-400" />}
+                {isActive && <Check className="size-3 shrink-0 text-status-info" />}
               </button>
             );
           })}
@@ -248,7 +248,7 @@ function AppHeaderBase({
               variant="outline"
               onClick={onBatchDisable}
               disabled={batchDisabling}
-              className="border-amber-500/25 text-amber-400 hover:bg-amber-500/10"
+              className="border-status-warning-strong/25 text-status-warning hover:bg-status-warning-strong/10"
             >
               <Power className="size-3.5 mr-1" />
               {batchDisabling ? "Working..." : "Disable"}
@@ -273,12 +273,12 @@ function AppHeaderBase({
                         tag === "favorite"
                           ? "text-primary"
                           : tag === "broken"
-                            ? "text-red-400"
+                            ? "text-status-danger"
                             : tag === "testing"
-                              ? "text-amber-400"
+                              ? "text-status-warning"
                               : tag === "essential"
-                                ? "text-emerald-400"
-                                : "text-violet-400"
+                                ? "text-status-success"
+                                : "text-status-library"
                       )}
                     >
                       {tag}
@@ -418,7 +418,7 @@ function AppHeaderBase({
           <SimpleTooltip content="Close" side="bottom">
             <button
               onClick={() => void getCurrentWindow().close()}
-              className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-red-500/20 hover:text-foreground"
+              className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-status-danger-strong/20 hover:text-foreground"
               aria-label="Close"
             >
               <XIcon className="size-3.5" />

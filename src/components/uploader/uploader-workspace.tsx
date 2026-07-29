@@ -1980,8 +1980,8 @@ function LiveSessionMiniBar({
         className={cn(
           "border p-3.5 shadow-[0_18px_48px_-18px_var(--scrim-85),inset_0_1px_0_var(--structure-06)]",
           tone === "emerald"
-            ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.08] to-structure-015"
-            : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.08] to-structure-015"
+            ? "border-status-success/20 bg-gradient-to-b from-status-success/[0.08] to-structure-015"
+            : "border-status-warning/20 bg-gradient-to-b from-status-warning/[0.08] to-structure-015"
         )}
       >
         <div className="flex flex-wrap items-center gap-3">
@@ -1990,12 +1990,12 @@ function LiveSessionMiniBar({
               className={cn(
                 "flex size-9 shrink-0 items-center justify-center rounded-lg border",
                 tone === "emerald"
-                  ? "border-emerald-400/20 bg-emerald-400/[0.08]"
-                  : "border-amber-400/20 bg-amber-400/[0.08]"
+                  ? "border-status-success/20 bg-status-success/[0.08]"
+                  : "border-status-warning/20 bg-status-warning/[0.08]"
               )}
             >
               {phase === "attention" ? (
-                <AlertTriangle className="size-4 text-amber-300" aria-hidden />
+                <AlertTriangle className="size-4 text-status-warning-soft" aria-hidden />
               ) : (
                 <PulseDot tone={tone} />
               )}
@@ -2055,8 +2055,8 @@ function LiveSessionMiniBar({
               onClick={onStop}
               className={
                 handedOff
-                  ? "border-amber-400/25 text-amber-200 hover:bg-amber-500/10"
-                  : "border-red-400/25 text-red-200 hover:bg-red-500/10"
+                  ? "border-status-warning/25 text-status-warning-muted hover:bg-status-warning-strong/10"
+                  : "border-status-danger/25 text-status-danger-muted hover:bg-status-danger-strong/10"
               }
             >
               {handedOff ? "Stop tracking" : "Stop upload"}
@@ -2097,7 +2097,7 @@ function DeleteLogConfirm({
           </DialogDescription>
         </DialogHeader>
         {target && (
-          <div className="mt-3 rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.05] p-3">
+          <div className="mt-3 rounded-lg border border-status-danger-strong/15 border-l-[3px] border-l-status-danger-strong bg-status-danger-strong/[0.05] p-3">
             <div className="truncate font-mono text-sm text-foreground" title={target.fileName}>
               {target.fileName}
             </div>
@@ -2235,13 +2235,13 @@ function PulseDot({ tone }: { tone: "amber" | "emerald" }) {
       <span
         className={cn(
           "absolute inline-flex size-full animate-ping rounded-full",
-          tone === "amber" ? "bg-amber-400/70" : "bg-emerald-400/70"
+          tone === "amber" ? "bg-status-warning/70" : "bg-status-success/70"
         )}
       />
       <span
         className={cn(
           "relative inline-flex size-2 rounded-full",
-          tone === "amber" ? "bg-amber-400" : "bg-emerald-400"
+          tone === "amber" ? "bg-status-warning" : "bg-status-success"
         )}
       />
     </span>
@@ -2278,7 +2278,7 @@ function AccountChip({
             title="Signed in for this session only — it won't persist after you restart Kalpa."
             className="inline-flex"
           >
-            <AlertTriangle className="size-3 text-amber-400" aria-hidden />
+            <AlertTriangle className="size-3 text-status-warning" aria-hidden />
           </span>
         )}
       </span>
@@ -2509,8 +2509,8 @@ function LiveDashboardBand({
       className={cn(
         "mt-2.5 rounded-xl border p-3",
         tone === "emerald"
-          ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.06] to-emerald-400/[0.01]"
-          : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.06] to-amber-400/[0.01]"
+          ? "border-status-success/20 bg-gradient-to-b from-status-success/[0.06] to-status-success/[0.01]"
+          : "border-status-warning/20 bg-gradient-to-b from-status-warning/[0.06] to-status-warning/[0.01]"
       )}
     >
       <div className="flex flex-wrap items-stretch gap-3">
@@ -2563,8 +2563,8 @@ function LiveCore({
       className={cn(
         "flex min-w-[116px] flex-col justify-center gap-0.5 rounded-lg border px-3 py-2",
         tone === "emerald"
-          ? "border-emerald-400/20 bg-emerald-400/[0.05]"
-          : "border-amber-400/20 bg-amber-400/[0.05]"
+          ? "border-status-success/20 bg-status-success/[0.05]"
+          : "border-status-warning/20 bg-status-warning/[0.05]"
       )}
     >
       <div className="flex items-center gap-1.5">
@@ -2572,7 +2572,7 @@ function LiveCore({
         <span
           className={cn(
             "font-heading text-[10px] font-bold tracking-[0.08em]",
-            tone === "emerald" ? "text-emerald-300/90" : "text-amber-300/90"
+            tone === "emerald" ? "text-status-success-soft/90" : "text-status-warning-soft/90"
           )}
         >
           {label}
@@ -2684,8 +2684,8 @@ function LiveReportCTA({
   // streaming through Kalpa, so it just opens.
   const isNative = !handedOff;
   return (
-    <div className="flex min-w-[124px] flex-col justify-center gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-2">
-      <span className="font-heading text-[10px] font-bold tracking-[0.08em] text-emerald-300/90 uppercase">
+    <div className="flex min-w-[124px] flex-col justify-center gap-1.5 rounded-lg border border-status-success/20 bg-status-success/[0.05] px-3 py-2">
+      <span className="font-heading text-[10px] font-bold tracking-[0.08em] text-status-success-soft/90 uppercase">
         Report ready
       </span>
       <span className="truncate text-xs text-foreground" title={report.code}>
@@ -2694,7 +2694,7 @@ function LiveReportCTA({
       <div className="flex items-center gap-1">
         <Button
           size="sm"
-          className="h-7 flex-1 gap-1.5 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
+          className="h-7 flex-1 gap-1.5 bg-status-success-strong/15 text-status-success-muted hover:bg-status-success-strong/25"
           onClick={() =>
             void openReportUrl(primaryReportUrl(report, visibility, { live: isNative }))
           }
@@ -2750,11 +2750,11 @@ function LogSummaryCard({
   return (
     <GlassPanel
       variant="primary"
-      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-structure-01 p-4 shadow-[0_12px_36px_-14px_var(--scrim-70),inset_0_1px_0_var(--structure-06)]"
+      className="overflow-hidden border-status-success/15 bg-gradient-to-b from-status-success/[0.05] to-structure-01 p-4 shadow-[0_12px_36px_-14px_var(--scrim-70),inset_0_1px_0_var(--structure-06)]"
     >
       <div className="mb-2.5 flex items-center gap-1.5">
-        <CheckCircle2 className="size-3.5 text-emerald-400" aria-hidden />
-        <span className="font-heading text-[11px] font-semibold tracking-[0.08em] text-emerald-300/90 uppercase">
+        <CheckCircle2 className="size-3.5 text-status-success" aria-hidden />
+        <span className="font-heading text-[11px] font-semibold tracking-[0.08em] text-status-success-soft/90 uppercase">
           Ready to upload
         </span>
       </div>
@@ -2985,10 +2985,10 @@ function DirectUploadSection({
   // doesn't add a second heavy panel above the action.
   if (hasSession) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.06] to-emerald-400/[0.02] px-3 py-1.5 shadow-[inset_0_1px_0_var(--structure-04)]">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-status-success/20 bg-gradient-to-b from-status-success/[0.06] to-status-success/[0.02] px-3 py-1.5 shadow-[inset_0_1px_0_var(--structure-04)]">
         <div className="flex min-w-0 items-center gap-2 text-xs">
-          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-400/15">
-            <Check className="size-2.5 text-emerald-400" aria-hidden />
+          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-status-success/15">
+            <Check className="size-2.5 text-status-success" aria-hidden />
           </span>
           <span className="text-foreground">Direct upload ready</span>
           <span className="truncate text-muted-foreground">— reports appear here</span>
@@ -3279,7 +3279,7 @@ function LogPicker({
                 )}
               </div>
             ) : (
-              <div className="text-[11px] text-amber-400/90">{detection?.message}</div>
+              <div className="text-[11px] text-status-warning/90">{detection?.message}</div>
             )}
           </div>
         </div>
@@ -3370,8 +3370,8 @@ function LogPicker({
       {listError ? (
         // On-brand error card: 3px red left-accent, icon + headline + raw detail,
         // so a folder-access failure reads as an intentional state, not a glitch.
-        <div className="rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.04] p-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-red-300/90">
+        <div className="rounded-lg border border-status-danger-strong/15 border-l-[3px] border-l-status-danger-strong bg-status-danger-strong/[0.04] p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-status-danger-soft/90">
             <AlertTriangle className="size-4 shrink-0" aria-hidden />
             Couldn't read this folder
           </div>
@@ -3517,7 +3517,7 @@ function LogPicker({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className="size-7 text-muted-foreground hover:text-red-400"
+                      className="size-7 text-muted-foreground hover:text-status-danger"
                       disabled={log.isActive}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -3720,7 +3720,7 @@ function Preflight({
       className={cn(
         "rounded-xl border border-l-[3px] p-3 transition-colors",
         urgent
-          ? "border-amber-400/25 border-l-amber-400 bg-amber-400/[0.05]"
+          ? "border-status-warning/25 border-l-status-warning bg-status-warning/[0.05]"
           : "border-accent-sky/20 border-l-accent-sky/70 bg-accent-sky/[0.04]"
       )}
     >
@@ -3728,7 +3728,9 @@ function Preflight({
         <span
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-lg",
-            urgent ? "bg-amber-400/12 text-amber-300" : "bg-accent-sky/12 text-accent-sky"
+            urgent
+              ? "bg-status-warning/12 text-status-warning-soft"
+              : "bg-accent-sky/12 text-accent-sky"
           )}
         >
           <Scissors className="size-4" aria-hidden />
@@ -3755,7 +3757,7 @@ function Preflight({
             className={cn(
               "shrink-0",
               urgent
-                ? "border-amber-400/35 bg-amber-400/[0.06] text-amber-200 hover:bg-amber-400/[0.14]"
+                ? "border-status-warning/35 bg-status-warning/[0.06] text-status-warning-muted hover:bg-status-warning/[0.14]"
                 : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
             )}
           >
@@ -3774,7 +3776,7 @@ function Preflight({
             className={cn(
               "shrink-0",
               urgent
-                ? "border-amber-400/35 bg-amber-400/[0.06] text-amber-200 hover:bg-amber-400/[0.14]"
+                ? "border-status-warning/35 bg-status-warning/[0.06] text-status-warning-muted hover:bg-status-warning/[0.14]"
                 : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
             )}
           >
@@ -3792,7 +3794,7 @@ function Preflight({
             className={cn(
               "shrink-0",
               urgent
-                ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
+                ? "border-status-warning/40 bg-status-warning/[0.08] text-status-warning-muted hover:bg-status-warning/[0.16]"
                 : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
             )}
           >
@@ -3990,7 +3992,7 @@ function CopyChip({ text }: { text: string }) {
       aria-label={`Copy ${text}`}
     >
       {copied ? (
-        <Check className="size-3 text-emerald-400" />
+        <Check className="size-3 text-status-success" />
       ) : (
         <Copy className="size-3 opacity-70" />
       )}
@@ -4064,16 +4066,16 @@ function LiveDashboard({
               {waiting ? (
                 <InfoPill color="amber" className="gap-1.5">
                   <span className="relative flex size-2">
-                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400/70" />
-                    <span className="relative inline-flex size-2 rounded-full bg-amber-400" />
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-status-warning/70" />
+                    <span className="relative inline-flex size-2 rounded-full bg-status-warning" />
                   </span>
                   ARMED
                 </InfoPill>
               ) : (
                 <InfoPill color="emerald" className="gap-1.5">
                   <span className="relative flex size-2">
-                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
-                    <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-status-success/70" />
+                    <span className="relative inline-flex size-2 rounded-full bg-status-success" />
                   </span>
                   LIVE
                 </InfoPill>
@@ -4098,9 +4100,9 @@ function LiveDashboard({
 
       {/* Report-ready, promoted to the top so it's seen the moment it lands. */}
       {liveReport && (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] px-3 py-2.5">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-status-success/25 bg-status-success/[0.06] px-3 py-2.5">
           <div className="min-w-0">
-            <div className="text-xs font-medium uppercase tracking-wide text-emerald-400/90">
+            <div className="text-xs font-medium uppercase tracking-wide text-status-success/90">
               Report ready
             </div>
             <div className="truncate text-base text-foreground">{liveReport.code}</div>
@@ -4122,7 +4124,7 @@ function LiveDashboard({
                 sessions open raw ESO Logs so players/fight=last stay current. */}
             <Button
               size="sm"
-              className="bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+              className="bg-status-success-strong/15 text-status-success-soft hover:bg-status-success-strong/25"
               onClick={() =>
                 void openReportUrl(primaryReportUrl(liveReport, visibility, { live: isNative }))
               }
@@ -4146,14 +4148,14 @@ function LiveDashboard({
           misleading, so it branches on the path the running session actually took. */}
       {running &&
         (handedOff ? (
-          <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
+          <div className="rounded-lg border border-status-warning-strong/15 border-l-[3px] border-l-status-warning-strong bg-status-warning-strong/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-status-warning-soft/90">
               <AlertCircle className="size-3.5 shrink-0" aria-hidden />
               Kalpa tracks; the ESO Logs uploader uploads
             </div>
             <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
               <li className="list-disc">
-                <span className="text-amber-400/90">Stop tracking</span> ends this timeline in
+                <span className="text-status-warning/90">Stop tracking</span> ends this timeline in
                 Kalpa.
               </li>
               <li className="list-disc">
@@ -4165,8 +4167,8 @@ function LiveDashboard({
             </ul>
           </div>
         ) : (
-          <div className="rounded-lg border border-emerald-500/15 border-l-[3px] border-l-emerald-500 bg-emerald-500/[0.04] p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-emerald-300/90">
+          <div className="rounded-lg border border-status-success-strong/15 border-l-[3px] border-l-status-success-strong bg-status-success-strong/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-status-success-soft/90">
               <Radio className="size-3.5 shrink-0" aria-hidden />
               Kalpa is uploading directly to ESO Logs
             </div>
@@ -4175,7 +4177,7 @@ function LiveDashboard({
                 Fights stream straight from Kalpa — no separate uploader window.
               </li>
               <li className="list-disc">
-                <span className="text-emerald-400/90">Stop</span> ends the upload and closes the
+                <span className="text-status-success/90">Stop</span> ends the upload and closes the
                 report on esologs.com.
               </li>
               <li className="list-disc">
@@ -4328,13 +4330,13 @@ function sourceLocation(sourcePath: string): { folder: string; dir: string } {
  *  alone. Emerald for `live` (a healthy in-progress session); red is reserved for
  *  real failures only. */
 const STATUS_ACCENT: Record<UploadRecord["status"], string> = {
-  completed: "before:bg-emerald-400/70",
+  completed: "before:bg-status-success/70",
   queued: "before:bg-accent-sky/70",
   uploading: "before:bg-accent-sky/70",
-  live: "before:bg-emerald-400/70",
-  paused: "before:bg-amber-400/70",
-  handedOff: "before:bg-amber-400/70",
-  failed: "before:bg-red-400/80",
+  live: "before:bg-status-success/70",
+  paused: "before:bg-status-warning/70",
+  handedOff: "before:bg-status-warning/70",
+  failed: "before:bg-status-danger/80",
   cancelled: "before:bg-structure-15",
 };
 
@@ -4496,7 +4498,7 @@ function HistoryPanel({
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
+                          className="text-status-success-soft/90 hover:bg-status-success-strong/15 hover:text-status-success-muted"
                           onClick={() =>
                             void primaryReportUrlForOpen(r.report!, r.visibility, {
                               buildEvidence: r.buildEvidence,
@@ -4524,7 +4526,7 @@ function HistoryPanel({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="text-muted-foreground hover:text-red-400"
+                        className="text-muted-foreground hover:text-status-danger"
                         onClick={() => setConfirmDeleteId(confirmDeleteId === r.id ? null : r.id)}
                         aria-label="Remove this upload from history"
                       >
@@ -4539,13 +4541,13 @@ function HistoryPanel({
                     is self-explanatory; clicking reveals the inline input in-place,
                     with the prose still showing so the "why" never disappears. */}
                 {handedOffNeedsLink && (
-                  <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2">
+                  <div className="mt-2 rounded-lg border border-status-warning/20 bg-status-warning/[0.05] px-3 py-2">
                     <div className="flex items-start gap-2">
                       <ExternalLink
-                        className="mt-0.5 size-3.5 shrink-0 text-amber-400/80"
+                        className="mt-0.5 size-3.5 shrink-0 text-status-warning/80"
                         aria-hidden
                       />
-                      <p className="text-xs leading-relaxed text-amber-100/80">
+                      <p className="text-xs leading-relaxed text-status-warning-faint/80">
                         Finished in the official ESO Logs uploader, so Kalpa doesn't have the report
                         link yet. Paste it to open the analysis.
                       </p>
@@ -4579,7 +4581,7 @@ function HistoryPanel({
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="mt-1.5 -ml-1.5 gap-1.5 text-amber-200/90 hover:bg-amber-400/10 hover:text-amber-100"
+                        className="mt-1.5 -ml-1.5 gap-1.5 text-status-warning-muted/90 hover:bg-status-warning/10 hover:text-status-warning-faint"
                         onClick={() => {
                           setAttachingId(r.id);
                           setLinkDraft("");
@@ -4593,8 +4595,8 @@ function HistoryPanel({
                 )}
 
                 {confirmDeleteId === r.id && (
-                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.05] px-3 py-2">
-                    <span className="text-xs text-red-200/90">
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-status-danger-strong/20 bg-status-danger-strong/[0.05] px-3 py-2">
+                    <span className="text-xs text-status-danger-muted/90">
                       Remove this record? Your log file stays on disk.
                     </span>
                     <div className="flex shrink-0 gap-1.5">
@@ -4642,8 +4644,8 @@ function StatusBadge({
       return (
         <InfoPill color="emerald" className="gap-1.5">
           <span className="relative flex size-2" aria-hidden>
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
-            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-status-success/70" />
+            <span className="relative inline-flex size-2 rounded-full bg-status-success" />
           </span>
           Live
         </InfoPill>
