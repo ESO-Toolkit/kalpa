@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Check, Plus, ClipboardPaste, Pencil, CopyPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,12 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { ambientAnimationsEnabled, setAmbientAnimations } from "@/lib/ambient-animations";
+import {
+  TEXT_ZOOM_CHANGE_EVENT,
+  TEXT_ZOOM_STOPS,
+  setTextZoom,
+  textZoomFactor,
+} from "@/lib/text-zoom";
 import { ThemeSwatch } from "@/components/ui/theme-swatch";
 import { ThemeEditor } from "@/components/theme-editor";
 import { useTheme } from "@/lib/use-theme";
@@ -61,6 +67,13 @@ export function AppearanceSettings() {
   // The root class is the synchronous source of truth (hydrated at startup),
   // so no load effect is needed.
   const [ambientOn, setAmbientOn] = useState(ambientAnimationsEnabled);
+  const [textZoom, setTextZoomState] = useState(textZoomFactor);
+
+  useEffect(() => {
+    const syncTextZoom = () => setTextZoomState(textZoomFactor());
+    window.addEventListener(TEXT_ZOOM_CHANGE_EVENT, syncTextZoom);
+    return () => window.removeEventListener(TEXT_ZOOM_CHANGE_EVENT, syncTextZoom);
+  }, []);
 
   const grouped = useMemo(() => {
     const byCat = new Map<string, Theme[]>();
@@ -149,6 +162,49 @@ export function AppearanceSettings() {
 
   return (
     <div className="space-y-4">
+      {/* Text size */}
+      <section className="space-y-2">
+        <SectionHeader>Text Size</SectionHeader>
+        <GlassPanel variant="subtle" className="space-y-3 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-foreground">Interface scale</p>
+              <p className="text-xs text-muted-foreground">
+                Enlarges all Kalpa text and controls together.
+              </p>
+            </div>
+            <div className="grid min-w-[248px] grid-cols-4 rounded-lg border border-white/[0.06] bg-white/[0.03] p-1">
+              {TEXT_ZOOM_STOPS.map((factor) => {
+                const active = Math.abs(textZoom - factor) < 0.001;
+                return (
+                  <button
+                    key={factor}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => {
+                      setTextZoomState(factor);
+                      setTextZoom(factor);
+                    }}
+                    className={`rounded-md px-2 py-1.5 text-xs font-semibold transition-colors duration-150 ${
+                      active
+                        ? "bg-[#c4a44a] text-[#0b1220] shadow-[0_1px_6px_rgba(196,164,74,0.24)]"
+                        : "text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+                    }`}
+                  >
+                    {Math.round(factor * 100)}%
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {textZoom >= 1.5 && (
+            <p className="rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2 text-xs text-amber-200">
+              At 150%, Kalpa widens its minimum window to 1200 x 750 so the addon list stays usable.
+            </p>
+          )}
+        </GlassPanel>
+      </section>
+
       {/* Effects */}
       <section className="space-y-2">
         <SectionHeader>Effects</SectionHeader>

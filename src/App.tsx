@@ -33,6 +33,7 @@ import {
 } from "@/lib/tauri";
 import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import { isModKey, isWindows } from "@/lib/platform";
+import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
 import type {
   AddonManifest,
   AuthUser,
@@ -642,6 +643,21 @@ function App() {
         event.preventDefault();
         setViewMode("discover");
         setDiscoverTab("search");
+      }
+
+      if (isModKey(event) && (event.key === "+" || event.key === "=")) {
+        event.preventDefault();
+        setTextZoom(nextTextZoomStop(1));
+      }
+
+      if (isModKey(event) && event.key === "-") {
+        event.preventDefault();
+        setTextZoom(nextTextZoomStop(-1));
+      }
+
+      if (isModKey(event) && event.key === "0") {
+        event.preventDefault();
+        setTextZoom(1);
       }
 
       if (event.key === "Escape") {

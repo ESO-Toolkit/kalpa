@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, LogicalSize, Manager};
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -9541,6 +9541,10 @@ fn launch_native_shell_process(
     }
 }
 
+const TEXT_ZOOM_MIN: f64 = 1.0;
+const TEXT_ZOOM_MAX: f64 = 1.5;
+const TEXT_ZOOM_BASE_MIN_WIDTH: f64 = 800.0;
+const TEXT_ZOOM_BASE_MIN_HEIGHT: f64 = 500.0;
 const NATIVE_SHELL_STANDARD_PRESET: &str = "standard";
 const NATIVE_SHELL_LOW_MEMORY_PRESET: &str = "low-memory";
 
@@ -9624,6 +9628,71 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn clamp_text_zoom(factor: f64) -> f64 {
+    if factor.is_finite() {
+        factor.clamp(TEXT_ZOOM_MIN, TEXT_ZOOM_MAX)
+    } else {
+        TEXT_ZOOM_MIN
+    }
+}
+
+pub fn text_zoom_from_path(path: &Path) -> Result<f64, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(TEXT_ZOOM_MIN),
+        Err(error) => return Err(format!("Failed to read text zoom setting: {error}")),
+    };
+    let value: serde_json::Value = serde_json::from_str(content.trim_start_matches('\u{feff}'))
+        .map_err(|error| format!("Failed to parse text zoom setting: {error}"))?;
+    Ok(value
+        .as_object()
+        .and_then(|object| object.get("appearance.textZoom"))
+        .and_then(serde_json::Value::as_f64)
+        .map(clamp_text_zoom)
+        .unwrap_or(TEXT_ZOOM_MIN))
+}
+
+pub fn apply_text_zoom(app: &tauri::AppHandle, factor: f64) -> Result<(), String> {
+    let clamped = clamp_text_zoom(factor);
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found.".to_string())?;
+
+    window
+        .set_zoom(clamped)
+        .map_err(|error| format!("Failed to set text zoom: {error}"))?;
+
+    let min_width = TEXT_ZOOM_BASE_MIN_WIDTH * clamped;
+    let min_height = TEXT_ZOOM_BASE_MIN_HEIGHT * clamped;
+    let min_size = LogicalSize::new(min_width, min_height);
+    window
+        .set_min_size(Some(min_size))
+        .map_err(|error| format!("Failed to set text zoom minimum size: {error}"))?;
+
+    let scale_factor = window
+        .scale_factor()
+        .map_err(|error| format!("Failed to read window scale factor: {error}"))?;
+    let current_size = window
+        .inner_size()
+        .map_err(|error| format!("Failed to read window size: {error}"))?
+        .to_logical::<f64>(scale_factor);
+
+    if current_size.width < min_width || current_size.height < min_height {
+        window
+            .set_size(LogicalSize::new(
+                current_size.width.max(min_width),
+                current_size.height.max(min_height),
+            ))
+            .map_err(|error| format!("Failed to grow window for text zoom: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_text_zoom(app: tauri::AppHandle, factor: f64) -> Result<(), String> {
+    apply_text_zoom(&app, factor)
+}
 fn native_performance_mode_enabled_from_value(value: &serde_json::Value) -> Option<bool> {
     match value.as_str()?.trim().to_ascii_lowercase().as_str() {
         "native-slint" | "slint" | "native" | "low-memory" => Some(true),
@@ -11377,6 +11446,38 @@ mod tests {
         assert_eq!(resolved, sidecar);
     }
 
+    #[test]
+    fn text_zoom_startup_reads_dotted_key() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = root.path().join("settings.json");
+        fs::write(&settings, r#"{"appearance.textZoom":1.25}"#).unwrap();
+
+        assert_eq!(text_zoom_from_path(&settings).unwrap(), 1.25);
+    }
+
+    #[test]
+    fn text_zoom_startup_defaults_when_absent_or_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = root.path().join("settings.json");
+
+        assert_eq!(text_zoom_from_path(&settings).unwrap(), 1.0);
+
+        fs::write(&settings, r#"{"appearance.ambientAnimations":false}"#).unwrap();
+
+        assert_eq!(text_zoom_from_path(&settings).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn text_zoom_startup_clamps_persisted_value() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = root.path().join("settings.json");
+
+        fs::write(&settings, r#"{"appearance.textZoom":0.8}"#).unwrap();
+        assert_eq!(text_zoom_from_path(&settings).unwrap(), 1.0);
+
+        fs::write(&settings, r#"{"appearance.textZoom":1.75}"#).unwrap();
+        assert_eq!(text_zoom_from_path(&settings).unwrap(), 1.5);
+    }
     #[test]
     fn native_performance_mode_startup_reads_aliases() {
         let root = tempfile::tempdir().unwrap();

@@ -467,6 +467,17 @@ pub fn run() {
             // is opened, so this is the only recovery pass that always runs.
             settings_store::recover(app.handle());
 
+            match app
+                .path()
+                .app_data_dir()
+                .map(|dir| dir.join("settings.json"))
+                .map_err(|error| format!("Failed to resolve app data dir: {error}"))
+                .and_then(|settings_path| commands::text_zoom_from_path(&settings_path))
+                .and_then(|factor| commands::apply_text_zoom(app.handle(), factor))
+            {
+                Ok(()) => {}
+                Err(error) => eprintln!("Failed to apply text zoom on startup: {error}"),
+            }
             // Parse any startup deep link BEFORE the native-mode gate: kalpa://
             // flows (pack installs from the browser) are WebView features, so a
             // deep-link activation boots the WebView UI even when native mode is
@@ -672,6 +683,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_addons_path,
+            commands::set_text_zoom,
             commands::check_addons_write_access,
             commands::open_ransomware_protection_settings,
             commands::detect_addons_folder,
