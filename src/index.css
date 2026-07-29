@@ -127,6 +127,29 @@
   /* Semantic status */
   --color-success: var(--success);
   --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--status-info);
+  --color-library: var(--status-library);
+  --color-status-success: var(--status-success);
+  --color-status-success-soft: var(--status-success-soft);
+  --color-status-success-muted: var(--status-success-muted);
+  --color-status-success-faint: var(--status-success-faint);
+  --color-status-success-strong: var(--status-success-strong);
+  --color-status-warning: var(--status-warning);
+  --color-status-warning-soft: var(--status-warning-soft);
+  --color-status-warning-muted: var(--status-warning-muted);
+  --color-status-warning-faint: var(--status-warning-faint);
+  --color-status-warning-strong: var(--status-warning-strong);
+  --color-status-danger: var(--status-danger);
+  --color-status-danger-soft: var(--status-danger-soft);
+  --color-status-danger-muted: var(--status-danger-muted);
+  --color-status-danger-faint: var(--status-danger-faint);
+  --color-status-danger-strong: var(--status-danger-strong);
+  --color-status-library: var(--status-library);
+  --color-status-library-strong: var(--status-library-strong);
+  --color-status-info: var(--status-info);
+  --color-status-info-soft: var(--status-info-soft);
+  --color-status-info-strong: var(--status-info-strong);
 
   /* Addon status */
   --color-addon-healthy: var(--addon-healthy);
@@ -135,25 +158,28 @@
   --color-addon-library: var(--addon-library);
   --color-addon-disabled: var(--addon-disabled);
 
-  /* Theme-tinted semantic palette — remap the Tailwind status shades the app uses
-   * (emerald/amber/red/violet, + yellow) so component status colors harmonize with
-   * the active theme. Values derive from --primary, so they recompute on switch. */
+  /* Compatibility aliases for any remaining old Tailwind palette utilities. */
+  --color-emerald-100: var(--status-success-faint);
+  --color-emerald-200: var(--status-success-muted);
+  --color-emerald-300: var(--status-success-soft);
   --color-emerald-400: var(--status-success);
   --color-emerald-500: var(--status-success-strong);
-  --color-amber-300: color-mix(in oklab, #fcd34d 82%, var(--primary));
+  --color-amber-100: var(--status-warning-faint);
+  --color-amber-200: var(--status-warning-muted);
+  --color-amber-300: var(--status-warning-soft);
   --color-amber-400: var(--status-warning);
   --color-amber-500: var(--status-warning-strong);
   --color-yellow-400: var(--status-warning);
-  --color-red-300: color-mix(in oklab, #fca5a5 86%, var(--primary));
-  --color-red-400: var(--status-error);
-  --color-red-500: var(--status-error-strong);
+  --color-red-100: var(--status-danger-faint);
+  --color-red-200: var(--status-danger-muted);
+  --color-red-300: var(--status-danger-soft);
+  --color-red-400: var(--status-danger);
+  --color-red-500: var(--status-danger-strong);
   --color-violet-400: var(--status-library);
   --color-violet-500: var(--status-library-strong);
-  /* Light status shades used for text/headings (backups) — tint lightly too. */
-  --color-emerald-100: color-mix(in oklab, #d1fae5 88%, var(--primary));
-  --color-amber-100: color-mix(in oklab, #fef3c7 88%, var(--primary));
-  --color-amber-200: color-mix(in oklab, #fde68a 86%, var(--primary));
-
+  --color-sky-300: var(--status-info-soft);
+  --color-sky-400: var(--status-info);
+  --color-sky-500: var(--status-info-strong);
   /* Glass tokens */
   --color-glass-bg: var(--glass-bg);
   --color-glass-bg-light: var(--glass-bg-light);
@@ -333,25 +359,37 @@
   --accent-cyan: oklch(from var(--accent-sky) clamp(0, calc(l + 0.08), 1) c h);
 
   /* === Semantic status colors ===
-   * Each keeps its meaning (green=ok, amber=warn, red=error, violet=library) but
-   * is mixed a modest amount toward the theme --primary so it harmonizes with the
-   * active theme instead of looking pasted-on. The Tailwind emerald/amber/red/
-   * violet utilities are remapped to these in @theme inline, so component status
-   * colors follow the theme too. Errors are tinted least, to stay alarming. */
-  --status-success: color-mix(in oklab, #34d399 78%, var(--primary));
-  --status-success-strong: color-mix(in oklab, #10b981 80%, var(--primary));
-  --status-warning: color-mix(in oklab, #fbbf24 82%, var(--primary));
-  --status-warning-strong: color-mix(in oklab, #f59e0b 82%, var(--primary));
-  --status-error: color-mix(in oklab, #f87171 86%, var(--primary));
-  --status-error-strong: color-mix(in oklab, #ef4444 86%, var(--primary));
-  --status-library: color-mix(in oklab, #a78bfa 78%, var(--primary));
-  --status-library-strong: color-mix(in oklab, #8b5cf6 80%, var(--primary));
+   * Runtime theme application flips these with the same seed-background luminance
+   * branch as --structure-rgb. Dark seeds keep the old Tailwind glow shades
+   * exactly; light seeds receive darker same-hue values that clear text contrast. */
+  --status-success: #34d399;
+  --status-success-soft: #6ee7b7;
+  --status-success-muted: #a7f3d0;
+  --status-success-faint: #d1fae5;
+  --status-success-strong: #10b981;
+  --status-warning: #fbbf24;
+  --status-warning-soft: #fcd34d;
+  --status-warning-muted: #fde68a;
+  --status-warning-faint: #fef3c7;
+  --status-warning-strong: #f59e0b;
+  --status-danger: #f87171;
+  --status-danger-soft: #fca5a5;
+  --status-danger-muted: #fecaca;
+  --status-danger-faint: #fee2e2;
+  --status-danger-strong: #ef4444;
+  --status-danger: var(--status-danger);
+  --status-danger-strong: var(--status-danger-strong);
+  --status-library: #a78bfa;
+  --status-library-strong: #8b5cf6;
+  --status-info: #38bdf8;
+  --status-info-soft: #7dd3fc;
+  --status-info-strong: #0ea5e9;
 
   --muted: color-mix(in oklab, var(--card) 82%, var(--accent-sky));
-  --destructive: var(--status-error-strong);
+  --destructive: var(--status-danger-strong);
+  --danger: var(--status-danger-strong);
   --success: var(--status-success-strong);
   --warning: var(--status-warning-strong);
-
   /* === Form surfaces === */
   --input: var(--border);
   --ring: var(--primary);
@@ -359,7 +397,7 @@
   /* === Addon Status Colors (theme-tinted via the tokens above) === */
   --addon-healthy: var(--status-success-strong);
   --addon-outdated: var(--status-warning-strong);
-  --addon-error: var(--status-error-strong);
+  --addon-error: var(--status-danger-strong);
   --addon-library: var(--status-library);
   --addon-disabled: #6b7280;
 

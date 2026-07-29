@@ -416,7 +416,7 @@ export function WhatGetsUploaded() {
         aria-expanded={open}
       >
         <span className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Lock className="size-3.5 text-emerald-400/70" aria-hidden />
+          <Lock className="size-3.5 text-status-success/70" aria-hidden />
           This report is built from your <code className="text-foreground">Encounter.log</code> and
           is owned by your ESO Logs account.
         </span>
@@ -438,14 +438,17 @@ export function WhatGetsUploaded() {
             </span>
           </div>
           <div className="flex items-start gap-2">
-            <ShieldQuestion className="mt-0.5 size-3.5 shrink-0 text-emerald-400/80" aria-hidden />
+            <ShieldQuestion
+              className="mt-0.5 size-3.5 shrink-0 text-status-success/80"
+              aria-hidden
+            />
             <span>
               <span className="text-foreground">What's never uploaded:</span> your account password,
               chat, or anything outside the combat log.
             </span>
           </div>
           <div className="flex items-start gap-2">
-            <Lock className="mt-0.5 size-3.5 shrink-0 text-violet-400/80" aria-hidden />
+            <Lock className="mt-0.5 size-3.5 shrink-0 text-status-library/80" aria-hidden />
             <span>
               You control visibility (public, unlisted, or private) and can delete a report from ESO
               Logs at any time.

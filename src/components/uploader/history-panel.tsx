@@ -68,13 +68,13 @@ export function sourceLocation(sourcePath: string): { folder: string; dir: strin
  *  alone. Emerald for `live` (a healthy in-progress session); red is reserved for
  *  real failures only. */
 const STATUS_ACCENT: Record<UploadRecord["status"], string> = {
-  completed: "before:bg-emerald-400/70",
+  completed: "before:bg-status-success/70",
   queued: "before:bg-accent-sky/70",
   uploading: "before:bg-accent-sky/70",
-  live: "before:bg-emerald-400/70",
-  paused: "before:bg-amber-400/70",
-  handedOff: "before:bg-amber-400/70",
-  failed: "before:bg-red-400/80",
+  live: "before:bg-status-success/70",
+  paused: "before:bg-status-warning/70",
+  handedOff: "before:bg-status-warning/70",
+  failed: "before:bg-status-danger/80",
   cancelled: "before:bg-structure-15",
 };
 
@@ -236,7 +236,7 @@ export const HistoryPanel = memo(function HistoryPanel({
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
+                          className="text-status-success-soft/90 hover:bg-status-success-strong/15 hover:text-status-success-muted"
                           onClick={() =>
                             void openReportUrl(primaryReportUrl(r.report!, r.visibility))
                           }
@@ -262,7 +262,7 @@ export const HistoryPanel = memo(function HistoryPanel({
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="text-muted-foreground/70 hover:text-red-400"
+                        className="text-muted-foreground/70 hover:text-status-danger"
                         onClick={() => setConfirmDeleteId(confirmDeleteId === r.id ? null : r.id)}
                         aria-label="Remove this upload from history"
                       >
@@ -277,13 +277,13 @@ export const HistoryPanel = memo(function HistoryPanel({
                     is self-explanatory; clicking reveals the inline input in-place,
                     with the prose still showing so the "why" never disappears. */}
                 {handedOffNeedsLink && (
-                  <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2">
+                  <div className="mt-2 rounded-lg border border-status-warning/20 bg-status-warning/[0.05] px-3 py-2">
                     <div className="flex items-start gap-2">
                       <ExternalLink
-                        className="mt-0.5 size-3.5 shrink-0 text-amber-400/80"
+                        className="mt-0.5 size-3.5 shrink-0 text-status-warning/80"
                         aria-hidden
                       />
-                      <p className="text-xs leading-relaxed text-amber-100/80">
+                      <p className="text-xs leading-relaxed text-status-warning-faint/80">
                         Finished in the official ESO Logs uploader, so Kalpa doesn't have the report
                         link yet. Paste it to open the analysis.
                       </p>
@@ -317,7 +317,7 @@ export const HistoryPanel = memo(function HistoryPanel({
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="mt-1.5 -ml-1.5 gap-1.5 text-amber-200/90 hover:bg-amber-400/10 hover:text-amber-100"
+                        className="mt-1.5 -ml-1.5 gap-1.5 text-status-warning-muted/90 hover:bg-status-warning/10 hover:text-status-warning-faint"
                         onClick={() => {
                           setAttachingId(r.id);
                           setLinkDraft("");
@@ -331,8 +331,8 @@ export const HistoryPanel = memo(function HistoryPanel({
                 )}
 
                 {confirmDeleteId === r.id && (
-                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.05] px-3 py-2">
-                    <span className="text-xs text-red-200/90">
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-status-danger-strong/20 bg-status-danger-strong/[0.05] px-3 py-2">
+                    <span className="text-xs text-status-danger-muted/90">
                       Remove this record? Your log file stays on disk.
                     </span>
                     <div className="flex shrink-0 gap-1.5">
@@ -380,8 +380,8 @@ function StatusBadge({
       return (
         <InfoPill color="emerald" className="gap-1.5">
           <span className="relative flex size-2" aria-hidden>
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
-            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-status-success/70" />
+            <span className="relative inline-flex size-2 rounded-full bg-status-success" />
           </span>
           Live
         </InfoPill>

@@ -153,7 +153,7 @@ export function AddonFileEditor({
     return (
       <GlassPanel variant="subtle" className="p-4">
         <div className="flex items-center justify-between">
-          <p className="text-sm text-red-400">{error}</p>
+          <p className="text-sm text-status-danger">{error}</p>
           <Button variant="ghost" size="sm" onClick={onClose}>
             <X className="h-3.5 w-3.5" />
           </Button>
@@ -167,7 +167,7 @@ export function AddonFileEditor({
       <div className="flex items-center gap-2">
         <span className="font-mono text-sm truncate flex-1">{relativePath}</span>
         {dirty && (
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-status-warning">
             unsaved
           </span>
         )}

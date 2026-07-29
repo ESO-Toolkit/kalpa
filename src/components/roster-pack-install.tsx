@@ -273,7 +273,7 @@ export function RosterPackInstall({
           {error && (
             <Fade>
               <GlassPanel variant="subtle" className="flex flex-col gap-2 p-3">
-                <div className="flex items-center gap-2 text-red-400">
+                <div className="flex items-center gap-2 text-status-danger">
                   <AlertCircleIcon className="h-4 w-4 shrink-0" />
                   <span className="text-sm">{error}</span>
                 </div>
@@ -336,11 +336,13 @@ export function RosterPackInstall({
                           Required
                         </InfoPill>
                       )}
-                      {status === "installed" && <CheckIcon className="h-4 w-4 text-emerald-400" />}
+                      {status === "installed" && (
+                        <CheckIcon className="h-4 w-4 text-status-success" />
+                      )}
                       {status === "installing" && (
                         <Loader2Icon className="h-4 w-4 animate-spin text-accent-sky" />
                       )}
-                      {status === "failed" && <XIcon className="h-4 w-4 text-red-400" />}
+                      {status === "failed" && <XIcon className="h-4 w-4 text-status-danger" />}
                     </div>
                   </GlassPanel>
                 ))}
@@ -361,7 +363,7 @@ export function RosterPackInstall({
                       <CountingNumber number={installProgress.completed + installProgress.failed} />{" "}
                       / <CountingNumber number={installProgress.total} initiallyStable />
                       {installProgress.failed > 0 && (
-                        <span className="text-red-400">
+                        <span className="text-status-danger">
                           {" "}
                           (<CountingNumber number={installProgress.failed} /> failed)
                         </span>

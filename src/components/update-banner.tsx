@@ -51,19 +51,19 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
     case "downloading":
       return <DownloadIcon className="h-3 w-3 animate-pulse text-accent-sky" />;
     case "scanning":
-      return <SearchIcon className="h-3 w-3 animate-pulse text-violet-400" />;
+      return <SearchIcon className="h-3 w-3 animate-pulse text-status-library" />;
     case "extracting":
       return <PackageIcon className="h-3 w-3 animate-pulse text-primary" />;
     case "completed":
       return (
-        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-emerald-500/20">
-          <CheckIcon className="h-2.5 w-2.5 text-emerald-400" strokeWidth={3} />
+        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-status-success-strong/20">
+          <CheckIcon className="h-2.5 w-2.5 text-status-success" strokeWidth={3} />
         </div>
       );
     case "failed":
       return (
-        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500/20">
-          <XIcon className="h-2.5 w-2.5 text-red-400" strokeWidth={3} />
+        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-status-danger-strong/20">
+          <XIcon className="h-2.5 w-2.5 text-status-danger" strokeWidth={3} />
         </div>
       );
   }
@@ -72,13 +72,13 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
 function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
   const bgColor =
     phase === "completed"
-      ? "bg-emerald-500/[0.06] border-emerald-500/15"
+      ? "bg-status-success-strong/[0.06] border-status-success-strong/15"
       : phase === "failed"
-        ? "bg-red-500/[0.06] border-red-500/15"
+        ? "bg-status-danger-strong/[0.06] border-status-danger-strong/15"
         : phase === "extracting"
           ? "bg-primary/[0.06] border-primary/15"
           : phase === "scanning"
-            ? "bg-violet-400/[0.06] border-violet-400/15"
+            ? "bg-status-library/[0.06] border-status-library/15"
             : "bg-accent-sky/[0.06] border-accent-sky/15";
 
   return (
@@ -298,9 +298,11 @@ function UpdateBannerBase({
               {/* Phase summary */}
               <span className="text-xs text-muted-foreground">
                 {allDone ? (
-                  <span className="text-emerald-400 animate-[fade-in_0.3s_ease-out]">All done</span>
+                  <span className="text-status-success animate-[fade-in_0.3s_ease-out]">
+                    All done
+                  </span>
                 ) : updateProgress.failed > 0 ? (
-                  <span className="text-red-400/70">{updateProgress.failed} failed</span>
+                  <span className="text-status-danger/70">{updateProgress.failed} failed</span>
                 ) : (
                   "Updating addons..."
                 )}

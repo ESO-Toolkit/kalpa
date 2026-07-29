@@ -1961,8 +1961,8 @@ function App() {
           />
 
           {pendingConflicts.size > 0 && (
-            <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
-              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+            <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-status-warning-strong/20 bg-status-warning-strong/[0.04] px-3 py-2 text-xs text-status-warning">
+              <span className="h-2 w-2 rounded-full bg-status-warning animate-pulse" />
               {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your
               attention — click one to review your edited files
             </div>

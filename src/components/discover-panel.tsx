@@ -167,7 +167,7 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
               Installing
             </span>
           ) : isInstalled ? (
-            <span className="flex items-center gap-1 text-emerald-400">
+            <span className="flex items-center gap-1 text-status-success">
               <Check className="size-3" />
               Installed
             </span>
@@ -1038,7 +1038,7 @@ function UrlContent({
             )}
           </div>
           {installedEsouiIds.has(addonInfo.id) && (
-            <div className="flex items-center gap-1.5 text-xs text-emerald-400">
+            <div className="flex items-center gap-1.5 text-xs text-status-success">
               <Check className="size-3" />
               Already installed
             </div>
@@ -1058,12 +1058,12 @@ function UrlContent({
 
       {state === "installed" && result && (
         <div className="space-y-2">
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400 flex items-center gap-2">
+          <div className="rounded-xl border border-status-success/20 bg-status-success/[0.04] p-3 text-sm text-status-success flex items-center gap-2">
             <Check className="size-4 shrink-0" />
             Installed: {result.installedFolders.join(", ")}
           </div>
           {result.installedDeps.length > 0 && (
-            <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400 flex items-center gap-2">
+            <div className="rounded-xl border border-status-success/20 bg-status-success/[0.04] p-3 text-sm text-status-success flex items-center gap-2">
               <Check className="size-4 shrink-0" />
               Deps: {result.installedDeps.join(", ")}
             </div>
@@ -1072,7 +1072,7 @@ function UrlContent({
       )}
 
       {error && (
-        <div className="rounded-xl border border-red-400/20 bg-red-400/[0.04] p-3 text-sm text-red-400">
+        <div className="rounded-xl border border-status-danger/20 bg-status-danger/[0.04] p-3 text-sm text-status-danger">
           {error}
         </div>
       )}

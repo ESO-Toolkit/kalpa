@@ -201,7 +201,7 @@ function DiscoverDetailBase({
     return (
       <Fade className="flex-1">
         <div className="flex flex-1 items-center justify-center px-8 h-full">
-          <div className="rounded-xl border border-red-400/20 bg-red-400/[0.04] p-4 text-sm text-red-400">
+          <div className="rounded-xl border border-status-danger/20 bg-status-danger/[0.04] p-4 text-sm text-status-danger">
             {error}
           </div>
         </div>
@@ -251,7 +251,7 @@ function DiscoverDetailBase({
                     onRemoveByEsouiId(result.id);
                     setInstallSuccess(null);
                   }}
-                  className="border-red-400/20 text-red-400 hover:bg-red-400/[0.08] hover:text-red-400"
+                  className="border-status-danger/20 text-status-danger hover:bg-status-danger/[0.08] hover:text-status-danger"
                 >
                   <Trash2 className="size-3.5" />
                   Uninstall
@@ -294,7 +294,7 @@ function DiscoverDetailBase({
 
         {/* Install success */}
         {installSuccess && (
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400 flex items-center gap-2">
+          <div className="rounded-xl border border-status-success/20 bg-status-success/[0.04] p-3 text-sm text-status-success flex items-center gap-2">
             <Check className="size-4 shrink-0" />
             <span className="flex-1">
               Installed: {installSuccess.installedFolders.join(", ")}
@@ -309,7 +309,7 @@ function DiscoverDetailBase({
                   onRemoveByEsouiId(result.id);
                   setInstallSuccess(null);
                 }}
-                className="shrink-0 rounded-lg border border-red-400/20 bg-red-400/[0.06] px-2.5 py-1 text-xs font-medium text-red-400 hover:bg-red-400/[0.12] transition-colors"
+                className="shrink-0 rounded-lg border border-status-danger/20 bg-status-danger/[0.06] px-2.5 py-1 text-xs font-medium text-status-danger hover:bg-status-danger/[0.12] transition-colors"
               >
                 <Trash2 className="size-3 inline -mt-px mr-1" />
                 Uninstall
@@ -327,7 +327,7 @@ function DiscoverDetailBase({
             accent="sky"
           />
           <StatCard
-            icon={<FileDown className="size-3.5 text-emerald-400" />}
+            icon={<FileDown className="size-3.5 text-status-success" />}
             label="Monthly"
             value={detail.monthlyDownloads}
             accent="emerald"
@@ -339,7 +339,7 @@ function DiscoverDetailBase({
             accent="gold"
           />
           <StatCard
-            icon={<Clock className="size-3.5 text-violet-400" />}
+            icon={<Clock className="size-3.5 text-status-library" />}
             label="Updated"
             value={detail.updated}
             accent="violet"
@@ -379,7 +379,7 @@ function DiscoverDetailBase({
                     className={cn(
                       "transition-all duration-150",
                       md5Copied
-                        ? "text-emerald-400"
+                        ? "text-status-success"
                         : "text-muted-foreground/30 group-hover/md5:text-accent-sky"
                     )}
                   >
@@ -509,9 +509,9 @@ function StatCard({
 }) {
   const borderColors = {
     sky: "border-accent-sky/10 hover:border-accent-sky/20",
-    emerald: "border-emerald-400/10 hover:border-emerald-400/20",
+    emerald: "border-status-success/10 hover:border-status-success/20",
     gold: "border-primary/10 hover:border-primary/20",
-    violet: "border-violet-400/10 hover:border-violet-400/20",
+    violet: "border-status-library/10 hover:border-status-library/20",
   };
 
   return (

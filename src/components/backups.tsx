@@ -430,12 +430,12 @@ function StatusHero({
     return (
       <GlassPanel
         variant="subtle"
-        className="p-4 border-amber-400/20 bg-amber-400/[0.04] flex items-center gap-3"
+        className="p-4 border-status-warning/20 bg-status-warning/[0.04] flex items-center gap-3"
       >
-        <ShieldAlert className="size-5 text-amber-400 shrink-0" />
+        <ShieldAlert className="size-5 text-status-warning shrink-0" />
         <div className="flex-1">
-          <div className="text-sm font-medium text-amber-100">No backup yet</div>
-          <div className="text-xs text-amber-200">
+          <div className="text-sm font-medium text-status-warning-faint">No backup yet</div>
+          <div className="text-xs text-status-warning-muted">
             Your addon settings aren't protected. Create your first backup below.
           </div>
         </div>
@@ -447,9 +447,9 @@ function StatusHero({
     return (
       <GlassPanel
         variant="subtle"
-        className="p-4 border-amber-400/20 bg-amber-400/[0.03] flex items-center gap-3"
+        className="p-4 border-status-warning/20 bg-status-warning/[0.03] flex items-center gap-3"
       >
-        <Clock className="size-5 text-amber-400 shrink-0" />
+        <Clock className="size-5 text-status-warning shrink-0" />
         <div className="flex-1">
           <div className="text-sm font-medium">Last backup was a while ago</div>
           <div className="text-xs text-muted-foreground">
@@ -464,9 +464,9 @@ function StatusHero({
   return (
     <GlassPanel
       variant="subtle"
-      className="p-4 border-emerald-400/15 bg-emerald-400/[0.03] flex items-center gap-3"
+      className="p-4 border-status-success/15 bg-status-success/[0.03] flex items-center gap-3"
     >
-      <ShieldCheck className="size-5 text-emerald-400 shrink-0" />
+      <ShieldCheck className="size-5 text-status-success shrink-0" />
       <div className="flex-1">
         <div className="text-sm font-medium">Your settings are protected</div>
         <div className="text-xs text-muted-foreground">
@@ -510,7 +510,7 @@ function BackupRow({
     <div
       className={cn(
         "flex items-center justify-between rounded-xl border bg-structure-02 p-3 transition-all duration-200 hover:border-structure-12",
-        isSafety ? "border-violet-400/15 bg-violet-400/[0.025]" : "border-structure-06"
+        isSafety ? "border-status-library/15 bg-status-library/[0.025]" : "border-structure-06"
       )}
     >
       <div className="min-w-0 flex-1 pr-3">
@@ -547,7 +547,7 @@ function BackupRow({
               transition={{ duration: 0.12 }}
               className="flex items-center gap-1"
             >
-              <span className="text-xs text-amber-300/90 mr-1">Delete?</span>
+              <span className="text-xs text-status-warning-soft/90 mr-1">Delete?</span>
               <Button
                 size="sm"
                 variant="destructive"
@@ -584,7 +584,7 @@ function BackupRow({
                 onClick={onAskDelete}
                 disabled={anyOpInFlight}
                 title="Delete this backup"
-                className="text-muted-foreground hover:text-red-400"
+                className="text-muted-foreground hover:text-status-danger"
               >
                 <Trash2 className="size-3.5" />
               </Button>
@@ -631,9 +631,9 @@ function RestoreConfirmDialog({
         </DialogHeader>
 
         {backup?.kind === "character" && (backup?.worldsSpanned ?? 0) > 1 && (
-          <div className="rounded-xl border border-amber-400/20 bg-amber-400/[0.04] p-3 flex gap-2.5">
-            <ShieldAlert className="size-4 text-amber-400 shrink-0 mt-0.5" />
-            <div className="text-xs text-amber-100/90 leading-relaxed">
+          <div className="rounded-xl border border-status-warning/20 bg-status-warning/[0.04] p-3 flex gap-2.5">
+            <ShieldAlert className="size-4 text-status-warning shrink-0 mt-0.5" />
+            <div className="text-xs text-status-warning-faint/90 leading-relaxed">
               <span className="font-semibold">
                 This character name exists on more than one server.
               </span>{" "}
@@ -657,9 +657,9 @@ function RestoreConfirmDialog({
           </div>
         )}
 
-        <div className="rounded-xl border border-emerald-400/15 bg-emerald-400/[0.04] p-3 flex gap-2.5">
-          <ShieldCheck className="size-4 text-emerald-400 shrink-0 mt-0.5" />
-          <div className="text-xs text-emerald-100/90 leading-relaxed">
+        <div className="rounded-xl border border-status-success/15 bg-status-success/[0.04] p-3 flex gap-2.5">
+          <ShieldCheck className="size-4 text-status-success shrink-0 mt-0.5" />
+          <div className="text-xs text-status-success-faint/90 leading-relaxed">
             <span className="font-semibold">Don't worry — this is reversible.</span> We'll save your
             current settings as a safety snapshot first, so you can undo by restoring it.
           </div>

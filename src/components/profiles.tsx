@@ -270,14 +270,14 @@ export function Profiles({
                 Activate <span className="text-primary">{preview.name}</span>?
               </p>
               {preview.plan.toEnable.length > 0 && (
-                <div className="text-xs text-emerald-400">
+                <div className="text-xs text-status-success">
                   {preview.plan.toEnable.length} addon
                   {preview.plan.toEnable.length !== 1 ? "s" : ""} will be enabled
                   <PreviewNameList names={preview.plan.toEnable} />
                 </div>
               )}
               {preview.plan.toDisable.length > 0 && (
-                <div className="text-xs text-amber-400">
+                <div className="text-xs text-status-warning">
                   {preview.plan.toDisable.length} addon
                   {preview.plan.toDisable.length !== 1 ? "s" : ""} will be disabled
                   <PreviewNameList names={preview.plan.toDisable} />
@@ -299,7 +299,7 @@ export function Profiles({
                 </div>
               )}
               {preview.plan.blocked.length > 0 && (
-                <div className="text-xs text-red-400">
+                <div className="text-xs text-status-danger">
                   Cannot disable {preview.plan.blocked.join(", ")} — both the enabled and disabled
                   folder copies exist. Remove the stale copy first.
                 </div>
@@ -385,7 +385,7 @@ export function Profiles({
                                   onClick={() => void handleRenameSave(p.name)}
                                   aria-label="Save name"
                                 >
-                                  <Check className="size-3.5 text-emerald-400" />
+                                  <Check className="size-3.5 text-status-success" />
                                 </Button>
                                 <Button
                                   size="icon-sm"
@@ -451,7 +451,7 @@ export function Profiles({
                                   transition={{ duration: 0.15 }}
                                   className="flex items-center gap-1"
                                 >
-                                  <span className="text-xs text-amber-400 mr-1">Delete?</span>
+                                  <span className="text-xs text-status-warning mr-1">Delete?</span>
                                   <Button
                                     size="sm"
                                     variant="destructive"
@@ -481,7 +481,9 @@ export function Profiles({
                                   transition={{ duration: 0.15 }}
                                   className="flex items-center gap-1"
                                 >
-                                  <span className="text-xs text-amber-400 mr-1">Overwrite?</span>
+                                  <span className="text-xs text-status-warning mr-1">
+                                    Overwrite?
+                                  </span>
                                   <Button
                                     size="sm"
                                     disabled={updating}

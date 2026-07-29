@@ -138,10 +138,10 @@ export function ThemeEditor({
               <span
                 className={`flex size-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
                   c.level === "fail"
-                    ? "bg-red-500/15 text-red-400"
+                    ? "bg-status-danger-strong/15 text-status-danger"
                     : c.level === "ok"
-                      ? "bg-amber-400/15 text-amber-400"
-                      : "bg-emerald-400/15 text-emerald-400"
+                      ? "bg-status-warning/15 text-status-warning"
+                      : "bg-status-success/15 text-status-success"
                 }`}
               >
                 {c.level === "fail" ? "!" : c.level === "ok" ? "~" : "✓"}
@@ -154,7 +154,7 @@ export function ThemeEditor({
           ))}
         </div>
         {failing.length > 0 && (
-          <div className="flex items-start gap-1.5 rounded-md border border-amber-400/20 bg-amber-400/[0.05] p-2 text-[11px] text-amber-300">
+          <div className="flex items-start gap-1.5 rounded-md border border-status-warning/20 bg-status-warning/[0.05] p-2 text-[11px] text-status-warning-soft">
             <AlertTriangle className="mt-px size-3.5 shrink-0" />
             <span>
               {failing.length} pair{failing.length !== 1 ? "s" : ""} below the recommended contrast.
@@ -196,7 +196,7 @@ export function ThemeEditor({
               <Button
                 variant="outline"
                 size="sm"
-                className="border-red-500/30 text-red-400 hover:border-red-500/50 hover:bg-red-500/10"
+                className="border-status-danger-strong/30 text-status-danger hover:border-status-danger-strong/50 hover:bg-status-danger-strong/10"
                 onClick={() => setConfirmDelete(true)}
               >
                 <Trash2 className="size-3.5" />

@@ -102,9 +102,9 @@ export function PackImportView({
 
           {/* All installed state */}
           {allInstalled && !installing && (
-            <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-success-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]">
-              <CheckIcon className="size-4 text-emerald-400" />
-              <span className="text-sm text-emerald-400 font-medium">
+            <div className="flex items-center gap-2 rounded-lg border border-status-success/25 bg-status-success/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-success-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]">
+              <CheckIcon className="size-4 text-status-success" />
+              <span className="text-sm text-status-success font-medium">
                 All addons already installed
               </span>
             </div>
@@ -120,7 +120,9 @@ export function PackImportView({
                     {installProgress.total}
                   </span>
                   {installProgress.failed > 0 && (
-                    <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
+                    <span className="text-status-danger text-xs">
+                      {installProgress.failed} failed
+                    </span>
                   )}
                 </div>
                 <div className="h-1.5 rounded-full bg-structure-06">
@@ -147,7 +149,7 @@ export function PackImportView({
                   >
                     <span className="text-sm">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) ? (
-                      <span className="text-xs text-emerald-400 font-medium">Installed</span>
+                      <span className="text-xs text-status-success font-medium">Installed</span>
                     ) : (
                       <span className="text-xs text-primary font-medium">New</span>
                     )}
@@ -168,7 +170,7 @@ export function PackImportView({
                   >
                     <span className="text-sm text-muted-foreground">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) && (
-                      <span className="text-xs text-emerald-400 font-medium">Installed</span>
+                      <span className="text-xs text-status-success font-medium">Installed</span>
                     )}
                   </div>
                 ))}
@@ -300,9 +302,9 @@ export function PackImportView({
 
       {importError && (
         <Fade>
-          <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
-            <AlertCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
-            <p className="text-sm text-red-300">{importError}</p>
+          <div className="flex items-start gap-2 rounded-lg border border-status-danger-strong/25 bg-status-danger-strong/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-danger-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-danger-strong)_4%,transparent)]">
+            <AlertCircleIcon className="size-4 text-status-danger shrink-0 mt-0.5" />
+            <p className="text-sm text-status-danger-soft">{importError}</p>
           </div>
         </Fade>
       )}
