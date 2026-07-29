@@ -1,9 +1,11 @@
 import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { exampleAddonsPath } from "@/lib/platform";
+import { FEEDBACK_ISSUES_URL } from "@/lib/feedback";
 import {
   clearSkippedDependencies,
   getSkippedDependencies,
@@ -44,6 +46,7 @@ import {
   Sparkles,
   Trash2,
   Palette,
+  MessageSquareText,
 } from "lucide-react";
 import { AppearanceSettings } from "./appearance-settings";
 
@@ -864,6 +867,12 @@ export function Settings({
                     label="Check for App Updates"
                     description="See if a newer version of Kalpa is available"
                     onClick={onCheckForAppUpdate}
+                  />
+                  <ToolItem
+                    icon={MessageSquareText}
+                    label="Report a Problem or Request"
+                    description="Open Kalpa's GitHub templates for bugs, accessibility issues, and ideas"
+                    onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
                   />
                   {minionDetected && (
                     <ToolItem

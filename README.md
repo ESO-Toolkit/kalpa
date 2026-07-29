@@ -19,7 +19,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 </p>
 
 > [!NOTE]
-> **Beta.** Windows is stable for daily use. The macOS and Linux builds are newer and less tested. Installers are on the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page and the app updates itself from there. Bugs and feedback go to [Issues](https://github.com/ESO-Toolkit/kalpa/issues); recent changes are in the [changelog](CHANGELOG.md).
+> **Beta.** Windows is stable for daily use. The macOS and Linux builds are newer and less tested. Installers are on the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page and the app updates itself from there. Bugs and feedback go to [Issues](https://github.com/ESO-Toolkit/kalpa/issues), including accessibility reports, which have their own template; recent changes are in the [changelog](CHANGELOG.md).
 
 ---
 

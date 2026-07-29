@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { Check, Plus, ClipboardPaste, Pencil, CopyPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,6 +18,7 @@ import { ThemeEditor } from "@/components/theme-editor";
 import { useTheme } from "@/lib/use-theme";
 import { newCustomThemeId, isBuiltin } from "@/lib/theme-manager";
 import { CATEGORY_ORDER } from "@/lib/theme-presets";
+import { FEEDBACK_ISSUES_URL } from "@/lib/feedback";
 import { THEME_COLOR_KEYS } from "@/lib/theme-types";
 import { isHexColor, normalizeHex } from "@/lib/theme-color";
 import type { Theme, ThemeColors } from "@/lib/theme-types";
@@ -277,6 +279,19 @@ export function AppearanceSettings() {
               />
             ))}
           </div>
+          {category === "Accessibility" && (
+            <p className="text-xs text-foreground">
+              If a theme is hard to see or use,{" "}
+              <button
+                type="button"
+                onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
+                className="font-medium text-accent-sky underline underline-offset-2 transition-colors duration-150 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky"
+              >
+                tell us what would help
+              </button>
+              .
+            </p>
+          )}
         </section>
       ))}
     </div>
