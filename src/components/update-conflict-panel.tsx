@@ -81,8 +81,11 @@ export function UpdateConflictPanel({
 
   return (
     <div className="space-y-4">
-      <GlassPanel variant="subtle" className="p-4 border-amber-500/20! bg-amber-500/[0.04]!">
-        <h3 className="font-heading text-sm font-semibold text-amber-400">
+      <GlassPanel
+        variant="subtle"
+        className="p-4 border-status-warning-strong/20! bg-status-warning-strong/[0.04]!"
+      >
+        <h3 className="font-heading text-sm font-semibold text-status-warning">
           {folderName} {currentVersion} → {updateVersion}
         </h3>
         <p className="mt-1.5 text-xs text-muted-foreground">
@@ -92,7 +95,7 @@ export function UpdateConflictPanel({
       </GlassPanel>
 
       {autoKeptFiles.length > 0 && (
-        <div className="text-xs text-emerald-400 flex items-center gap-1.5">
+        <div className="text-xs text-status-success flex items-center gap-1.5">
           <Check className="h-3.5 w-3.5" />
           {autoKeptFiles.length} of your edited files are unchanged in this update — automatically
           preserved
@@ -149,7 +152,7 @@ export function UpdateConflictPanel({
                 <div className="mt-1">
                   {loadingDiff ? (
                     <div className="flex items-center justify-center py-4 text-muted-foreground text-sm">
-                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary mr-2" />
                       Loading differences...
                     </div>
                   ) : diffData?.isBinary ? (

@@ -127,7 +127,7 @@ export function AddonFileEditor({
   if (loadState === "loading") {
     return (
       <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary mr-2" />
         Loading file...
       </div>
     );
@@ -153,7 +153,7 @@ export function AddonFileEditor({
     return (
       <GlassPanel variant="subtle" className="p-4">
         <div className="flex items-center justify-between">
-          <p className="text-sm text-red-400">{error}</p>
+          <p className="text-sm text-status-danger">{error}</p>
           <Button variant="ghost" size="sm" onClick={onClose}>
             <X className="h-3.5 w-3.5" />
           </Button>
@@ -167,7 +167,7 @@ export function AddonFileEditor({
       <div className="flex items-center gap-2">
         <span className="font-mono text-sm truncate flex-1">{relativePath}</span>
         {dirty && (
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-status-warning">
             unsaved
           </span>
         )}
@@ -195,7 +195,7 @@ export function AddonFileEditor({
       </div>
 
       {!editable && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="rounded-lg border border-structure-06 bg-structure-02 px-3 py-1.5 text-xs text-muted-foreground">
           This file hasn't been edited. Click "Enable Editing" to modify it.
         </div>
       )}

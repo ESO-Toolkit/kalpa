@@ -226,7 +226,7 @@ function AddonDetailBase({
       >
         {/* Ambient glow behind icon */}
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-primary/[0.04] blur-[60px]" />
-        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
+        <div className="relative rounded-2xl bg-structure-03 border border-structure-06 p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
           <FileText
             aria-hidden="true"
             className="size-10 text-muted-foreground/30"
@@ -436,17 +436,17 @@ function AddonDetailBase({
       {updateSuccess ? (
         <GlassPanel
           variant="subtle"
-          className="mb-4 flex items-center gap-2 border-emerald-500/20! bg-emerald-500/[0.04]! p-3"
+          className="mb-4 flex items-center gap-2 border-status-success-strong/20! bg-status-success-strong/[0.04]! p-3"
         >
           <AnimatedCheckmark size={18} />
-          <span className="text-sm text-emerald-400">Updated successfully</span>
+          <span className="text-sm text-status-success">Updated successfully</span>
         </GlassPanel>
       ) : updateResult?.hasUpdate ? (
         <GlassPanel
           variant="subtle"
-          className="mb-4 flex items-center justify-between gap-3 border-amber-500/20! bg-amber-500/[0.04]! p-3"
+          className="mb-4 flex items-center justify-between gap-3 border-status-warning-strong/20! bg-status-warning-strong/[0.04]! p-3"
         >
-          <span className="text-sm text-amber-400">
+          <span className="text-sm text-status-warning">
             Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
           {updating ? (
@@ -611,7 +611,7 @@ function AddonDetailBase({
               )}
             </dl>
             {addon.esouiId && (
-              <div className="mt-3 pt-3 border-t border-white/[0.06]">
+              <div className="mt-3 pt-3 border-t border-structure-06">
                 <button
                   onClick={() => openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}`)}
                   className="inline-flex items-center gap-1.5 rounded-md bg-accent-sky/10 px-3 py-1.5 text-xs font-medium text-accent-sky hover:bg-accent-sky/20 transition-colors"
@@ -646,13 +646,13 @@ function AddonDetailBase({
                         ? tag === "favorite"
                           ? "bg-primary/15 text-primary border-primary/25"
                           : tag === "broken"
-                            ? "bg-red-500/15 text-red-400 border-red-500/25"
+                            ? "bg-status-danger-strong/15 text-status-danger border-status-danger-strong/25"
                             : tag === "testing"
-                              ? "bg-amber-500/15 text-amber-400 border-amber-500/25"
+                              ? "bg-status-warning-strong/15 text-status-warning border-status-warning-strong/25"
                               : tag === "essential"
-                                ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/25"
-                                : "bg-violet-500/15 text-violet-400 border-violet-500/25"
-                        : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06] hover:text-foreground"
+                                ? "bg-status-success-strong/15 text-status-success border-status-success-strong/25"
+                                : "bg-status-library-strong/15 text-status-library border-status-library-strong/25"
+                        : "bg-structure-03 text-muted-foreground border-structure-06 hover:bg-structure-06 hover:text-foreground"
                     )}
                   >
                     {tag === "favorite" && (active ? "\u2605 " : "\u2606 ")}
@@ -697,7 +697,7 @@ function AddonDetailBase({
                   value={customTagInput}
                   onChange={(e) => setCustomTagInput(e.target.value)}
                   placeholder="+ tag"
-                  className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-white/[0.03] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-accent-sky/30 focus:bg-white/[0.05]"
+                  className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-structure-03 border border-structure-06 px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-accent-sky/30 focus:bg-structure-05"
                 />
                 {customTagInput.trim() && (
                   <button
@@ -735,16 +735,16 @@ function AddonDetailBase({
                   return (
                     <div
                       key={dep.name}
-                      className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-white/[0.03] transition-colors"
+                      className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-structure-03 transition-colors"
                     >
                       <span
                         className={cn(
                           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
                           outdated
-                            ? "bg-amber-500/15 text-amber-400"
+                            ? "bg-status-warning-strong/15 text-status-warning"
                             : satisfied
-                              ? "bg-emerald-500/15 text-emerald-400"
-                              : "bg-red-500/15 text-red-400"
+                              ? "bg-status-success-strong/15 text-status-success"
+                              : "bg-status-danger-strong/15 text-status-danger"
                         )}
                       >
                         {outdated ? "!" : satisfied ? "\u2713" : "!"}
@@ -755,7 +755,7 @@ function AddonDetailBase({
                           <span
                             className={cn(
                               "text-[11px]",
-                              outdated ? "text-amber-400" : "text-muted-foreground"
+                              outdated ? "text-status-warning" : "text-muted-foreground"
                             )}
                           >
                             v{dep.min_version}+{outdated ? " (outdated)" : ""}
@@ -773,14 +773,14 @@ function AddonDetailBase({
                               }
                             >
                               <button
-                                className="shrink-0 cursor-pointer rounded bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                                className="shrink-0 cursor-pointer rounded bg-status-warning-strong/10 px-2 py-1 text-xs font-medium text-status-warning hover:bg-status-warning-strong/20 transition-colors disabled:opacity-50"
                                 onClick={() => handleInstallDep(dep.name)}
                                 disabled={installingDep === dep.name || isOffline}
                               >
                                 {installingDep === dep.name ? (
-                                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-amber-400" />
+                                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-warning" />
                                 ) : justInstalled ? (
-                                  <span className="flex items-center gap-1 text-emerald-400">
+                                  <span className="flex items-center gap-1 text-status-success">
                                     <Check className="size-3" />
                                     Updated
                                   </span>
@@ -793,12 +793,12 @@ function AddonDetailBase({
                           {removeTarget && (
                             <SimpleTooltip content={`Remove ${removeTarget}`}>
                               <button
-                                className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
+                                className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:opacity-50"
                                 onClick={() => handleRemoveDep(removeTarget)}
                                 disabled={removingDep === removeTarget}
                               >
                                 {removingDep === removeTarget ? (
-                                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
+                                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-danger" />
                                 ) : (
                                   <Trash2 className="size-3.5" />
                                 )}
@@ -820,9 +820,9 @@ function AddonDetailBase({
                             disabled={installingDep === dep.name || isOffline}
                           >
                             {installingDep === dep.name ? (
-                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-accent-sky" />
                             ) : justInstalled ? (
-                              <span className="flex items-center gap-1 text-emerald-400">
+                              <span className="flex items-center gap-1 text-status-success">
                                 <Check className="size-3" />
                                 Installed
                               </span>
@@ -854,14 +854,14 @@ function AddonDetailBase({
                   return (
                     <div
                       key={dep.name}
-                      className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-white/[0.03] transition-colors"
+                      className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-structure-03 transition-colors"
                     >
                       <span
                         className={cn(
                           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px]",
                           present
-                            ? "bg-emerald-500/15 text-emerald-400 font-bold"
-                            : "bg-white/[0.04] text-muted-foreground"
+                            ? "bg-status-success-strong/15 text-status-success font-bold"
+                            : "bg-structure-04 text-muted-foreground"
                         )}
                       >
                         {present ? "\u2713" : "\u2013"}
@@ -876,12 +876,12 @@ function AddonDetailBase({
                         removeTarget ? (
                           <SimpleTooltip content={`Remove ${removeTarget}`}>
                             <button
-                              className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
+                              className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:opacity-50"
                               onClick={() => handleRemoveDep(removeTarget)}
                               disabled={removingDep === removeTarget}
                             >
                               {removingDep === removeTarget ? (
-                                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
+                                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-danger" />
                               ) : (
                                 <Trash2 className="size-3.5" />
                               )}
@@ -902,9 +902,9 @@ function AddonDetailBase({
                             disabled={installingDep === dep.name || isOffline}
                           >
                             {installingDep === dep.name ? (
-                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-accent-sky" />
                             ) : justInstalled ? (
-                              <span className="flex items-center gap-1 text-emerald-400">
+                              <span className="flex items-center gap-1 text-status-success">
                                 <Check className="size-3" />
                                 Installed
                               </span>
@@ -927,15 +927,15 @@ function AddonDetailBase({
         </TabsContent>
       </Tabs>
 
-      <div className="mt-6 border-t border-white/[0.06] pt-4 space-y-3">
+      <div className="mt-6 border-t border-structure-06 pt-4 space-y-3">
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
             onClick={() => onToggleDisable(addon.folderName, addon.disabled)}
             className={cn(
               addon.disabled
-                ? "border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/10"
-                : "border-amber-500/25 text-amber-400 hover:bg-amber-500/10"
+                ? "border-status-success-strong/25 text-status-success hover:bg-status-success-strong/10"
+                : "border-status-warning-strong/25 text-status-warning hover:bg-status-warning-strong/10"
             )}
           >
             <Power className="size-4 mr-1.5" />
@@ -943,14 +943,14 @@ function AddonDetailBase({
           </Button>
         </div>
         {addon.disabled && dependents.length > 0 && (
-          <p className="text-xs text-amber-400">
+          <p className="text-xs text-status-warning">
             {dependents.map((d) => d.title).join(", ")}{" "}
             {dependents.length === 1 ? "depends" : "depend"} on this addon and may not work.
           </p>
         )}
 
         {!addon.disabled && dependents.length > 0 && (
-          <p className="text-xs text-amber-400">
+          <p className="text-xs text-status-warning">
             {dependents.map((d) => d.title).join(", ")}{" "}
             {dependents.length === 1 ? "depends" : "depend"} on this addon.
           </p>

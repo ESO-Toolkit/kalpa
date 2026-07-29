@@ -114,10 +114,12 @@ export function PackListView({
         ) : error ? (
           <Fade>
             <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-              <div className="rounded-xl bg-red-500/[0.08] border border-red-500/[0.15] p-4 shadow-[0_0_24px_color-mix(in_oklab,var(--status-error-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_6%,transparent)]">
-                <AlertCircleIcon className="size-8 text-red-400/70" />
+              <div className="rounded-xl bg-status-danger-strong/[0.08] border border-status-danger-strong/[0.15] p-4 shadow-[0_0_24px_color-mix(in_oklab,var(--status-danger-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-danger-strong)_6%,transparent)]">
+                <AlertCircleIcon className="size-8 text-status-danger/70" />
               </div>
-              <p className="font-heading text-sm font-medium text-red-400">Could not load packs</p>
+              <p className="font-heading text-sm font-medium text-status-danger">
+                Could not load packs
+              </p>
               <p className="text-xs text-muted-foreground max-w-[280px]">{error}</p>
               <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
                 <RefreshCwIcon className="size-3.5 mr-1.5" />
@@ -162,15 +164,15 @@ export function PackListView({
                 }}
                 style={identity.cardStyle}
                 className={cn(
-                  "group w-full text-left rounded-xl border border-white/[0.1] p-3",
+                  "group w-full text-left rounded-xl border border-structure-10 p-3",
                   "border-l-[3px] cursor-pointer",
                   "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
                   // Real elevation so the opaque card sits clearly above the background.
-                  "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.07)]",
+                  "shadow-[0_4px_16px_-4px_var(--scrim-50),0_2px_4px_-1px_var(--scrim-30),inset_0_1px_0_var(--structure-07)]",
                   accent.border,
                   // Per-pack colored glow + deeper shadow lift on hover.
-                  "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.1)]",
-                  "hover:border-white/[0.18] motion-safe:hover:-translate-y-[2px]",
+                  "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_var(--scrim-55),inset_0_1px_0_var(--structure-10)]",
+                  "hover:border-structure-18 motion-safe:hover:-translate-y-[2px]",
                   "motion-reduce:transition-none",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                 )}
@@ -230,7 +232,7 @@ export function PackListView({
                         votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
                         pack.userVoted
                           ? "text-primary bg-primary/[0.15] border-primary/40 hover:bg-primary/[0.22] shadow-[0_0_12px_color-mix(in_oklab,var(--primary)_25%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_10%,transparent)]"
-                          : "text-muted-foreground bg-white/[0.03] border-white/[0.06] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
+                          : "text-muted-foreground bg-structure-03 border-structure-06 hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
                       )}
                     >
                       <ArrowUpIcon
@@ -282,7 +284,7 @@ export function PackListView({
                         aria-hidden="true"
                         className={cn(
                           "inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold uppercase leading-none",
-                          "bg-gradient-to-b from-white/[0.14] to-white/[0.06] text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
+                          "bg-gradient-to-b from-structure-14 to-structure-06 text-muted-foreground shadow-[inset_0_1px_0_var(--structure-10)]"
                         )}
                       >
                         {[...decodeHtml(pack.authorName)][0]}
@@ -300,15 +302,15 @@ export function PackListView({
             onClick={onLoadMore}
             disabled={loadingMore}
             className={cn(
-              "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
-              "shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-all duration-200 hover:bg-white/[0.05] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.15)]",
+              "w-full py-2.5 rounded-xl border border-structure-06 bg-structure-02 text-xs font-semibold",
+              "shadow-[inset_0_1px_0_var(--structure-03)] transition-all duration-200 hover:bg-structure-05 hover:border-structure-12 hover:shadow-[inset_0_1px_0_var(--structure-05),0_2px_8px_var(--scrim-15)]",
               "text-muted-foreground hover:text-foreground",
               loadingMore && "opacity-60 cursor-wait"
             )}
           >
             {loadingMore ? (
               <span className="inline-flex items-center gap-1.5">
-                <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+                <span className="inline-block size-3 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
                 Loading...
               </span>
             ) : (

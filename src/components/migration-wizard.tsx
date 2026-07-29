@@ -224,20 +224,20 @@ function PhaseIndicator({ current }: { current: MigrationPhase }) {
           <div
             className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-medium ${
               i < currentIndex
-                ? "bg-emerald-500/20 text-emerald-400"
+                ? "bg-status-success-strong/20 text-status-success"
                 : i === currentIndex
                   ? "bg-[#4dc2e6]/20 text-[#4dc2e6]"
-                  : "bg-white/[0.06] text-muted-foreground"
+                  : "bg-structure-06 text-muted-foreground"
             }`}
           >
             {i < currentIndex ? "\u2713" : i + 1}
           </div>
           <span
-            className={`text-xs ${i === currentIndex ? "text-white" : "text-muted-foreground"}`}
+            className={`text-xs ${i === currentIndex ? "text-foreground" : "text-muted-foreground"}`}
           >
             {p.label}
           </span>
-          {i < phases.length - 1 && <div className="mx-1 h-px w-4 bg-white/[0.1]" />}
+          {i < phases.length - 1 && <div className="mx-1 h-px w-4 bg-structure-10" />}
         </div>
       ))}
     </div>
@@ -281,7 +281,7 @@ function PreconditionsPhase({
           {preconditions.warnings.map((w) => (
             <div
               key={w}
-              className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-1.5 text-xs text-amber-400"
+              className="rounded-lg border border-status-warning/20 bg-status-warning/[0.04] px-3 py-1.5 text-xs text-status-warning"
             >
               {w}
             </div>
@@ -304,10 +304,14 @@ function PreconditionsPhase({
 function CheckItem({ ok, label, warn }: { ok: boolean; label: string; warn?: boolean }) {
   return (
     <div className="flex items-center gap-2 text-sm">
-      <span className={ok ? "text-emerald-400" : warn ? "text-amber-400" : "text-red-400"}>
+      <span
+        className={ok ? "text-status-success" : warn ? "text-status-warning" : "text-status-danger"}
+      >
         {ok ? "\u2713" : warn ? "!" : "\u2717"}
       </span>
-      <span className={ok ? "text-foreground" : warn ? "text-amber-400" : "text-red-400"}>
+      <span
+        className={ok ? "text-foreground" : warn ? "text-status-warning" : "text-status-danger"}
+      >
         {label}
       </span>
     </div>
@@ -332,15 +336,15 @@ function SnapshotPhase({
         be used to restore your exact pre-migration state at any time.
       </p>
 
-      <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-2">
+      <div className="rounded-lg border border-structure-06 bg-structure-02 p-3 space-y-2">
         <SectionHeader className="text-xs">Snapshot will include:</SectionHeader>
         <div className="space-y-1 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
-            <span className="text-emerald-400">{"\u2713"}</span>
+            <span className="text-status-success">{"\u2713"}</span>
             SavedVariables (all addon settings)
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-emerald-400">{"\u2713"}</span>
+            <span className="text-status-success">{"\u2713"}</span>
             UserSettings.txt &amp; AddOnSettings.txt
           </div>
           <label className="flex items-center gap-2 cursor-pointer">
@@ -426,7 +430,7 @@ function DryRunPhase({
       )}
 
       {(dryRun.willTrack.length > 0 || dryRun.missingOnDisk.length > 0) && confirmed && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+        <div className="rounded-lg border border-structure-06 bg-structure-02 p-3">
           <p className="text-xs text-muted-foreground mb-2">
             This will only write to <code className="text-foreground">kalpa.json</code>. No addon
             folders, SavedVariables, or game settings will be touched.
@@ -442,10 +446,10 @@ function DryRunPhase({
 
 function DiffSection({ title, color, items }: { title: string; color: string; items: string[] }) {
   const colorMap: Record<string, string> = {
-    emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
+    emerald: "border-status-success/20 bg-status-success/[0.04] text-status-success",
     sky: "border-accent-sky/20 bg-accent-sky/[0.04] text-accent-sky",
-    amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
-    white: "border-white/[0.08] bg-white/[0.02] text-muted-foreground",
+    amber: "border-status-warning/20 bg-status-warning/[0.04] text-status-warning",
+    white: "border-structure-08 bg-structure-02 text-muted-foreground",
   };
   const classes = colorMap[color] ?? colorMap.white;
 
@@ -470,27 +474,27 @@ function CompletePhase({
 }) {
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400">
+      <div className="rounded-lg border border-status-success/20 bg-status-success/[0.04] p-3 text-sm text-status-success">
         Migration complete!
       </div>
 
       <div className="space-y-1 text-sm text-muted-foreground">
         <div>
-          Imported: <span className="text-white">{result.imported}</span> addon
+          Imported: <span className="text-foreground">{result.imported}</span> addon
           {result.imported !== 1 ? "s" : ""}
         </div>
         <div>
-          Already tracked: <span className="text-white">{result.alreadyTracked}</span>
+          Already tracked: <span className="text-foreground">{result.alreadyTracked}</span>
         </div>
         {result.skippedMissing > 0 && (
           <div>
-            Skipped (not on disk): <span className="text-white">{result.skippedMissing}</span>
+            Skipped (not on disk): <span className="text-foreground">{result.skippedMissing}</span>
           </div>
         )}
       </div>
 
       {snapshot && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
+        <div className="rounded-lg border border-structure-06 bg-structure-02 p-3 text-xs text-muted-foreground">
           <div className="font-medium text-foreground mb-1">Restore point saved</div>
           <div>
             Snapshot: {snapshot.fileCount} files ({formatBytes(snapshot.totalSize)})

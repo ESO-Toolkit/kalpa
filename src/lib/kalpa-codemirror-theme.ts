@@ -45,6 +45,6 @@ export const kalpaTheme = createTheme({
     { tag: [t.tagName], color: "var(--primary)" },
     { tag: [t.attributeName], color: "var(--accent-sky)" },
     { tag: [t.attributeValue], color: "var(--status-success-strong)" },
-    { tag: t.null, color: "var(--status-error-strong)" },
+    { tag: t.null, color: "var(--status-danger-strong)" },
   ],
 });

@@ -128,7 +128,7 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
       offset={12}
       transition={{ type: "spring", stiffness: 300, damping: 25 }}
     >
-      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-primary/[0.08] px-3 py-1.5 text-xs">
+      <div className="flex items-center gap-2 border-b border-structure-06 bg-primary/[0.08] px-3 py-1.5 text-xs">
         {state.status === "available" && (
           <>
             <DownloadIcon className="h-3.5 w-3.5 text-primary" />
@@ -145,7 +145,7 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
           <>
             <RefreshCwIcon className="h-3.5 w-3.5 animate-spin text-primary" />
             <span className="text-primary">Downloading update...</span>
-            <div className="ml-auto h-1.5 w-24 overflow-hidden rounded-full bg-white/[0.1]">
+            <div className="ml-auto h-1.5 w-24 overflow-hidden rounded-full bg-structure-10">
               <div
                 className="h-full rounded-full bg-primary transition-all"
                 style={{ width: `${state.progress}%` }}
@@ -162,11 +162,11 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
         )}
         {state.status === "ready" && (
           <>
-            <DownloadIcon className="h-3.5 w-3.5 text-emerald-400" />
-            <span className="text-emerald-400">Update ready</span>
+            <DownloadIcon className="h-3.5 w-3.5 text-status-success" />
+            <span className="text-status-success">Update ready</span>
             <button
               onClick={onRestart}
-              className="ml-auto rounded-md bg-emerald-400/20 px-2 py-0.5 text-emerald-400 transition-colors hover:bg-emerald-400/30"
+              className="ml-auto rounded-md bg-status-success/20 px-2 py-0.5 text-status-success transition-colors hover:bg-status-success/30"
             >
               Restart Now
             </button>

@@ -51,19 +51,19 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
     case "downloading":
       return <DownloadIcon className="h-3 w-3 animate-pulse text-accent-sky" />;
     case "scanning":
-      return <SearchIcon className="h-3 w-3 animate-pulse text-violet-400" />;
+      return <SearchIcon className="h-3 w-3 animate-pulse text-status-library" />;
     case "extracting":
       return <PackageIcon className="h-3 w-3 animate-pulse text-primary" />;
     case "completed":
       return (
-        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-emerald-500/20">
-          <CheckIcon className="h-2.5 w-2.5 text-emerald-400" strokeWidth={3} />
+        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-status-success-strong/20">
+          <CheckIcon className="h-2.5 w-2.5 text-status-success" strokeWidth={3} />
         </div>
       );
     case "failed":
       return (
-        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500/20">
-          <XIcon className="h-2.5 w-2.5 text-red-400" strokeWidth={3} />
+        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-status-danger-strong/20">
+          <XIcon className="h-2.5 w-2.5 text-status-danger" strokeWidth={3} />
         </div>
       );
   }
@@ -72,13 +72,13 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
 function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
   const bgColor =
     phase === "completed"
-      ? "bg-emerald-500/[0.06] border-emerald-500/15"
+      ? "bg-status-success-strong/[0.06] border-status-success-strong/15"
       : phase === "failed"
-        ? "bg-red-500/[0.06] border-red-500/15"
+        ? "bg-status-danger-strong/[0.06] border-status-danger-strong/15"
         : phase === "extracting"
           ? "bg-primary/[0.06] border-primary/15"
           : phase === "scanning"
-            ? "bg-violet-400/[0.06] border-violet-400/15"
+            ? "bg-status-library/[0.06] border-status-library/15"
             : "bg-accent-sky/[0.06] border-accent-sky/15";
 
   return (
@@ -104,7 +104,7 @@ function ChooserRow({
   return (
     <label
       className={cn(
-        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors duration-150 ease-out hover:bg-white/[0.04]",
+        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors duration-150 ease-out hover:bg-structure-04",
         checked && "bg-primary/[0.04]"
       )}
     >
@@ -126,7 +126,7 @@ function ChooserRow({
         >
           {update.currentVersion || "—"}
         </span>
-        <ArrowRightIcon className="h-3 w-3 text-white/20" aria-hidden="true" />
+        <ArrowRightIcon className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
         <span
           className="max-w-[88px] truncate font-medium text-primary"
           title={update.remoteVersion || undefined}
@@ -267,7 +267,7 @@ function UpdateBannerBase({
                       cy="10"
                       r="8"
                       fill="none"
-                      stroke="rgba(255,255,255,0.06)"
+                      stroke="var(--structure-06)"
                       strokeWidth="2"
                     />
                     <circle
@@ -298,9 +298,11 @@ function UpdateBannerBase({
               {/* Phase summary */}
               <span className="text-xs text-muted-foreground">
                 {allDone ? (
-                  <span className="text-emerald-400 animate-[fade-in_0.3s_ease-out]">All done</span>
+                  <span className="text-status-success animate-[fade-in_0.3s_ease-out]">
+                    All done
+                  </span>
                 ) : updateProgress.failed > 0 ? (
-                  <span className="text-red-400/70">{updateProgress.failed} failed</span>
+                  <span className="text-status-danger/70">{updateProgress.failed} failed</span>
                 ) : (
                   "Updating addons..."
                 )}
@@ -355,7 +357,7 @@ function UpdateBannerBase({
                 id="update-chooser"
                 role="region"
                 aria-label="Choose which addons to update"
-                className="border-t border-white/[0.06] px-5 pt-2.5 pb-3"
+                className="border-t border-structure-06 px-5 pt-2.5 pb-3"
               >
                 {/* Toolbar: select-all + scoped update action */}
                 <div className="flex items-center justify-between gap-3 pb-1.5">
@@ -416,7 +418,7 @@ function UpdateBannerBase({
         {/* Segmented progress bar */}
         {updatingAll && total > 0 && (
           <div
-            className="relative h-[3px] bg-white/[0.04]"
+            className="relative h-[3px] bg-structure-04"
             role="progressbar"
             aria-valuenow={Number(progressPct)}
             aria-valuemin={0}
@@ -434,7 +436,7 @@ function UpdateBannerBase({
                 className="absolute inset-y-0 left-0 overflow-hidden transition-all duration-500 ease-out"
                 style={{ width: `${progressPct}%` }}
               >
-                <div className="h-full w-full animate-[shimmer_1.5s_ease-in-out_infinite] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+                <div className="h-full w-full animate-[shimmer_1.5s_ease-in-out_infinite] bg-gradient-to-r from-transparent via-structure-20 to-transparent" />
               </div>
             )}
           </div>

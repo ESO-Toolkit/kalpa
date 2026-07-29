@@ -54,7 +54,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
         {loading ? (
           <Fade>
             <div className="flex items-center justify-center py-8">
-              <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+              <span className="inline-block size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
               <span className="ml-2 text-muted-foreground">Checking compatibility...</span>
             </div>
           </Fade>
@@ -78,7 +78,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
               {info.outdatedAddons.length > 0 && (
                 <div>
                   <div className="flex items-center gap-2 mb-2">
-                    <SectionHeader className="text-amber-400!">
+                    <SectionHeader className="text-status-warning!">
                       Outdated API ({info.outdatedAddons.length})
                     </SectionHeader>
                     <span className="text-xs text-muted-foreground">
@@ -89,9 +89,9 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
                     {info.outdatedAddons.map((name) => (
                       <div
                         key={name}
-                        className="flex items-center gap-2 rounded-xl px-3 py-1.5 text-sm bg-amber-500/[0.04] border border-amber-500/20"
+                        className="flex items-center gap-2 rounded-xl px-3 py-1.5 text-sm bg-status-warning-strong/[0.04] border border-status-warning-strong/20"
                       >
-                        <span className="text-yellow-400">!</span>
+                        <span className="text-status-warning">!</span>
                         <span>{name}</span>
                       </div>
                     ))}
@@ -100,12 +100,12 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
               )}
 
               {info.outdatedAddons.length > 0 && info.upToDateAddons.length > 0 && (
-                <div className="border-t border-white/[0.06]" />
+                <div className="border-t border-structure-06" />
               )}
 
               {info.upToDateAddons.length > 0 && (
                 <div>
-                  <SectionHeader className="text-emerald-400! mb-2">
+                  <SectionHeader className="text-status-success! mb-2">
                     Compatible ({info.upToDateAddons.length})
                   </SectionHeader>
                   <div className="space-y-1">
@@ -114,7 +114,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
                         key={name}
                         className="flex items-center gap-2 rounded px-3 py-1.5 text-sm text-muted-foreground"
                       >
-                        <span className="text-emerald-400">{"\u2713"}</span>
+                        <span className="text-status-success">{"\u2713"}</span>
                         <span>{name}</span>
                       </div>
                     ))}
@@ -124,7 +124,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
 
               {info.outdatedAddons.length === 0 && (
                 <Fade>
-                  <div className="text-center py-4 text-emerald-400 text-sm">
+                  <div className="text-center py-4 text-status-success text-sm">
                     All addons are compatible with the current game version!
                   </div>
                 </Fade>

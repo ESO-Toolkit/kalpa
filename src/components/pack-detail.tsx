@@ -140,8 +140,10 @@ export function PackDetailView({
                   offset={8}
                   transition={{ type: "spring", stiffness: 400, damping: 30 }}
                 >
-                  <div className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/[0.08] px-2.5 py-1 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
-                    <span className="text-[11px] text-red-400 font-medium">Delete this pack?</span>
+                  <div className="flex items-center gap-1.5 rounded-lg border border-status-danger-strong/25 bg-status-danger-strong/[0.08] px-2.5 py-1 shadow-[0_0_12px_color-mix(in_oklab,var(--status-danger-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-danger-strong)_4%,transparent)]">
+                    <span className="text-[11px] text-status-danger font-medium">
+                      Delete this pack?
+                    </span>
                     <Button
                       variant="outline"
                       size="sm"
@@ -158,7 +160,7 @@ export function PackDetailView({
                         onDelete();
                       }}
                       disabled={deletingPack}
-                      className="h-6 px-2 text-[10px] border-red-500/30 text-red-400 hover:bg-red-500/10"
+                      className="h-6 px-2 text-[10px] border-status-danger-strong/30 text-status-danger hover:bg-status-danger-strong/10"
                     >
                       {deletingPack ? <Loader2Icon className="size-3 animate-spin" /> : "Delete"}
                     </Button>
@@ -169,7 +171,7 @@ export function PackDetailView({
                   variant="outline"
                   size="sm"
                   onClick={() => setShowDeleteConfirm(true)}
-                  className="text-red-400 hover:text-red-300 hover:border-red-500/30"
+                  className="text-status-danger hover:text-status-danger-soft hover:border-status-danger-strong/30"
                 >
                   <TrashIcon className="size-3.5 mr-1.5" />
                   Delete
@@ -200,7 +202,7 @@ export function PackDetailView({
               votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
               pack.userVoted
                 ? "text-primary bg-primary/[0.15] border-primary/40 hover:bg-primary/[0.22] shadow-[0_0_14px_color-mix(in_oklab,var(--primary)_25%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_12%,transparent)]"
-                : "text-muted-foreground bg-white/[0.03] border-white/[0.08] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
+                : "text-muted-foreground bg-structure-03 border-structure-08 hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
             )}
           >
             <ArrowUpIcon
@@ -226,11 +228,11 @@ export function PackDetailView({
           offset={12}
           transition={{ type: "spring", stiffness: 300, damping: 25 }}
         >
-          <div className="rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
+          <div className="rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_var(--structure-04),0_4px_16px_var(--scrim-15)]">
             {/* Segmented control: Private Link vs Export File */}
-            <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <div className="relative flex p-0.5 rounded-lg bg-structure-03 border border-structure-06">
               <div
-                className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-08 shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
                 style={{
                   left: shareMode === "private-link" ? "2px" : "calc(50% + 2px)",
                   width: "calc(50% - 4px)",
@@ -270,7 +272,7 @@ export function PackDetailView({
                           onClick={() => onCopyToClipboard(shareResult.code, "code")}
                         >
                           {copiedField === "code" ? (
-                            <CheckIcon className="size-3.5 text-emerald-400" />
+                            <CheckIcon className="size-3.5 text-status-success" />
                           ) : (
                             <CopyIcon className="size-3.5" />
                           )}
@@ -278,7 +280,7 @@ export function PackDetailView({
                       </SimpleTooltip>
                     </div>
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground">
+                      <code className="flex-1 truncate rounded-md bg-structure-05 px-3 py-1.5 text-xs text-muted-foreground">
                         {shareResult.deepLink}
                       </code>
                       <SimpleTooltip content="Copy deep link">
@@ -288,7 +290,7 @@ export function PackDetailView({
                           onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
                         >
                           {copiedField === "link" ? (
-                            <CheckIcon className="size-3.5 text-emerald-400" />
+                            <CheckIcon className="size-3.5 text-status-success" />
                           ) : (
                             <CopyIcon className="size-3.5" />
                           )}
@@ -358,7 +360,7 @@ export function PackDetailView({
             className={cn(
               "rounded-xl border p-3",
               installSucceeded
-                ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_color-mix(in_oklab,var(--status-success-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]"
+                ? "border-status-success/25 bg-status-success/[0.06] shadow-[0_0_16px_color-mix(in_oklab,var(--status-success-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]"
                 : "border-primary/25 bg-primary/[0.06] shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]"
             )}
           >
@@ -378,22 +380,24 @@ export function PackDetailView({
                   />
                 </span>
                 {installProgress.failed > 0 && (
-                  <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
+                  <span className="text-status-danger text-xs">
+                    {installProgress.failed} failed
+                  </span>
                 )}
               </div>
             )}
             {installSucceeded && !installProgress && (
               <div className="flex items-center gap-2 text-sm mb-2">
-                <CheckIcon className="size-4 text-emerald-400" />
-                <span className="text-emerald-400 font-medium">Installed successfully</span>
+                <CheckIcon className="size-4 text-status-success" />
+                <span className="text-status-success font-medium">Installed successfully</span>
               </div>
             )}
-            <div className="h-1.5 rounded-full bg-white/[0.06]">
+            <div className="h-1.5 rounded-full bg-structure-06">
               <div
                 className={cn(
                   "h-full rounded-full transition-all duration-300 ease-out",
                   installSucceeded
-                    ? "bg-emerald-400 shadow-[0_0_8px_color-mix(in_oklab,var(--status-success-strong)_50%,transparent)]"
+                    ? "bg-status-success shadow-[0_0_8px_color-mix(in_oklab,var(--status-success-strong)_50%,transparent)]"
                     : "bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_50%,transparent)]"
                 )}
                 style={{
@@ -523,7 +527,7 @@ function AddonRow({
               ? "bg-primary/15 border-primary/40"
               : checked
                 ? "bg-primary/20 border-primary/50 shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_15%,transparent)]"
-                : "border-white/20 bg-white/[0.03] group-hover:border-accent-sky/40 group-hover:bg-accent-sky/[0.06]"
+                : "border-structure-20 bg-structure-03 group-hover:border-accent-sky/40 group-hover:bg-accent-sky/[0.06]"
           )}
         >
           {(checked || locked) && (
@@ -550,7 +554,7 @@ function AddonRow({
               </span>
             )}
             {isInstalled && (
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400 shrink-0">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-status-success shrink-0">
                 Installed
               </span>
             )}

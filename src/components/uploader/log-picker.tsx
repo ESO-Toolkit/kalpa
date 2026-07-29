@@ -100,8 +100,8 @@ export const LogPicker = memo(function LogPicker({
     // shadow. This is the one place the eye should land first.
     <div
       className={cn(
-        "relative rounded-2xl border border-white/[0.1] bg-gradient-to-b from-white/[0.07] to-white/[0.025] p-3.5 transition-colors duration-150",
-        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)]",
+        "relative rounded-2xl border border-structure-10 bg-gradient-to-b from-structure-07 to-structure-025 p-3.5 transition-colors duration-150",
+        "shadow-[0_12px_40px_-16px_var(--scrim-70),inset_0_1px_0_var(--structure-08)]",
         dragOver && "border-accent-sky/60 from-accent-sky/[0.1] to-accent-sky/[0.03]"
       )}
     >
@@ -115,7 +115,7 @@ export const LogPicker = memo(function LogPicker({
       )}
       {importing && (
         <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-surface-overlay text-center">
-          <span className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
+          <span className="size-5 animate-spin rounded-full border-2 border-structure-10 border-t-accent-sky" />
           <span className="text-sm text-muted-foreground">Adding log to your folder…</span>
         </div>
       )}
@@ -135,13 +135,13 @@ export const LogPicker = memo(function LogPicker({
                   state stays badge-free, so absence reads as "the folder Kalpa
                   found". */}
               {isCustomFolder && (
-                <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                <span className="inline-flex items-center gap-1 rounded-md bg-structure-06 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                   <FolderSearch className="size-2.5" aria-hidden />
                   Custom
                 </span>
               )}
               {logsDir && (
-                <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+                <span className="rounded-md bg-structure-06 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
                   {logs.length} {logs.length === 1 ? "file" : "files"}
                   {totalBytes > 0 && ` · ${compactBytes(totalBytes)}`}
                 </span>
@@ -177,7 +177,7 @@ export const LogPicker = memo(function LogPicker({
                 )}
               </div>
             ) : (
-              <div className="text-[11px] text-amber-400/90">{detection?.message}</div>
+              <div className="text-[11px] text-status-warning/90">{detection?.message}</div>
             )}
           </div>
         </div>
@@ -245,7 +245,7 @@ export const LogPicker = memo(function LogPicker({
                     "focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
                     filter === f.id
                       ? "border-accent-sky/40 bg-accent-sky/[0.06] text-accent-sky"
-                      : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:text-foreground/80"
+                      : "border-structure-08 bg-structure-02 text-muted-foreground hover:text-foreground/80"
                   )}
                 >
                   {f.label}
@@ -255,7 +255,7 @@ export const LogPicker = memo(function LogPicker({
             <button
               type="button"
               onClick={() => setSort((s) => (s === "newest" ? "largest" : "newest"))}
-              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
+              className="inline-flex items-center gap-1 rounded-md border border-structure-08 bg-structure-02 px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
               aria-label={`Sorted by ${sort === "newest" ? "newest" : "largest"} first — tap to sort by ${sort === "newest" ? "largest" : "newest"}`}
             >
               <ArrowDownUp className="size-3" aria-hidden />
@@ -268,8 +268,8 @@ export const LogPicker = memo(function LogPicker({
       {listError ? (
         // On-brand error card: 3px red left-accent, icon + headline + raw detail,
         // so a folder-access failure reads as an intentional state, not a glitch.
-        <div className="rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.04] p-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-red-300/90">
+        <div className="rounded-lg border border-status-danger-strong/15 border-l-[3px] border-l-status-danger-strong bg-status-danger-strong/[0.04] p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-status-danger-soft/90">
             <AlertTriangle className="size-4 shrink-0" aria-hidden />
             Couldn't read this folder
           </div>
@@ -280,7 +280,7 @@ export const LogPicker = memo(function LogPicker({
         </div>
       ) : logs.length === 0 ? (
         // Unified empty state matching the FightList dashed pattern.
-        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-white/[0.08] p-5 text-center">
+        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-structure-08 p-5 text-center">
           <FileText className="size-6 text-muted-foreground/40" aria-hidden />
           <p className="text-sm text-muted-foreground">
             {detection && !detection.encounterLogExists
@@ -290,7 +290,7 @@ export const LogPicker = memo(function LogPicker({
         </div>
       ) : (
         <ul
-          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]"
+          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-scrim-40 bg-scrim-25 p-1.5 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]"
           aria-label="Log files"
           // Lightweight roving navigation: Up/Down/Home/End move focus between
           // log rows so a long folder isn't N Tab presses. Tab still works as a
@@ -314,7 +314,7 @@ export const LogPicker = memo(function LogPicker({
           }}
         >
           {visible.length === 0 ? (
-            <li className="rounded-lg border border-dashed border-white/[0.08] px-3 py-4 text-center text-xs text-muted-foreground">
+            <li className="rounded-lg border border-dashed border-structure-08 px-3 py-4 text-center text-xs text-muted-foreground">
               No logs match — clear the search or filter.
             </li>
           ) : null}
@@ -336,7 +336,7 @@ export const LogPicker = memo(function LogPicker({
                       ? // Selected row pops OFF the recessed list: lit sky fill, a
                         // left accent bar, and a glow so the current choice is loud.
                         "border-accent-sky/50 border-l-[3px] border-l-accent-sky bg-accent-sky/[0.12] shadow-[0_2px_12px_-2px_color-mix(in_oklab,var(--accent-sky)_35%,transparent)]"
-                      : "border-transparent bg-white/[0.03] hover:bg-white/[0.06]"
+                      : "border-transparent bg-structure-03 hover:bg-structure-06"
                   )}
                   aria-pressed={isSelected}
                 >
@@ -415,7 +415,7 @@ export const LogPicker = memo(function LogPicker({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className="size-7 text-muted-foreground/70 hover:text-red-400"
+                      className="size-7 text-muted-foreground/70 hover:text-status-danger"
                       disabled={log.isActive}
                       onClick={(e) => {
                         e.stopPropagation();

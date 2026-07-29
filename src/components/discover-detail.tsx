@@ -126,7 +126,7 @@ function DiscoverDetailBase({
     return (
       <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-primary/[0.04] blur-[60px]" />
-        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
+        <div className="relative rounded-2xl bg-structure-03 border border-structure-06 p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
           <Search
             aria-hidden="true"
             className="size-10 text-muted-foreground/30"
@@ -201,7 +201,7 @@ function DiscoverDetailBase({
     return (
       <Fade className="flex-1">
         <div className="flex flex-1 items-center justify-center px-8 h-full">
-          <div className="rounded-xl border border-red-400/20 bg-red-400/[0.04] p-4 text-sm text-red-400">
+          <div className="rounded-xl border border-status-danger/20 bg-status-danger/[0.04] p-4 text-sm text-status-danger">
             {error}
           </div>
         </div>
@@ -223,7 +223,7 @@ function DiscoverDetailBase({
               {detail.title}
             </h2>
             {detail.version && (
-              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground bg-white/[0.04] px-1.5 py-0.5 rounded">
+              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground bg-structure-04 px-1.5 py-0.5 rounded">
                 v{detail.version}
               </span>
             )}
@@ -251,7 +251,7 @@ function DiscoverDetailBase({
                     onRemoveByEsouiId(result.id);
                     setInstallSuccess(null);
                   }}
-                  className="border-red-400/20 text-red-400 hover:bg-red-400/[0.08] hover:text-red-400"
+                  className="border-status-danger/20 text-status-danger hover:bg-status-danger/[0.08] hover:text-status-danger"
                 >
                   <Trash2 className="size-3.5" />
                   Uninstall
@@ -294,7 +294,7 @@ function DiscoverDetailBase({
 
         {/* Install success */}
         {installSuccess && (
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400 flex items-center gap-2">
+          <div className="rounded-xl border border-status-success/20 bg-status-success/[0.04] p-3 text-sm text-status-success flex items-center gap-2">
             <Check className="size-4 shrink-0" />
             <span className="flex-1">
               Installed: {installSuccess.installedFolders.join(", ")}
@@ -309,7 +309,7 @@ function DiscoverDetailBase({
                   onRemoveByEsouiId(result.id);
                   setInstallSuccess(null);
                 }}
-                className="shrink-0 rounded-lg border border-red-400/20 bg-red-400/[0.06] px-2.5 py-1 text-xs font-medium text-red-400 hover:bg-red-400/[0.12] transition-colors"
+                className="shrink-0 rounded-lg border border-status-danger/20 bg-status-danger/[0.06] px-2.5 py-1 text-xs font-medium text-status-danger hover:bg-status-danger/[0.12] transition-colors"
               >
                 <Trash2 className="size-3 inline -mt-px mr-1" />
                 Uninstall
@@ -327,7 +327,7 @@ function DiscoverDetailBase({
             accent="sky"
           />
           <StatCard
-            icon={<FileDown className="size-3.5 text-emerald-400" />}
+            icon={<FileDown className="size-3.5 text-status-success" />}
             label="Monthly"
             value={detail.monthlyDownloads}
             accent="emerald"
@@ -339,7 +339,7 @@ function DiscoverDetailBase({
             accent="gold"
           />
           <StatCard
-            icon={<Clock className="size-3.5 text-violet-400" />}
+            icon={<Clock className="size-3.5 text-status-library" />}
             label="Updated"
             value={detail.updated}
             accent="violet"
@@ -379,7 +379,7 @@ function DiscoverDetailBase({
                     className={cn(
                       "transition-all duration-150",
                       md5Copied
-                        ? "text-emerald-400"
+                        ? "text-status-success"
                         : "text-muted-foreground/30 group-hover/md5:text-accent-sky"
                     )}
                   >
@@ -397,7 +397,7 @@ function DiscoverDetailBase({
             <SectionHeader className="mb-2">
               Screenshots ({detail.screenshots.length})
             </SectionHeader>
-            <div className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] group/screenshot">
+            <div className="relative overflow-hidden rounded-xl border border-structure-06 bg-structure-02 group/screenshot">
               <img
                 src={detail.screenshots[safeIdx]}
                 alt={`Screenshot ${safeIdx + 1}`}
@@ -409,7 +409,7 @@ function DiscoverDetailBase({
                 <>
                   {/* Navigation arrows */}
                   <button
-                    className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                    className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-scrim-50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-scrim-70"
                     onClick={() =>
                       setScreenshotIdx((prev) =>
                         prev > 0 ? prev - 1 : detail.screenshots.length - 1
@@ -420,7 +420,7 @@ function DiscoverDetailBase({
                     <ChevronLeft className="size-4" />
                   </button>
                   <button
-                    className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-scrim-50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-scrim-70"
                     onClick={() =>
                       setScreenshotIdx((prev) =>
                         prev < detail.screenshots.length - 1 ? prev + 1 : 0
@@ -432,13 +432,15 @@ function DiscoverDetailBase({
                   </button>
 
                   {/* Dot indicators */}
-                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-2 py-1">
+                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5 bg-scrim-40 backdrop-blur-sm rounded-full px-2 py-1">
                     {detail.screenshots.map((_, i) => (
                       <button
                         key={i}
                         className={cn(
                           "size-2 rounded-full transition-all duration-200",
-                          i === safeIdx ? "bg-primary scale-110" : "bg-white/30 hover:bg-white/50"
+                          i === safeIdx
+                            ? "bg-primary scale-110"
+                            : "bg-structure-30 hover:bg-structure-50"
                         )}
                         onClick={() => setScreenshotIdx(i)}
                         aria-label={`Screenshot ${i + 1}`}
@@ -447,7 +449,7 @@ function DiscoverDetailBase({
                   </div>
 
                   {/* Counter */}
-                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-foreground">
+                  <div className="absolute top-2 right-2 bg-scrim-50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-foreground">
                     {safeIdx + 1} / {detail.screenshots.length}
                   </div>
                 </>
@@ -465,7 +467,7 @@ function DiscoverDetailBase({
                       "shrink-0 overflow-hidden rounded-lg border-2 transition-all duration-200",
                       i === safeIdx
                         ? "border-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_30%,transparent)]"
-                        : "border-white/[0.06] hover:border-white/[0.15] opacity-60 hover:opacity-100"
+                        : "border-structure-06 hover:border-structure-15 opacity-60 hover:opacity-100"
                     )}
                   >
                     <img
@@ -507,16 +509,16 @@ function StatCard({
 }) {
   const borderColors = {
     sky: "border-accent-sky/10 hover:border-accent-sky/20",
-    emerald: "border-emerald-400/10 hover:border-emerald-400/20",
+    emerald: "border-status-success/10 hover:border-status-success/20",
     gold: "border-primary/10 hover:border-primary/20",
-    violet: "border-violet-400/10 hover:border-violet-400/20",
+    violet: "border-status-library/10 hover:border-status-library/20",
   };
 
   return (
     <SimpleTooltip content={value || ""}>
       <div
         className={cn(
-          "rounded-xl border bg-white/[0.02] p-2.5 transition-colors",
+          "rounded-xl border bg-structure-02 p-2.5 transition-colors",
           borderColors[accent]
         )}
       >

@@ -7,7 +7,7 @@ export function PackCardSkeleton({ index = 0 }: { index?: number }) {
   const style = { "--shimmer-delay": delay } as React.CSSProperties;
 
   return (
-    <div className="rounded-xl border border-white/[0.06] p-3 border-l-[3px] border-l-white/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <div className="rounded-xl border border-structure-06 p-3 border-l-[3px] border-l-structure-08 shadow-[inset_0_1px_0_var(--structure-04)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1 space-y-1.5">
           <div className="flex items-center gap-2">
@@ -111,7 +111,7 @@ export function DiscoverDetailSkeleton() {
         {Array.from({ length: 4 }, (_, i) => (
           <div
             key={i}
-            className="rounded-xl border border-white/[0.04] bg-white/[0.02] p-2.5 space-y-1.5"
+            className="rounded-xl border border-structure-04 bg-structure-02 p-2.5 space-y-1.5"
           >
             <div className="flex items-center gap-1.5">
               <Skeleton className="size-3.5 rounded" style={style(i + 3)} />
@@ -169,7 +169,7 @@ export function CharactersSkeleton() {
             {Array.from({ length: 3 }, (_, charIdx) => (
               <div
                 key={charIdx}
-                className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3"
+                className="flex items-center justify-between rounded-xl border border-structure-06 bg-structure-02 p-3"
               >
                 <Skeleton
                   className="h-3.5 rounded"
@@ -253,7 +253,7 @@ export function RosterPackSkeleton() {
         {Array.from({ length: 5 }, (_, i) => (
           <div
             key={i}
-            className="flex items-center gap-3 rounded-lg border border-white/[0.04] bg-white/[0.02] px-3 py-2"
+            className="flex items-center gap-3 rounded-lg border border-structure-04 bg-structure-02 px-3 py-2"
           >
             <Skeleton className="size-4 shrink-0 rounded-[3px]" style={style(i + 1)} />
             <Skeleton
@@ -278,7 +278,7 @@ export function SavedVariablesSkeleton() {
       aria-label="Loading saved variables"
     >
       {/* Left panel skeleton */}
-      <div className="flex w-[200px] shrink-0 flex-col border-r border-white/[0.06]">
+      <div className="flex w-[200px] shrink-0 flex-col border-r border-structure-06">
         <div className="p-2">
           <Skeleton className="h-6 w-full rounded-lg" style={style(0)} />
         </div>
@@ -295,7 +295,7 @@ export function SavedVariablesSkeleton() {
             />
           ))}
         </div>
-        <div className="flex gap-1 border-t border-white/[0.06] bg-white/[0.02] p-1.5">
+        <div className="flex gap-1 border-t border-structure-06 bg-structure-02 p-1.5">
           <Skeleton className="h-5 flex-1 rounded-md" style={style(9)} />
           <Skeleton className="h-5 flex-1 rounded-md" style={style(9)} />
         </div>

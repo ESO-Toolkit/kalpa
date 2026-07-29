@@ -395,7 +395,7 @@ export function PackCreateView({
                 "inline-flex items-center justify-center size-5 rounded-full text-[10px] font-bold leading-none transition-all duration-200",
                 step === s.key
                   ? "bg-primary/20 text-primary border border-primary/40 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_15%,transparent)]"
-                  : "bg-white/[0.04] text-muted-foreground border border-white/[0.08]"
+                  : "bg-structure-04 text-muted-foreground border border-structure-08"
               )}
             >
               {s.num}
@@ -418,7 +418,7 @@ export function PackCreateView({
           {/* Title */}
           <div>
             <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block">
-              Pack Name <span className="text-red-400">*</span>
+              Pack Name <span className="text-status-danger">*</span>
             </label>
             <Input
               placeholder="e.g. Trial Essentials, PvP Toolkit"
@@ -428,7 +428,7 @@ export function PackCreateView({
               autoFocus
             />
             <div className="mt-1 flex items-center gap-2">
-              <div className="flex-1 h-0.5 rounded bg-white/[0.04] overflow-hidden">
+              <div className="flex-1 h-0.5 rounded bg-structure-04 overflow-hidden">
                 <div
                   className="h-full rounded bg-primary transition-all duration-300"
                   style={{ width: `${Math.min((title.length / 100) * 100, 100)}%` }}
@@ -452,10 +452,10 @@ export function PackCreateView({
               onChange={(e) => setDescription(e.target.value)}
               maxLength={500}
               rows={3}
-              className="w-full rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_rgba(255,255,255,0.02)] transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.14] focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
+              className="w-full rounded-[10px] border border-structure-10 bg-structure-04 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none shadow-[inset_0_1px_2px_var(--scrim-20),0_1px_0_var(--structure-02)] transition-all duration-150 hover:bg-structure-05 hover:border-structure-14 focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_var(--scrim-20),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
             />
             <div className="mt-1 flex items-center gap-2">
-              <div className="flex-1 h-0.5 rounded bg-white/[0.04] overflow-hidden">
+              <div className="flex-1 h-0.5 rounded bg-structure-04 overflow-hidden">
                 <div
                   className="h-full rounded bg-primary transition-all duration-300"
                   style={{ width: `${Math.min((description.length / 500) * 100, 100)}%` }}
@@ -485,17 +485,17 @@ export function PackCreateView({
                     className={cn(
                       "relative flex flex-col items-start gap-1 rounded-xl border p-2.5 text-left transition-all duration-200",
                       isSelected
-                        ? `${accent.border} border-l-[3px] bg-white/[0.08] border-white/[0.15] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]`
-                        : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.1] hover:bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]",
+                        ? `${accent.border} border-l-[3px] bg-structure-08 border-structure-15 shadow-[inset_0_1px_0_var(--structure-06)]`
+                        : "border-structure-06 bg-structure-02 hover:border-structure-10 hover:bg-structure-04 shadow-[inset_0_1px_0_var(--structure-02)]",
                       isSelected &&
                         pt === "addon-pack" &&
-                        "ring-1 ring-primary/15 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        "ring-1 ring-primary/15 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_6%,transparent),inset_0_1px_0_var(--structure-06)]",
                       isSelected &&
                         pt === "build-pack" &&
-                        "ring-1 ring-accent-sky/15 shadow-[0_0_16px_color-mix(in_oklab,var(--accent-sky)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        "ring-1 ring-accent-sky/15 shadow-[0_0_16px_color-mix(in_oklab,var(--accent-sky)_6%,transparent),inset_0_1px_0_var(--structure-06)]",
                       isSelected &&
                         pt === "roster-pack" &&
-                        "ring-1 ring-violet-400/15 shadow-[0_0_16px_color-mix(in_oklab,var(--status-library)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        "ring-1 ring-status-library/15 shadow-[0_0_16px_color-mix(in_oklab,var(--status-library)_6%,transparent),inset_0_1px_0_var(--structure-06)]",
                       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                     )}
                   >
@@ -503,7 +503,7 @@ export function PackCreateView({
                       <span
                         className={cn(
                           "absolute top-1.5 right-1.5 flex items-center justify-center size-4 rounded-full",
-                          "bg-white/[0.1] border border-white/[0.15]"
+                          "bg-structure-10 border border-structure-15"
                         )}
                       >
                         <CheckIcon className={cn("size-2.5", accent.text)} />
@@ -533,7 +533,7 @@ export function PackCreateView({
               <span
                 className={cn(
                   "text-[10px] tabular-nums",
-                  selectedTags.length >= 5 ? "text-amber-400" : "text-muted-foreground"
+                  selectedTags.length >= 5 ? "text-status-warning" : "text-muted-foreground"
                 )}
               >
                 {selectedTags.length}/5
@@ -552,7 +552,7 @@ export function PackCreateView({
                       "px-2.5 py-1 rounded-lg text-xs font-semibold transition-all duration-150",
                       isSelected
                         ? "bg-primary/20 text-primary border border-primary/40 shadow-[0_0_10px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]"
-                        : "bg-white/[0.03] text-muted-foreground border border-white/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] hover:border-white/[0.12] hover:text-foreground hover:bg-white/[0.05]",
+                        : "bg-structure-03 text-muted-foreground border border-structure-06 shadow-[inset_0_1px_0_var(--structure-02)] hover:border-structure-12 hover:text-foreground hover:bg-structure-05",
                       isDisabled && "opacity-30 cursor-not-allowed"
                     )}
                   >
@@ -589,9 +589,9 @@ export function PackCreateView({
           </div>
 
           {/* Source toggle with animated pill */}
-          <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+          <div className="relative flex p-0.5 rounded-lg bg-structure-03 border border-structure-06">
             <div
-              className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
+              className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-08 shadow-sm transition-[left] duration-200 ease-out"
               style={{
                 left: addonSource === "search" ? "2px" : "calc(50% + 2px)",
                 width: "calc(50% - 4px)",
@@ -677,8 +677,8 @@ export function PackCreateView({
                           "w-full text-left rounded-lg p-2 transition-all duration-150",
                           "border border-transparent",
                           alreadyAdded
-                            ? "opacity-40 cursor-not-allowed bg-white/[0.02]"
-                            : "hover:bg-white/[0.04] hover:border-white/[0.08] cursor-pointer"
+                            ? "opacity-40 cursor-not-allowed bg-structure-02"
+                            : "hover:bg-structure-04 hover:border-structure-08 cursor-pointer"
                         )}
                       >
                         <div className="flex items-center gap-2">
@@ -728,8 +728,8 @@ export function PackCreateView({
                         "w-full text-left rounded-lg p-2 transition-all duration-150",
                         "border border-transparent",
                         alreadyAdded
-                          ? "opacity-40 cursor-not-allowed bg-white/[0.02]"
-                          : "hover:bg-white/[0.04] hover:border-white/[0.08] cursor-pointer"
+                          ? "opacity-40 cursor-not-allowed bg-structure-02"
+                          : "hover:bg-structure-04 hover:border-structure-08 cursor-pointer"
                       )}
                     >
                       <div className="flex items-center gap-2">
@@ -755,7 +755,7 @@ export function PackCreateView({
             </div>
 
             {/* Right: selected addons */}
-            <div className="w-[220px] shrink-0 overflow-y-auto border-l border-white/[0.06] pl-2">
+            <div className="w-[220px] shrink-0 overflow-y-auto border-l border-structure-06 pl-2">
               <SectionHeader className="mb-1.5 sticky top-0 bg-background/80 backdrop-blur-sm pb-1">
                 Selected ({addons.length})
               </SectionHeader>
@@ -775,8 +775,8 @@ export function PackCreateView({
                       key={addon.esouiId}
                       className={cn(
                         "group/item rounded-lg p-2 transition-all duration-150",
-                        "border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]",
-                        "hover:bg-white/[0.05] hover:border-white/[0.1]"
+                        "border border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-03)]",
+                        "hover:bg-structure-05 hover:border-structure-10"
                       )}
                     >
                       <div className="flex items-center gap-1.5 mb-1.5">
@@ -784,20 +784,20 @@ export function PackCreateView({
                         <SimpleTooltip content="Remove">
                           <button
                             onClick={() => handleRemoveAddon(addon.esouiId)}
-                            className="text-muted-foreground/20 hover:text-red-400 transition-colors p-0.5 opacity-0 group-hover/item:opacity-100"
+                            className="text-muted-foreground/20 hover:text-status-danger transition-colors p-0.5 opacity-0 group-hover/item:opacity-100"
                           >
                             <XIcon className="size-3" />
                           </button>
                         </SimpleTooltip>
                       </div>
                       {/* Required / Optional toggle pill */}
-                      <div className="relative flex p-0.5 rounded-md bg-white/[0.03] border border-white/[0.06]">
+                      <div className="relative flex p-0.5 rounded-md bg-structure-03 border border-structure-06">
                         <div
                           className={cn(
                             "absolute top-0.5 bottom-0.5 rounded-[5px] transition-all duration-200 ease-[cubic-bezier(0.34,1.56,0.64,1)]",
                             addon.required
                               ? "left-0.5 w-[calc(50%-2px)] bg-primary/20 border border-primary/30 shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_12%,transparent)]"
-                              : "left-[calc(50%)] w-[calc(50%-2px)] bg-white/[0.06] border border-white/[0.08]"
+                              : "left-[calc(50%)] w-[calc(50%-2px)] bg-structure-06 border border-structure-08"
                           )}
                         />
                         <button
@@ -854,9 +854,9 @@ export function PackCreateView({
 
             {/* Divider */}
             <div className="flex items-center gap-3">
-              <div className="flex-1 border-t border-white/[0.06]" />
+              <div className="flex-1 border-t border-structure-06" />
               <span className="text-xs text-muted-foreground uppercase tracking-wider">or</span>
-              <div className="flex-1 border-t border-white/[0.06]" />
+              <div className="flex-1 border-t border-structure-06" />
             </div>
 
             {/* Save as Draft + Publish — both require auth */}

@@ -102,9 +102,9 @@ export function PackImportView({
 
           {/* All installed state */}
           {allInstalled && !installing && (
-            <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-success-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]">
-              <CheckIcon className="size-4 text-emerald-400" />
-              <span className="text-sm text-emerald-400 font-medium">
+            <div className="flex items-center gap-2 rounded-lg border border-status-success/25 bg-status-success/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-success-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]">
+              <CheckIcon className="size-4 text-status-success" />
+              <span className="text-sm text-status-success font-medium">
                 All addons already installed
               </span>
             </div>
@@ -120,10 +120,12 @@ export function PackImportView({
                     {installProgress.total}
                   </span>
                   {installProgress.failed > 0 && (
-                    <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
+                    <span className="text-status-danger text-xs">
+                      {installProgress.failed} failed
+                    </span>
                   )}
                 </div>
-                <div className="h-1.5 rounded-full bg-white/[0.06]">
+                <div className="h-1.5 rounded-full bg-structure-06">
                   <div
                     className="h-full rounded-full bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_50%,transparent)] transition-all duration-300 ease-out"
                     style={{
@@ -143,11 +145,11 @@ export function PackImportView({
                 {requiredAddons.map((addon) => (
                   <div
                     key={addon.esouiId}
-                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-03)]"
                   >
                     <span className="text-sm">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) ? (
-                      <span className="text-xs text-emerald-400 font-medium">Installed</span>
+                      <span className="text-xs text-status-success font-medium">Installed</span>
                     ) : (
                       <span className="text-xs text-primary font-medium">New</span>
                     )}
@@ -164,11 +166,11 @@ export function PackImportView({
                 {optionalAddons.map((addon) => (
                   <div
                     key={addon.esouiId}
-                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-03)]"
                   >
                     <span className="text-sm text-muted-foreground">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) && (
-                      <span className="text-xs text-emerald-400 font-medium">Installed</span>
+                      <span className="text-xs text-status-success font-medium">Installed</span>
                     )}
                   </div>
                 ))}
@@ -187,7 +189,7 @@ export function PackImportView({
           )}
 
           {applyingSettings && (
-            <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2">
+            <div className="flex items-center gap-2 rounded-lg border border-structure-06 bg-structure-03 px-3 py-2">
               <Loader2Icon className="size-3.5 animate-spin text-muted-foreground/50 shrink-0" />
               <span className="text-xs text-muted-foreground">Applying settings...</span>
             </div>
@@ -234,9 +236,9 @@ export function PackImportView({
       </div>
 
       {/* Import mode toggle */}
-      <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+      <div className="relative flex p-0.5 rounded-lg bg-structure-03 border border-structure-06">
         <div
-          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
+          className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-08 shadow-sm transition-[left] duration-200 ease-out"
           style={{
             left: importMode === "enter-code" ? "2px" : "calc(50% + 2px)",
             width: "calc(50% - 4px)",
@@ -282,7 +284,7 @@ export function PackImportView({
           </div>
           {resolvingCode && (
             <div className="flex items-center justify-center py-4">
-              <div className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+              <div className="inline-block size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
             </div>
           )}
         </div>
@@ -300,9 +302,9 @@ export function PackImportView({
 
       {importError && (
         <Fade>
-          <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
-            <AlertCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
-            <p className="text-sm text-red-300">{importError}</p>
+          <div className="flex items-start gap-2 rounded-lg border border-status-danger-strong/25 bg-status-danger-strong/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-danger-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-danger-strong)_4%,transparent)]">
+            <AlertCircleIcon className="size-4 text-status-danger shrink-0 mt-0.5" />
+            <p className="text-sm text-status-danger-soft">{importError}</p>
           </div>
         </Fade>
       )}
