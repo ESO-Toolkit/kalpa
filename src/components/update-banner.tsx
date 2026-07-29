@@ -126,7 +126,7 @@ function ChooserRow({
         >
           {update.currentVersion || "—"}
         </span>
-        <ArrowRightIcon className="h-3 w-3 text-white/20" aria-hidden="true" />
+        <ArrowRightIcon className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
         <span
           className="max-w-[88px] truncate font-medium text-primary"
           title={update.remoteVersion || undefined}

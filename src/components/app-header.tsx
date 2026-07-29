@@ -98,7 +98,7 @@ function InstanceBadge({
           className={cn(
             "inline-flex items-center gap-1.5 rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300",
             switchable
-              ? "cursor-pointer hover:border-accent-sky/20 hover:text-white/70"
+              ? "cursor-pointer hover:border-accent-sky/20 hover:text-foreground"
               : "cursor-default"
           )}
         >
@@ -195,7 +195,7 @@ function AppHeaderBase({
         if ((e.target as HTMLElement).closest('button, a, input, [role="button"]')) return;
         void getCurrentWindow().toggleMaximize();
       }}
-      className={`relative z-20 flex items-center border-b border-structure-06 bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_var(--structure-05)] backdrop-blur-xl backdrop-saturate-[1.2] ${
+      className={`relative z-20 flex items-center border-b border-structure-06 bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] py-2 select-none shadow-[0_4px_24px_var(--scrim-40),inset_0_1px_0_var(--structure-05)] backdrop-blur-xl backdrop-saturate-[1.2] ${
         // Clear the macOS traffic-light overlay on the left.
         isMac() ? "pr-4 pl-20" : "px-4"
       }`}
@@ -210,7 +210,7 @@ function AppHeaderBase({
           <div className="h-3 w-px bg-structure-12" />
           <button
             onClick={() => void openUrl("https://esotk.com")}
-            className="inline-flex items-center rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-white/60 cursor-pointer"
+            className="inline-flex items-center rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-muted-foreground cursor-pointer"
           >
             esotk.com
           </button>

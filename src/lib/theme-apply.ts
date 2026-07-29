@@ -2,7 +2,7 @@ import { relativeLuminance } from "./theme-color";
 import type { ThemeColors, ThemeSkin } from "./theme-types";
 
 /**
- * Applies a theme by writing the 12 BASE CSS variables plus derived structural ink to the document root.
+ * Applies a theme by writing the 12 BASE CSS variables plus derived structural/scrim ink to the document root.
  *
  * Every other token (card-alt, muted, secondary, glass tints, scrollbar, sidebar,
  * primary-hover, glow, …) is derived from these 12 in `index.css` using
@@ -29,8 +29,9 @@ const VAR_MAP: Record<keyof ThemeColors, string> = {
 };
 
 const STRUCTURE_RGB_VAR = "--structure-rgb";
+const SCRIM_RGB_VAR = "--scrim-rgb";
 
-const MANAGED_VARS = [...Object.values(VAR_MAP), STRUCTURE_RGB_VAR];
+const MANAGED_VARS = [...Object.values(VAR_MAP), STRUCTURE_RGB_VAR, SCRIM_RGB_VAR];
 
 /** Background luminance at/above this point reads as a light theme, so translucent
  * structural affordances (hairlines, fill plates, dividers) should use black ink.
@@ -43,6 +44,14 @@ export function structureInkForTheme(colors: ThemeColors): "0 0 0" | "255 255 25
     : "255 255 255";
 }
 
+/** Scrims are the inverse polarity of structural ink: dark themes keep the old
+ * black depth washes exactly, while light themes use a white wash instead. */
+export function scrimInkForTheme(colors: ThemeColors): "0 0 0" | "255 255 255" {
+  return relativeLuminance(colors.background) >= LIGHT_THEME_BACKGROUND_LUMINANCE
+    ? "255 255 255"
+    : "0 0 0";
+}
+
 /** Resolve a theme's seed colors into the `{ "--css-var": value }` map applied to
  * the root. Used both to apply at runtime and to mirror to localStorage for the
  * synchronous pre-paint boot script (see index.html). */
@@ -52,6 +61,7 @@ export function themeColorsToVars(colors: ThemeColors): Record<string, string> {
     vars[VAR_MAP[key]] = colors[key];
   }
   vars[STRUCTURE_RGB_VAR] = structureInkForTheme(colors);
+  vars[SCRIM_RGB_VAR] = scrimInkForTheme(colors);
   return vars;
 }
 

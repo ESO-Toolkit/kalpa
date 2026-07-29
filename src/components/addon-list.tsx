@@ -144,7 +144,7 @@ const AddonListItem = memo(function AddonListItem({
         {addon.disabled && (
           <Badge
             variant="outline"
-            className="border-zinc-400/20 bg-zinc-400/[0.04] text-zinc-400 text-[10px]"
+            className="border-addon-disabled/20 bg-addon-disabled/[0.04] text-addon-disabled text-[10px]"
           >
             Disabled
           </Badge>
@@ -202,7 +202,7 @@ const AddonListItem = memo(function AddonListItem({
       className={cn(
         "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-structure-04 hover:shadow-[inset_0_0_20px_color-mix(in_oklab,var(--primary)_2%,transparent)] group",
         addon.disabled
-          ? "border-l-zinc-500 bg-zinc-500/[0.04]"
+          ? "border-l-addon-disabled bg-addon-disabled/[0.04]"
           : addon.missingDependencies.length > 0
             ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-error-strong)_10%,transparent)]"
             : addon.outdatedDependencies.length > 0

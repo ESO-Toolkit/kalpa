@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { BUILTIN_THEMES } from "../theme-presets";
 import { evaluateContrast } from "../theme-contrast";
-import { LIGHT_THEME_BACKGROUND_LUMINANCE, structureInkForTheme } from "../theme-apply";
+import {
+  LIGHT_THEME_BACKGROUND_LUMINANCE,
+  scrimInkForTheme,
+  structureInkForTheme,
+} from "../theme-apply";
 import { relativeLuminance, contrastRatio, hexToRgb, mix } from "../theme-color";
 import { THEME_COLOR_KEYS } from "../theme-types";
 
@@ -29,6 +33,7 @@ describe("built-in themes", () => {
         expect(background, `${theme.id} background`).toBeGreaterThan(0.7);
         expect(relativeLuminance(theme.colors.surface), `${theme.id} surface`).toBeGreaterThan(0.7);
         expect(structureInkForTheme(theme.colors), `${theme.id} structural ink`).toBe("0 0 0");
+        expect(scrimInkForTheme(theme.colors), `${theme.id} scrim ink`).toBe("255 255 255");
       } else {
         expect(relativeLuminance(theme.colors.bgBase), `${theme.id} bgBase`).toBeLessThan(0.12);
         expect(background, `${theme.id} background`).toBeLessThan(0.12);
@@ -36,6 +41,7 @@ describe("built-in themes", () => {
         expect(structureInkForTheme(theme.colors), `${theme.id} structural ink`).toBe(
           "255 255 255"
         );
+        expect(scrimInkForTheme(theme.colors), `${theme.id} scrim ink`).toBe("0 0 0");
       }
     }
   });

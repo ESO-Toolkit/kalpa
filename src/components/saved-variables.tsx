@@ -195,11 +195,11 @@ function OverviewTab({
     <div className="space-y-3">
       {/* Summary stats */}
       <div className="grid grid-cols-3 gap-2">
-        <div className="rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-center shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_rgba(0,0,0,0.12)]">
+        <div className="rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-center shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_var(--scrim-12)]">
           <div className="text-lg font-heading font-semibold">{files.length}</div>
           <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Files</div>
         </div>
-        <div className="rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-center shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_rgba(0,0,0,0.12)]">
+        <div className="rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-center shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_var(--scrim-12)]">
           <div className="text-lg font-heading font-semibold">{formatBytes(totalSize)}</div>
           <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
             Total Size
@@ -210,8 +210,8 @@ function OverviewTab({
           disabled={orphaned.length === 0}
           className={`rounded-xl border p-2.5 text-center transition-all duration-200 ${
             orphaned.length > 0
-              ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer"
-              : "border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_rgba(0,0,0,0.12)]"
+              ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_var(--scrim-12)] cursor-pointer"
+              : "border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_var(--scrim-12)]"
           }`}
         >
           <div
@@ -227,7 +227,7 @@ function OverviewTab({
       {orphaned.length > 0 && (
         <button
           onClick={onSwitchToCleanup}
-          className="flex w-full items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-all duration-200 hover:border-amber-500/35 shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_rgba(0,0,0,0.1)] hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)]"
+          className="flex w-full items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-all duration-200 hover:border-amber-500/35 shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_var(--scrim-10)] hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)]"
         >
           <PackageXIcon className="size-4 shrink-0" />
           <span>
@@ -239,7 +239,7 @@ function OverviewTab({
       )}
 
       {largeFiles.length > 0 && orphaned.length === 0 && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2.5 text-xs text-muted-foreground shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_3%,transparent),0_2px_8px_rgba(0,0,0,0.1)]">
+        <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2.5 text-xs text-muted-foreground shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_3%,transparent),0_2px_8px_var(--scrim-10)]">
           <HardDriveIcon className="size-4 shrink-0 text-red-400" />
           <span>
             <strong className="text-red-400">{largeFiles.length} large files</strong> (&gt;5 MB) may
@@ -257,7 +257,7 @@ function OverviewTab({
               onClick={() => setFilter(f)}
               className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
                 filter === f
-                  ? "bg-structure-10 text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-06)] border border-structure-06"
+                  ? "bg-structure-10 text-foreground shadow-[0_1px_3px_var(--scrim-20),inset_0_1px_0_var(--structure-06)] border border-structure-06"
                   : "text-muted-foreground hover:text-foreground hover:bg-structure-04"
               }`}
             >
@@ -308,7 +308,7 @@ function OverviewTab({
             <button
               key={f.fileName}
               onClick={() => onSelectFile(f)}
-              className="flex w-full items-center gap-3 rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-left transition-all duration-200 hover:border-structure-10 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.15),inset_0_1px_0_var(--structure-05)]"
+              className="flex w-full items-center gap-3 rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-left transition-all duration-200 hover:border-structure-10 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_4px_12px_var(--scrim-15),inset_0_1px_0_var(--structure-05)]"
             >
               {/* Size bar */}
               <div className="w-14 shrink-0">
@@ -478,7 +478,7 @@ function CleanupTab({
             {orphaned.map((f) => (
               <label
                 key={f.fileName}
-                className="flex items-center gap-2.5 rounded-xl border border-structure-06 bg-structure-03 p-2 cursor-pointer transition-all duration-200 hover:border-structure-10 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.12),inset_0_1px_0_var(--structure-05)]"
+                className="flex items-center gap-2.5 rounded-xl border border-structure-06 bg-structure-03 p-2 cursor-pointer transition-all duration-200 hover:border-structure-10 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_2px_8px_var(--scrim-12),inset_0_1px_0_var(--structure-05)]"
               >
                 <Checkbox
                   checked={selected.has(f.fileName)}
@@ -495,7 +495,7 @@ function CleanupTab({
           </div>
 
           {/* Delete action */}
-          <div className="mt-3 flex items-center justify-between rounded-xl border border-structure-06 bg-structure-03 p-2.5 shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_rgba(0,0,0,0.12)]">
+          <div className="mt-3 flex items-center justify-between rounded-xl border border-structure-06 bg-structure-03 p-2.5 shadow-[inset_0_1px_0_var(--structure-04),0_2px_8px_var(--scrim-12)]">
             <div className="text-xs text-muted-foreground">
               {selected.size > 0 ? (
                 <span>
@@ -693,7 +693,7 @@ const NavTreeItem = memo(function NavTreeItem({
         }}
         className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-xs transition-all duration-150 ${
           isSelected
-            ? "bg-structure-10 text-foreground shadow-[inset_0_1px_0_var(--structure-06),0_1px_3px_rgba(0,0,0,0.15)] border border-structure-06"
+            ? "bg-structure-10 text-foreground shadow-[inset_0_1px_0_var(--structure-06),0_1px_3px_var(--scrim-15)] border border-structure-06"
             : "text-foreground hover:bg-structure-04 hover:text-foreground border border-transparent"
         }`}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
@@ -1244,7 +1244,7 @@ function DetailPanel({
                   <button
                     key={`${child.key}-${i}`}
                     onClick={() => onSelectPath([...selectedPath, child.key], child)}
-                    className="flex items-center gap-2 rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-left transition-all duration-200 hover:border-structure-12 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.15),inset_0_1px_0_var(--structure-05)]"
+                    className="flex items-center gap-2 rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-left transition-all duration-200 hover:border-structure-12 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_4px_12px_var(--scrim-15),inset_0_1px_0_var(--structure-05)]"
                   >
                     <BracesIcon className="size-3.5 shrink-0 text-violet-400/70" />
                     <div className="min-w-0 flex-1">
@@ -1776,12 +1776,12 @@ function EditorTab({
           <RotateCcwIcon className="mr-1 size-3.5" />
           Restore
         </Button>
-        <div className="ml-auto flex items-center gap-1 rounded-xl border border-structure-06 bg-structure-03 p-0.5 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)]">
+        <div className="ml-auto flex items-center gap-1 rounded-xl border border-structure-06 bg-structure-03 p-0.5 shadow-[inset_0_1px_2px_var(--scrim-15)]">
           <button
             onClick={() => setRawMode(false)}
             className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
               !rawMode
-                ? "bg-structure-10 text-foreground border border-structure-06 shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-06)]"
+                ? "bg-structure-10 text-foreground border border-structure-06 shadow-[0_1px_3px_var(--scrim-20),inset_0_1px_0_var(--structure-06)]"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -1792,7 +1792,7 @@ function EditorTab({
             onClick={() => setRawMode(true)}
             className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
               rawMode
-                ? "bg-structure-10 text-foreground border border-structure-06 shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-06)]"
+                ? "bg-structure-10 text-foreground border border-structure-06 shadow-[0_1px_3px_var(--scrim-20),inset_0_1px_0_var(--structure-06)]"
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
@@ -1818,7 +1818,7 @@ function EditorTab({
 
       {/* Two-panel layout */}
       <div
-        className="flex gap-0 rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_40%,transparent)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-04)]"
+        className="flex gap-0 rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_40%,transparent)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_var(--scrim-20),inset_0_1px_0_var(--structure-04)]"
         style={{ height: "380px" }}
       >
         {loading ? (
@@ -1841,7 +1841,7 @@ function EditorTab({
                   <input
                     type="text"
                     placeholder="Search settings..."
-                    className="w-full rounded-lg border border-structure-10 bg-structure-04 py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_rgba(0,0,0,0.1)]"
+                    className="w-full rounded-lg border border-structure-10 bg-structure-04 py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground shadow-[inset_0_1px_2px_var(--scrim-15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_var(--scrim-10)]"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />

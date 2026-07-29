@@ -14,7 +14,7 @@ import { primaryReportUrl } from "./uploader-shared";
  *  quieter than the primary picker/action. Used for fights, options, history so
  *  the elevation order reads: canvas < these < picker/action. */
 export const WORK_PANEL =
-  "rounded-2xl border border-structure-08 bg-gradient-to-b from-structure-045 to-structure-015 shadow-[0_8px_28px_-14px_rgba(0,0,0,0.65),inset_0_1px_0_var(--structure-05)]";
+  "rounded-2xl border border-structure-08 bg-gradient-to-b from-structure-045 to-structure-015 shadow-[0_8px_28px_-14px_var(--scrim-65),inset_0_1px_0_var(--structure-05)]";
 
 /** Open a report URL in the user's browser, surfacing failures instead of
  *  swallowing them. The opener plugin rejects a URL outside the capability's

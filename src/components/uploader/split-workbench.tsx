@@ -395,7 +395,7 @@ export function SplitWorkbench({
         {/* Granularity toggle — a segmented control in a recessed track, mirroring
             the workspace mode tabs. "By fight" is disabled when the fight list
             wasn't scanned (very large log). */}
-        <div className="mt-4 grid shrink-0 grid-cols-2 gap-1 rounded-lg border border-black/40 bg-black/25 p-1 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]">
+        <div className="mt-4 grid shrink-0 grid-cols-2 gap-1 rounded-lg border border-scrim-40 bg-scrim-25 p-1 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]">
           <GranTab
             active={granularity === "session"}
             onClick={() => setGranularity("session")}
@@ -653,7 +653,7 @@ function GranTab({
         "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-40",
         active
-          ? "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] text-accent-sky shadow-[0_1px_2px_rgba(0,0,0,0.5),inset_0_1px_0_var(--structure-12)] ring-1 ring-inset ring-accent-sky/25"
+          ? "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] text-accent-sky shadow-[0_1px_2px_var(--scrim-50),inset_0_1px_0_var(--structure-12)] ring-1 ring-inset ring-accent-sky/25"
           : "text-muted-foreground hover:bg-structure-04"
       )}
     >

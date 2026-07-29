@@ -110,7 +110,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
       initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.1, ease: "easeOut" }}
-      className="fixed z-[9998] min-w-[180px] rounded-xl border border-structure-08 bg-surface-overlay backdrop-blur-xl p-1 shadow-[0_8px_32px_rgba(0,0,0,0.5),0_1px_0_var(--structure-04)_inset]"
+      className="fixed z-[9998] min-w-[180px] rounded-xl border border-structure-08 bg-surface-overlay backdrop-blur-xl p-1 shadow-[0_8px_32px_var(--scrim-50),0_1px_0_var(--structure-04)_inset]"
       style={{ left: adjustedPos.x, top: adjustedPos.y }}
     >
       {items.map((entry, i) => {

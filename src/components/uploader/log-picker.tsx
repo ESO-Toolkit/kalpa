@@ -101,7 +101,7 @@ export const LogPicker = memo(function LogPicker({
     <div
       className={cn(
         "relative rounded-2xl border border-structure-10 bg-gradient-to-b from-structure-07 to-structure-025 p-3.5 transition-colors duration-150",
-        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_var(--structure-08)]",
+        "shadow-[0_12px_40px_-16px_var(--scrim-70),inset_0_1px_0_var(--structure-08)]",
         dragOver && "border-accent-sky/60 from-accent-sky/[0.1] to-accent-sky/[0.03]"
       )}
     >
@@ -290,7 +290,7 @@ export const LogPicker = memo(function LogPicker({
         </div>
       ) : (
         <ul
-          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]"
+          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-scrim-40 bg-scrim-25 p-1.5 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]"
           aria-label="Log files"
           // Lightweight roving navigation: Up/Down/Home/End move focus between
           // log rows so a long folder isn't N Tab presses. Tab still works as a

@@ -452,7 +452,7 @@ export function PackCreateView({
               onChange={(e) => setDescription(e.target.value)}
               maxLength={500}
               rows={3}
-              className="w-full rounded-[10px] border border-structure-10 bg-structure-04 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_var(--structure-02)] transition-all duration-150 hover:bg-structure-05 hover:border-structure-14 focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
+              className="w-full rounded-[10px] border border-structure-10 bg-structure-04 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none shadow-[inset_0_1px_2px_var(--scrim-20),0_1px_0_var(--structure-02)] transition-all duration-150 hover:bg-structure-05 hover:border-structure-14 focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_var(--scrim-20),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
             />
             <div className="mt-1 flex items-center gap-2">
               <div className="flex-1 h-0.5 rounded bg-structure-04 overflow-hidden">

@@ -429,7 +429,7 @@ export function WhatGetsUploaded() {
         />
       </button>
       {open && (
-        <div className="mt-1 animate-[fade-in_0.2s_ease-out] space-y-2 rounded-lg bg-black/20 p-3 text-xs text-muted-foreground">
+        <div className="mt-1 animate-[fade-in_0.2s_ease-out] space-y-2 rounded-lg bg-scrim-20 p-3 text-xs text-muted-foreground">
           <div className="flex items-start gap-2">
             <Swords className="mt-0.5 size-3.5 shrink-0 text-accent-sky/80" aria-hidden />
             <span>

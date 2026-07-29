@@ -31,7 +31,7 @@ export function SetupWizard({ instances, onSelect }: SetupWizardProps) {
             <div className="mb-6 flex items-center gap-3">
               <Logo size={32} />
               <div>
-                <h1 className="font-heading text-lg font-bold text-white">Kalpa</h1>
+                <h1 className="font-heading text-lg font-bold text-foreground">Kalpa</h1>
                 <p className="text-sm text-muted-foreground">Set up your AddOns folder</p>
               </div>
             </div>

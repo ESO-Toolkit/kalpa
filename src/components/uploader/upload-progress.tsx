@@ -207,7 +207,7 @@ export function UploadProgressPanel({
       className={cn(
         // The active climax surface: warm gold glass to match the upload action it
         // replaces, with a strong lift so it reads as the live focus of the flow.
-        "relative w-full overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),inset_0_1px_0_var(--structure-08)]",
+        "relative w-full overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_var(--scrim-75),inset_0_1px_0_var(--structure-08)]",
         className
       )}
       role="status"
@@ -249,7 +249,7 @@ export function UploadProgressPanel({
 
       {/* The bar. */}
       <div
-        className="relative mt-3.5 h-2 overflow-hidden rounded-full bg-black/40 ring-1 ring-inset ring-structure-04"
+        className="relative mt-3.5 h-2 overflow-hidden rounded-full bg-scrim-40 ring-1 ring-inset ring-structure-04"
         role="progressbar"
         aria-valuenow={pct}
         aria-valuemin={0}

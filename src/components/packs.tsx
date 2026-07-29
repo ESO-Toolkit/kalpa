@@ -930,9 +930,9 @@ export function Packs({
                 create: editingPackId ? "Edit Pack" : "Create",
               };
               return (
-                <div className="relative flex mt-2 p-0.5 rounded-lg bg-structure-03 border border-structure-06 shadow-[inset_0_1px_2px_rgba(0,0,0,0.12)]">
+                <div className="relative flex mt-2 p-0.5 rounded-lg bg-structure-03 border border-structure-06 shadow-[inset_0_1px_2px_var(--scrim-12)]">
                   <div
-                    className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-10 border border-structure-06 shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-06)] transition-[left] duration-200 ease-out"
+                    className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-10 border border-structure-06 shadow-[0_1px_3px_var(--scrim-20),inset_0_1px_0_var(--structure-06)] transition-[left] duration-200 ease-out"
                     style={{
                       left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
                       width: `calc(${100 / tabCount}% - 4px)`,
@@ -1048,7 +1048,7 @@ export function Packs({
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -8 }}
                         transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                        className="rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_var(--structure-04),0_4px_16px_rgba(0,0,0,0.15)]"
+                        className="rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_var(--structure-04),0_4px_16px_var(--scrim-15)]"
                       >
                         <PackImportView
                           key={importedPack ? "resolved" : "empty"}

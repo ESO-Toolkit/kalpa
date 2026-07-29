@@ -233,7 +233,7 @@ function PhaseIndicator({ current }: { current: MigrationPhase }) {
             {i < currentIndex ? "\u2713" : i + 1}
           </div>
           <span
-            className={`text-xs ${i === currentIndex ? "text-white" : "text-muted-foreground"}`}
+            className={`text-xs ${i === currentIndex ? "text-foreground" : "text-muted-foreground"}`}
           >
             {p.label}
           </span>
@@ -476,15 +476,15 @@ function CompletePhase({
 
       <div className="space-y-1 text-sm text-muted-foreground">
         <div>
-          Imported: <span className="text-white">{result.imported}</span> addon
+          Imported: <span className="text-foreground">{result.imported}</span> addon
           {result.imported !== 1 ? "s" : ""}
         </div>
         <div>
-          Already tracked: <span className="text-white">{result.alreadyTracked}</span>
+          Already tracked: <span className="text-foreground">{result.alreadyTracked}</span>
         </div>
         {result.skippedMissing > 0 && (
           <div>
-            Skipped (not on disk): <span className="text-white">{result.skippedMissing}</span>
+            Skipped (not on disk): <span className="text-foreground">{result.skippedMissing}</span>
           </div>
         )}
       </div>

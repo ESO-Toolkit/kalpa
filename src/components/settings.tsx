@@ -391,14 +391,14 @@ export function Settings({
                   onClick={() => setActiveTab(tab.id)}
                   className={`relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
                     active
-                      ? "text-white"
-                      : "text-muted-foreground hover:text-white/70 hover:bg-structure-03"
+                      ? "text-foreground"
+                      : "text-muted-foreground hover:text-foreground hover:bg-structure-03"
                   }`}
                 >
                   {active && (
                     <motion.span
                       layoutId="settings-tab-indicator"
-                      className="absolute inset-0 rounded-md bg-structure-08 shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-04)]"
+                      className="absolute inset-0 rounded-md bg-structure-08 shadow-[0_1px_3px_var(--scrim-20),inset_0_1px_0_var(--structure-04)]"
                       transition={{ type: "spring", stiffness: 400, damping: 30 }}
                     />
                   )}
@@ -1027,7 +1027,7 @@ function ToolItem({
         className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
           accent === "gold"
             ? "bg-[#c4a44a]/10 text-[#c4a44a]"
-            : "bg-structure-04 text-muted-foreground group-hover:text-white/70"
+            : "bg-structure-04 text-muted-foreground group-hover:text-foreground"
         } transition-colors duration-150`}
       >
         <Icon className="size-4" />

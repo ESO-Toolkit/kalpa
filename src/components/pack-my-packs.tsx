@@ -271,9 +271,9 @@ export function MyPacksView({
                         "border-l-[3px] cursor-pointer",
                         "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
                         // Real elevation so the opaque card sits clearly above the background.
-                        "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_var(--structure-07)]",
+                        "shadow-[0_4px_16px_-4px_var(--scrim-50),0_2px_4px_-1px_var(--scrim-30),inset_0_1px_0_var(--structure-07)]",
                         accent.border,
-                        "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_var(--structure-10)]",
+                        "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_var(--scrim-55),inset_0_1px_0_var(--structure-10)]",
                         "hover:border-structure-18 motion-safe:hover:-translate-y-[2px]",
                         "motion-reduce:transition-none",
                         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
@@ -436,7 +436,7 @@ export function MyPacksView({
                 disabled={loadingMore}
                 className={cn(
                   "w-full py-2.5 rounded-xl border border-structure-06 bg-structure-02 text-xs font-semibold",
-                  "shadow-[inset_0_1px_0_var(--structure-03)] transition-all duration-200 hover:bg-structure-05 hover:border-structure-12 hover:shadow-[inset_0_1px_0_var(--structure-05),0_2px_8px_rgba(0,0,0,0.15)]",
+                  "shadow-[inset_0_1px_0_var(--structure-03)] transition-all duration-200 hover:bg-structure-05 hover:border-structure-12 hover:shadow-[inset_0_1px_0_var(--structure-05),0_2px_8px_var(--scrim-15)]",
                   "text-muted-foreground hover:text-foreground",
                   loadingMore && "opacity-60 cursor-wait"
                 )}
@@ -497,9 +497,9 @@ export function MyPacksView({
                     "border-l-[3px] cursor-pointer",
                     "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
                     // Real elevation so the opaque card sits clearly above the background.
-                    "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_var(--structure-07)]",
+                    "shadow-[0_4px_16px_-4px_var(--scrim-50),0_2px_4px_-1px_var(--scrim-30),inset_0_1px_0_var(--structure-07)]",
                     accent.border,
-                    "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_var(--structure-10)]",
+                    "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_var(--scrim-55),inset_0_1px_0_var(--structure-10)]",
                     "hover:border-structure-18 motion-safe:hover:-translate-y-[2px]",
                     "motion-reduce:transition-none",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"

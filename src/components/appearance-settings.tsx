@@ -270,7 +270,7 @@ function ThemeCard({
           <button
             type="button"
             onClick={onEdit}
-            className="flex size-6 items-center justify-center rounded-md border border-structure-10 bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
+            className="flex size-6 items-center justify-center rounded-md border border-structure-10 bg-scrim-40 text-foreground backdrop-blur-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-foreground"
             aria-label={`Edit ${theme.name} theme`}
           >
             <Pencil className="size-3" />
@@ -279,7 +279,7 @@ function ThemeCard({
         <button
           type="button"
           onClick={onFork}
-          className="flex size-6 items-center justify-center rounded-md border border-structure-10 bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
+          className="flex size-6 items-center justify-center rounded-md border border-structure-10 bg-scrim-40 text-foreground backdrop-blur-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-foreground"
           aria-label={`Duplicate ${theme.name} as a custom theme`}
         >
           <CopyPlus className="size-3" />
