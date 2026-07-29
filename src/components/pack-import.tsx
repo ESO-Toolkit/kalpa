@@ -84,17 +84,17 @@ export function PackImportView({
                 {tag}
               </InfoPill>
             ))}
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <PackageIcon className="size-3" />
               {importedPack.addons.length} addon{importedPack.addons.length !== 1 ? "s" : ""}
             </span>
             {importedPack.sharedBy && (
-              <span className="text-[11px] text-muted-foreground/40">
+              <span className="text-xs text-muted-foreground">
                 shared by {importedPack.sharedBy}
               </span>
             )}
             {importedPack.sharedAt && formatRelativeDate(importedPack.sharedAt) && (
-              <span className="text-[10px] text-muted-foreground/30">
+              <span className="text-xs text-muted-foreground">
                 {formatRelativeDate(importedPack.sharedAt)}
               </span>
             )}
@@ -147,9 +147,9 @@ export function PackImportView({
                   >
                     <span className="text-sm">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) ? (
-                      <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
+                      <span className="text-xs text-emerald-400 font-medium">Installed</span>
                     ) : (
-                      <span className="text-[10px] text-primary/60 font-medium">New</span>
+                      <span className="text-xs text-primary font-medium">New</span>
                     )}
                   </div>
                 ))}
@@ -168,7 +168,7 @@ export function PackImportView({
                   >
                     <span className="text-sm text-muted-foreground">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) && (
-                      <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
+                      <span className="text-xs text-emerald-400 font-medium">Installed</span>
                     )}
                   </div>
                 ))}
@@ -178,7 +178,7 @@ export function PackImportView({
 
           {hasSettings && (
             <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/[0.05] px-3 py-2">
-              <span className="text-[11px] text-primary/80">
+              <span className="text-xs text-primary">
                 {allInstalled
                   ? "Includes addon settings — ready to apply"
                   : "Includes addon settings — will be applied after install"}
@@ -189,7 +189,7 @@ export function PackImportView({
           {applyingSettings && (
             <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2">
               <Loader2Icon className="size-3.5 animate-spin text-muted-foreground/50 shrink-0" />
-              <span className="text-[11px] text-muted-foreground/50">Applying settings...</span>
+              <span className="text-xs text-muted-foreground">Applying settings...</span>
             </div>
           )}
 
@@ -250,7 +250,7 @@ export function PackImportView({
               "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
               importMode === mode
                 ? "text-foreground"
-                : "text-muted-foreground/60 hover:text-muted-foreground"
+                : "text-muted-foreground hover:text-foreground"
             )}
           >
             {mode === "enter-code" ? "Enter Code" : "Import File"}
@@ -288,7 +288,7 @@ export function PackImportView({
         </div>
       ) : (
         <div className="space-y-2">
-          <p className="text-[11px] text-muted-foreground/50">
+          <p className="text-xs text-muted-foreground">
             Open a .esopack file shared with you on Discord, forums, or elsewhere.
           </p>
           <Button variant="outline" onClick={onImportFile} className="w-full">

@@ -134,8 +134,8 @@ function DiscoverDetailBase({
           />
         </div>
         <div className="relative text-center">
-          <p className="font-heading text-sm font-medium text-foreground/70">Discover Addons</p>
-          <p className="mt-1 text-xs text-muted-foreground/40">
+          <p className="font-heading text-sm font-medium text-foreground">Discover Addons</p>
+          <p className="mt-1 text-xs text-muted-foreground">
             Search or browse to see addon details here
           </p>
         </div>
@@ -223,11 +223,11 @@ function DiscoverDetailBase({
               {detail.title}
             </h2>
             {detail.version && (
-              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground/40 bg-white/[0.04] px-1.5 py-0.5 rounded">
+              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground bg-white/[0.04] px-1.5 py-0.5 rounded">
                 v{detail.version}
               </span>
             )}
-            <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground/60">
+            <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
               <span>by {detail.author}</span>
               {result.category && (
                 <>
@@ -237,7 +237,7 @@ function DiscoverDetailBase({
               )}
             </div>
             {detail.compatibility && (
-              <div className="mt-1.5 text-xs text-muted-foreground/40">
+              <div className="mt-1.5 text-xs text-muted-foreground">
                 Compatible with {detail.compatibility}
               </div>
             )}
@@ -284,7 +284,7 @@ function DiscoverDetailBase({
             </div>
             <button
               onClick={() => openUrl(`https://www.esoui.com/downloads/info${detail.id}.html`)}
-              className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors flex items-center gap-1 cursor-pointer"
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 cursor-pointer"
             >
               <ExternalLink className="size-3" />
               View on ESOUI
@@ -347,7 +347,7 @@ function DiscoverDetailBase({
         </div>
 
         {/* Secondary metadata */}
-        <div className="flex items-center gap-2 text-xs text-muted-foreground/40">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           {detail.created && (
             <SimpleTooltip content={detail.created}>
               <span className="flex items-center gap-1">
@@ -447,7 +447,7 @@ function DiscoverDetailBase({
                   </div>
 
                   {/* Counter */}
-                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-white/70">
+                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-foreground">
                     {safeIdx + 1} / {detail.screenshots.length}
                   </div>
                 </>
@@ -522,7 +522,7 @@ function StatCard({
       >
         <div className="flex items-center gap-1.5 mb-1">
           {icon}
-          <span className="text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/40">
+          <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
             {label}
           </span>
         </div>

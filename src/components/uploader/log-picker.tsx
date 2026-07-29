@@ -129,7 +129,7 @@ export const LogPicker = memo(function LogPicker({
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-foreground/90">Logs folder</span>
+              <span className="text-sm font-semibold text-foreground">Logs folder</span>
               {/* A neutral state tag (NOT sky — it's informational, not a control)
                   marking that this isn't the auto-detected folder. The default
                   state stays badge-free, so absence reads as "the folder Kalpa
@@ -276,7 +276,7 @@ export const LogPicker = memo(function LogPicker({
           <p className="mt-1 text-xs text-muted-foreground">
             Check it's accessible and try Refresh.
           </p>
-          <p className="mt-1 text-xs break-words text-muted-foreground/70">{listError}</p>
+          <p className="mt-1 text-xs break-words text-muted-foreground">{listError}</p>
         </div>
       ) : logs.length === 0 ? (
         // Unified empty state matching the FightList dashed pattern.
@@ -349,7 +349,7 @@ export const LogPicker = memo(function LogPicker({
                       aria-hidden
                     />
                     <div className="min-w-0">
-                      <div className="truncate text-sm text-foreground/90">{log.fileName}</div>
+                      <div className="truncate text-sm text-foreground">{log.fileName}</div>
                       <div className="text-xs text-muted-foreground">
                         {compactBytes(log.sizeBytes)} · {relativeFromMs(log.modifiedAtMs)}
                       </div>
@@ -440,8 +440,8 @@ export const LogPicker = memo(function LogPicker({
       {/* Discoverability for drag-drop — a quiet hint that you can drop a log
           from anywhere; the backend copies it into this folder first. */}
       {!listError && (
-        <p className="mt-2 text-center text-[11px] text-muted-foreground/60">
-          or drop a <code className="text-muted-foreground/80">.log</code> file here from anywhere
+        <p className="mt-2 text-center text-xs text-muted-foreground">
+          or drop a <code className="text-muted-foreground">.log</code> file here from anywhere
         </p>
       )}
     </div>

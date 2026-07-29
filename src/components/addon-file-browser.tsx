@@ -102,7 +102,7 @@ function FileTreeNode({
           ) : (
             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
           )}
-          <span className="text-muted-foreground/80">{node.name}/</span>
+          <span className="text-muted-foreground">{node.name}/</span>
         </button>
         {expanded &&
           sorted.map((child) => (
@@ -148,7 +148,7 @@ function FileTreeNode({
           {ext}
         </InfoPill>
       )}
-      <span className="text-[10px] text-muted-foreground/30 tabular-nums">
+      <span className="text-[11px] text-muted-foreground tabular-nums">
         {formatSize(file.sizeBytes)}
       </span>
     </button>
@@ -269,7 +269,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
 
   if (loadState === "loading" && !fileTree) {
     return (
-      <div className="flex items-center justify-center py-12 text-muted-foreground/50 text-sm">
+      <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
         <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
         Loading files...
       </div>
@@ -278,7 +278,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
 
   if (error) {
     return (
-      <GlassPanel variant="subtle" className="p-4 text-sm text-red-400/80">
+      <GlassPanel variant="subtle" className="p-4 text-sm text-red-400">
         Failed to load files: {error}
       </GlassPanel>
     );
@@ -328,7 +328,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
       </GlassPanel>
 
       {fileTree.modifiedCount > 0 && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground/60">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="h-2 w-2 rounded-full bg-primary" />
           {fileTree.modifiedCount} file{fileTree.modifiedCount !== 1 ? "s" : ""} edited
           <span className="text-muted-foreground/30">·</span>
@@ -339,7 +339,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
       {editingFile && (
         <Suspense
           fallback={
-            <div className="flex items-center justify-center py-8 text-muted-foreground/50 text-sm">
+            <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
               Loading editor...
             </div>
@@ -360,7 +360,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
         <div className="space-y-2">
           <SectionHeader>Edit Backups</SectionHeader>
           {backups.length === 0 ? (
-            <p className="text-xs text-muted-foreground/50">
+            <p className="text-xs text-muted-foreground">
               No backups yet. Backups are created when your edited files are overwritten by an
               update.
             </p>
@@ -368,15 +368,15 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
             backups.map((backup) => (
               <GlassPanel key={backup.backedUpAt} variant="subtle" className="p-3">
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-medium text-muted-foreground/80">
+                  <span className="text-xs font-medium text-muted-foreground">
                     {backup.updateFrom} → {backup.updateTo}
                   </span>
-                  <span className="text-[10px] text-muted-foreground/40">{backup.backedUpAt}</span>
+                  <span className="text-[11px] text-muted-foreground">{backup.backedUpAt}</span>
                 </div>
                 <div className="space-y-1">
                   {backup.files.map((file) => (
                     <div key={file} className="flex items-center gap-2 text-xs">
-                      <span className="flex-1 font-mono truncate text-muted-foreground/70">
+                      <span className="flex-1 font-mono truncate text-muted-foreground">
                         {file}
                       </span>
                       <Button

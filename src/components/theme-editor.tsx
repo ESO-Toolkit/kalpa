@@ -146,7 +146,7 @@ export function ThemeEditor({
               >
                 {c.level === "fail" ? "!" : c.level === "ok" ? "~" : "✓"}
               </span>
-              <span className="flex-1 text-white/75">{c.label}</span>
+              <span className="flex-1 text-foreground">{c.label}</span>
               <span className="font-mono text-[11px] text-muted-foreground">
                 {c.ratio.toFixed(2)}:1
               </span>

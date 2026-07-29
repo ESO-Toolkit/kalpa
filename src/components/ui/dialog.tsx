@@ -149,7 +149,7 @@ function DialogDescription({ className, ...props }: React.ComponentProps<"p">) {
   return (
     <AnimatedDialogDescription
       className={cn(
-        "text-[13px] leading-relaxed text-muted-foreground/80 *:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-foreground",
+        "text-[13px] leading-relaxed text-muted-foreground *:[a]:underline *:[a]:underline-offset-3 *:[a]:hover:text-foreground",
         className
       )}
       {...props}

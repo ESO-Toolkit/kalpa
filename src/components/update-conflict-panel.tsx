@@ -85,14 +85,14 @@ export function UpdateConflictPanel({
         <h3 className="font-heading text-sm font-semibold text-amber-400">
           {folderName} {currentVersion} → {updateVersion}
         </h3>
-        <p className="mt-1.5 text-xs text-muted-foreground/70">
+        <p className="mt-1.5 text-xs text-muted-foreground">
           You've edited {conflicts.length} file{conflicts.length !== 1 ? "s" : ""} that this update
           also changed. Choose which version to keep for each:
         </p>
       </GlassPanel>
 
       {autoKeptFiles.length > 0 && (
-        <div className="text-xs text-emerald-400/70 flex items-center gap-1.5">
+        <div className="text-xs text-emerald-400 flex items-center gap-1.5">
           <Check className="h-3.5 w-3.5" />
           {autoKeptFiles.length} of your edited files are unchanged in this update — automatically
           preserved
@@ -148,14 +148,14 @@ export function UpdateConflictPanel({
               {isViewingThis && (
                 <div className="mt-1">
                   {loadingDiff ? (
-                    <div className="flex items-center justify-center py-4 text-muted-foreground/50 text-sm">
+                    <div className="flex items-center justify-center py-4 text-muted-foreground text-sm">
                       <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
                       Loading differences...
                     </div>
                   ) : diffData?.isBinary ? (
                     <GlassPanel
                       variant="subtle"
-                      className="p-3 text-sm text-muted-foreground/60 text-center"
+                      className="p-3 text-sm text-muted-foreground text-center"
                     >
                       Binary file — cannot show differences
                     </GlassPanel>
@@ -174,7 +174,7 @@ export function UpdateConflictPanel({
       </div>
 
       {safeFileCount > 0 && (
-        <div className="text-xs text-muted-foreground/50">
+        <div className="text-xs text-muted-foreground">
           {safeFileCount} other file{safeFileCount !== 1 ? "s" : ""} will update normally (you
           haven't modified them)
         </div>

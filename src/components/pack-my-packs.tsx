@@ -117,7 +117,7 @@ export function MyPacksView({
           </div>
           <div>
             <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
-            <p className="mt-1 text-xs text-muted-foreground/60 max-w-[260px]">
+            <p className="mt-1 text-xs text-muted-foreground max-w-[260px]">
               Sign in with your ESO Logs account to view, edit, and manage your packs and drafts.
             </p>
           </div>
@@ -153,9 +153,7 @@ export function MyPacksView({
             onClick={() => setSubTab(st)}
             className={cn(
               "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
-              subTab === st
-                ? "text-foreground"
-                : "text-muted-foreground/60 hover:text-muted-foreground"
+              subTab === st ? "text-foreground" : "text-muted-foreground hover:text-foreground"
             )}
           >
             {st === "created"
@@ -170,11 +168,11 @@ export function MyPacksView({
           {/* Header */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground/60">
+              <span className="text-xs text-muted-foreground">
                 Your packs as{" "}
                 <span className="text-primary font-semibold">{authUser.userName}</span>
               </span>
-              <span className="text-[10px] text-muted-foreground/40 tabular-nums">
+              <span className="text-xs text-muted-foreground tabular-nums">
                 {packs.length} / 25
               </span>
             </div>
@@ -228,7 +226,7 @@ export function MyPacksView({
                     <SparklesIcon className="size-8 text-primary/60" />
                   </div>
                   <p className="font-heading text-sm font-medium">No packs yet</p>
-                  <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                  <p className="text-xs text-muted-foreground max-w-[260px]">
                     You haven&apos;t created any packs yet. Share your favourite addon collections
                     with the community!
                   </p>
@@ -242,7 +240,7 @@ export function MyPacksView({
               <Fade>
                 <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
                   <p className="font-heading text-sm font-medium">No packs match your filters</p>
-                  <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                  <p className="text-xs text-muted-foreground max-w-[260px]">
                     Try different keywords or clear your filters.
                   </p>
                 </div>
@@ -366,7 +364,7 @@ export function MyPacksView({
 
                       {/* Description (aligned past the tile) */}
                       {pack.description && (
-                        <p className="mt-1.5 pl-[52px] text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
+                        <p className="mt-1.5 pl-[52px] text-xs text-muted-foreground line-clamp-2 leading-relaxed">
                           {decodeHtml(pack.description)}
                         </p>
                       )}
@@ -381,12 +379,12 @@ export function MyPacksView({
                         {pack.tags.length > 0 && pack.addons.length > 0 && (
                           <span className="text-muted-foreground/20 mx-0.5">·</span>
                         )}
-                        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                           <PackageIcon className="size-3" />
                           {pack.addons.length} addon{pack.addons.length !== 1 ? "s" : ""}
                         </span>
                         {pack.updatedAt && formatRelativeDate(pack.updatedAt) && (
-                          <span className="text-[10px] text-muted-foreground/30 ml-auto">
+                          <span className="text-xs text-muted-foreground ml-auto">
                             Updated {formatRelativeDate(pack.updatedAt)}
                           </span>
                         )}
@@ -410,7 +408,7 @@ export function MyPacksView({
                             <div className="flex items-center gap-2">
                               <button
                                 onClick={() => setConfirmDeleteId(null)}
-                                className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5"
+                                className="text-xs text-muted-foreground hover:text-muted-foreground transition-colors px-2 py-0.5"
                               >
                                 Cancel
                               </button>
@@ -439,7 +437,7 @@ export function MyPacksView({
                 className={cn(
                   "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
                   "shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-all duration-200 hover:bg-white/[0.05] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.15)]",
-                  "text-muted-foreground/60 hover:text-muted-foreground",
+                  "text-muted-foreground hover:text-foreground",
                   loadingMore && "opacity-60 cursor-wait"
                 )}
               >
@@ -465,7 +463,7 @@ export function MyPacksView({
                   <DownloadIcon className="size-8 text-accent-sky/60" />
                 </div>
                 <p className="font-heading text-sm font-medium">No installed packs yet</p>
-                <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                <p className="text-xs text-muted-foreground max-w-[260px]">
                   Packs you install from the Browse tab will appear here for easy reference.
                 </p>
               </div>
@@ -543,20 +541,20 @@ export function MyPacksView({
                     </SimpleTooltip>
                   </div>
                   <div className="mt-2 flex items-center gap-1.5 flex-wrap pl-[52px]">
-                    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                       <PackageIcon className="size-3" />
                       {ref.addonCount} addon{ref.addonCount !== 1 ? "s" : ""}
                     </span>
                     {ref.authorName && (
                       <>
                         <span className="text-muted-foreground/20 mx-0.5">·</span>
-                        <span className="text-[11px] text-muted-foreground/40">
+                        <span className="text-xs text-muted-foreground">
                           by {decodeHtml(ref.authorName)}
                         </span>
                       </>
                     )}
                     {ref.installedAt && formatRelativeDate(ref.installedAt) && (
-                      <span className="text-[10px] text-muted-foreground/30 ml-auto">
+                      <span className="text-xs text-muted-foreground ml-auto">
                         Installed {formatRelativeDate(ref.installedAt)}
                       </span>
                     )}

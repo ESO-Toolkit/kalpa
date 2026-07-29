@@ -94,7 +94,7 @@ function ComboboxInput({ className, ...props }: ComboboxPrimitive.Input.Props) {
     <ComboboxPrimitive.Input
       data-slot="combobox-input"
       className={cn(
-        "h-8 w-full flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/50",
+        "h-8 w-full flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground",
         className
       )}
       {...props}
@@ -152,7 +152,7 @@ function ComboboxStatus({ className, ...props }: ComboboxPrimitive.Status.Props)
     <ComboboxPrimitive.Status
       data-slot="combobox-status"
       className={cn(
-        "border-b border-white/[0.06] px-2 py-1.5 text-[11px] text-muted-foreground/70 empty:hidden",
+        "border-b border-white/[0.06] px-2 py-1.5 text-xs text-muted-foreground empty:hidden",
         className
       )}
       {...props}

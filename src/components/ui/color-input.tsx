@@ -73,10 +73,10 @@ export function ColorInput({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
-          <label htmlFor={id} className="text-xs font-medium text-white/85">
+          <label htmlFor={id} className="text-xs font-medium text-foreground">
             {label}
           </label>
-          {hint && <span className="truncate text-[10px] text-muted-foreground">{hint}</span>}
+          {hint && <span className="truncate text-[11px] text-muted-foreground">{hint}</span>}
         </div>
         <input
           id={id}
@@ -93,7 +93,7 @@ export function ColorInput({
               textRef.current?.blur();
             }
           }}
-          className="mt-0.5 w-full rounded-md border border-white/[0.08] bg-white/[0.03] px-1.5 py-0.5 font-mono text-[11px] text-white/80 outline-none transition-colors duration-150 hover:border-white/15 focus:border-accent-sky/40 focus:bg-white/[0.05]"
+          className="mt-0.5 w-full rounded-md border border-white/[0.08] bg-white/[0.03] px-1.5 py-0.5 font-mono text-xs text-foreground outline-none transition-colors duration-150 hover:border-white/15 focus:border-accent-sky/40 focus:bg-white/[0.05]"
         />
       </div>
 

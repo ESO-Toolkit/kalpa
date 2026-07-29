@@ -897,7 +897,7 @@ export function Packs({
 
           {authUser && (
             <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2.5 py-1.5 text-xs">
-              <span className="min-w-0 truncate text-muted-foreground/60">
+              <span className="min-w-0 truncate text-muted-foreground">
                 Signed in as <span className="font-semibold text-primary">{authUser.userName}</span>
               </span>
               <Button
@@ -949,7 +949,7 @@ export function Packs({
                         "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
                         tab === t
                           ? "text-foreground"
-                          : "text-muted-foreground/60 hover:text-muted-foreground"
+                          : "text-muted-foreground hover:text-muted-foreground"
                       )}
                     >
                       {tabLabels[t]}
@@ -1030,7 +1030,7 @@ export function Packs({
                         "flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md border transition-all duration-200",
                         showImportPanel
                           ? "text-primary border-primary/30 bg-primary/[0.08] shadow-[0_0_10px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]"
-                          : "text-muted-foreground/50 border-white/[0.06] bg-white/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:text-muted-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
+                          : "text-muted-foreground border-white/[0.06] bg-white/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:text-muted-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
                       )}
                     >
                       <ImportIcon className="size-3.5" />
@@ -1238,7 +1238,7 @@ export function Packs({
               </Button>
               {confirmInstall ? (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground/60">
+                  <span className="text-xs text-muted-foreground">
                     Install {newAddonsToInstall.length} new addon
                     {newAddonsToInstall.length !== 1 ? "s" : ""}?
                   </span>

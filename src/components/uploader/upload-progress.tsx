@@ -288,7 +288,7 @@ export function UploadProgressPanel({
                 <span
                   className={cn(
                     "text-[11px] transition-colors duration-300",
-                    reached || current ? "text-foreground/80" : "text-muted-foreground/60"
+                    reached || current ? "text-foreground" : "text-muted-foreground"
                   )}
                 >
                   {step.label}

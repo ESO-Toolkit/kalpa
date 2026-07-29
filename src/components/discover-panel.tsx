@@ -141,7 +141,7 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
               "shrink-0 size-6 flex items-center justify-center rounded-md text-[11px] font-bold font-heading tabular-nums",
               rank <= 3
                 ? "bg-primary/12 text-primary border border-primary/20"
-                : "bg-white/[0.03] text-muted-foreground/40 border border-white/[0.06]"
+                : "bg-white/[0.03] text-muted-foreground border border-white/[0.06]"
             )}
           >
             {rank}
@@ -176,12 +176,12 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
           )}
         </Button>
       </div>
-      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground/60">
+      <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {result.author && <span className="truncate">by {result.author}</span>}
         {result.category && <InfoPill color="muted">{result.category}</InfoPill>}
       </div>
       {showMeta && (
-        <div className="mt-1.5 flex items-center gap-3 text-[11px] text-muted-foreground/40">
+        <div className="mt-1.5 flex items-center gap-3 text-xs text-muted-foreground">
           {result.downloads && (
             <span className="flex items-center gap-1">
               <Download className="size-3" />
@@ -301,7 +301,7 @@ export function DiscoverPanel({
               role="tab"
               aria-selected={false}
               disabled
-              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground/30 border border-transparent cursor-not-allowed"
+              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
             >
               <Icon className="size-3 shrink-0" />
               <span className="truncate">{label}</span>
@@ -330,7 +330,7 @@ export function DiscoverPanel({
               "relative flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
               activeTab === tab
                 ? "text-primary"
-                : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-transparent"
             )}
             onClick={() => onTabChange(tab)}
           >
@@ -530,10 +530,10 @@ function SearchContent({
       {/* Results count bar */}
       {results.length > 0 && (
         <div className="flex items-center justify-between px-3 pb-1.5">
-          <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
+          <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
             {results.length} result{results.length !== 1 ? "s" : ""}
           </span>
-          <span className="text-[11px] text-muted-foreground/30">&uarr;&darr; to navigate</span>
+          <span className="text-xs text-muted-foreground">&uarr;&darr; to navigate</span>
         </div>
       )}
 
@@ -542,7 +542,7 @@ function SearchContent({
           <DiscoverResultListSkeleton />
         ) : results.length === 0 && query.trim() ? (
           <EmptyState
-            icon={<Search className="size-8 text-muted-foreground/30" />}
+            icon={<Search className="size-8 text-muted-foreground" />}
             title="No results found"
             subtitle={`Try different keywords for "${query}"`}
           />
@@ -647,7 +647,7 @@ function PopularContent({
               "flex-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all duration-150 flex items-center justify-center gap-1.5",
               sortBy === "downloads"
                 ? "bg-primary/15 text-primary border border-primary/25"
-                : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-white/[0.06]"
+                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-white/[0.06]"
             )}
             onClick={() => handleSortChange("downloads")}
           >
@@ -659,7 +659,7 @@ function PopularContent({
               "flex-1 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all duration-150 flex items-center justify-center gap-1.5",
               sortBy === "newest"
                 ? "bg-primary/15 text-primary border border-primary/25"
-                : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-white/[0.06]"
+                : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-white/[0.06]"
             )}
             onClick={() => handleSortChange("newest")}
           >
@@ -850,7 +850,7 @@ function CategoryContent({
       {/* Results count */}
       {results.length > 0 && (
         <div className="flex items-center justify-between px-3 pb-1">
-          <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
+          <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
             {filterText ? `${filteredResults.length} of ${results.length}` : results.length} addon
             {(filterText ? filteredResults.length : results.length) !== 1 ? "s" : ""}
           </span>
@@ -967,7 +967,7 @@ function UrlContent({
   return (
     <div className="flex-1 overflow-y-auto px-3 space-y-3">
       <div>
-        <label htmlFor="esoui-input" className="mb-1 block text-xs text-muted-foreground/60">
+        <label htmlFor="esoui-input" className="mb-1 block text-xs text-muted-foreground">
           ESOUI URL or Addon ID
         </label>
         <Input
@@ -991,20 +991,20 @@ function UrlContent({
       </div>
 
       <div className="rounded-xl border border-white/[0.04] bg-white/[0.02] p-3 space-y-2">
-        <div className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/40">
+        <div className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
           Supported formats
         </div>
-        <div className="space-y-1 text-xs text-muted-foreground/50">
+        <div className="space-y-1 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
-            <span className="text-primary/60">1.</span>
+            <span className="text-primary">1.</span>
             <code className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[11px]">
               https://esoui.com/downloads/info123
             </code>
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-primary/60">2.</span>
+            <span className="text-primary">2.</span>
             <code className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[11px]">123</code>
-            <span className="text-muted-foreground/30">(addon ID)</span>
+            <span className="text-muted-foreground">(addon ID)</span>
           </div>
         </div>
       </div>
@@ -1027,7 +1027,7 @@ function UrlContent({
           <div className="font-heading font-medium bg-gradient-to-r from-primary to-primary-hover bg-clip-text text-transparent">
             {addonInfo.title}
           </div>
-          <div className="flex items-center gap-3 text-xs text-muted-foreground/60">
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
             <span>ESOUI #{addonInfo.id}</span>
             {addonInfo.version && <span>v{addonInfo.version}</span>}
             {addonInfo.updated && (
@@ -1098,8 +1098,8 @@ function EmptyState({
           {icon}
         </div>
         <div className="text-center">
-          <p className="font-heading text-sm font-medium text-foreground/70">{title}</p>
-          <p className="mt-1 text-xs text-muted-foreground/40 max-w-[200px]">{subtitle}</p>
+          <p className="font-heading text-sm font-medium text-foreground">{title}</p>
+          <p className="mt-1 text-xs text-muted-foreground max-w-[200px]">{subtitle}</p>
         </div>
       </div>
     </Fade>

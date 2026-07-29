@@ -34,6 +34,9 @@ export const ROOT_THEME_ID = "eso-gold";
 export const CATEGORY_ORDER = [
   "Elder Scrolls",
   "ESO",
+  // Sits above the decorative buckets so someone who needs it is not scrolling
+  // past forty art themes to find it (see issue #199).
+  "Accessibility",
   "Editor Classics",
   "Neon",
   "Nature",
@@ -1054,6 +1057,54 @@ const GENERATED_THEMES: Theme[] = [
       orb3: "#4a5a52",
     },
     skin: SKINS["nordic-runestone"],
+  },
+
+  // Issue #199: a player with vision issues asked for a palette where small
+  // text is genuinely readable. Every other theme targets the 4.5:1 AA floor;
+  // these two clear 12:1 on every pair the contrast checker measures, and put
+  // muted text — the text that complaint was about — near 14:1. No skin, so
+  // no texture sits behind the type.
+  {
+    id: "high-contrast-dark",
+    name: "High Contrast",
+    description:
+      "Maximum legibility on a near-black field. Pure white body text, a bright amber accent, and borders strong enough to read as edges rather than hints.",
+    category: "Accessibility",
+    colors: seed({
+      bgBase: "#000000",
+      background: "#0a0b0d",
+      surface: "#16181c",
+      foreground: "#ffffff",
+      mutedForeground: "#d6d8dc",
+      primary: "#f2c75c",
+      primaryForeground: "#000000",
+      accent: "#7fd4ff",
+      border: "#5a5f68",
+      orb1: "#f2c75c",
+      orb2: "#7fd4ff",
+      orb3: "#3a4048",
+    }),
+  },
+  {
+    id: "high-contrast-gold",
+    name: "High Contrast Gold",
+    description:
+      "The same legibility floor kept in Kalpa's own colours — warm near-black, parchment-white text, and ESO gold bright enough to hold as body copy.",
+    category: "Accessibility",
+    colors: seed({
+      bgBase: "#000000",
+      background: "#0c0a06",
+      surface: "#1a160e",
+      foreground: "#fff8e8",
+      mutedForeground: "#ded3bb",
+      primary: "#ffc94d",
+      primaryForeground: "#000000",
+      accent: "#8fd8ff",
+      border: "#6b5f43",
+      orb1: "#ffc94d",
+      orb2: "#8fd8ff",
+      orb3: "#4a3f28",
+    }),
   },
 ];
 

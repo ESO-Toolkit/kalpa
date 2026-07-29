@@ -96,7 +96,7 @@ function InstanceBadge({
           aria-label={`Managing ${label}${switchable ? " — switch instance" : ""}`}
           aria-expanded={open}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white/50 backdrop-blur-sm transition-colors duration-300",
+            "inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300",
             switchable
               ? "cursor-pointer hover:border-accent-sky/20 hover:text-white/70"
               : "cursor-default"
@@ -123,7 +123,7 @@ function InstanceBadge({
                 }}
                 className={cn(
                   "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium transition-colors hover:bg-white/[0.06]",
-                  isActive ? "text-sky-300" : "text-white/80"
+                  isActive ? "text-sky-300" : "text-muted-foreground"
                 )}
               >
                 <Monitor className="size-3 shrink-0 text-muted-foreground" />
@@ -210,7 +210,7 @@ function AppHeaderBase({
           <div className="h-3 w-px bg-white/[0.12]" />
           <button
             onClick={() => void openUrl("https://esotk.com")}
-            className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white/40 backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-white/60 cursor-pointer"
+            className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-white/60 cursor-pointer"
           >
             esotk.com
           </button>
@@ -301,7 +301,7 @@ function AppHeaderBase({
                         value={customTagInput}
                         onChange={(e) => setCustomTagInput(e.target.value)}
                         placeholder="Custom tag..."
-                        className="flex-1 min-w-0 rounded-[10px] bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.15] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent-sky/40"
+                        className="flex-1 min-w-0 rounded-[10px] bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.15] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-accent-sky/40"
                         autoFocus
                       />
                       <button
@@ -327,7 +327,7 @@ function AppHeaderBase({
         ) : (
           <>
             <span
-              className="mr-1 text-xs text-muted-foreground/50"
+              className="mr-1 text-xs text-muted-foreground"
               aria-live="polite"
               aria-atomic="true"
             >

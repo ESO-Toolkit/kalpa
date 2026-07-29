@@ -128,7 +128,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
               "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors outline-none",
               entry.destructive
                 ? "text-red-400 hover:bg-red-500/10"
-                : "text-foreground/80 hover:bg-white/[0.06] hover:text-foreground",
+                : "text-foreground hover:bg-white/[0.06] hover:text-foreground",
               entry.disabled && "opacity-40 pointer-events-none",
               activeIndex === i && (entry.destructive ? "bg-red-500/10" : "bg-white/[0.06]")
             )}

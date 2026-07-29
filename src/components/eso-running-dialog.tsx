@@ -43,7 +43,7 @@ function EsoRunningDialogBase({ open, onConfirm, onCancel }: EsoRunningDialogPro
           </DialogDescription>
         </DialogHeader>
 
-        <label className="flex cursor-pointer items-center gap-2 px-1 text-[13px] text-muted-foreground/90">
+        <label className="flex cursor-pointer items-center gap-2 px-1 text-[13px] text-muted-foreground">
           <Checkbox checked={dontAskAgain} onCheckedChange={(next) => setDontAskAgain(!!next)} />
           Don&apos;t show this again
         </label>

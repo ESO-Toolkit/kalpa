@@ -415,12 +415,10 @@ export function WhatGetsUploaded() {
         className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
         aria-expanded={open}
       >
-        <span className="flex items-center gap-2 text-xs text-muted-foreground/80">
+        <span className="flex items-center gap-2 text-xs text-muted-foreground">
           <Lock className="size-3.5 text-emerald-400/70" aria-hidden />
-          This report is built from your <code className="text-foreground/70">
-            Encounter.log
-          </code>{" "}
-          and is owned by your ESO Logs account.
+          This report is built from your <code className="text-foreground">Encounter.log</code> and
+          is owned by your ESO Logs account.
         </span>
         <ChevronDown
           className={cn(
@@ -435,15 +433,15 @@ export function WhatGetsUploaded() {
           <div className="flex items-start gap-2">
             <Swords className="mt-0.5 size-3.5 shrink-0 text-accent-sky/80" aria-hidden />
             <span>
-              <span className="text-foreground/80">What's uploaded:</span> combat events, character
-              and ability data, and timestamps from your session log.
+              <span className="text-foreground">What's uploaded:</span> combat events, character and
+              ability data, and timestamps from your session log.
             </span>
           </div>
           <div className="flex items-start gap-2">
             <ShieldQuestion className="mt-0.5 size-3.5 shrink-0 text-emerald-400/80" aria-hidden />
             <span>
-              <span className="text-foreground/80">What's never uploaded:</span> your account
-              password, chat, or anything outside the combat log.
+              <span className="text-foreground">What's never uploaded:</span> your account password,
+              chat, or anything outside the combat log.
             </span>
           </div>
           <div className="flex items-start gap-2">
@@ -456,9 +454,9 @@ export function WhatGetsUploaded() {
           <div className="flex items-start gap-2">
             <Zap className="mt-0.5 size-3.5 shrink-0 text-primary/80" aria-hidden />
             <span>
-              <span className="text-foreground/80">How it uploads:</span> Kalpa uploads directly to
-              ESO Logs when you enable it (faster, an unofficial but operator-approved method);
-              anything it can't encode exactly falls back to the official uploader automatically.
+              <span className="text-foreground">How it uploads:</span> Kalpa uploads directly to ESO
+              Logs when you enable it (faster, an unofficial but operator-approved method); anything
+              it can't encode exactly falls back to the official uploader automatically.
             </span>
           </div>
         </div>

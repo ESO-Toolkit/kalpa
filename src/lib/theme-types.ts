@@ -69,6 +69,7 @@ export const THEME_COLOR_META: Record<keyof ThemeColors, { label: string; hint: 
 };
 
 export type ThemeCategory =
+  | "Accessibility"
   | "ESO"
   | "Elder Scrolls"
   | "Editor Classics"

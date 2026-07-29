@@ -69,7 +69,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
           <Fade className="flex-1 overflow-hidden">
             <div className="h-full overflow-y-auto space-y-4">
               <div className="flex items-center gap-3">
-                <span className="text-sm text-muted-foreground/60">Game API Version:</span>
+                <span className="text-sm text-muted-foreground">Game API Version:</span>
                 <InfoPill color="sky" className="font-mono">
                   {info.gameApiVersion}
                 </InfoPill>

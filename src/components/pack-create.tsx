@@ -349,18 +349,18 @@ export function PackCreateView({
       {/* Header — shows auth state and edit controls */}
       <div className="flex items-center justify-between text-xs">
         {authUser ? (
-          <span className="text-muted-foreground/60">
+          <span className="text-muted-foreground">
             {editingPackId ? "Editing as " : "Creating as "}
             <span className="text-primary font-semibold">{authUser.userName}</span>
           </span>
         ) : (
-          <span className="text-muted-foreground/60">Creating a pack</span>
+          <span className="text-muted-foreground">Creating a pack</span>
         )}
         <div className="flex items-center gap-3">
           {editingPackId && onCancelEdit && (
             <button
               onClick={onCancelEdit}
-              className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              className="text-muted-foreground hover:text-foreground transition-colors"
             >
               Cancel edit
             </button>
@@ -386,8 +386,8 @@ export function PackCreateView({
               step === s.key
                 ? "text-primary"
                 : s.key === "addons" && !canProceed
-                  ? "text-muted-foreground/30 cursor-not-allowed"
-                  : "text-muted-foreground/50 hover:text-muted-foreground cursor-pointer"
+                  ? "text-muted-foreground cursor-not-allowed"
+                  : "text-muted-foreground hover:text-foreground cursor-pointer"
             )}
           >
             <span
@@ -395,7 +395,7 @@ export function PackCreateView({
                 "inline-flex items-center justify-center size-5 rounded-full text-[10px] font-bold leading-none transition-all duration-200",
                 step === s.key
                   ? "bg-primary/20 text-primary border border-primary/40 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_15%,transparent)]"
-                  : "bg-white/[0.04] text-muted-foreground/40 border border-white/[0.08]"
+                  : "bg-white/[0.04] text-muted-foreground border border-white/[0.08]"
               )}
             >
               {s.num}
@@ -417,7 +417,7 @@ export function PackCreateView({
 
           {/* Title */}
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1 block">
+            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block">
               Pack Name <span className="text-red-400">*</span>
             </label>
             <Input
@@ -434,7 +434,7 @@ export function PackCreateView({
                   style={{ width: `${Math.min((title.length / 100) * 100, 100)}%` }}
                 />
               </div>
-              <span className="text-[10px] text-muted-foreground/40 tabular-nums">
+              <span className="text-xs text-muted-foreground tabular-nums">
                 <CountingNumber number={title.length} initiallyStable />
                 /100
               </span>
@@ -443,7 +443,7 @@ export function PackCreateView({
 
           {/* Description */}
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1 block">
+            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block">
               Description
             </label>
             <textarea
@@ -452,7 +452,7 @@ export function PackCreateView({
               onChange={(e) => setDescription(e.target.value)}
               maxLength={500}
               rows={3}
-              className="w-full rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_rgba(255,255,255,0.02)] transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.14] focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
+              className="w-full rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_rgba(255,255,255,0.02)] transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.14] focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
             />
             <div className="mt-1 flex items-center gap-2">
               <div className="flex-1 h-0.5 rounded bg-white/[0.04] overflow-hidden">
@@ -461,7 +461,7 @@ export function PackCreateView({
                   style={{ width: `${Math.min((description.length / 500) * 100, 100)}%` }}
                 />
               </div>
-              <span className="text-[10px] text-muted-foreground/40 tabular-nums">
+              <span className="text-xs text-muted-foreground tabular-nums">
                 <CountingNumber number={description.length} initiallyStable />
                 /500
               </span>
@@ -470,7 +470,7 @@ export function PackCreateView({
 
           {/* Pack type — clickable cards */}
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1.5 block">
+            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5 block">
               Pack Type
             </label>
             <div className="grid grid-cols-3 gap-2">
@@ -512,8 +512,8 @@ export function PackCreateView({
                     <InfoPill color={pillColor}>{TYPE_LABELS[pt]}</InfoPill>
                     <span
                       className={cn(
-                        "text-[10px] leading-tight transition-colors duration-200",
-                        isSelected ? "text-muted-foreground/70" : "text-muted-foreground/50"
+                        "text-xs leading-tight transition-colors duration-200",
+                        isSelected ? "text-muted-foreground" : "text-muted-foreground"
                       )}
                     >
                       {PACK_TYPE_DESCRIPTIONS[pt]}
@@ -527,13 +527,13 @@ export function PackCreateView({
           {/* Tags */}
           <div>
             <div className="flex items-baseline justify-between mb-1">
-              <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60">
+              <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Tags
               </label>
               <span
                 className={cn(
                   "text-[10px] tabular-nums",
-                  selectedTags.length >= 5 ? "text-amber-400" : "text-muted-foreground/40"
+                  selectedTags.length >= 5 ? "text-amber-400" : "text-muted-foreground"
                 )}
               >
                 {selectedTags.length}/5
@@ -552,7 +552,7 @@ export function PackCreateView({
                       "px-2.5 py-1 rounded-lg text-xs font-semibold transition-all duration-150",
                       isSelected
                         ? "bg-primary/20 text-primary border border-primary/40 shadow-[0_0_10px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]"
-                        : "bg-white/[0.03] text-muted-foreground/60 border border-white/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] hover:border-white/[0.12] hover:text-muted-foreground hover:bg-white/[0.05]",
+                        : "bg-white/[0.03] text-muted-foreground border border-white/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] hover:border-white/[0.12] hover:text-foreground hover:bg-white/[0.05]",
                       isDisabled && "opacity-30 cursor-not-allowed"
                     )}
                   >
@@ -605,7 +605,7 @@ export function PackCreateView({
                   "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
                   addonSource === src
                     ? "text-foreground"
-                    : "text-muted-foreground/60 hover:text-muted-foreground"
+                    : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 {src === "search" ? (
@@ -655,7 +655,7 @@ export function PackCreateView({
                 ) : searchResults.length === 0 ? (
                   <div className="text-center py-8">
                     <SearchIcon className="size-6 mx-auto text-muted-foreground/20 mb-2" />
-                    <p className="text-xs text-muted-foreground/50">
+                    <p className="text-xs text-muted-foreground">
                       {searchQuery.length < 2 ? "Type to search ESOUI addons" : "No results found"}
                     </p>
                   </div>
@@ -688,11 +688,11 @@ export function PackCreateView({
                             <PlusIcon className="size-3.5 text-primary shrink-0" />
                           )}
                           <span className="text-sm font-medium truncate">{result.title}</span>
-                          <span className="text-[10px] text-muted-foreground/30 tabular-nums shrink-0">
+                          <span className="text-xs text-muted-foreground tabular-nums shrink-0">
                             #{result.id}
                           </span>
                         </div>
-                        <p className="text-[11px] text-muted-foreground/50 mt-0.5 truncate ml-5">
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate ml-5">
                           by {result.author}
                           {result.category ? ` · ${result.category}` : ""}
                           {result.downloads ? ` · ${result.downloads} downloads` : ""}
@@ -704,7 +704,7 @@ export function PackCreateView({
               ) : filteredInstalled.length === 0 ? (
                 <div className="text-center py-8">
                   <PackageIcon className="size-6 mx-auto text-muted-foreground/20 mb-2" />
-                  <p className="text-xs text-muted-foreground/50">
+                  <p className="text-xs text-muted-foreground">
                     {installedFilter
                       ? "No matching installed addons"
                       : "No installed addons with ESOUI IDs"}
@@ -741,11 +741,11 @@ export function PackCreateView({
                         <span className="text-sm font-medium truncate">
                           {addon.title || addon.folderName}
                         </span>
-                        <span className="text-[10px] text-muted-foreground/30 tabular-nums shrink-0">
+                        <span className="text-xs text-muted-foreground tabular-nums shrink-0">
                           #{addon.esouiId}
                         </span>
                       </div>
-                      <p className="text-[11px] text-muted-foreground/50 mt-0.5 truncate ml-5">
+                      <p className="text-xs text-muted-foreground mt-0.5 truncate ml-5">
                         by {addon.author} · v{addon.version}
                       </p>
                     </button>
@@ -764,7 +764,7 @@ export function PackCreateView({
                   <div className="rounded-xl bg-primary/[0.08] border border-primary/[0.15] p-3 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]">
                     <SparklesIcon className="size-5 text-primary/50" />
                   </div>
-                  <p className="text-[11px] text-muted-foreground/50 max-w-[160px] leading-relaxed">
+                  <p className="text-xs text-muted-foreground max-w-[160px] leading-relaxed">
                     No addons yet — search or pick from your installed addons above.
                   </p>
                 </div>
@@ -806,7 +806,7 @@ export function PackCreateView({
                             "relative z-10 flex-1 text-[10px] font-semibold py-0.5 rounded-[5px] transition-colors duration-150 text-center",
                             addon.required
                               ? "text-primary"
-                              : "text-muted-foreground/40 hover:text-muted-foreground/60"
+                              : "text-muted-foreground hover:text-foreground"
                           )}
                         >
                           Required
@@ -816,8 +816,8 @@ export function PackCreateView({
                           className={cn(
                             "relative z-10 flex-1 text-[10px] font-semibold py-0.5 rounded-[5px] transition-colors duration-150 text-center",
                             !addon.required
-                              ? "text-foreground/70"
-                              : "text-muted-foreground/40 hover:text-muted-foreground/60"
+                              ? "text-foreground"
+                              : "text-muted-foreground hover:text-foreground"
                           )}
                         >
                           Optional
@@ -855,16 +855,14 @@ export function PackCreateView({
             {/* Divider */}
             <div className="flex items-center gap-3">
               <div className="flex-1 border-t border-white/[0.06]" />
-              <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider">
-                or
-              </span>
+              <span className="text-xs text-muted-foreground uppercase tracking-wider">or</span>
               <div className="flex-1 border-t border-white/[0.06]" />
             </div>
 
             {/* Save as Draft + Publish — both require auth */}
             {authUser ? (
               <>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground/60 cursor-pointer">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
                   <Checkbox
                     checked={isAnonymous}
                     onCheckedChange={(checked) => setIsAnonymous(checked === true)}

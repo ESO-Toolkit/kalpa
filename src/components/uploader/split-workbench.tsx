@@ -387,7 +387,7 @@ export function SplitWorkbench({
           </DialogTitle>
           <DialogDescription>
             {scope === "latest" ? "Split the latest session from " : "Carve "}
-            <code className="text-foreground/80">{fileName}</code>
+            <code className="text-foreground">{fileName}</code>
             {" into smaller logs. Choose a granularity, pick which to keep, name each, then split."}
           </DialogDescription>
         </DialogHeader>
@@ -424,7 +424,7 @@ export function SplitWorkbench({
             log can be split by session first, but a single dense session can't —
             don't send the user in a circle. */}
         {!fightsAvailable && (
-          <p className="mt-2 px-1 text-[11px] text-muted-foreground/70">
+          <p className="mt-2 px-1 text-xs text-muted-foreground">
             {!fightsOmitted
               ? "No completed fights were found in this scan."
               : sessions.length > 1
@@ -478,9 +478,7 @@ export function SplitWorkbench({
                   aria-label="Prefix for all fight names"
                   className="h-7 w-40 text-[11px]"
                 />
-                <span className="text-[11px] text-muted-foreground/50">
-                  added before each fight name
-                </span>
+                <span className="text-xs text-muted-foreground">added before each fight name</span>
               </div>
             )
           : selected.length > 0 && (
@@ -493,7 +491,7 @@ export function SplitWorkbench({
                   aria-label="Prefix for all split names"
                   className="h-7 w-32 text-[11px]"
                 />
-                <span className="text-[11px] text-muted-foreground/50">+ tag:</span>
+                <span className="text-xs text-muted-foreground">+ tag:</span>
                 {RUN_TAGS.map((t) => (
                   <button
                     key={t.id}
@@ -524,11 +522,11 @@ export function SplitWorkbench({
                 return (
                   <div key={s.index} className="space-y-1.5">
                     <div className="flex items-center gap-2 px-1 pt-1">
-                      <span className="font-heading text-[11px] font-semibold tracking-[0.06em] text-muted-foreground/60 uppercase">
+                      <span className="font-heading text-[11px] font-semibold tracking-[0.06em] text-muted-foreground uppercase">
                         {sessionLabel(s)}
                       </span>
                       {realm && <InfoPill color="muted">{realm}</InfoPill>}
-                      <span className="text-[11px] text-muted-foreground/50">
+                      <span className="text-xs text-muted-foreground">
                         {relativeFromMs(s.startTimeMs)} · {inFights.length} fight
                         {inFights.length === 1 ? "" : "s"}
                       </span>
@@ -583,7 +581,7 @@ export function SplitWorkbench({
               selectedFights.length === 0 ? (
                 <span className="text-muted-foreground">Select at least one fight to split.</span>
               ) : (
-                <span className="text-foreground/80">
+                <span className="text-foreground">
                   <span className="font-semibold text-primary">{selectedFights.length}</span> fight
                   file{selectedFights.length === 1 ? "" : "s"}{" "}
                   <span className="text-muted-foreground">· one log per fight</span>
@@ -592,7 +590,7 @@ export function SplitWorkbench({
             ) : selected.length === 0 ? (
               <span className="text-muted-foreground">Select at least one session to split.</span>
             ) : (
-              <span className="text-foreground/80">
+              <span className="text-foreground">
                 <span className="font-semibold text-primary">{selected.length}</span> file
                 {selected.length === 1 ? "" : "s"}{" "}
                 <span className="text-muted-foreground">· ~{compactBytes(selectedBytes)}</span>
@@ -664,9 +662,7 @@ function GranTab({
         aria-hidden
       />
       <span className="text-sm font-semibold">{label}</span>
-      <span
-        className={cn("text-[11px]", active ? "text-accent-sky/60" : "text-muted-foreground/60")}
-      >
+      <span className={cn("text-[11px]", active ? "text-accent-sky" : "text-muted-foreground")}>
         {hint}
       </span>
     </button>
@@ -721,7 +717,7 @@ function FightRow({
         </button>
         <Swords className="size-3.5 shrink-0 text-primary/70" aria-hidden />
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="truncate text-sm text-foreground/90">{label}</span>
+          <span className="truncate text-sm text-foreground">{label}</span>
           <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
             {duration}
           </span>
@@ -736,7 +732,7 @@ function FightRow({
             aria-label={`Name for ${label}`}
             className="h-8 text-xs"
           />
-          <span className="text-[11px] text-muted-foreground/70">.log</span>
+          <span className="text-xs text-muted-foreground">.log</span>
           {showSuggest && (
             <button
               type="button"
@@ -806,7 +802,7 @@ function SessionCard({
         <div className="min-w-0 flex-1">
           {/* Meta row */}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-            <span className="font-semibold text-foreground/90">{label}</span>
+            <span className="font-semibold text-foreground">{label}</span>
             {realm && <InfoPill color="muted">{realm}</InfoPill>}
             <span className="text-xs text-muted-foreground">
               {relativeFromMs(session.startTimeMs)} · {compactBytes(session.sizeBytes)}
@@ -835,7 +831,7 @@ function SessionCard({
               aria-label={`Name for session ${session.index + 1}`}
               className="h-8 text-xs"
             />
-            <span className="text-[11px] text-muted-foreground/70">.log</span>
+            <span className="text-xs text-muted-foreground">.log</span>
             {draft.include && showSuggest && (
               <button
                 type="button"
@@ -855,10 +851,10 @@ function SessionCard({
           {fights.length > 0 && (
             <div className="mt-2.5 border-t border-white/[0.06] pt-2">
               <div className="mb-1.5 flex items-center justify-between px-0.5">
-                <span className="font-heading text-[10px] font-bold tracking-[0.06em] text-muted-foreground/55 uppercase">
+                <span className="font-heading text-[11px] font-bold tracking-[0.06em] text-muted-foreground uppercase">
                   Fights
                 </span>
-                <span className="text-[10px] tabular-nums text-muted-foreground/50">
+                <span className="text-[11px] tabular-nums text-muted-foreground">
                   {fights.length}
                 </span>
               </div>
@@ -873,7 +869,7 @@ function SessionCard({
                     >
                       <span className="flex min-w-0 items-center gap-1.5">
                         <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />
-                        <span className="truncate text-xs text-foreground/85">{fightLabel(f)}</span>
+                        <span className="truncate text-xs text-foreground">{fightLabel(f)}</span>
                       </span>
                       <span className="flex shrink-0 items-center gap-1.5">
                         {hint && (

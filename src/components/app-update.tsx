@@ -151,7 +151,7 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
                 style={{ width: `${state.progress}%` }}
               />
             </div>
-            <span className="text-primary/70">
+            <span className="text-primary">
               <CountingNumber
                 number={state.progress}
                 transition={{ stiffness: 200, damping: 25 }}

@@ -234,8 +234,8 @@ function AddonDetailBase({
           />
         </div>
         <div className="relative text-center">
-          <p className="font-heading text-sm font-medium text-foreground/70">No addon selected</p>
-          <p className="mt-1 text-xs text-muted-foreground/40">
+          <p className="font-heading text-sm font-medium text-foreground">No addon selected</p>
+          <p className="mt-1 text-xs text-muted-foreground">
             Select an addon from the list to view details
           </p>
         </div>
@@ -451,7 +451,7 @@ function AddonDetailBase({
           </span>
           {updating ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs tabular-nums text-white/50">
+              <span className="text-xs tabular-nums text-muted-foreground">
                 {extractProgress && extractProgress.total > 0
                   ? `Extracting ${extractProgress.done.toLocaleString()} / ${extractProgress.total.toLocaleString()}`
                   : "Updating…"}
@@ -565,25 +565,25 @@ function AddonDetailBase({
             <dl className="grid grid-cols-[120px_1fr] gap-x-4 gap-y-2 text-sm">
               {addon.author && (
                 <>
-                  <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+                  <dt className="text-muted-foreground font-heading text-xs uppercase tracking-wider">
                     Author
                   </dt>
                   <dd>{addon.author}</dd>
                 </>
               )}
-              <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+              <dt className="text-muted-foreground font-heading text-xs uppercase tracking-wider">
                 Version
               </dt>
               <dd>{addon.version || addon.addonVersion || "Unknown"}</dd>
               {addon.apiVersion.length > 0 && (
                 <>
-                  <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+                  <dt className="text-muted-foreground font-heading text-xs uppercase tracking-wider">
                     API Version
                   </dt>
                   <dd>{addon.apiVersion.join(", ")}</dd>
                 </>
               )}
-              <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+              <dt className="text-muted-foreground font-heading text-xs uppercase tracking-wider">
                 Type
               </dt>
               <dd>
@@ -595,7 +595,7 @@ function AddonDetailBase({
               </dd>
               {addon.esouiLastUpdate > 0 && (
                 <>
-                  <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+                  <dt className="text-muted-foreground font-heading text-xs uppercase tracking-wider">
                     Last Updated
                   </dt>
                   <dd>{relativeDate(addon.esouiLastUpdate)}</dd>
@@ -603,7 +603,7 @@ function AddonDetailBase({
               )}
               {addon.installedAt && !Number.isNaN(Date.parse(addon.installedAt)) && (
                 <>
-                  <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+                  <dt className="text-muted-foreground font-heading text-xs uppercase tracking-wider">
                     Downloaded
                   </dt>
                   <dd>{relativeDate(Date.parse(addon.installedAt))}</dd>
@@ -652,7 +652,7 @@ function AddonDetailBase({
                               : tag === "essential"
                                 ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/25"
                                 : "bg-violet-500/15 text-violet-400 border-violet-500/25"
-                        : "bg-white/[0.03] text-muted-foreground/50 border-white/[0.06] hover:bg-white/[0.06] hover:text-muted-foreground"
+                        : "bg-white/[0.03] text-muted-foreground border-white/[0.06] hover:bg-white/[0.06] hover:text-foreground"
                     )}
                   >
                     {tag === "favorite" && (active ? "\u2605 " : "\u2606 ")}
@@ -697,7 +697,7 @@ function AddonDetailBase({
                   value={customTagInput}
                   onChange={(e) => setCustomTagInput(e.target.value)}
                   placeholder="+ tag"
-                  className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-white/[0.03] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-accent-sky/30 focus:bg-white/[0.05]"
+                  className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-white/[0.03] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-accent-sky/30 focus:bg-white/[0.05]"
                 />
                 {customTagInput.trim() && (
                   <button
@@ -755,7 +755,7 @@ function AddonDetailBase({
                           <span
                             className={cn(
                               "text-[11px]",
-                              outdated ? "text-amber-400/70" : "text-muted-foreground/50"
+                              outdated ? "text-amber-400" : "text-muted-foreground"
                             )}
                           >
                             v{dep.min_version}+{outdated ? " (outdated)" : ""}
@@ -861,17 +861,15 @@ function AddonDetailBase({
                           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px]",
                           present
                             ? "bg-emerald-500/15 text-emerald-400 font-bold"
-                            : "bg-white/[0.04] text-muted-foreground/40"
+                            : "bg-white/[0.04] text-muted-foreground"
                         )}
                       >
                         {present ? "\u2713" : "\u2013"}
                       </span>
-                      <div className={cn("flex-1 min-w-0", !present && "text-muted-foreground/60")}>
+                      <div className={cn("flex-1 min-w-0", !present && "text-muted-foreground")}>
                         <span className="truncate block">{dep.name}</span>
                         {dep.min_version !== null && (
-                          <span className="text-[11px] text-muted-foreground/50">
-                            v{dep.min_version}+
-                          </span>
+                          <span className="text-xs text-muted-foreground">v{dep.min_version}+</span>
                         )}
                       </div>
                       {present ? (
@@ -945,14 +943,14 @@ function AddonDetailBase({
           </Button>
         </div>
         {addon.disabled && dependents.length > 0 && (
-          <p className="text-xs text-amber-400/80">
+          <p className="text-xs text-amber-400">
             {dependents.map((d) => d.title).join(", ")}{" "}
             {dependents.length === 1 ? "depends" : "depend"} on this addon and may not work.
           </p>
         )}
 
         {!addon.disabled && dependents.length > 0 && (
-          <p className="text-xs text-amber-400/70">
+          <p className="text-xs text-amber-400">
             {dependents.map((d) => d.title).join(", ")}{" "}
             {dependents.length === 1 ? "depends" : "depend"} on this addon.
           </p>

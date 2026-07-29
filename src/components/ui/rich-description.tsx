@@ -61,7 +61,7 @@ export function RichDescription({ text, className }: RichDescriptionProps) {
   return (
     <div
       className={[
-        "rounded-xl border border-white/[0.06] bg-gradient-to-b from-white/[0.03] to-white/[0.01] p-4 text-sm text-foreground/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+        "rounded-xl border border-white/[0.06] bg-gradient-to-b from-white/[0.03] to-white/[0.01] p-4 text-sm text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
         className,
       ]
         .filter(Boolean)
@@ -71,13 +71,13 @@ export function RichDescription({ text, className }: RichDescriptionProps) {
         {blocks.length > 0 ? (
           blocks.map((block, idx) =>
             block.type === "p" ? (
-              <p key={idx} className="text-foreground/85">
+              <p key={idx} className="text-foreground">
                 {block.items[0]}
               </p>
             ) : (
               <ul key={idx} className="list-disc space-y-1 pl-5 marker:text-primary">
                 {block.items.map((item, itemIdx) => (
-                  <li key={`${idx}-${itemIdx}`} className="text-foreground/85">
+                  <li key={`${idx}-${itemIdx}`} className="text-foreground">
                     {item}
                   </li>
                 ))}
@@ -85,7 +85,7 @@ export function RichDescription({ text, className }: RichDescriptionProps) {
             )
           )
         ) : (
-          <p className="text-foreground/70">No description available.</p>
+          <p className="text-muted-foreground">No description available.</p>
         )}
       </div>
     </div>
