@@ -467,6 +467,9 @@ pub fn run() {
             // is opened, so this is the only recovery pass that always runs.
             settings_store::recover(app.handle());
 
+            // Text zoom is applied by the frontend once the Tauri bridge is live.
+            // Applying it here can run before the WebView2 dispatcher is ready,
+            // which makes window metrics calls fail or silently queues a no-op.
             // Parse any startup deep link BEFORE the native-mode gate: kalpa://
             // flows (pack installs from the browser) are WebView features, so a
             // deep-link activation boots the WebView UI even when native mode is
@@ -672,6 +675,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_addons_path,
+            commands::set_text_zoom,
             commands::check_addons_write_access,
             commands::open_ransomware_protection_settings,
             commands::detect_addons_folder,

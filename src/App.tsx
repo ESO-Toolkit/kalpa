@@ -1,9 +1,17 @@
-import { useDeferredValue, useEffect, useState, useCallback, useRef, useMemo } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useMemo,
+  lazy,
+  Suspense,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useAppUpdate } from "./components/app-update";
 import { AddonList } from "./components/addon-list";
-import { AddonDetail } from "./components/addon-detail";
 import { AppBackground } from "./components/app-background";
 import { AppDialogs } from "./components/app-dialogs";
 import { AppHeader } from "./components/app-header";
@@ -33,6 +41,7 @@ import {
 } from "@/lib/tauri";
 import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import { isModKey, isWindows } from "@/lib/platform";
+import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
 import type {
   AddonManifest,
   AuthUser,
@@ -53,6 +62,10 @@ import type {
   DiscoverTab,
 } from "./types";
 
+const AddonDetail = lazy(() =>
+  import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
+);
+
 type ActiveDialog =
   | "settings"
   | "profiles"
@@ -63,6 +76,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "shortcuts"
   | "log-upload"
   | null;
 
@@ -231,6 +245,8 @@ function App() {
   const depPromptPathRef = useRef("");
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
+  const activeDialogRef = useRef<ActiveDialog>(null);
+  const setupInstancesRef = useRef<GameInstance[] | null>(null);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
   // events arrive faster than renders during Update All, and deriving the
   // progress counts inside the state updater would call a second setter from
@@ -247,6 +263,8 @@ function App() {
     addonsPathRef.current = addonsPath;
     viewModeRef.current = viewMode;
     updatingAllRef.current = updatingAll;
+    activeDialogRef.current = activeDialog;
+    setupInstancesRef.current = setupInstances;
   });
 
   useEffect(() => {
@@ -625,6 +643,20 @@ function App() {
     const handler = (event: KeyboardEvent) => {
       if (event.isComposing) return;
 
+      if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        const active = document.activeElement;
+        if (
+          active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          (active instanceof HTMLElement && active.isContentEditable)
+        ) {
+          return;
+        }
+        if (activeDialogRef.current !== null || setupInstancesRef.current !== null) return;
+        event.preventDefault();
+        setActiveDialog("shortcuts");
+      }
+
       if (isModKey(event) && event.key === "r") {
         event.preventDefault();
         if (addonsPathRef.current && !updatingAllRef.current) {
@@ -642,6 +674,21 @@ function App() {
         event.preventDefault();
         setViewMode("discover");
         setDiscoverTab("search");
+      }
+
+      if (isModKey(event) && (event.key === "+" || event.key === "=")) {
+        event.preventDefault();
+        setTextZoom(nextTextZoomStop(1));
+      }
+
+      if (isModKey(event) && event.key === "-") {
+        event.preventDefault();
+        setTextZoom(nextTextZoomStop(-1));
+      }
+
+      if (isModKey(event) && event.key === "0") {
+        event.preventDefault();
+        setTextZoom(1);
       }
 
       if (event.key === "Escape") {
@@ -2004,23 +2051,32 @@ function App() {
             />
 
             {viewMode === "installed" ? (
-              <AddonDetail
-                key={selectedAddon?.folderName ?? "none"}
-                addon={selectedAddon}
-                installedAddons={addons}
-                addonsPath={addonsPath}
-                onRemove={handleDetailRemove}
-                onRemoveAddon={handleSingleRemove}
-                onToggleDisable={handleToggleDisable}
-                updateResult={selectedUpdateResult}
-                onAddonUpdated={handleAddonUpdated}
-                onTagsChange={handleTagsChange}
-                isOffline={isOffline}
-                pendingConflict={
-                  selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+              <Suspense
+                fallback={
+                  <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                    <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+                    Loading addon details...
+                  </div>
                 }
-                onConflictResolved={handleConflictResolved}
-              />
+              >
+                <AddonDetail
+                  key={selectedAddon?.folderName ?? "none"}
+                  addon={selectedAddon}
+                  installedAddons={addons}
+                  addonsPath={addonsPath}
+                  onRemove={handleDetailRemove}
+                  onRemoveAddon={handleSingleRemove}
+                  onToggleDisable={handleToggleDisable}
+                  updateResult={selectedUpdateResult}
+                  onAddonUpdated={handleAddonUpdated}
+                  onTagsChange={handleTagsChange}
+                  isOffline={isOffline}
+                  pendingConflict={
+                    selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+                  }
+                  onConflictResolved={handleConflictResolved}
+                />
+              </Suspense>
             ) : (
               <DiscoverDetail
                 key={selectedDiscoverResult?.id ?? "none"}

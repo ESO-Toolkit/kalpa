@@ -63,6 +63,16 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
    - `docs: update documentation`
 5. Open a pull request against `main`
 
+### Packaged build gate
+
+Before a release candidate on Windows, run:
+
+```bash
+npm run test:packaged
+```
+
+This is intentionally not part of GitHub Actions. It needs Windows with WebView2 and a long Tauri build, then launches `src-tauri/target/debug/kalpa.exe` itself and proves the app is served from `http://tauri.localhost/`. If `npm run tauri dev` or any other `kalpa.exe` is already running, the gate fails instead of testing the Vite dev server or being absorbed by `tauri-plugin-single-instance`.
+
 ## Pull Requests
 
 - Keep PRs focused — one feature or fix per PR

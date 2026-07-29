@@ -34,6 +34,14 @@ export function modKeyLabel(): string {
 }
 
 /**
+ * Spoken form of the primary modifier, for aria-labels. Screen readers do not
+ * reliably verbalize the bare macOS command glyph.
+ */
+export function modKeySpokenLabel(): string {
+  return isMac() ? "Command" : "Control";
+}
+
+/**
  * True when the platform's primary modifier is held for a shortcut —
  * Cmd on macOS, Ctrl elsewhere. Checks only the platform's own modifier so
  * Ctrl-combos don't double-fire on macOS.

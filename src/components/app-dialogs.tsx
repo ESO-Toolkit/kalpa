@@ -16,6 +16,9 @@ const Backups = lazy(() => import("./backups").then((m) => ({ default: m.Backups
 const ApiCompat = lazy(() => import("./api-compat").then((m) => ({ default: m.ApiCompat })));
 const Characters = lazy(() => import("./characters").then((m) => ({ default: m.Characters })));
 const Settings = lazy(() => import("./settings").then((m) => ({ default: m.Settings })));
+const KeyboardShortcuts = lazy(() =>
+  import("./keyboard-shortcuts").then((m) => ({ default: m.KeyboardShortcuts }))
+);
 const SavedVariables = lazy(() =>
   import("./saved-variables").then((m) => ({ default: m.SavedVariables }))
 );
@@ -39,6 +42,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "shortcuts"
   | "log-upload"
   | null;
 
@@ -52,6 +56,7 @@ const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
   "saved-variables": "Saved Variables",
   "migration-wizard": "Migration",
   "safety-center": "Safety Center",
+  shortcuts: "Keyboard Shortcuts",
   "log-upload": "Log Uploader",
 };
 
@@ -201,6 +206,7 @@ function AppDialogsBase({
               onShowCharacters={() => onShowDialog("characters")}
               onShowMigrationWizard={() => onShowDialog("migration-wizard")}
               onShowSafetyCenter={() => onShowDialog("safety-center")}
+              onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}
             />
           )}
@@ -216,6 +222,8 @@ function AppDialogsBase({
           {activeDialog === "safety-center" && (
             <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
           )}
+
+          {activeDialog === "shortcuts" && <KeyboardShortcuts onClose={onCloseDialog} />}
         </Suspense>
       )}
 

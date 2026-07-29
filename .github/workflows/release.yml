@@ -146,10 +146,10 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
-            ## Changed: Kalpa now asks before installing libraries
-            Kalpa used to install every dependency an addon declared, transitively and silently. **If you are upgrading, you will now see a picker** the first time an addon needs libraries: required ones come pre-ticked, optional ones are listed unticked, and you take all, some, or none. Prefer the old behaviour? **Settings → install automatically** restores it. Skipping a required library warns you but never blocks the install.
+            ## Changed: text you can actually read
+            A player with low vision reported that Kalpa's text was too faint and too small. The faintness was a bug in every theme — components faded readable text *after* the theme had picked its colour, so all 48 themes measured as compliant and none of them rendered that way. **Text now paints at the contrast its theme promises**, and switching themes is no longer a workaround for it.
 
-            The **native performance UI** (beta, Windows — **Settings → Native performance UI**) now releases its memory while minimized and can no longer start in a broken rendering mode.
+            Alongside that: a **text size control** in **Settings → Appearance** (100% to 150%, or `Ctrl`/`⌘` with `+`, `-` and `0`) that scales the whole interface, and a new **Accessibility** theme category with two high-contrast dark themes and three light ones — Kalpa's first light themes. Every keyboard shortcut is now listed in-app on `?`, and **Settings → Tools** can reach the issue tracker and Discord directly.
 
             ## Verify your download
             Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.

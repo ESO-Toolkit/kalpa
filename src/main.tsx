@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { hydrateThemeFromStore } from "@/lib/theme-manager";
 import { hydrateAmbientAnimations } from "@/lib/ambient-animations";
+import { hydrateTextZoom } from "@/lib/text-zoom";
 import "./index.css";
 import "./App.css";
 
@@ -13,6 +14,7 @@ import "./App.css";
 // durable Tauri store once the bundle runs.
 void hydrateThemeFromStore();
 void hydrateAmbientAnimations();
+void hydrateTextZoom();
 
 // Catch fatal errors that occur before React mounts (CSP violations, script
 // load failures, etc.) and display them instead of a blank white screen.
