@@ -614,7 +614,7 @@ export function Settings({
                           void handlePerformanceModeChange(checked === true);
                         }}
                       />
-                      <Gauge className="size-4 shrink-0 text-[#c4a44a]" />
+                      <Gauge className="size-4 shrink-0 text-brand-gold-readable" />
                       <div>
                         <div className="flex items-center gap-2">
                           <p className="text-sm font-medium text-foreground">
@@ -1067,14 +1067,14 @@ function ToolItem({
       onClick={onClick}
       className={`group flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-all duration-150 hover:-translate-y-px ${
         accent === "gold"
-          ? "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] hover:border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.06]"
+          ? "border-brand-gold-readable/20 bg-brand-gold-readable/[0.04] hover:border-brand-gold-readable/30 hover:bg-brand-gold-readable/[0.06]"
           : "border-structure-04 bg-structure-02 hover:border-structure-08 hover:bg-structure-04"
       }`}
     >
       <div
         className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
           accent === "gold"
-            ? "bg-[#c4a44a]/10 text-[#c4a44a]"
+            ? "bg-brand-gold-readable/10 text-brand-gold-readable"
             : "bg-structure-04 text-muted-foreground group-hover:text-foreground"
         } transition-colors duration-150`}
       >

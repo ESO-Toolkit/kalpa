@@ -2189,7 +2189,7 @@ function CopyProfileTab({
           <p className="text-sm">
             Copy <span className="font-medium text-primary">{sourceKey}</span>
             {" \u2192 "}
-            <span className="font-medium text-[#4dc2e6]">{actualDest}</span>
+            <span className="font-medium text-primary">{actualDest}</span>
             {" in "}
             <span className="font-medium">{currentFile?.addonName}.lua</span>
           </p>

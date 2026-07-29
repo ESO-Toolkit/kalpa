@@ -9,6 +9,8 @@ import { hydrateTextZoom } from "@/lib/text-zoom";
 import "./index.css";
 import "./App.css";
 
+const CRITICAL_HEADING_COLOR = "#5a6b82";
+
 // The pre-paint theme apply happens in the inline boot script in index.html
 // (a deferred module would paint a frame late). Here we just reconcile from the
 // durable Tauri store once the bundle runs.
@@ -32,7 +34,7 @@ function showFatalError(msg: string) {
   });
 
   const heading = document.createElement("h1");
-  Object.assign(heading.style, { color: "#fff", marginBottom: "16px" });
+  Object.assign(heading.style, { color: CRITICAL_HEADING_COLOR, marginBottom: "16px" });
   heading.textContent = "Fatal Error";
 
   const message = document.createElement("p");
@@ -77,7 +79,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
         <div
           style={{ padding: 32, color: "#ef4444", fontFamily: "monospace", whiteSpace: "pre-wrap" }}
         >
-          <h1 style={{ color: "#fff", marginBottom: 16 }}>React Error</h1>
+          <h1 style={{ color: CRITICAL_HEADING_COLOR, marginBottom: 16 }}>React Error</h1>
           <p>{this.state.error.message}</p>
           <button
             onClick={this.handleRetry}

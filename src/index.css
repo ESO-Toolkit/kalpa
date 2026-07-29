@@ -140,6 +140,7 @@
   --color-status-warning-muted: var(--status-warning-muted);
   --color-status-warning-faint: var(--status-warning-faint);
   --color-status-warning-strong: var(--status-warning-strong);
+  --color-status-warning-readable: var(--status-warning-readable);
   --color-status-danger: var(--status-danger);
   --color-status-danger-soft: var(--status-danger-soft);
   --color-status-danger-muted: var(--status-danger-muted);
@@ -150,6 +151,8 @@
   --color-status-info: var(--status-info);
   --color-status-info-soft: var(--status-info-soft);
   --color-status-info-strong: var(--status-info-strong);
+  --color-brand-gold-readable: var(--brand-gold-readable);
+  --color-brand-cyan-readable: var(--brand-cyan-readable);
 
   /* Addon status */
   --color-addon-healthy: var(--addon-healthy);
@@ -384,6 +387,9 @@
   --status-info: #38bdf8;
   --status-info-soft: #7dd3fc;
   --status-info-strong: #0ea5e9;
+  --status-warning-readable: #d9a441;
+  --brand-gold-readable: #c4a44a;
+  --brand-cyan-readable: #4dc2e6;
 
   --muted: color-mix(in oklab, var(--card) 82%, var(--accent-sky));
   --destructive: var(--status-danger-strong);
@@ -630,7 +636,7 @@
     color-mix(in oklab, var(--primary) 0%, transparent) 0%,
     color-mix(in oklab, var(--primary-hover) 60%, transparent) 20%,
     color-mix(in oklab, var(--primary) 90%, transparent) 40%,
-    color-mix(in oklab, var(--primary-hover) 65%, #ffffff) 50%,
+    color-mix(in oklab, var(--primary-hover) 82%, transparent) 50%,
     color-mix(in oklab, var(--primary) 90%, transparent) 60%,
     color-mix(in oklab, var(--primary-hover) 60%, transparent) 80%,
     color-mix(in oklab, var(--primary) 0%, transparent) 100%
