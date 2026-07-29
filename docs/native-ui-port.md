@@ -77,11 +77,15 @@ native app. Do not keep measuring memory while a surface is still visibly or
 functionally wrong; first make the surface acceptable, then measure both fidelity
 and memory if the renderer choice affects the result.
 
-The prototype defaults to `KALPA_RENDER_PRESET=low-memory` to protect the memory
-target. Launch with `KALPA_RENDER_PRESET=standard` for the standard/fidelity
-track. `KALPA_SLINT_BACKEND=winit-femtovg`, `KALPA_SLINT_BACKEND=winit-skia`, or
-`KALPA_SLINT_BACKEND=winit-software` can still override the backend directly for
-manual renderer checks.
+The prototype defaults to `KALPA_RENDER_PRESET=standard`, which resolves to
+`winit-femtovg` — see `#[default] Standard` on `NativeRenderPreset` in
+`src/main.rs`. Launch with `KALPA_RENDER_PRESET=low-memory` for the
+software-renderer track. `KALPA_SLINT_BACKEND=winit-femtovg`,
+`KALPA_SLINT_BACKEND=winit-skia`, or `KALPA_SLINT_BACKEND=winit-software` can
+still override the backend directly for manual renderer checks, but a software
+backend always clamps to the low-memory preset: the standard preset leans on
+drop shadows, clip-to-border-radius and gradients the software renderer does not
+implement, so honouring `standard` there would render a visibly broken window.
 
 Native glass must be implemented as a small design system instead of ad hoc
 per-component approximations. The accepted low-memory path is:
