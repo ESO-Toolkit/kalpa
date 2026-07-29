@@ -126,7 +126,7 @@ function DiscoverDetailBase({
     return (
       <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-primary/[0.04] blur-[60px]" />
-        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
+        <div className="relative rounded-2xl bg-structure-03 border border-structure-06 p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
           <Search
             aria-hidden="true"
             className="size-10 text-muted-foreground/30"
@@ -223,7 +223,7 @@ function DiscoverDetailBase({
               {detail.title}
             </h2>
             {detail.version && (
-              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground bg-white/[0.04] px-1.5 py-0.5 rounded">
+              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground bg-structure-04 px-1.5 py-0.5 rounded">
                 v{detail.version}
               </span>
             )}
@@ -397,7 +397,7 @@ function DiscoverDetailBase({
             <SectionHeader className="mb-2">
               Screenshots ({detail.screenshots.length})
             </SectionHeader>
-            <div className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] group/screenshot">
+            <div className="relative overflow-hidden rounded-xl border border-structure-06 bg-structure-02 group/screenshot">
               <img
                 src={detail.screenshots[safeIdx]}
                 alt={`Screenshot ${safeIdx + 1}`}
@@ -438,7 +438,9 @@ function DiscoverDetailBase({
                         key={i}
                         className={cn(
                           "size-2 rounded-full transition-all duration-200",
-                          i === safeIdx ? "bg-primary scale-110" : "bg-white/30 hover:bg-white/50"
+                          i === safeIdx
+                            ? "bg-primary scale-110"
+                            : "bg-structure-30 hover:bg-structure-50"
                         )}
                         onClick={() => setScreenshotIdx(i)}
                         aria-label={`Screenshot ${i + 1}`}
@@ -465,7 +467,7 @@ function DiscoverDetailBase({
                       "shrink-0 overflow-hidden rounded-lg border-2 transition-all duration-200",
                       i === safeIdx
                         ? "border-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_30%,transparent)]"
-                        : "border-white/[0.06] hover:border-white/[0.15] opacity-60 hover:opacity-100"
+                        : "border-structure-06 hover:border-structure-15 opacity-60 hover:opacity-100"
                     )}
                   >
                     <img
@@ -516,7 +518,7 @@ function StatCard({
     <SimpleTooltip content={value || ""}>
       <div
         className={cn(
-          "rounded-xl border bg-white/[0.02] p-2.5 transition-colors",
+          "rounded-xl border bg-structure-02 p-2.5 transition-colors",
           borderColors[accent]
         )}
       >

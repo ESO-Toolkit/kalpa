@@ -412,7 +412,7 @@ export function WhatGetsUploaded() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
+        className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-structure-03"
         aria-expanded={open}
       >
         <span className="flex items-center gap-2 text-xs text-muted-foreground">

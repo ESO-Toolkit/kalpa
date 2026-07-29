@@ -174,7 +174,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
         ) : (
           snapshots.map((s, i) => (
             <Fade key={s.id} delay={i * 50}>
-              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+              <div className="rounded-xl border border-structure-06 bg-structure-02 p-3 transition-all duration-200 hover:border-structure-10">
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="font-medium text-sm">{s.label}</div>
@@ -387,7 +387,7 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
         ) : (
           [...entries].reverse().map((entry, i) => (
             <Fade key={`${entry.startedAt}-${i}`} delay={i * 40}>
-              <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 text-xs">
+              <div className="rounded-lg border border-structure-06 bg-structure-02 p-2 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="font-medium text-foreground">{entry.operation}</span>
                   <span

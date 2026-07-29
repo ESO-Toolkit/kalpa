@@ -123,7 +123,7 @@ export function PackImportView({
                     <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
                   )}
                 </div>
-                <div className="h-1.5 rounded-full bg-white/[0.06]">
+                <div className="h-1.5 rounded-full bg-structure-06">
                   <div
                     className="h-full rounded-full bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_50%,transparent)] transition-all duration-300 ease-out"
                     style={{
@@ -143,7 +143,7 @@ export function PackImportView({
                 {requiredAddons.map((addon) => (
                   <div
                     key={addon.esouiId}
-                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-03)]"
                   >
                     <span className="text-sm">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) ? (
@@ -164,7 +164,7 @@ export function PackImportView({
                 {optionalAddons.map((addon) => (
                   <div
                     key={addon.esouiId}
-                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-03)]"
                   >
                     <span className="text-sm text-muted-foreground">{addon.name}</span>
                     {installedEsouiIds.has(addon.esouiId) && (
@@ -187,7 +187,7 @@ export function PackImportView({
           )}
 
           {applyingSettings && (
-            <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2">
+            <div className="flex items-center gap-2 rounded-lg border border-structure-06 bg-structure-03 px-3 py-2">
               <Loader2Icon className="size-3.5 animate-spin text-muted-foreground/50 shrink-0" />
               <span className="text-xs text-muted-foreground">Applying settings...</span>
             </div>
@@ -234,9 +234,9 @@ export function PackImportView({
       </div>
 
       {/* Import mode toggle */}
-      <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+      <div className="relative flex p-0.5 rounded-lg bg-structure-03 border border-structure-06">
         <div
-          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
+          className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-08 shadow-sm transition-[left] duration-200 ease-out"
           style={{
             left: importMode === "enter-code" ? "2px" : "calc(50% + 2px)",
             width: "calc(50% - 4px)",
@@ -282,7 +282,7 @@ export function PackImportView({
           </div>
           {resolvingCode && (
             <div className="flex items-center justify-center py-4">
-              <div className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+              <div className="inline-block size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
             </div>
           )}
         </div>

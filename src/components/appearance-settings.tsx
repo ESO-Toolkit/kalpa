@@ -245,7 +245,7 @@ function ThemeCard({
       className={`group relative overflow-hidden rounded-xl border p-1.5 text-left transition-all duration-150 ${
         active
           ? "border-primary/50 bg-primary/[0.06] shadow-[0_0_0_1px_var(--primary-glow)]"
-          : "border-white/[0.06] bg-white/[0.02] hover:-translate-y-px hover:border-white/[0.12] hover:bg-white/[0.04]"
+          : "border-structure-06 bg-structure-02 hover:-translate-y-px hover:border-structure-12 hover:bg-structure-04"
       }`}
     >
       <button
@@ -270,7 +270,7 @@ function ThemeCard({
           <button
             type="button"
             onClick={onEdit}
-            className="flex size-6 items-center justify-center rounded-md border border-white/[0.1] bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
+            className="flex size-6 items-center justify-center rounded-md border border-structure-10 bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
             aria-label={`Edit ${theme.name} theme`}
           >
             <Pencil className="size-3" />
@@ -279,7 +279,7 @@ function ThemeCard({
         <button
           type="button"
           onClick={onFork}
-          className="flex size-6 items-center justify-center rounded-md border border-white/[0.1] bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
+          className="flex size-6 items-center justify-center rounded-md border border-structure-10 bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
           aria-label={`Duplicate ${theme.name} as a custom theme`}
         >
           <CopyPlus className="size-3" />

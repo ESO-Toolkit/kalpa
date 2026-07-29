@@ -469,7 +469,7 @@ export function SplitWorkbench({
         {/* Batch naming */}
         {byFight
           ? selectedFights.length > 0 && (
-              <div className="mt-2 flex shrink-0 flex-wrap items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5">
+              <div className="mt-2 flex shrink-0 flex-wrap items-center gap-1.5 rounded-lg border border-structure-06 bg-structure-02 px-2 py-1.5">
                 <span className="text-[11px] font-medium text-muted-foreground">Name all:</span>
                 <Input
                   value={fightPrefix}
@@ -482,7 +482,7 @@ export function SplitWorkbench({
               </div>
             )
           : selected.length > 0 && (
-              <div className="mt-2 flex shrink-0 flex-wrap items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5">
+              <div className="mt-2 flex shrink-0 flex-wrap items-center gap-1.5 rounded-lg border border-structure-06 bg-structure-02 px-2 py-1.5">
                 <span className="text-[11px] font-medium text-muted-foreground">Name all:</span>
                 <Input
                   value={prefix}
@@ -498,7 +498,7 @@ export function SplitWorkbench({
                     type="button"
                     title={`Add "${t.label}" to every selected split`}
                     onClick={() => tagAllIncluded(t.id)}
-                    className="rounded-md border border-white/[0.08] bg-white/[0.02] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-accent-sky/30 hover:text-accent-sky"
+                    className="rounded-md border border-structure-08 bg-structure-02 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-accent-sky/30 hover:text-accent-sky"
                   >
                     {t.label}
                   </button>
@@ -512,7 +512,7 @@ export function SplitWorkbench({
         <div className="-mr-2 mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-2">
           {byFight ? (
             sessionsWithFights.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
+              <div className="rounded-lg border border-dashed border-structure-08 p-6 text-center text-sm text-muted-foreground">
                 No fights found in this file.
               </div>
             ) : (
@@ -551,7 +551,7 @@ export function SplitWorkbench({
               })
             )
           ) : sessions.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-structure-08 p-6 text-center text-sm text-muted-foreground">
               No logging sessions found in this file.
             </div>
           ) : (
@@ -575,7 +575,7 @@ export function SplitWorkbench({
         </div>
 
         {/* Live preview + action footer */}
-        <div className="-mx-5 -mb-5 mt-4 flex shrink-0 items-center justify-between gap-3 border-t border-white/[0.06] bg-gradient-to-b from-white/[0.02] to-transparent p-4">
+        <div className="-mx-5 -mb-5 mt-4 flex shrink-0 items-center justify-between gap-3 border-t border-structure-06 bg-gradient-to-b from-structure-02 to-transparent p-4">
           <div className="text-sm">
             {byFight ? (
               selectedFights.length === 0 ? (
@@ -653,8 +653,8 @@ function GranTab({
         "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-40",
         active
-          ? "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] text-accent-sky shadow-[0_1px_2px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.12)] ring-1 ring-inset ring-accent-sky/25"
-          : "text-muted-foreground hover:bg-white/[0.04]"
+          ? "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] text-accent-sky shadow-[0_1px_2px_rgba(0,0,0,0.5),inset_0_1px_0_var(--structure-12)] ring-1 ring-inset ring-accent-sky/25"
+          : "text-muted-foreground hover:bg-structure-04"
       )}
     >
       <Icon
@@ -695,7 +695,7 @@ function FightRow({
         "rounded-lg border px-3 py-2 transition-colors duration-150",
         draft.include
           ? "border-accent-sky/30 bg-accent-sky/[0.04]"
-          : "border-white/[0.06] bg-white/[0.02]"
+          : "border-structure-06 bg-structure-02"
       )}
     >
       <div className="flex items-center gap-3">
@@ -710,7 +710,7 @@ function FightRow({
             "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
             draft.include
               ? "border-accent-sky/60 bg-accent-sky/80 text-primary-foreground"
-              : "border-white/[0.15] bg-white/[0.03] hover:border-white/[0.3]"
+              : "border-structure-15 bg-structure-03 hover:border-structure-30"
           )}
         >
           {draft.include && <CheckCheck className="size-3" aria-hidden />}
@@ -777,7 +777,7 @@ function SessionCard({
         "rounded-xl border transition-colors duration-150",
         draft.include
           ? "border-accent-sky/30 bg-accent-sky/[0.04]"
-          : "border-white/[0.06] bg-white/[0.02]"
+          : "border-structure-06 bg-structure-02"
       )}
     >
       <div className="flex items-start gap-3 p-3">
@@ -793,7 +793,7 @@ function SessionCard({
             "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
             draft.include
               ? "border-accent-sky/60 bg-accent-sky/80 text-primary-foreground"
-              : "border-white/[0.15] bg-white/[0.03] hover:border-white/[0.3]"
+              : "border-structure-15 bg-structure-03 hover:border-structure-30"
           )}
         >
           {draft.include && <CheckCheck className="size-3" aria-hidden />}
@@ -849,7 +849,7 @@ function SessionCard({
               duration and an honest quick-reset / long-pull hint. Capped height +
               scroll keeps a dense session from dominating the modal. */}
           {fights.length > 0 && (
-            <div className="mt-2.5 border-t border-white/[0.06] pt-2">
+            <div className="mt-2.5 border-t border-structure-06 pt-2">
               <div className="mb-1.5 flex items-center justify-between px-0.5">
                 <span className="font-heading text-[11px] font-bold tracking-[0.06em] text-muted-foreground uppercase">
                   Fights
@@ -865,7 +865,7 @@ function SessionCard({
                   return (
                     <li
                       key={f.index}
-                      className="flex items-center justify-between gap-3 rounded-md bg-white/[0.02] px-2 py-1.5"
+                      className="flex items-center justify-between gap-3 rounded-md bg-structure-02 px-2 py-1.5"
                     >
                       <span className="flex min-w-0 items-center gap-1.5">
                         <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />

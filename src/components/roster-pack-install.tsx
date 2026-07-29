@@ -349,7 +349,7 @@ export function RosterPackInstall({
               {installProgress && (
                 <Fade>
                   <div className="mt-1">
-                    <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
+                    <div className="h-1 overflow-hidden rounded-full bg-structure-06">
                       <div
                         className="h-full rounded-full bg-accent-sky transition-all duration-300"
                         style={{

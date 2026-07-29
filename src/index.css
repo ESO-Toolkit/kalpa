@@ -161,6 +161,34 @@
   --color-glass-border-subtle: var(--glass-border-subtle);
   --color-surface-overlay: var(--surface-overlay);
 
+  /* Theme-aware structural alpha tokens. Dark seeds resolve to the exact old
+   * white-alpha colors; light seeds switch to black-alpha via --structure-rgb. */
+  --color-structure-01: var(--structure-01);
+  --color-structure-015: var(--structure-015);
+  --color-structure-02: var(--structure-02);
+  --color-structure-025: var(--structure-025);
+  --color-structure-03: var(--structure-03);
+  --color-structure-035: var(--structure-035);
+  --color-structure-04: var(--structure-04);
+  --color-structure-045: var(--structure-045);
+  --color-structure-05: var(--structure-05);
+  --color-structure-06: var(--structure-06);
+  --color-structure-07: var(--structure-07);
+  --color-structure-08: var(--structure-08);
+  --color-structure-09: var(--structure-09);
+  --color-structure-10: var(--structure-10);
+  --color-structure-12: var(--structure-12);
+  --color-structure-14: var(--structure-14);
+  --color-structure-15: var(--structure-15);
+  --color-structure-16: var(--structure-16);
+  --color-structure-18: var(--structure-18);
+  --color-structure-20: var(--structure-20);
+  --color-structure-25: var(--structure-25);
+  --color-structure-30: var(--structure-30);
+  --color-structure-40: var(--structure-40);
+  --color-structure-50: var(--structure-50);
+  --color-structure-60: var(--structure-60);
+  --color-structure-70: var(--structure-70);
   /* Card alt */
   --color-card-alt: var(--card-alt);
 
@@ -193,6 +221,36 @@
   --orb-2: #38bdf8; /* ambient background orb 2 */
   --orb-3: #6366f1; /* ambient background orb 3 */
 
+  /* Theme-aware structural ink. Runtime theme application sets --structure-rgb
+   * from the seed background luminance: white on dark themes, black on light
+   * themes. The alpha ladder preserves the old dark rgba values exactly. */
+  --structure-rgb: 255 255 255;
+  --structure-01: rgb(var(--structure-rgb) / 0.01);
+  --structure-015: rgb(var(--structure-rgb) / 0.015);
+  --structure-02: rgb(var(--structure-rgb) / 0.02);
+  --structure-025: rgb(var(--structure-rgb) / 0.025);
+  --structure-03: rgb(var(--structure-rgb) / 0.03);
+  --structure-035: rgb(var(--structure-rgb) / 0.035);
+  --structure-04: rgb(var(--structure-rgb) / 0.04);
+  --structure-045: rgb(var(--structure-rgb) / 0.045);
+  --structure-05: rgb(var(--structure-rgb) / 0.05);
+  --structure-06: rgb(var(--structure-rgb) / 0.06);
+  --structure-07: rgb(var(--structure-rgb) / 0.07);
+  --structure-08: rgb(var(--structure-rgb) / 0.08);
+  --structure-09: rgb(var(--structure-rgb) / 0.09);
+  --structure-10: rgb(var(--structure-rgb) / 0.1);
+  --structure-12: rgb(var(--structure-rgb) / 0.12);
+  --structure-14: rgb(var(--structure-rgb) / 0.14);
+  --structure-15: rgb(var(--structure-rgb) / 0.15);
+  --structure-16: rgb(var(--structure-rgb) / 0.16);
+  --structure-18: rgb(var(--structure-rgb) / 0.18);
+  --structure-20: rgb(var(--structure-rgb) / 0.2);
+  --structure-25: rgb(var(--structure-rgb) / 0.25);
+  --structure-30: rgb(var(--structure-rgb) / 0.3);
+  --structure-40: rgb(var(--structure-rgb) / 0.4);
+  --structure-50: rgb(var(--structure-rgb) / 0.5);
+  --structure-60: rgb(var(--structure-rgb) / 0.6);
+  --structure-70: rgb(var(--structure-rgb) / 0.7);
   /* ============================================================
      DERIVED TOKENS (computed from the 12 base vars)
      ============================================================ */
@@ -255,13 +313,13 @@
   --addon-library: var(--status-library);
   --addon-disabled: #6b7280;
 
-  /* === Glass Morphism (tint derived from surface; borders are constant white-alpha) === */
+  /* === Glass Morphism (tint derived from surface; borders use structural ink) === */
   --glass-bg: color-mix(in oklab, var(--card) 84%, transparent);
   --glass-bg-light: color-mix(in oklab, var(--card) 66%, transparent);
-  --glass-border: rgba(255, 255, 255, 0.09);
-  --glass-border-subtle: rgba(255, 255, 255, 0.04);
+  --glass-border: var(--structure-09);
+  --glass-border-subtle: var(--structure-04);
   --glass-blur: 16px;
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), 0 1px 0 var(--structure-05) inset;
   --glass-shadow-light: 0 4px 16px rgba(0, 0, 0, 0.2);
 
   /* === Scrollbar (accent-tinted) === */
@@ -674,8 +732,8 @@
 /* === Increased contrast preference: firm up hairline borders === */
 @media (prefers-contrast: more) {
   :root {
-    --glass-border: rgba(255, 255, 255, 0.18);
-    --glass-border-subtle: rgba(255, 255, 255, 0.1);
+    --glass-border: var(--structure-18);
+    --glass-border-subtle: var(--structure-10);
   }
 }
 

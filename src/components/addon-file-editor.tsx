@@ -127,7 +127,7 @@ export function AddonFileEditor({
   if (loadState === "loading") {
     return (
       <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary mr-2" />
         Loading file...
       </div>
     );
@@ -195,7 +195,7 @@ export function AddonFileEditor({
       </div>
 
       {!editable && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="rounded-lg border border-structure-06 bg-structure-02 px-3 py-1.5 text-xs text-muted-foreground">
           This file hasn't been edited. Click "Enable Editing" to modify it.
         </div>
       )}

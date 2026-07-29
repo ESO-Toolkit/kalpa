@@ -12,7 +12,7 @@ const infoPillVariants = cva(
         amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
         red: "border-red-400/20 bg-red-400/[0.04] text-red-400",
         violet: "border-violet-400/20 bg-violet-400/[0.04] text-violet-400",
-        muted: "border-white/10 bg-white/[0.03] text-muted-foreground",
+        muted: "border-structure-10 bg-structure-03 text-muted-foreground",
       },
     },
     defaultVariants: { color: "muted" },

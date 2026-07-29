@@ -75,7 +75,7 @@ const STATUS_ACCENT: Record<UploadRecord["status"], string> = {
   paused: "before:bg-amber-400/70",
   handedOff: "before:bg-amber-400/70",
   failed: "before:bg-red-400/80",
-  cancelled: "before:bg-white/15",
+  cancelled: "before:bg-structure-15",
 };
 
 export const HistoryPanel = memo(function HistoryPanel({
@@ -165,7 +165,7 @@ export const HistoryPanel = memo(function HistoryPanel({
               <li
                 key={r.id}
                 className={cn(
-                  "relative overflow-hidden rounded-lg border border-white/[0.06] bg-white/[0.02] py-2 pr-3 pl-3.5 transition-colors hover:bg-white/[0.04]",
+                  "relative overflow-hidden rounded-lg border border-structure-06 bg-structure-02 py-2 pr-3 pl-3.5 transition-colors hover:bg-structure-04",
                   "before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-full before:content-['']",
                   STATUS_ACCENT[r.status]
                 )}

@@ -200,7 +200,7 @@ const AddonListItem = memo(function AddonListItem({
       aria-selected={batchMode ? isSelected : isCurrent}
       aria-label={`${addon.title}${dateLabel ? `, ${dateLabel}` : addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}${addon.outdatedDependencies.length > 0 ? `, ${addon.outdatedDependencies.length} outdated dependencies` : ""}`}
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_color-mix(in_oklab,var(--primary)_2%,transparent)] group",
+        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-structure-04 hover:shadow-[inset_0_0_20px_color-mix(in_oklab,var(--primary)_2%,transparent)] group",
         addon.disabled
           ? "border-l-zinc-500 bg-zinc-500/[0.04]"
           : addon.missingDependencies.length > 0
@@ -509,11 +509,11 @@ function AddonListBase({
   );
 
   return (
-    <div className="flex min-h-0 w-[380px] min-w-[300px] flex-col border-r border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_60%,transparent)] backdrop-blur-xl backdrop-saturate-[1.2] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <div className="flex min-h-0 w-[380px] min-w-[300px] flex-col border-r border-structure-06 bg-[color-mix(in_oklab,var(--bg-base)_60%,transparent)] backdrop-blur-xl backdrop-saturate-[1.2] shadow-[inset_0_1px_0_var(--structure-04)]">
       {/* Mode switcher */}
       <div className="px-3 pt-3 pb-2">
         <Tabs value={viewMode} onValueChange={(v) => onViewModeChange(v as ViewMode)}>
-          <TabsList className="w-full bg-white/[0.04] border border-white/[0.06] [&_[data-slot=tabs-trigger]]:data-active:text-primary">
+          <TabsList className="w-full bg-structure-04 border border-structure-06 [&_[data-slot=tabs-trigger]]:data-active:text-primary">
             <TabsIndicator className="bg-primary/[0.1] border-primary/20" />
             <TabsTrigger value="installed" className="flex-1">
               My Addons
@@ -566,7 +566,7 @@ function AddonListBase({
                       "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                       isActive
                         ? "text-primary"
-                        : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                        : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-transparent"
                     )}
                     onClick={() => {
                       onFilterChange(mode);
@@ -576,7 +576,7 @@ function AddonListBase({
                     {isActive && (
                       <motion.span
                         layoutId="filter-tab-indicator"
-                        className="absolute inset-0 rounded-lg bg-primary/15 border border-primary/25 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                        className="absolute inset-0 rounded-lg bg-primary/15 border border-primary/25 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_var(--structure-05)]"
                         transition={{ type: "spring", stiffness: 400, damping: 30 }}
                       />
                     )}
@@ -603,7 +603,7 @@ function AddonListBase({
                         "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                         isActive
                           ? "text-accent-sky"
-                          : "text-muted-foreground hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                          : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-transparent"
                       )}
                       onClick={() => {
                         onFilterChange("all");
@@ -613,7 +613,7 @@ function AddonListBase({
                       {isActive && (
                         <motion.span
                           layoutId="filter-tab-indicator"
-                          className="absolute inset-0 rounded-lg bg-accent-sky/15 border border-accent-sky/25 shadow-[0_0_8px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                          className="absolute inset-0 rounded-lg bg-accent-sky/15 border border-accent-sky/25 shadow-[0_0_8px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_var(--structure-05)]"
                           transition={{ type: "spring", stiffness: 400, damping: 30 }}
                         />
                       )}
@@ -627,7 +627,7 @@ function AddonListBase({
             </div>
 
             {/* Sort + count bar */}
-            <div className="flex items-center justify-between border-y border-white/[0.06] px-3 py-1.5">
+            <div className="flex items-center justify-between border-y border-structure-06 px-3 py-1.5">
               <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
                 {addons.length} {addons.length === 1 ? "addon" : "addons"}
                 {batchMode && (
@@ -667,13 +667,13 @@ function AddonListBase({
             >
               {loading && addons.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground">
-                  <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+                  <div className="size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
                 </div>
               ) : addons.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center px-5">
                   {searchQuery || activeTagFilter || filterMode !== "all" ? (
                     <Fade className="flex flex-col items-center gap-3 text-center">
-                      <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-3">
+                      <div className="rounded-xl bg-structure-03 border border-structure-06 p-3">
                         <Search className="size-6 text-muted-foreground/30" />
                       </div>
                       <div>
@@ -687,7 +687,7 @@ function AddonListBase({
                         </p>
                       </div>
                       <button
-                        className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.08] hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
+                        className="rounded-lg border border-structure-08 bg-structure-04 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-structure-08 hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
                         onClick={() => {
                           onSearchChange("");
                           onFilterChange("all");
@@ -718,7 +718,7 @@ function AddonListBase({
                                 onViewModeChange("discover");
                                 onDiscoverTabChange("search");
                               }}
-                              className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] hover:border-white/[0.1] group"
+                              className="flex w-full items-center gap-3 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2.5 text-left transition-colors hover:bg-structure-06 hover:border-structure-10 group"
                             >
                               <div className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
                                 <Globe className="size-3.5" />
@@ -737,7 +737,7 @@ function AddonListBase({
                                 onViewModeChange("discover");
                                 onDiscoverTabChange("url");
                               }}
-                              className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] hover:border-white/[0.1] group"
+                              className="flex w-full items-center gap-3 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2.5 text-left transition-colors hover:bg-structure-06 hover:border-structure-10 group"
                             >
                               <div className="flex size-7 items-center justify-center rounded-md bg-accent-sky/10 text-accent-sky">
                                 <Search className="size-3.5" />

@@ -60,7 +60,7 @@ export function ColorInput({
     <div className={cn("flex items-center gap-2", className)}>
       <Popover>
         <PopoverTrigger
-          className="size-7 shrink-0 cursor-pointer rounded-md border border-white/[0.12] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)] transition-transform duration-150 hover:scale-105"
+          className="size-7 shrink-0 cursor-pointer rounded-md border border-structure-12 shadow-[inset_0_1px_0_var(--structure-10)] transition-transform duration-150 hover:scale-105"
           style={{ background: normalized }}
           aria-label={`${label} — open color picker`}
         />
@@ -93,7 +93,7 @@ export function ColorInput({
               textRef.current?.blur();
             }
           }}
-          className="mt-0.5 w-full rounded-md border border-white/[0.08] bg-white/[0.03] px-1.5 py-0.5 font-mono text-xs text-foreground outline-none transition-colors duration-150 hover:border-white/15 focus:border-accent-sky/40 focus:bg-white/[0.05]"
+          className="mt-0.5 w-full rounded-md border border-structure-08 bg-structure-03 px-1.5 py-0.5 font-mono text-xs text-foreground outline-none transition-colors duration-150 hover:border-structure-15 focus:border-accent-sky/40 focus:bg-structure-05"
         />
       </div>
 
@@ -101,7 +101,7 @@ export function ColorInput({
         <button
           type="button"
           onClick={pickWithEyeDropper}
-          className="flex size-7 shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-muted-foreground transition-colors duration-150 hover:border-white/15 hover:text-white/80"
+          className="flex size-7 shrink-0 items-center justify-center rounded-md border border-structure-08 bg-structure-03 text-muted-foreground transition-colors duration-150 hover:border-structure-15 hover:text-white/80"
           aria-label={`Sample a color for ${label} from the screen`}
           title="Sample a color from the screen"
         >

@@ -43,7 +43,7 @@ export const FightList = memo(function FightList({
 
   if (fights.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
+      <div className="rounded-lg border border-dashed border-structure-08 p-6 text-center text-sm text-muted-foreground">
         {emptyHint ?? "No fights detected yet."}
       </div>
     );
@@ -70,7 +70,7 @@ export const FightList = memo(function FightList({
               "flex animate-[fade-in_0.2s_ease-out] items-center justify-between gap-3 rounded-lg border px-3 py-2 transition-colors duration-150",
               isNewest
                 ? "border-accent-sky/30 bg-accent-sky/[0.05]"
-                : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]"
+                : "border-structure-06 bg-structure-02 hover:bg-structure-04"
             )}
           >
             <div className="flex min-w-0 items-center gap-2.5">

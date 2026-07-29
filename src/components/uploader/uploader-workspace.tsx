@@ -124,7 +124,7 @@ const OPTIONS_KEY = "kalpa.uploader.options";
  *  quieter than the primary picker/action. Used for fights, options, history so
  *  the elevation order reads: canvas < these < picker/action. */
 const WORK_PANEL =
-  "rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.045] to-white/[0.015] shadow-[0_8px_28px_-14px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.05)]";
+  "rounded-2xl border border-structure-08 bg-gradient-to-b from-structure-045 to-structure-015 shadow-[0_8px_28px_-14px_rgba(0,0,0,0.65),inset_0_1px_0_var(--structure-05)]";
 
 /** Open a report URL in the user's browser, surfacing failures instead of
  *  swallowing them. The opener plugin rejects a URL outside the capability's
@@ -1978,10 +1978,10 @@ function LiveSessionMiniBar({
       <GlassPanel
         variant="primary"
         className={cn(
-          "border p-3.5 shadow-[0_18px_48px_-18px_rgba(0,0,0,0.85),inset_0_1px_0_rgba(255,255,255,0.06)]",
+          "border p-3.5 shadow-[0_18px_48px_-18px_rgba(0,0,0,0.85),inset_0_1px_0_var(--structure-06)]",
           tone === "emerald"
-            ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.08] to-white/[0.015]"
-            : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.08] to-white/[0.015]"
+            ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.08] to-structure-015"
+            : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.08] to-structure-015"
         )}
       >
         <div className="flex flex-wrap items-center gap-3">
@@ -2063,7 +2063,7 @@ function LiveSessionMiniBar({
             </Button>
           </div>
         </div>
-        <p className="mt-2 border-t border-white/[0.06] pt-2 text-xs text-muted-foreground">
+        <p className="mt-2 border-t border-structure-06 pt-2 text-xs text-muted-foreground">
           {detail}
         </p>
       </GlassPanel>
@@ -2307,7 +2307,7 @@ function RouteFlow({
         className="inline-flex items-center gap-2"
         aria-label={`Upload route: your log, ${routeDirect ? "Direct from Kalpa" : "Official uploader"}, to esologs.com`}
       >
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-foreground">
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-structure-03 px-2 py-1 font-medium text-foreground">
           <FileText className="size-3 text-muted-foreground" aria-hidden />
           Your log
         </span>
@@ -2318,13 +2318,13 @@ function RouteFlow({
             Direct from Kalpa
           </span>
         ) : (
-          <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-structure-03 px-2 py-1 font-medium text-muted-foreground">
             <CloudUpload className="size-3" aria-hidden />
             {officialInstalled ? "Official uploader" : "ESO Logs uploader"}
           </span>
         )}
         <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.04] px-2 py-1 font-medium text-foreground">
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-structure-10 bg-structure-04 px-2 py-1 font-medium text-foreground">
           esologs.com
         </span>
       </span>
@@ -2452,7 +2452,7 @@ function MissionControlBand({
       <span className="font-heading text-[11px] font-bold tracking-[0.08em] text-muted-foreground uppercase">
         {mode === "live" ? "Live Log" : "Upload a Log"}
       </span>
-      <span className="h-3 w-px bg-white/[0.08]" aria-hidden />
+      <span className="h-3 w-px bg-structure-08" aria-hidden />
       {lead}
       <span className="min-w-2 flex-1" aria-hidden />
       <RouteFlow
@@ -2530,7 +2530,7 @@ function LiveDashboardBand({
           onCopyLink={onCopyLink}
         />
       </div>
-      <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-2 text-[11px]">
+      <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-structure-06 pt-2 text-[11px]">
         <span className="inline-flex items-center gap-1.5 text-muted-foreground">
           {routeDirect ? (
             <Zap className="size-3 text-accent-sky" aria-hidden />
@@ -2668,7 +2668,7 @@ function LiveReportCTA({
 }) {
   if (!report) {
     return (
-      <div className="flex min-w-[112px] flex-col items-center justify-center gap-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-center">
+      <div className="flex min-w-[112px] flex-col items-center justify-center gap-1 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2 text-center">
         <CircleDashed className="size-4 text-muted-foreground/50" aria-hidden />
         <span className="text-[11px] leading-tight text-muted-foreground">
           {handedOff
@@ -2750,7 +2750,7 @@ function LogSummaryCard({
   return (
     <GlassPanel
       variant="primary"
-      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-white/[0.01] p-4 shadow-[0_12px_36px_-14px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.06)]"
+      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-structure-01 p-4 shadow-[0_12px_36px_-14px_rgba(0,0,0,0.7),inset_0_1px_0_var(--structure-06)]"
     >
       <div className="mb-2.5 flex items-center gap-1.5">
         <CheckCircle2 className="size-3.5 text-emerald-400" aria-hidden />
@@ -2815,7 +2815,7 @@ function LogSummaryCard({
 
 function SummaryStat({ value, label }: { value: string | number; label: string }) {
   return (
-    <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-center">
+    <div className="rounded-lg border border-structure-06 bg-structure-02 px-3 py-2 text-center">
       <div className="font-heading text-lg leading-tight font-semibold text-foreground tabular-nums">
         {value}
       </div>
@@ -2851,7 +2851,7 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
     <div className="mt-4">
       <GlassPanel
         variant="primary"
-        className="flex flex-col items-center gap-4 border-accent-sky/15 bg-gradient-to-b from-accent-sky/[0.05] to-white/[0.01] px-6 py-8 text-center"
+        className="flex flex-col items-center gap-4 border-accent-sky/15 bg-gradient-to-b from-accent-sky/[0.05] to-structure-01 px-6 py-8 text-center"
       >
         <div className="flex size-14 items-center justify-center rounded-2xl border border-accent-sky/20 bg-accent-sky/[0.1] text-accent-sky shadow-[0_0_28px_-8px_color-mix(in_oklab,var(--accent-sky)_50%,transparent)]">
           <LogIn className="size-7" aria-hidden />
@@ -2985,7 +2985,7 @@ function DirectUploadSection({
   // doesn't add a second heavy panel above the action.
   if (hasSession) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.06] to-emerald-400/[0.02] px-3 py-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.06] to-emerald-400/[0.02] px-3 py-1.5 shadow-[inset_0_1px_0_var(--structure-04)]">
         <div className="flex min-w-0 items-center gap-2 text-xs">
           <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-400/15">
             <Check className="size-2.5 text-emerald-400" aria-hidden />
@@ -3106,9 +3106,9 @@ function ModeTab({
             // (not the lift), and an inset top highlight catches the light. The
             // sky accents are tokenized (accent-sky) so the active tab follows
             // the theme.
-            "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] ring-1 ring-inset ring-accent-sky/25 shadow-[0_1px_2px_rgba(0,0,0,0.5),0_8px_20px_-8px_rgba(0,0,0,0.55),0_0_22px_-12px_color-mix(in_oklab,var(--accent-sky)_55%,transparent),inset_0_1px_0_rgba(255,255,255,0.14)]"
+            "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] ring-1 ring-inset ring-accent-sky/25 shadow-[0_1px_2px_rgba(0,0,0,0.5),0_8px_20px_-8px_rgba(0,0,0,0.55),0_0_22px_-12px_color-mix(in_oklab,var(--accent-sky)_55%,transparent),inset_0_1px_0_var(--structure-14)]"
           : // FLAT in the well: no fill, no border — just sits in the recess.
-            "text-muted-foreground hover:bg-white/[0.04]"
+            "text-muted-foreground hover:bg-structure-04"
       )}
     >
       <div
@@ -3202,8 +3202,8 @@ function LogPicker({
     // shadow. This is the one place the eye should land first.
     <div
       className={cn(
-        "relative rounded-2xl border border-white/[0.1] bg-gradient-to-b from-white/[0.07] to-white/[0.025] p-3.5 transition-colors duration-150",
-        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)]",
+        "relative rounded-2xl border border-structure-10 bg-gradient-to-b from-structure-07 to-structure-025 p-3.5 transition-colors duration-150",
+        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_var(--structure-08)]",
         dragOver && "border-accent-sky/60 from-accent-sky/[0.1] to-accent-sky/[0.03]"
       )}
     >
@@ -3217,7 +3217,7 @@ function LogPicker({
       )}
       {importing && (
         <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-surface-overlay text-center">
-          <span className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
+          <span className="size-5 animate-spin rounded-full border-2 border-structure-10 border-t-accent-sky" />
           <span className="text-sm text-muted-foreground">Adding log to your folder…</span>
         </div>
       )}
@@ -3237,13 +3237,13 @@ function LogPicker({
                   state stays badge-free, so absence reads as "the folder Kalpa
                   found". */}
               {isCustomFolder && (
-                <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                <span className="inline-flex items-center gap-1 rounded-md bg-structure-06 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                   <FolderSearch className="size-2.5" aria-hidden />
                   Custom
                 </span>
               )}
               {logsDir && (
-                <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+                <span className="rounded-md bg-structure-06 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
                   {logs.length} {logs.length === 1 ? "file" : "files"}
                   {totalBytes > 0 && ` · ${compactBytes(totalBytes)}`}
                 </span>
@@ -3347,7 +3347,7 @@ function LogPicker({
                     "focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
                     filter === f.id
                       ? "border-accent-sky/40 bg-accent-sky/[0.06] text-accent-sky"
-                      : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:text-foreground"
+                      : "border-structure-08 bg-structure-02 text-muted-foreground hover:text-foreground"
                   )}
                 >
                   {f.label}
@@ -3357,7 +3357,7 @@ function LogPicker({
             <button
               type="button"
               onClick={() => setSort((s) => (s === "newest" ? "largest" : "newest"))}
-              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
+              className="inline-flex items-center gap-1 rounded-md border border-structure-08 bg-structure-02 px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
               aria-label={`Sorted by ${sort === "newest" ? "newest" : "largest"} first — tap to sort by ${sort === "newest" ? "largest" : "newest"}`}
             >
               <ArrowDownUp className="size-3" aria-hidden />
@@ -3382,7 +3382,7 @@ function LogPicker({
         </div>
       ) : logs.length === 0 ? (
         // Unified empty state matching the FightList dashed pattern.
-        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-white/[0.08] p-5 text-center">
+        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-structure-08 p-5 text-center">
           <FileText className="size-6 text-muted-foreground/40" aria-hidden />
           <p className="text-sm text-muted-foreground">
             {detection && !detection.encounterLogExists
@@ -3416,7 +3416,7 @@ function LogPicker({
           }}
         >
           {visible.length === 0 ? (
-            <li className="rounded-lg border border-dashed border-white/[0.08] px-3 py-4 text-center text-xs text-muted-foreground">
+            <li className="rounded-lg border border-dashed border-structure-08 px-3 py-4 text-center text-xs text-muted-foreground">
               No logs match — clear the search or filter.
             </li>
           ) : null}
@@ -3438,7 +3438,7 @@ function LogPicker({
                       ? // Selected row pops OFF the recessed list: lit sky fill, a
                         // left accent bar, and a glow so the current choice is loud.
                         "border-accent-sky/50 border-l-[3px] border-l-accent-sky bg-accent-sky/[0.12] shadow-[0_2px_12px_-2px_color-mix(in_oklab,var(--accent-sky)_35%,transparent)]"
-                      : "border-transparent bg-white/[0.03] hover:bg-white/[0.06]"
+                      : "border-transparent bg-structure-03 hover:bg-structure-06"
                   )}
                   aria-pressed={isSelected}
                 >
@@ -3582,10 +3582,10 @@ function Preflight({
     const sizeHint = scanningSizeBytes ? ` (${compactBytes(scanningSizeBytes)})` : "";
     const big = (scanningSizeBytes ?? 0) > 256 * 1024 * 1024;
     return (
-      <div className="space-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+      <div className="space-y-2 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+            <span className="size-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
             Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
@@ -3620,9 +3620,9 @@ function Preflight({
           </div>
         </div>
         <div className="flex gap-2" aria-hidden>
-          <span className="h-5 w-16 animate-pulse rounded-lg bg-white/[0.05]" />
-          <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
-          <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
+          <span className="h-5 w-16 animate-pulse rounded-lg bg-structure-05" />
+          <span className="h-5 w-20 animate-pulse rounded-lg bg-structure-05" />
+          <span className="h-5 w-20 animate-pulse rounded-lg bg-structure-05" />
         </div>
       </div>
     );
@@ -3805,11 +3805,11 @@ function Preflight({
       {/* Fight peek — the first few fights with their durations, so the content is
           visible before opening the workbench. */}
       {fightPreview.length > 0 && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-white/[0.06] pt-2.5">
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-structure-06 pt-2.5">
           {fightPreview.map((f) => (
             <span
               key={f.index}
-              className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px]"
+              className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-structure-02 px-2 py-0.5 text-[11px]"
             >
               <Swords className="size-2.5 shrink-0 text-primary/60" aria-hidden />
               <span className="max-w-[150px] truncate text-foreground">{fightLabel(f)}</span>
@@ -3839,7 +3839,7 @@ function LiveToggles({
   // Note: live mode is definitionally real-time (the official uploader tails the
   // running file), so there is no real-time toggle — it would be a no-op.
   return (
-    <div className="mt-4 space-y-2 border-t border-white/[0.06] pt-4">
+    <div className="mt-4 space-y-2 border-t border-structure-06 pt-4">
       <SectionHeader>Live Options</SectionHeader>
       <Toggle
         checked={options.includeEntireFile}
@@ -3882,7 +3882,7 @@ function Toggle({
       <span
         className={cn(
           "relative h-5 w-9 shrink-0 rounded-full transition-colors duration-200",
-          checked ? "bg-accent-sky/70" : "bg-white/[0.1]"
+          checked ? "bg-accent-sky/70" : "bg-structure-10"
         )}
       >
         <span
@@ -3939,7 +3939,7 @@ function ManualActions({
     // The climax — the MOST raised surface, and the only WARM (gold) one, so it
     // reads as the destination of the whole flow against the cool-blue inputs
     // above it. Strong outer shadow + gold top highlight lift it off the canvas.
-    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),0_0_40px_-20px_color-mix(in_oklab,var(--primary)_40%,transparent),inset_0_1px_0_rgba(255,255,255,0.08)]">
+    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),0_0_40px_-20px_color-mix(in_oklab,var(--primary)_40%,transparent),inset_0_1px_0_var(--structure-08)]">
       <span
         className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-primary/0 via-primary/60 to-primary/0"
         aria-hidden
@@ -3986,7 +3986,7 @@ function CopyChip({ text }: { text: string }) {
           /* clipboard may be blocked; the visible text is still copyable manually */
         }
       }}
-      className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-black/30 px-2 py-1 font-mono text-xs text-foreground transition-colors hover:border-white/15 hover:bg-black/40"
+      className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-black/30 px-2 py-1 font-mono text-xs text-foreground transition-colors hover:border-structure-15 hover:bg-black/40"
       aria-label={`Copy ${text}`}
     >
       {copied ? (
@@ -4267,7 +4267,7 @@ function LiveDashboard({
           once attached, but old completed pulls are intentionally left for manual
           upload. Set the expectation without taking destructive action. */}
       {!running && priorFightCount > 0 && (
-        <div className="flex items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
+        <div className="flex items-start gap-2 rounded-lg border border-structure-06 bg-structure-02 p-3 text-xs text-muted-foreground">
           <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-foreground/50" aria-hidden />
           <span>
             Live skips the {priorFightCount} completed fight{priorFightCount === 1 ? "" : "s"}{" "}
@@ -4335,7 +4335,7 @@ const STATUS_ACCENT: Record<UploadRecord["status"], string> = {
   paused: "before:bg-amber-400/70",
   handedOff: "before:bg-amber-400/70",
   failed: "before:bg-red-400/80",
-  cancelled: "before:bg-white/15",
+  cancelled: "before:bg-structure-15",
 };
 
 function HistoryPanel({
@@ -4425,7 +4425,7 @@ function HistoryPanel({
               <li
                 key={r.id}
                 className={cn(
-                  "relative overflow-hidden rounded-lg border border-white/[0.06] bg-white/[0.02] py-2 pr-3 pl-3.5 transition-colors hover:bg-white/[0.04]",
+                  "relative overflow-hidden rounded-lg border border-structure-06 bg-structure-02 py-2 pr-3 pl-3.5 transition-colors hover:bg-structure-04",
                   "before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-full before:content-['']",
                   STATUS_ACCENT[r.status]
                 )}

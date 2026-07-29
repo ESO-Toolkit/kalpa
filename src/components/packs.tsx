@@ -896,7 +896,7 @@ export function Packs({
           </DialogTitle>
 
           {authUser && (
-            <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2.5 py-1.5 text-xs">
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border border-structure-06 bg-structure-03 px-2.5 py-1.5 text-xs">
               <span className="min-w-0 truncate text-muted-foreground">
                 Signed in as <span className="font-semibold text-primary">{authUser.userName}</span>
               </span>
@@ -930,9 +930,9 @@ export function Packs({
                 create: editingPackId ? "Edit Pack" : "Create",
               };
               return (
-                <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06] shadow-[inset_0_1px_2px_rgba(0,0,0,0.12)]">
+                <div className="relative flex mt-2 p-0.5 rounded-lg bg-structure-03 border border-structure-06 shadow-[inset_0_1px_2px_rgba(0,0,0,0.12)]">
                   <div
-                    className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.1] border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)] transition-[left] duration-200 ease-out"
+                    className="absolute top-0.5 bottom-0.5 rounded-md bg-structure-10 border border-structure-06 shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_var(--structure-06)] transition-[left] duration-200 ease-out"
                     style={{
                       left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
                       width: `calc(${100 / tabCount}% - 4px)`,
@@ -1030,7 +1030,7 @@ export function Packs({
                         "flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md border transition-all duration-200",
                         showImportPanel
                           ? "text-primary border-primary/30 bg-primary/[0.08] shadow-[0_0_10px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]"
-                          : "text-muted-foreground border-white/[0.06] bg-white/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:text-muted-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
+                          : "text-muted-foreground border-structure-06 bg-structure-02 shadow-[inset_0_1px_0_var(--structure-03)] hover:text-muted-foreground hover:border-structure-12 hover:bg-structure-04"
                       )}
                     >
                       <ImportIcon className="size-3.5" />
@@ -1048,7 +1048,7 @@ export function Packs({
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -8 }}
                         transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                        className="rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]"
+                        className="rounded-xl border border-structure-08 bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_var(--structure-04),0_4px_16px_rgba(0,0,0,0.15)]"
                       >
                         <PackImportView
                           key={importedPack ? "resolved" : "empty"}
