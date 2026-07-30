@@ -25,11 +25,12 @@
 //! string would misalign every subsequent range. Content is decoded lossily
 //! only for field parsing, never for offset math.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use super::types::{FightSummary, LogSession};
+use super::types::{Difficulty, FightSummary, LogSession, Outcome};
 
 /// Files larger than this get a "recommend split" hint in the UI.
 pub const SPLIT_RECOMMEND_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
@@ -59,6 +60,8 @@ enum LineType {
     UnitAdded,
     BeginCombat,
     EndCombat,
+    CombatEvent,
+    EndTrial,
     Other,
 }
 
@@ -80,6 +83,10 @@ fn classify(line: &str) -> LineType {
         LineType::BeginCombat
     } else if tok.eq_ignore_ascii_case("END_COMBAT") {
         LineType::EndCombat
+    } else if tok.eq_ignore_ascii_case("COMBAT_EVENT") {
+        LineType::CombatEvent
+    } else if tok.eq_ignore_ascii_case("END_TRIAL") {
+        LineType::EndTrial
     } else {
         LineType::Other
     }
@@ -336,6 +343,9 @@ struct Detector {
     fight_start: Option<(u64, u64)>,
     pending_zone: Option<String>,
     pending_boss: Option<String>,
+    pending_difficulty: Option<Difficulty>,
+    boss_unit_ids: HashSet<String>,
+    current_fight_outcome: Option<Outcome>,
     /// Chunk-scan only: absolute offset of the first `BEGIN_LOG` seen *after*
     /// the chunk started in an already-open session (a `/encounterlog`
     /// re-enable mid-tail). Lets the watcher detect a new session without a
@@ -373,6 +383,9 @@ impl Detector {
                 self.fight_start = None;
                 self.pending_zone = None;
                 self.pending_boss = None;
+                self.pending_difficulty = None;
+                self.boss_unit_ids.clear();
+                self.current_fight_outcome = None;
 
                 let start_time_ms = field(line, 2)
                     .and_then(|s| s.parse::<u64>().ok())
@@ -404,6 +417,11 @@ impl Detector {
                 self.pending_zone = field(line, 3)
                     .map(|s| s.to_string())
                     .filter(|s| !s.is_empty());
+                self.pending_difficulty = match field(line, 4) {
+                    Some(v) if v.eq_ignore_ascii_case("VETERAN") => Some(Difficulty::Veteran),
+                    Some(v) if v.eq_ignore_ascii_case("NORMAL") => Some(Difficulty::Normal),
+                    _ => None,
+                };
             }
             LineType::UnitAdded => {
                 // isBoss is field 7 (isLocalPlayer is field 4 — a different
@@ -414,6 +432,9 @@ impl Detector {
                 // filter is kept as defense in depth so only monster names
                 // are ever adopted.
                 if field(line, 7).is_some_and(|f| f.eq_ignore_ascii_case("T")) {
+                    if let Some(unit_id) = field(line, 2).filter(|s| !s.is_empty()) {
+                        self.boss_unit_ids.insert(unit_id.to_string());
+                    }
                     if let Some(name) =
                         field(line, 10).filter(|s| !s.is_empty() && !s.starts_with('@'))
                     {
@@ -423,6 +444,7 @@ impl Detector {
             }
             LineType::BeginCombat => {
                 self.fight_start = Some((offset, parse_rel_ms(line)));
+                self.current_fight_outcome = None;
             }
             LineType::EndCombat => {
                 if let Some((start_offset, start_ms)) = self.fight_start.take() {
@@ -440,11 +462,37 @@ impl Detector {
                             end_ms: parse_rel_ms(line),
                             zone_name: self.pending_zone.clone(),
                             boss_name: self.pending_boss.clone(),
+                            difficulty: self.pending_difficulty,
+                            outcome: self.current_fight_outcome,
                         });
                     }
                     self.pending_boss.take();
+                    self.current_fight_outcome = None;
                     self.total_fights += 1;
                     self.session_fight_count += 1;
+                }
+            }
+            LineType::CombatEvent => {
+                if self.fight_start.is_some()
+                    && matches!(field(line, 2), Some(v) if v.eq_ignore_ascii_case("DIED") || v.eq_ignore_ascii_case("DIED_XP"))
+                    && field(line, 11).is_some_and(|unit_id| self.boss_unit_ids.contains(unit_id))
+                {
+                    self.current_fight_outcome = Some(Outcome::Kill);
+                }
+            }
+            LineType::EndTrial => {
+                if self.fight_start.is_some() {
+                    match field(line, 4) {
+                        Some(v) if v.eq_ignore_ascii_case("T") => {
+                            self.current_fight_outcome = Some(Outcome::Kill);
+                        }
+                        Some(v) if v.eq_ignore_ascii_case("F") => {
+                            if self.current_fight_outcome.is_none() {
+                                self.current_fight_outcome = Some(Outcome::Wipe);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             LineType::Other => {}
@@ -734,8 +782,37 @@ mod tests {
         assert_eq!(r.sessions[0].start_time_ms, 1700000000000);
         assert_eq!(r.fights.len(), 1);
         assert_eq!(r.fights[0].zone_name.as_deref(), Some("Sunspire"));
+        assert_eq!(r.fights[0].difficulty, Some(Difficulty::Veteran));
         assert_eq!(r.fights[0].start_ms, 200);
         assert_eq!(r.fights[0].end_ms, 5200);
+    }
+
+    #[test]
+    fn detects_boss_death_as_kill() {
+        let log = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"10.0\"\n\
+                   100,ZONE_CHANGED,1301,\"Sunspire\",VETERAN\n\
+                   150,UNIT_ADDED,30,MONSTER,F,0,88330,T,0,0,\"Lokkestiiz\",\"\"\n\
+                   200,BEGIN_COMBAT\n\
+                   300,COMBAT_EVENT,DIED_XP,DISEASE,1,92,0,5000,100,1,0/1,30,0/100\n\
+                   400,END_COMBAT\n";
+        let r = scan_text(log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].boss_name.as_deref(), Some("Lokkestiiz"));
+        assert_eq!(r.fights[0].outcome, Some(Outcome::Kill));
+    }
+
+    #[test]
+    fn detects_end_trial_failure_as_wipe() {
+        let log = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"10.0\"\n\
+                   100,ZONE_CHANGED,1301,\"Sunspire\",NORMAL\n\
+                   150,UNIT_ADDED,30,MONSTER,F,0,88330,T,0,0,\"Yolnahkriin\",\"\"\n\
+                   200,BEGIN_COMBAT\n\
+                   300,END_TRIAL,1301,100,F,0\n\
+                   400,END_COMBAT\n";
+        let r = scan_text(log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].difficulty, Some(Difficulty::Normal));
+        assert_eq!(r.fights[0].outcome, Some(Outcome::Wipe));
     }
 
     #[test]

@@ -72,6 +72,7 @@ const LOAD_BACKOFF: Duration = Duration::from_millis(50);
 const STAGING_INFIX: &str = ".tmp-";
 /// Where a corrupt primary is set aside for inspection.
 const QUARANTINE_SUFFIX: &str = ".corrupt";
+const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
 /// Serialises [`atomic_write`] within this process so two writers (e.g. a
 /// frontend flush racing the token migration) take consistent turns.
@@ -201,10 +202,33 @@ enum PrimaryState {
     Unreadable,
 }
 
+fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)
+}
+
+fn parse_settings_map(bytes: &[u8]) -> serde_json::Result<BTreeMap<String, JsonValue>> {
+    serde_json::from_slice(strip_utf8_bom(bytes))
+}
+
+fn normalize_utf8_bom(path: &Path) {
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    let Some(stripped) = bytes.strip_prefix(UTF8_BOM) else {
+        return;
+    };
+    if parse_settings_map(stripped).is_err() {
+        return;
+    }
+    if let Err(e) = atomic_write(path, stripped) {
+        eprintln!("[settings_store] recovery: failed to strip UTF-8 BOM from {path:?}: {e}");
+    }
+}
+
 fn classify(path: &Path) -> PrimaryState {
     match fs::read(path) {
         Ok(bytes) => {
-            if serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).is_ok() {
+            if parse_settings_map(&bytes).is_ok() {
                 PrimaryState::Valid
             } else {
                 PrimaryState::Corrupt
@@ -241,6 +265,7 @@ fn recover_path(main: &Path) {
     for s in staging_files(main) {
         let _ = fs::remove_file(&s);
     }
+    normalize_utf8_bom(main);
     match classify(main) {
         PrimaryState::Corrupt => quarantine(main),
         PrimaryState::Unreadable if main.exists() => eprintln!(
@@ -271,7 +296,7 @@ pub fn recover<R: Runtime>(app: &AppHandle<R>) {
 /// primary has nothing worth protecting.
 fn primary_may_hold_settings(path: &Path) -> bool {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes)
+        Ok(bytes) => parse_settings_map(&bytes)
             .map(|m| !m.is_empty())
             .unwrap_or(false),
         Err(_) => path.exists(),
@@ -470,6 +495,29 @@ mod tests {
 
         assert_eq!(fs::read(&main).unwrap(), b"{\"new\":1}");
         assert_eq!(fs::read(&leftover).unwrap(), b"{\"leftover\":1}");
+    }
+
+    #[test]
+    fn recovery_strips_utf8_bom_without_losing_settings() {
+        let dir = temp_dir("bom-primary");
+        let main = dir.join("settings.json");
+        fs::write(
+            &main,
+            b"\xEF\xBB\xBF{\"performanceMode\":\"webview\",\"theme\":\"nordic\",\"autoUpdate\":true}",
+        )
+        .unwrap();
+
+        recover_path(&main);
+
+        let bytes = fs::read(&main).unwrap();
+        assert!(
+            !bytes.starts_with(UTF8_BOM),
+            "BOM should be stripped before plugin load"
+        );
+        let value: BTreeMap<String, JsonValue> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["performanceMode"], "webview");
+        assert_eq!(value["theme"], "nordic");
+        assert_eq!(value["autoUpdate"], true);
     }
 
     #[test]

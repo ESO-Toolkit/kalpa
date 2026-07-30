@@ -86,7 +86,55 @@ pub fn detect_log_path(addons_path: Option<&str>) -> LogPathDetection {
     }
 }
 
-/// List all `*.log` files in a directory, newest first.
+fn push_log_file(path: &Path, now: u64, files: &mut Vec<LogFileInfo>) {
+    if !path.is_file() {
+        return;
+    }
+    let is_log = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("log"))
+        .unwrap_or(false);
+    if !is_log {
+        return;
+    }
+    // Skip ESO's two non-combat `.log` files: `Interface.log` (UI/Lua/addon
+    // error log) and `client.log` (engine/connection diagnostics). Both are
+    // `.log` files but contain no `BEGIN_LOG`/combat events, so they can never
+    // become a report.
+    let is_noncombat = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case("Interface.log") || n.eq_ignore_ascii_case("client.log"))
+        .unwrap_or(false);
+    if is_noncombat {
+        return;
+    }
+
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    let modified_at_ms = modified_ms(&meta);
+    // Guard against a future-dated mtime (clock skew / VM resume): otherwise
+    // `now.saturating_sub` underflows to 0 and a long-idle log reads "active".
+    let is_active = modified_at_ms > 0
+        && modified_at_ms <= now
+        && now.saturating_sub(modified_at_ms) < ACTIVE_WINDOW_SECS * 1000;
+
+    files.push(LogFileInfo {
+        path: path.to_string_lossy().into_owned(),
+        file_name: path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        size_bytes: meta.len(),
+        modified_at_ms,
+        is_active,
+    });
+}
+
+/// List all uploadable `*.log` files in a Logs directory, newest first.
 pub fn list_log_files(logs_dir: &str) -> Result<Vec<LogFileInfo>, String> {
     let dir = Path::new(logs_dir);
     if !dir.is_dir() {
@@ -100,56 +148,21 @@ pub fn list_log_files(logs_dir: &str) -> Result<Vec<LogFileInfo>, String> {
         .map_err(|e| format!("Failed to read directory: {e}"))?
         .flatten()
     {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let is_log = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("log"))
-            .unwrap_or(false);
-        if !is_log {
-            continue;
-        }
-        // Skip ESO's two non-combat `.log` files: `Interface.log` (UI/Lua/addon
-        // error log) and `client.log` (engine/connection diagnostics). Both are
-        // `.log` files but contain no `BEGIN_LOG`/combat events, so they can never
-        // become a report — listing them is clutter and a footgun (selecting one
-        // yields an empty/failed upload). Real archived/imported combat logs keep
-        // their own names (e.g. `Archive-…-Encounter.log`) and are unaffected.
-        let is_noncombat = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| {
-                n.eq_ignore_ascii_case("Interface.log") || n.eq_ignore_ascii_case("client.log")
-            })
-            .unwrap_or(false);
-        if is_noncombat {
-            continue;
-        }
+        push_log_file(&entry.path(), now, &mut files);
+    }
 
-        let Ok(meta) = fs::metadata(&path) else {
-            continue;
-        };
-        let modified_at_ms = modified_ms(&meta);
-        // Guard against a future-dated mtime (clock skew / VM resume): otherwise
-        // `now.saturating_sub` underflows to 0 and a long-idle log reads "active".
-        let is_active = modified_at_ms > 0
-            && modified_at_ms <= now
-            && now.saturating_sub(modified_at_ms) < ACTIVE_WINDOW_SECS * 1000;
-
-        files.push(LogFileInfo {
-            path: path.to_string_lossy().into_owned(),
-            file_name: path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            size_bytes: meta.len(),
-            modified_at_ms,
-            is_active,
-        });
+    let splits = dir.join("Kalpa Splits");
+    if splits.is_dir() {
+        for folder in fs::read_dir(&splits).into_iter().flatten().flatten() {
+            let path = folder.path();
+            if path.is_file() {
+                push_log_file(&path, now, &mut files);
+            } else if path.is_dir() {
+                for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+                    push_log_file(&entry.path(), now, &mut files);
+                }
+            }
+        }
     }
 
     files.sort_by(|a, b| b.modified_at_ms.cmp(&a.modified_at_ms));
@@ -158,7 +171,26 @@ pub fn list_log_files(logs_dir: &str) -> Result<Vec<LogFileInfo>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_log_path;
+    use super::{detect_log_path, list_log_files};
+
+    #[test]
+    fn list_log_files_includes_kalpa_split_outputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join("Logs");
+        let split_dir = logs.join("Kalpa Splits").join("split-123");
+        std::fs::create_dir_all(&split_dir).unwrap();
+        std::fs::write(logs.join("Encounter.log"), b"0,BEGIN_LOG,1000\n").unwrap();
+        std::fs::write(split_dir.join("raid.log"), b"0,BEGIN_LOG,1000\n").unwrap();
+        std::fs::write(split_dir.join("Interface.log"), b"not combat").unwrap();
+
+        let files = list_log_files(&logs.to_string_lossy()).unwrap();
+        let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+
+        assert_eq!(files.len(), 2);
+        assert!(paths.iter().any(|p| p.ends_with("Encounter.log")));
+        assert!(paths.iter().any(|p| p.ends_with("raid.log")));
+        assert!(!paths.iter().any(|p| p.ends_with("Interface.log")));
+    }
 
     #[test]
     fn addon_path_detection_reports_missing_logs_dir_without_losing_expected_path() {

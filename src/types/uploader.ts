@@ -30,6 +30,9 @@ export interface LogSession {
   sizeBytes: number;
 }
 
+export type Difficulty = "veteran" | "normal";
+export type Outcome = "kill" | "wipe";
+
 export interface FightSummary {
   index: number;
   startOffset: number;
@@ -38,6 +41,8 @@ export interface FightSummary {
   endMs: number;
   zoneName: string | null;
   bossName: string | null;
+  difficulty?: Difficulty | null;
+  outcome?: Outcome | null;
 }
 
 export interface LogPreflight {
