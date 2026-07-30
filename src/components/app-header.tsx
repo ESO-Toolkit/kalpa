@@ -18,11 +18,12 @@ import {
   Tag,
   XIcon,
 } from "lucide-react";
+import { AccountChip } from "@/components/account-chip";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { isMac, modKeyLabel } from "@/lib/platform";
-import { PRESET_TAGS, type GameInstance } from "@/types";
+import { PRESET_TAGS, type AuthUser, type GameInstance } from "@/types";
 import { cn } from "@/lib/utils";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
@@ -35,6 +36,8 @@ interface AppHeaderProps {
   selectedCount: number;
   updatingAll: boolean;
   isOffline?: boolean;
+  authUser: AuthUser | null;
+  authVerifying: boolean;
   /** Detected ESO instances; the badge renders when at least one is known. */
   instances: GameInstance[];
   /** The AddOns path currently being managed (identifies the active instance). */
@@ -49,6 +52,7 @@ interface AppHeaderProps {
   onOpenSavedVars: () => void;
   onOpenSettings: () => void;
   onOpenLogUpload: () => void;
+  onAuthChange: (user: AuthUser | null) => void;
   onRefresh: () => void;
   onSwitchInstance: (path: string) => void;
 }
@@ -150,6 +154,8 @@ function AppHeaderBase({
   selectedCount,
   updatingAll,
   isOffline,
+  authUser,
+  authVerifying,
   instances,
   activeAddonsPath,
   onSwitchInstance,
@@ -163,6 +169,7 @@ function AppHeaderBase({
   onOpenSavedVars,
   onOpenSettings,
   onOpenLogUpload,
+  onAuthChange,
   onRefresh,
 }: AppHeaderProps) {
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
@@ -210,7 +217,7 @@ function AppHeaderBase({
           <div className="h-3 w-px bg-structure-12" />
           <button
             onClick={() => void openUrl("https://esotk.com")}
-            className="inline-flex items-center rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-muted-foreground cursor-pointer"
+            className="hidden cursor-pointer items-center rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-muted-foreground min-[860px]:inline-flex"
           >
             esotk.com
           </button>
@@ -378,13 +385,20 @@ function AppHeaderBase({
             <SimpleTooltip content="Upload to ESO Logs" side="bottom">
               <Button
                 variant="ghost"
-                size="icon-sm"
+                size="sm"
                 onClick={onOpenLogUpload}
                 aria-label="Upload to ESO Logs"
               >
-                <CloudUpload />
+                <CloudUpload className="size-3.5" />
+                <span className="hidden min-[860px]:inline">Upload logs</span>
               </Button>
             </SimpleTooltip>
+            <AccountChip
+              authUser={authUser}
+              authVerifying={authVerifying}
+              onAuthChange={onAuthChange}
+              onOpenLogUpload={onOpenLogUpload}
+            />
             <SimpleTooltip content="Settings" side="bottom">
               <Button variant="ghost" size="icon-sm" onClick={onOpenSettings} aria-label="Settings">
                 <SettingsIcon />

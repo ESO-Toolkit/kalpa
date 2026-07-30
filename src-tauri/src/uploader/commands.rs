@@ -1096,6 +1096,19 @@ pub fn uploader_transport_info() -> TransportInfo {
 /// warning. `async` is required: the cookie read deadlocks the WebView2 if run on
 /// a synchronous command thread (see `native::login`).
 #[tauri::command]
+pub async fn uploader_try_login_esologs_silent(
+    app: tauri::AppHandle,
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
+) -> Result<Option<super::native::login::UploadLoginResult>, String> {
+    let result = super::native::login::try_silent_login(app.clone(), &session)
+        .await
+        .map_err(|e| e.to_string());
+    if matches!(result, Ok(Some(_))) {
+        super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
+    }
+    result
+}
+#[tauri::command]
 pub async fn uploader_login_esologs(
     app: tauri::AppHandle,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,

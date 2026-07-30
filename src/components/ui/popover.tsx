@@ -29,10 +29,15 @@ function PopoverContent({
   }) {
   return (
     <PopoverPortal>
-      <PopoverPositioner side={side} sideOffset={sideOffset} align={align}>
+      {/* The z-index MUST live here, on the positioner. The positioner carries a
+          transform, which creates a stacking context — so any z-index on the
+          popup inside it is scoped to that context and cannot compete with
+          anything outside. Left on the popup alone, the popover lost to the
+          header's `relative z-20` and rendered behind the nav. */}
+      <PopoverPositioner side={side} sideOffset={sideOffset} align={align} className="z-50">
         <PopoverPopup
           className={cn(
-            "z-50 w-64 origin-(--transform-origin) rounded-xl border border-structure-08 bg-surface-overlay p-3 shadow-lg backdrop-blur-xl",
+            "relative w-64 origin-(--transform-origin) rounded-xl border border-structure-08 bg-surface-overlay p-3 shadow-lg backdrop-blur-xl",
             className
           )}
           transition={{ type: "spring", stiffness: 500, damping: 30 }}

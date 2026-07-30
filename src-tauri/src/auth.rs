@@ -2,6 +2,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +13,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const APP_AUTH_URL: &str = "https://esotk.com/app-auth";
 
 const USER_API: &str = "https://www.esologs.com/api/v2/user";
+
+static OAUTH_ATTEMPT: OnceLock<Mutex<Option<OAuthAttempt>>> = OnceLock::new();
+static NEXT_OAUTH_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+const OAUTH_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct OAuthAttempt {
+    id: u64,
+    cancel: Arc<AtomicBool>,
+}
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -154,9 +165,83 @@ mod urlencoding {
 /// 4. Website posts tokens to http://localhost:{port}/callback as JSON
 /// 5. We receive and decode the tokens
 pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
-    // Bind to random port
-    let listener =
-        TcpListener::bind("localhost:0").map_err(|e| format!("Failed to bind port: {e}"))?;
+    let (attempt_id, cancel) = begin_oauth_attempt()?;
+    let result = run_oauth_flow_attempt(&cancel);
+    finish_oauth_attempt(attempt_id);
+    result
+}
+
+pub fn cancel_oauth_flow() -> Result<bool, String> {
+    let mut guard = oauth_attempts()
+        .lock()
+        .map_err(|_| "Internal error.".to_string())?;
+    let Some(attempt) = guard.take() else {
+        return Ok(false);
+    };
+    attempt.cancel.store(true, Ordering::SeqCst);
+    Ok(true)
+}
+
+fn oauth_attempts() -> &'static Mutex<Option<OAuthAttempt>> {
+    OAUTH_ATTEMPT.get_or_init(|| Mutex::new(None))
+}
+
+fn begin_oauth_attempt() -> Result<(u64, Arc<AtomicBool>), String> {
+    let drain_started = std::time::Instant::now();
+    loop {
+        {
+            let mut guard = oauth_attempts()
+                .lock()
+                .map_err(|_| "Internal error.".to_string())?;
+            if guard.is_none() {
+                let id = NEXT_OAUTH_ATTEMPT_ID.fetch_add(1, Ordering::SeqCst);
+                let cancel = Arc::new(AtomicBool::new(false));
+                *guard = Some(OAuthAttempt {
+                    id,
+                    cancel: Arc::clone(&cancel),
+                });
+                return Ok((id, cancel));
+            }
+
+            if let Some(previous) = guard.as_ref() {
+                previous.cancel.store(true, Ordering::SeqCst);
+            }
+        }
+
+        if drain_started.elapsed() >= OAUTH_CANCEL_DRAIN_TIMEOUT {
+            return Err(
+                "A previous sign-in is still closing. Try again in a moment and use the newest ESO Logs tab; an older tab may be stale."
+                    .to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn finish_oauth_attempt(id: u64) {
+    let Ok(mut guard) = oauth_attempts().lock() else {
+        return;
+    };
+    if guard.as_ref().is_some_and(|attempt| attempt.id == id) {
+        *guard = None;
+    }
+}
+
+fn run_oauth_flow_attempt(cancel: &AtomicBool) -> Result<CallbackTokens, String> {
+    // Bind 127.0.0.1 EXPLICITLY, not "localhost".
+    //
+    // `TcpListener::bind("localhost:0")` resolves the name and binds the first
+    // address that accepts. On Windows `localhost` resolves to `::1` first, so
+    // the listener ended up IPv6-only — and the browser posting the callback to
+    // `http://localhost:{port}` could pick 127.0.0.1 and get connection refused,
+    // surfacing as "Could not connect to the desktop application."
+    //
+    // RFC 8252 §7.3 says native OAuth clients should use the IPv4 loopback
+    // literal for exactly this reason. Fall back to `::1` for the rare host with
+    // IPv4 loopback disabled, so this is strictly more permissive than before.
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .or_else(|_| TcpListener::bind(("::1", 0)))
+        .map_err(|e| format!("Failed to bind port: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("Failed to get port: {e}"))?
@@ -175,8 +260,15 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
         .map_err(|e| format!("Failed to set nonblocking: {e}"))?;
 
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("Sign-in was cancelled.".to_string());
+        }
+
         if start.elapsed() > timeout {
-            return Err("OAuth login timed out. Please try again.".to_string());
+            return Err(
+                "Sign-in timed out after 120 seconds. Try again and use the newest ESO Logs tab; an older tab may be stale."
+                    .to_string(),
+            );
         }
 
         match listener.accept() {

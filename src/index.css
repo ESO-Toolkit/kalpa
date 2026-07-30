@@ -805,7 +805,9 @@
 @media (forced-colors: active) {
   [data-slot="glass-panel"],
   [data-slot="dialog-content"],
+  [data-slot="dialog-popup"],
   [data-slot="popover-content"],
+  [data-slot="popover-popup"],
   [data-slot="select-content"] {
     border: 1px solid CanvasText;
   }

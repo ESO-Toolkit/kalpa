@@ -12,7 +12,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
-import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { cancelProfileSignIn, signInWithDirectUploadSetup } from "@/lib/account-auth";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { SearchResultListSkeleton } from "@/components/ui/skeletons";
@@ -28,6 +29,7 @@ import {
   XIcon,
   ArrowUpIcon,
   Loader2Icon,
+  XCircleIcon,
   SparklesIcon,
   FileDownIcon,
 } from "lucide-react";
@@ -165,19 +167,22 @@ export function PackCreateView({
   const [loggingIn, setLoggingIn] = useState(false);
 
   const handleLogin = async () => {
+    if (loggingIn) return;
     setLoggingIn(true);
     try {
-      const user = await invokeOrThrow<AuthUser>("auth_login");
-      onAuthChange(user);
-      toast.success(`Signed in as ${user.userName}`);
-      warnIfSessionNotPersisted(user);
-    } catch (e) {
-      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+      await signInWithDirectUploadSetup({
+        context: "packHub",
+        onAuthChange,
+      });
     } finally {
       setLoggingIn(false);
     }
   };
 
+  const handleCancelLogin = async () => {
+    await cancelProfileSignIn();
+    setLoggingIn(false);
+  };
   const handleSaveDraft = async () => {
     if (!title.trim()) {
       toast.error("Pack needs a title.");
@@ -896,21 +901,20 @@ export function PackCreateView({
                   </Button>
                 </div>
               </>
+            ) : loggingIn ? (
+              <div className="grid gap-1.5">
+                <Button variant="outline" disabled className="w-full">
+                  <Loader2Icon className="size-4 animate-spin mr-1.5" />
+                  Sign-in in progress...
+                </Button>
+                <Button variant="ghost" onClick={() => void handleCancelLogin()} className="w-full">
+                  <XCircleIcon className="size-4 mr-1.5" />
+                  Cancel sign-in
+                </Button>
+              </div>
             ) : (
-              <Button
-                variant="outline"
-                onClick={handleLogin}
-                disabled={loggingIn}
-                className="w-full"
-              >
-                {loggingIn ? (
-                  <>
-                    <Loader2Icon className="size-4 animate-spin mr-1.5" />
-                    Signing in...
-                  </>
-                ) : (
-                  "Sign in to save or publish"
-                )}
+              <Button variant="outline" onClick={handleLogin} className="w-full">
+                Sign in to save or publish
               </Button>
             )}
           </div>
