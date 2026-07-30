@@ -306,15 +306,28 @@ export function AccountChip({
                     : directReadFailed
                       ? "Kalpa could not confirm upload routing."
                       : directOptIn
-                        ? "Kalpa needs to refresh the ESO Logs upload session before direct upload can run."
+                        ? "Your ESO Logs upload session expired. Reconnect to send logs straight from Kalpa."
                         : "Uploads will use the official uploader until direct upload is restored."}
               </p>
             </div>
+            {/* "Off" must mean "you opted out", nothing else. An opted-in user
+                whose ESO Logs web session simply lapsed was being told "Off",
+                which reads as a setting they changed — so they go looking for
+                the switch they never touched. The session is a separate
+                credential from the sign-in token and expires on its own. */}
             <InfoPill
               color={directChecking ? "muted" : directReady ? "emerald" : "amber"}
               className="shrink-0 text-[10px]"
             >
-              {directChecking ? "Checking..." : directReady ? "On" : "Off"}
+              {directChecking
+                ? "Checking..."
+                : directReady
+                  ? "On"
+                  : directReadFailed
+                    ? "Unknown"
+                    : directOptIn
+                      ? "Session expired"
+                      : "Off"}
             </InfoPill>
           </div>
           {/* Only offer "enable" once we KNOW it is off. While the read is in
@@ -336,7 +349,11 @@ export function AccountChip({
                 ) : (
                   <Zap className="size-3.5" />
                 )}
-                {directEnabling ? "Opening ESO Logs..." : "Enable direct upload"}
+                {directEnabling
+                  ? "Opening ESO Logs..."
+                  : directOptIn
+                    ? "Reconnect ESO Logs"
+                    : "Enable direct upload"}
               </Button>
             </div>
           )}
