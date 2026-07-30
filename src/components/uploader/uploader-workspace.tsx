@@ -1698,7 +1698,14 @@ export function UploaderWorkspace({
               />
             )}
 
+            {/* The flat fight list is the picker's predecessor: once the picker is
+                up it shows the same fights as a selectable tree, so rendering both
+                duplicated the list AND reintroduced a capped scroller (max-h-64),
+                which at 150% text zoom is the ~250px porthole the picker exists to
+                avoid. It still earns its place while a scan is running or after one
+                fails, where it carries the only explanation of what happened. */}
             {selectedLog &&
+              !(preflight && !scanning && mode === "manual") &&
               (mode === "live" ? null : (
                 <div className={cn(WORK_PANEL, "p-3.5")}>
                   <SectionHeader className="mb-2">Fights</SectionHeader>
