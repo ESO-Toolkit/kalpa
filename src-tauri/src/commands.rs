@@ -7476,10 +7476,14 @@ fn clear_auth_and_upload_sessions(
 // ── Auth Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
+pub fn auth_cancel_login() -> Result<bool, String> {
+    auth::cancel_oauth_flow()
+}
+#[tauri::command]
 pub async fn auth_login(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
-    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
+    _upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<AuthUser, String> {
     let tokens = tokio::task::spawn_blocking(auth::login)
         .await
@@ -7504,11 +7508,9 @@ pub async fn auth_login(
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(tokens);
 
-    // The native upload cookie is a separate website session and carries no
-    // identity metadata here. Require a fresh upload login after an OAuth login
-    // so direct uploads cannot silently reuse a prior account's cookie.
-    clear_upload_session(&upload_session);
-
+    // The native upload cookie is a separate website session. Keep it across
+    // profile sign-in so the shared helper can silently reuse a completed direct
+    // upload setup and make direct upload the default route.
     Ok(user)
 }
 
@@ -7516,7 +7518,7 @@ pub async fn auth_login(
 pub async fn auth_logout(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
-    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
+    _upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<(), String> {
     // Clear in-memory state
     *state
@@ -7524,9 +7526,10 @@ pub async fn auth_logout(
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
 
-    // Clear both credential families: OAuth tokens and the separate website
-    // cookie used by direct ESO Logs uploads.
-    clear_auth_and_upload_sessions(&app, &upload_session);
+    // Explicit profile sign-out clears only OAuth tokens. The direct-upload
+    // website session is reused on the next sign-in so users do not repeat a
+    // completed capture step.
+    clear_auth_tokens(&app);
 
     Ok(())
 }

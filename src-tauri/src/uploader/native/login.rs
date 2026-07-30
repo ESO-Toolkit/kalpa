@@ -67,6 +67,11 @@ const REMEMBER_COOKIE_PREFIX: &str = "remember_web_";
 /// How long to wait for the user to complete the login before giving up.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Bound for the silent remember-me capture attempt after profile sign-in. This
+/// must stay short: if ESO Logs does not materialize an authenticated session
+/// from the persistent WebView2 profile quickly, the visible flow owns login.
+const SILENT_LOGIN_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// How often to poll the cookie jar / webview URL for login completion.
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 
@@ -254,13 +259,39 @@ pub async fn run_login<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     provider: &StoredSessionProvider,
 ) -> Result<UploadLoginResult, LoginError> {
+    run_login_window(app, provider, true, LOGIN_TIMEOUT)
+        .await
+        .map(|outcome| outcome.expect("visible login must resolve to a result"))
+}
+
+/// Try to reuse ESO Logs' persistent remember-me session without asking the user
+/// to interact. A hidden webview uses the same dedicated profile as the visible
+/// login window, waits only [`SILENT_LOGIN_TIMEOUT`], then closes. `Ok(None)`
+/// means no session appeared quickly enough and the caller should use the visible
+/// login flow if setup is still desired.
+pub async fn try_silent_login<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    provider: &StoredSessionProvider,
+) -> Result<Option<UploadLoginResult>, LoginError> {
+    run_login_window(app, provider, false, SILENT_LOGIN_TIMEOUT).await
+}
+
+async fn run_login_window<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    provider: &StoredSessionProvider,
+    visible: bool,
+    timeout: Duration,
+) -> Result<Option<UploadLoginResult>, LoginError> {
     // Concurrency guard: if a login window already exists (a prior attempt still
-    // running, or a double-invoke), don't build a second one — the fixed label
-    // would make `build()` error and the two poll loops would race the same
-    // cookie jar. Focus the existing window and let the in-flight login own it.
+    // running, or a double-invoke), don't build a second one. A visible login
+    // focuses the existing window; a silent probe just declines so it never
+    // interferes with a real user-driven login.
     if let Some(existing) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
-        let _ = existing.set_focus();
-        return Err(LoginError::AlreadyInProgress);
+        if visible {
+            let _ = existing.set_focus();
+            return Err(LoginError::AlreadyInProgress);
+        }
+        return Ok(None);
     }
 
     let url = WebviewUrl::External(
@@ -272,9 +303,10 @@ pub async fn run_login<R: tauri::Runtime>(
         .title("Sign in to ESO Logs")
         .inner_size(520.0, 720.0)
         .resizable(true)
-        .focused(true);
+        .visible(visible)
+        .focused(visible);
     // Isolate the login webview's WebView2 profile from the main app window's (B1). The
-    // cookies land in — and sign-out clears — this dedicated profile, never the shared
+    // cookies land in - and sign-out clears - this dedicated profile, never the shared
     // default (see `login_webview_data_dir`). If the app data dir can't be resolved we
     // fall back to the shared default so sign-in still works (sign-out then can't scope
     // its clear, but a blocked login is worse than a wider clear).
@@ -286,14 +318,16 @@ pub async fn run_login<R: tauri::Runtime>(
         .map_err(|e| LoginError::WindowCreation(e.to_string()))?;
 
     // Run the poll loop, ensuring the login window is closed on EVERY exit path
-    // (success or error) — a left-open window would orphan an authenticated
-    // webview and block the next login (the concurrency guard above would see it
-    // and refuse). The helper returns the outcome; we close, then propagate.
-    let outcome = poll_for_session(&app, &window, provider).await;
+    // (success or error). Silent timeout is a normal "not available" result.
+    let outcome = poll_for_session(&app, &window, provider, timeout).await;
     let _ = window.close();
-    outcome
+    match outcome {
+        Ok(result) => Ok(Some(result)),
+        Err(LoginError::TimedOut) if !visible => Ok(None),
+        Err(LoginError::WindowClosed) if !visible => Ok(None),
+        Err(error) => Err(error),
+    }
 }
-
 /// The poll loop: wait until the webview is on an authenticated (post-login)
 /// view AND carries a `laravel_session`, then capture + persist it. Separated
 /// from [`run_login`] so the caller can guarantee window cleanup on all paths.
@@ -301,6 +335,7 @@ async fn poll_for_session<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     window: &tauri::WebviewWindow<R>,
     provider: &StoredSessionProvider,
+    timeout: Duration,
 ) -> Result<UploadLoginResult, LoginError> {
     // Pre-parse the cookie-read origins once (both www + apex; see ESOLOGS_ORIGINS).
     let origins: Vec<tauri::webview::Url> = ESOLOGS_ORIGINS
@@ -383,7 +418,7 @@ async fn poll_for_session<R: tauri::Runtime>(
 
         // True wall-clock bound: counts time spent in cookie reads too, so a slow
         // WebView2 can't extend the login past the timeout.
-        if start.elapsed() >= LOGIN_TIMEOUT {
+        if start.elapsed() >= timeout {
             return Err(LoginError::TimedOut);
         }
         tokio::time::sleep(POLL_INTERVAL).await;

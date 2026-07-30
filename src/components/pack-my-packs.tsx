@@ -22,10 +22,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
+import { cancelProfileSignIn, signInWithDirectUploadSetup } from "@/lib/account-auth";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn, decodeHtml, formatRelativeDate } from "@/lib/utils";
-import { toast } from "sonner";
 import {
   PackageIcon,
   PlusIcon,
@@ -35,6 +34,7 @@ import {
   TrashIcon,
   ArrowUpIcon,
   Loader2Icon,
+  XCircleIcon,
   SearchIcon,
   XIcon,
   DownloadIcon,
@@ -94,19 +94,22 @@ export function MyPacksView({
   }, [packs, myTypeFilter, mySearchQuery]);
 
   const handleLogin = async () => {
+    if (loggingIn) return;
     setLoggingIn(true);
     try {
-      const user = await invokeOrThrow<AuthUser>("auth_login");
-      onAuthChange(user);
-      toast.success(`Signed in as ${user.userName}`);
-      warnIfSessionNotPersisted(user);
-    } catch (e) {
-      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+      await signInWithDirectUploadSetup({
+        context: "packHub",
+        onAuthChange,
+      });
     } finally {
       setLoggingIn(false);
     }
   };
 
+  const handleCancelLogin = async () => {
+    await cancelProfileSignIn();
+    setLoggingIn(false);
+  };
   // Auth gate
   if (!authUser) {
     return (
@@ -121,16 +124,22 @@ export function MyPacksView({
               Sign in with your ESO Logs account to view, edit, and manage your packs and drafts.
             </p>
           </div>
-          <Button onClick={handleLogin} disabled={loggingIn} className="mt-1">
-            {loggingIn ? (
-              <>
+          {loggingIn ? (
+            <div className="grid gap-1.5">
+              <Button disabled className="mt-1">
                 <Loader2Icon className="size-4 animate-spin mr-1.5" />
-                Signing in...
-              </>
-            ) : (
-              "Sign in with ESO Logs"
-            )}
-          </Button>
+                Sign-in in progress...
+              </Button>
+              <Button variant="ghost" onClick={() => void handleCancelLogin()}>
+                <XCircleIcon className="size-4 mr-1.5" />
+                Cancel sign-in
+              </Button>
+            </div>
+          ) : (
+            <Button onClick={handleLogin} className="mt-1">
+              Sign in with ESO Logs
+            </Button>
+          )}
         </div>
       </Fade>
     );

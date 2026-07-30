@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { CloudUpload, Loader2, LogIn, LogOut, Zap } from "lucide-react";
+import { CloudUpload, Loader2, LogIn, LogOut, XCircle, Zap } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
-import { getSettingChecked, setSettings, settingsWritesSettled } from "@/lib/store";
-import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
+import { getSettingChecked, settingsWritesSettled } from "@/lib/store";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import {
+  cancelProfileSignIn,
+  setupDirectUploadSession,
+  signInWithDirectUploadSetup,
+} from "@/lib/account-auth";
 import type { AuthUser } from "@/types";
 
 interface AccountSettingsProps {
@@ -34,40 +39,46 @@ export function AccountSettings({
   const [directOptIn, setDirectOptIn] = useState(false);
   const [directHasSession, setDirectHasSession] = useState(false);
   const [directReadFailed, setDirectReadFailed] = useState(false);
-  const [directNextStep, setDirectNextStep] = useState(false);
 
   const directReady = directOptIn && directHasSession && !directReadFailed;
 
-  const refreshDirectUploadState = useCallback(async () => {
-    if (!authUser) {
-      setDirectOptIn(false);
-      setDirectHasSession(false);
-      setDirectReadFailed(false);
-      setDirectChecking(false);
-      return;
-    }
+  // `assumeSignedIn` exists because this runs immediately after sign-in, before
+  // `authUser` has propagated — the captured value is still null, so the guard
+  // would zero the state instead of reading it, and the panel only corrected
+  // itself once reopened.
+  const refreshDirectUploadState = useCallback(
+    async (assumeSignedIn = false) => {
+      if (!authUser && !assumeSignedIn) {
+        setDirectOptIn(false);
+        setDirectHasSession(false);
+        setDirectReadFailed(false);
+        setDirectChecking(false);
+        return;
+      }
 
-    setDirectChecking(true);
-    try {
-      await settingsWritesSettled();
-      const [manual, live, hasSession] = await Promise.all([
-        getSettingChecked<boolean>("manualUseOfficialUploader", false),
-        getSettingChecked<boolean>("liveUseOfficialUploader", false),
-        invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
-      ]);
-      const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
-      const readFailed = !manual.ok || !live.ok || tainted;
-      setDirectOptIn(!readFailed && !manual.value && !live.value);
-      setDirectHasSession(hasSession);
-      setDirectReadFailed(readFailed);
-    } catch {
-      setDirectOptIn(false);
-      setDirectHasSession(false);
-      setDirectReadFailed(true);
-    } finally {
-      setDirectChecking(false);
-    }
-  }, [authUser]);
+      setDirectChecking(true);
+      try {
+        await settingsWritesSettled();
+        const [manual, live, hasSession] = await Promise.all([
+          getSettingChecked<boolean>("manualUseOfficialUploader", false),
+          getSettingChecked<boolean>("liveUseOfficialUploader", false),
+          invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        ]);
+        const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+        const readFailed = !manual.ok || !live.ok || tainted;
+        setDirectOptIn(!readFailed && !manual.value && !live.value);
+        setDirectHasSession(hasSession);
+        setDirectReadFailed(readFailed);
+      } catch {
+        setDirectOptIn(false);
+        setDirectHasSession(false);
+        setDirectReadFailed(true);
+      } finally {
+        setDirectChecking(false);
+      }
+    },
+    [authUser]
+  );
 
   useEffect(() => {
     void (async () => {
@@ -79,25 +90,29 @@ export function AccountSettings({
     if (loggingIn) return;
     setLoggingIn(true);
     try {
-      const user = await invokeOrThrow<AuthUser>("auth_login");
-      onAuthChange(user);
-      setDirectNextStep(true);
-      toast.success(`Signed in as ${user.userName}`);
-      warnIfSessionNotPersisted(user);
-    } catch (e) {
-      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+      const result = await signInWithDirectUploadSetup({
+        context: "settings",
+        onAuthChange,
+        onDirectUploadSetupComplete: () => refreshDirectUploadState(true),
+      });
+      if (result.user) {
+        await refreshDirectUploadState(true);
+      }
     } finally {
       setLoggingIn(false);
     }
   };
 
+  const handleCancelLogin = async () => {
+    await cancelProfileSignIn();
+    setLoggingIn(false);
+  };
   const handleLogout = async () => {
     if (loggingOut) return;
     setLoggingOut(true);
     try {
       await invokeOrThrow("auth_logout");
       onAuthChange(null);
-      setDirectNextStep(false);
       toast.success("Signed out of ESO Logs");
     } catch (e) {
       toast.error(`Sign out failed: ${getTauriErrorMessage(e)}`);
@@ -110,27 +125,10 @@ export function AccountSettings({
     if (directEnabling) return;
     setDirectEnabling(true);
     try {
-      const ok = await setSettings({
-        manualUseOfficialUploader: false,
-        liveUseOfficialUploader: false,
+      await setupDirectUploadSession({
+        context: "settings",
+        enableWhenSessionExists: true,
       });
-      if (!ok) {
-        toast.error("Couldn't enable direct upload - Kalpa will keep using the official uploader.");
-        return;
-      }
-
-      const result = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs");
-      warnIfSessionNotPersisted(result);
-      const hasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
-      await refreshDirectUploadState();
-      if (hasSession) {
-        setDirectNextStep(false);
-        toast.success("Direct upload ready - logs can go straight from Kalpa.");
-      } else {
-        toast.info("Direct upload is still off - Kalpa will use the official uploader.");
-      }
-    } catch (e) {
-      toast.error(`Couldn't enable direct upload: ${getTauriErrorMessage(e)}`);
       await refreshDirectUploadState();
     } finally {
       setDirectEnabling(false);
@@ -149,14 +147,28 @@ export function AccountSettings({
             updating, profiles, backups, SavedVariables - works without an account.
           </p>
         </div>
-        <Button type="button" size="sm" onClick={() => void handleLogin()} disabled={loggingIn}>
-          {loggingIn ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
+        {loggingIn ? (
+          <div className="flex flex-wrap gap-1.5">
+            <Button type="button" size="sm" disabled>
+              <Loader2 className="size-3.5 animate-spin" />
+              Sign-in in progress...
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => void handleCancelLogin()}
+            >
+              <XCircle className="size-3.5" />
+              Cancel sign-in
+            </Button>
+          </div>
+        ) : (
+          <Button type="button" size="sm" onClick={() => void handleLogin()}>
             <LogIn className="size-3.5" />
-          )}
-          Sign in with ESO Logs
-        </Button>
+            Sign in with ESO Logs
+          </Button>
+        )}
       </GlassPanel>
     );
   }
@@ -193,19 +205,20 @@ export function AccountSettings({
         One ESO Logs account powers Pack Hub and log uploads; sign-in is handled through esotk.com.
       </p>
 
-      {!directReady && (
+      {/* Same rule as the account chip: do not offer "enable" until the read has
+          actually finished. `directReady` is false while checking, so gating on
+          it alone showed an Off panel over a session that was already live. */}
+      {!directReady && !directChecking && (
         <div className="rounded-lg border border-structure-06 bg-structure-02 p-2.5">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="text-xs font-medium text-foreground">
-                {directNextStep ? "Optional next step" : "Direct upload"}
-              </p>
+              <p className="text-xs font-medium text-foreground">Direct upload</p>
               <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
                 {directReadFailed
                   ? "Kalpa could not confirm upload routing. The official uploader handoff still works."
                   : directOptIn
-                    ? "Open ESO Logs once to capture the upload session. Skipping is fine - the official uploader still works."
-                    : "Set it up for supported logs, or skip it and keep using the official uploader handoff."}
+                    ? "Kalpa needs to refresh the ESO Logs upload session before direct upload can run."
+                    : "Uploads will use the official uploader until direct upload is restored."}
               </p>
             </div>
             <InfoPill color={directChecking ? "muted" : "amber"} className="shrink-0 text-[10px]">
@@ -228,16 +241,6 @@ export function AccountSettings({
               )}
               {directEnabling ? "Opening ESO Logs..." : "Enable direct upload"}
             </Button>
-            {directNextStep && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setDirectNextStep(false)}
-              >
-                Skip for now
-              </Button>
-            )}
           </div>
         </div>
       )}

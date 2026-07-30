@@ -1,8 +1,8 @@
 // The ESO Logs uploader workspace. Full-screen dialog with a glanceable status
 // pill, Manual / Live mode tabs, an auto-detected log picker with preflight, a
 // per-fight timeline, split-to-disk for oversized logs, upload history, and a
-// first-run wizard. Uploads use the official ESO Logs uploader by default, with
-// an opt-in native direct route when the backend proves the log/session is safe.
+// first-run wizard. Direct upload is the default after sign-in when Kalpa has an
+// ESO Logs upload session, with the official uploader retained as fallback.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { Channel } from "@tauri-apps/api/core";
@@ -37,6 +37,7 @@ import {
   CircleDashed,
   Loader2,
   RotateCcw,
+  XCircle,
 } from "lucide-react";
 import {
   Dialog,
@@ -51,8 +52,13 @@ import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
-import { getSetting, getSettingChecked, setSettings, settingsWritesSettled } from "@/lib/store";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import {
+  cancelProfileSignIn,
+  setupDirectUploadSession,
+  signInWithDirectUploadSetup,
+} from "@/lib/account-auth";
+import { getSetting, getSettingChecked, settingsWritesSettled } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
@@ -332,7 +338,7 @@ export function UploaderWorkspace({
   // uploader (a separate app keeps streaming); false = native in-process (Kalpa IS
   // the uploader, Stop ends it). Drives the live dashboard's callout/copy so it's
   // accurate per session, since the same session can route either way depending on
-  // opt-in + sign-in. Set from the start dispatch's `handedOff`.
+  // direct route + upload session. Set from the start dispatch's `handedOff`.
   const [liveHandedOff, setLiveHandedOff] = useState(false);
   // (Native path) whether a logging session has anchored yet — i.e. the driver saw
   // its first BEGIN_LOG and is now streaming. Until then the native path is "armed but
@@ -480,7 +486,7 @@ export function UploaderWorkspace({
     };
   }, [applyDetectedLogs, refreshHistory]);
 
-  // Re-read the direct-upload opt-in + session presence. Called on mount and
+  // Re-read the direct-upload route + session presence. Called on mount and
   // after the user enables/signs in/out inline, so the promoted section and the
   // transport hint stay in sync with Settings and the credential store.
   const refreshNativeState = useCallback(async () => {
@@ -2851,19 +2857,22 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
   // pointed the user to Settings, which has no sign-in control — a dead end. The
   // uploader is the most common first entry point, so sign in right here.
   const handleLogin = async () => {
+    if (loggingIn) return;
     setLoggingIn(true);
     try {
-      const user = await invokeOrThrow<AuthUser>("auth_login");
-      onAuthChange(user);
-      toast.success(`Signed in as ${user.userName}`);
-      warnIfSessionNotPersisted(user);
-    } catch (e) {
-      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+      await signInWithDirectUploadSetup({
+        context: "uploader",
+        onAuthChange,
+      });
     } finally {
       setLoggingIn(false);
     }
   };
 
+  const handleCancelLogin = async () => {
+    await cancelProfileSignIn();
+    setLoggingIn(false);
+  };
   return (
     // A contained "gateway" card so signing in reads as a distinct first step,
     // not floating text. Sky-accented (an account/connection action) to set it
@@ -2887,24 +2896,41 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
         </div>
         {/* Outline (not gold): a connect action, deliberately distinct from the
             gold "Upload to ESO Logs" primary action that appears once signed in. */}
-        <Button
-          variant="outline"
-          size="lg"
-          onClick={handleLogin}
-          disabled={loggingIn}
-          className="border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
-        >
-          <LogIn className="size-4" />
-          {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
-        </Button>
+        {loggingIn ? (
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button
+              variant="outline"
+              size="lg"
+              disabled
+              className="border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky"
+            >
+              <Loader2 className="size-4 animate-spin" />
+              Sign-in in progress...
+            </Button>
+            <Button variant="ghost" size="lg" onClick={() => void handleCancelLogin()}>
+              <XCircle className="size-4" />
+              Cancel sign-in
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="outline"
+            size="lg"
+            onClick={handleLogin}
+            className="border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
+          >
+            <LogIn className="size-4" />
+            Sign in to ESO Logs
+          </Button>
+        )}
       </GlassPanel>
     </div>
   );
 }
 
-// Compact routing surface for the optional direct-upload path. The official
-// ESO Logs uploader remains the fallback whenever direct upload is off, the
-// upload session is missing, or a specific log cannot be encoded safely.
+// Compact routing surface for the direct-upload path. The official ESO Logs
+// uploader remains the fallback whenever direct upload is off, the upload session
+// is missing, or a specific log cannot be encoded safely.
 function DirectUploadSection({
   optIn,
   hasSession,
@@ -2915,77 +2941,22 @@ function DirectUploadSection({
   onChanged: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
-  const [disclosureOpen, setDisclosureOpen] = useState(false);
 
-  const handleEnable = async () => {
-    const ok = await setSettings({
-      manualUseOfficialUploader: false,
-      liveUseOfficialUploader: false,
-    });
-    if (!ok) {
-      toast.error("Couldn't enable direct upload - Kalpa will keep using the official uploader.");
-      return;
-    }
-    setDisclosureOpen(false);
-    toast.success("Direct upload enabled.");
-    await onChanged();
-  };
-
-  const handleCaptureSession = async () => {
+  const handleRepairDirectUpload = async () => {
+    if (busy) return;
     setBusy(true);
     try {
-      const result = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs");
-      toast.success("Direct upload ready - your logs now go straight from Kalpa.");
-      warnIfSessionNotPersisted(result);
+      await setupDirectUploadSession({
+        context: "uploader",
+        enableWhenSessionExists: true,
+      });
       await onChanged();
-    } catch (e) {
-      toast.error(`Couldn't turn on direct upload: ${getTauriErrorMessage(e)}`);
     } finally {
       setBusy(false);
     }
   };
 
-  if (!optIn) {
-    return (
-      <>
-        <GlassPanel
-          variant="subtle"
-          className="flex flex-col gap-3 border-status-warning-strong/30 bg-gradient-to-b from-status-warning/[0.1] to-status-warning/[0.03] p-3 shadow-[0_0_18px_color-mix(in_oklab,var(--status-warning-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_8%,transparent)] sm:flex-row sm:items-center sm:justify-between"
-        >
-          <div className="flex min-w-0 items-start gap-2.5">
-            <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-status-warning-strong/15">
-              <Zap className="size-4 text-status-warning" aria-hidden />
-            </span>
-            <div className="min-w-0 space-y-1">
-              <p className="text-sm font-semibold text-status-warning-readable">
-                Optional: direct upload from Kalpa
-              </p>
-              <p className="text-xs leading-relaxed text-foreground">
-                Skipping is fine - uploads still work through the official ESO Logs uploader. Enable
-                direct upload for supported logs; ESO Logs opens once so Kalpa can capture the
-                upload session.
-              </p>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            className="self-start sm:self-center"
-            onClick={() => setDisclosureOpen(true)}
-          >
-            <Zap className="size-3.5" />
-            Set up direct upload
-          </Button>
-        </GlassPanel>
-        <DirectUploadDisclosure
-          open={disclosureOpen}
-          onOpenChange={setDisclosureOpen}
-          onAccept={handleEnable}
-        />
-      </>
-    );
-  }
-
-  if (hasSession) {
+  if (optIn && hasSession) {
     return (
       <div className="flex items-center justify-between gap-3 rounded-lg border border-structure-08 bg-structure-03 px-3 py-1.5 shadow-[inset_0_1px_0_var(--structure-04)]">
         <div className="flex min-w-0 items-center gap-2 text-xs">
@@ -3008,75 +2979,31 @@ function DirectUploadSection({
     >
       <div className="flex min-w-0 items-start gap-2.5">
         <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-status-warning-strong/15">
-          <LogIn className="size-4 text-status-warning" aria-hidden />
+          {optIn ? (
+            <LogIn className="size-4 text-status-warning" aria-hidden />
+          ) : (
+            <Zap className="size-4 text-status-warning" aria-hidden />
+          )}
         </span>
         <div className="min-w-0 space-y-1">
-          <p className="text-sm font-semibold text-status-warning-readable">
-            Optional next step: direct upload
-          </p>
+          <p className="text-sm font-semibold text-status-warning-readable">Direct upload</p>
           <p className="text-xs leading-relaxed text-foreground">
-            Skipping is fine - uploads still work through the official uploader handoff. Open ESO
-            Logs once when you want Kalpa to capture the upload session for supported direct
-            uploads.
+            {optIn
+              ? "Kalpa needs to refresh the ESO Logs upload session before direct upload can run."
+              : "Uploads will use the official uploader until direct upload is restored."}
           </p>
         </div>
       </div>
       <Button
         size="sm"
         className="self-start sm:self-center"
-        onClick={handleCaptureSession}
+        onClick={handleRepairDirectUpload}
         disabled={busy}
       >
-        <LogIn className="size-3.5" />
-        {busy ? "Opening..." : "Open ESO Logs once"}
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Zap className="size-3.5" />}
+        {busy ? "Opening..." : "Enable direct upload"}
       </Button>
     </GlassPanel>
-  );
-}
-function DirectUploadDisclosure({
-  open,
-  onOpenChange,
-  onAccept,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onAccept: () => void | Promise<void>;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Enable direct upload?</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3 text-sm text-muted-foreground">
-          <p>
-            Direct upload sends supported logs to ESO Logs straight from Kalpa instead of opening
-            the official ESO Logs uploader. The official uploader remains the fallback.
-          </p>
-          <p>
-            Kalpa opens an ESO Logs window once to capture the upload session for this faster path.
-            That uses the same ESO Logs account, but a separate upload session from the profile
-            identity shown in the header.
-          </p>
-          <p>
-            It works by talking to ESO Logs' uploader endpoints directly - an{" "}
-            <span className="font-medium text-foreground">unofficial method</span>. The ESO Logs
-            operator has said this is fine, but it is not an officially supported integration and
-            could stop working if ESO Logs changes its uploader.
-          </p>
-          <p>
-            Kalpa only uses direct upload for logs it can encode with full accuracy. Anything else
-            falls back automatically, and you can turn direct upload off any time in Settings.
-          </p>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={() => void onAccept()}>Enable direct upload</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 function ModeTab({
@@ -3922,7 +3849,7 @@ function ManualActions({
   progress: UploadProgressState | null;
   fileName: string | null;
   transport: TransportInfo | null;
-  // The *intended* transport (opt-in + a captured session). The backend coverage
+  // The *intended* transport (direct route + a captured session). The backend coverage
   // gate still decides for real per log, so this is an honest hint, not a promise
   // — the fallback caption keeps a fallback from feeling like a bug.
   willUseNative: boolean;

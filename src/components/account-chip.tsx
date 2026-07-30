@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
-import { CloudUpload, ExternalLink, Loader2, LogIn, LogOut, Zap } from "lucide-react";
+import { CloudUpload, ExternalLink, Loader2, LogIn, LogOut, XCircle, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
 import {
@@ -12,8 +12,13 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { getSettingChecked, setSettings, settingsWritesSettled } from "@/lib/store";
-import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
+import { getSettingChecked, settingsWritesSettled } from "@/lib/store";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import {
+  cancelProfileSignIn,
+  setupDirectUploadSession,
+  signInWithDirectUploadSetup,
+} from "@/lib/account-auth";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 
@@ -56,7 +61,6 @@ export function AccountChip({
   const [directOptIn, setDirectOptIn] = useState(false);
   const [directHasSession, setDirectHasSession] = useState(false);
   const [directReadFailed, setDirectReadFailed] = useState(false);
-  const [directNextStep, setDirectNextStep] = useState(false);
 
   const signedIn = authUser !== null;
   const verifyingSignedIn = signedIn && authVerifying;
@@ -66,36 +70,43 @@ export function AccountChip({
   const sessionPersisted = authUser?.sessionPersisted;
   const directReady = directOptIn && directHasSession && !directReadFailed;
 
-  const refreshDirectUploadState = useCallback(async () => {
-    if (!signedIn) {
-      setDirectOptIn(false);
-      setDirectHasSession(false);
-      setDirectReadFailed(false);
-      setDirectChecking(false);
-      return;
-    }
+  // `assumeSignedIn` exists because this is called immediately after sign-in,
+  // before `authUser` has propagated — so the captured `signedIn` is still
+  // false and the guard below would zero the state instead of reading it. That
+  // is why the popover only showed "On" after being closed and reopened.
+  const refreshDirectUploadState = useCallback(
+    async (assumeSignedIn = false) => {
+      if (!signedIn && !assumeSignedIn) {
+        setDirectOptIn(false);
+        setDirectHasSession(false);
+        setDirectReadFailed(false);
+        setDirectChecking(false);
+        return;
+      }
 
-    setDirectChecking(true);
-    try {
-      await settingsWritesSettled();
-      const [manual, live, hasSession] = await Promise.all([
-        getSettingChecked<boolean>("manualUseOfficialUploader", false),
-        getSettingChecked<boolean>("liveUseOfficialUploader", false),
-        invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
-      ]);
-      const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
-      const readFailed = !manual.ok || !live.ok || tainted;
-      setDirectOptIn(!readFailed && !manual.value && !live.value);
-      setDirectHasSession(hasSession);
-      setDirectReadFailed(readFailed);
-    } catch {
-      setDirectOptIn(false);
-      setDirectHasSession(false);
-      setDirectReadFailed(true);
-    } finally {
-      setDirectChecking(false);
-    }
-  }, [signedIn]);
+      setDirectChecking(true);
+      try {
+        await settingsWritesSettled();
+        const [manual, live, hasSession] = await Promise.all([
+          getSettingChecked<boolean>("manualUseOfficialUploader", false),
+          getSettingChecked<boolean>("liveUseOfficialUploader", false),
+          invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        ]);
+        const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+        const readFailed = !manual.ok || !live.ok || tainted;
+        setDirectOptIn(!readFailed && !manual.value && !live.value);
+        setDirectHasSession(hasSession);
+        setDirectReadFailed(readFailed);
+      } catch {
+        setDirectOptIn(false);
+        setDirectHasSession(false);
+        setDirectReadFailed(true);
+      } finally {
+        setDirectChecking(false);
+      }
+    },
+    [signedIn]
+  );
 
   const chipClassName = useMemo(
     () =>
@@ -125,19 +136,25 @@ export function AccountChip({
     if (loggingIn) return;
     setLoggingIn(true);
     try {
-      const user = await invokeOrThrow<AuthUser>("auth_login");
-      onAuthChange(user);
-      setDirectNextStep(true);
-      setOpen(true);
-      toast.success(`Signed in as ${user.userName}`);
-      warnIfSessionNotPersisted(user);
-    } catch (e) {
-      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+      const result = await signInWithDirectUploadSetup({
+        context: "account",
+        onAuthChange,
+        // Pass assumeSignedIn: these fire before `authUser` has propagated, so
+        // the closure's `signedIn` is still false and would zero the state.
+        onDirectUploadSetupComplete: () => refreshDirectUploadState(true),
+      });
+      if (result.user) {
+        await refreshDirectUploadState(true);
+      }
     } finally {
       setLoggingIn(false);
     }
   };
 
+  const handleCancelLogin = async () => {
+    await cancelProfileSignIn();
+    setLoggingIn(false);
+  };
   const handleLogout = async () => {
     if (loggingOut) return;
     setLoggingOut(true);
@@ -157,27 +174,10 @@ export function AccountChip({
     if (directEnabling) return;
     setDirectEnabling(true);
     try {
-      const ok = await setSettings({
-        manualUseOfficialUploader: false,
-        liveUseOfficialUploader: false,
+      await setupDirectUploadSession({
+        context: "account",
+        enableWhenSessionExists: true,
       });
-      if (!ok) {
-        toast.error("Couldn't enable direct upload - Kalpa will keep using the official uploader.");
-        return;
-      }
-
-      const result = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs");
-      warnIfSessionNotPersisted(result);
-      const hasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
-      await refreshDirectUploadState();
-      if (hasSession) {
-        setDirectNextStep(false);
-        toast.success("Direct upload ready - logs can go straight from Kalpa.");
-      } else {
-        toast.info("Direct upload is still off - Kalpa will use the official uploader.");
-      }
-    } catch (e) {
-      toast.error(`Couldn't enable direct upload: ${getTauriErrorMessage(e)}`);
       await refreshDirectUploadState();
     } finally {
       setDirectEnabling(false);
@@ -186,7 +186,6 @@ export function AccountChip({
 
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
-    if (!nextOpen) setDirectNextStep(false);
   };
 
   if (!signedIn) {
@@ -198,6 +197,7 @@ export function AccountChip({
             aria-label="ESO Logs account sign-in"
             aria-haspopup="dialog"
             aria-expanded={open}
+            aria-busy={loggingIn}
           >
             {loggingIn ? <Loader2 className="size-3 animate-spin" /> : <LogIn className="size-3" />}
             <span className="hidden min-[860px]:inline">ESO Logs</span>
@@ -213,20 +213,34 @@ export function AccountChip({
           <p className="text-xs text-muted-foreground">
             Installing, updating, profiles, backups and SavedVariables work without signing in.
           </p>
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => void handleLogin()}
-            disabled={loggingIn}
-            className="w-full justify-start"
-          >
-            {loggingIn ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
+          {loggingIn ? (
+            <div className="grid gap-1.5">
+              <Button type="button" size="sm" disabled className="w-full justify-start">
+                <Loader2 className="size-3.5 animate-spin" />
+                Sign-in in progress...
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleCancelLogin()}
+                className="w-full justify-start"
+              >
+                <XCircle className="size-3.5" />
+                Cancel sign-in
+              </Button>
+            </div>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void handleLogin()}
+              className="w-full justify-start"
+            >
               <LogIn className="size-3.5" />
-            )}
-            {loggingIn ? "Opening ESO Logs..." : "Sign in with ESO Logs"}
-          </Button>
+              Sign in with ESO Logs
+            </Button>
+          )}
         </PopoverContent>
       </Popover>
     );
@@ -283,17 +297,17 @@ export function AccountChip({
         <div className="rounded-lg border border-structure-06 bg-structure-02 p-2.5">
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="text-xs font-medium text-foreground">
-                {directNextStep && !directReady ? "Optional next step" : "Direct upload"}
-              </p>
+              <p className="text-xs font-medium text-foreground">Direct upload</p>
               <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
-                {directReady
-                  ? "Logs can go straight from Kalpa."
-                  : directReadFailed
-                    ? "Kalpa could not confirm upload routing."
-                    : directOptIn
-                      ? "Open ESO Logs once to capture the upload session. Skipping is fine - the official uploader still works."
-                      : "Set it up for supported logs, or skip it and keep using the official uploader handoff."}
+                {directChecking
+                  ? "Checking upload routing..."
+                  : directReady
+                    ? "Logs can go straight from Kalpa."
+                    : directReadFailed
+                      ? "Kalpa could not confirm upload routing."
+                      : directOptIn
+                        ? "Kalpa needs to refresh the ESO Logs upload session before direct upload can run."
+                        : "Uploads will use the official uploader until direct upload is restored."}
               </p>
             </div>
             <InfoPill
@@ -303,14 +317,18 @@ export function AccountChip({
               {directChecking ? "Checking..." : directReady ? "On" : "Off"}
             </InfoPill>
           </div>
-          {!directReady && (
+          {/* Only offer "enable" once we KNOW it is off. While the read is in
+              flight `directReady` is false, so gating on that alone rendered
+              "Checking..." next to an Enable button and told users to switch on
+              something that was already on. */}
+          {!directReady && !directChecking && (
             <div className="mt-2 flex gap-1.5">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => void handleEnableDirectUpload()}
-                disabled={directChecking || directEnabling}
+                disabled={directEnabling}
                 className="min-w-0 flex-1 justify-start"
               >
                 {directEnabling ? (
@@ -320,17 +338,6 @@ export function AccountChip({
                 )}
                 {directEnabling ? "Opening ESO Logs..." : "Enable direct upload"}
               </Button>
-              {directNextStep && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setDirectNextStep(false)}
-                  className="shrink-0"
-                >
-                  Skip
-                </Button>
-              )}
             </div>
           )}
         </div>
