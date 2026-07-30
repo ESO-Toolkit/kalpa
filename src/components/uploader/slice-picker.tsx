@@ -1,0 +1,1064 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { AlertTriangle, ChevronDown, ChevronRight, Scissors, Upload, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { InfoPill } from "@/components/ui/info-pill";
+import { Input } from "@/components/ui/input";
+import { ProgressBar } from "@/components/ui/progress-bar";
+import { SectionHeader } from "@/components/ui/section-header";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { cn } from "@/lib/utils";
+import type {
+  FightSelection,
+  FightSummary,
+  LogPreflight,
+  LogSession,
+  SplitSelection,
+  UploadDispatch,
+  UploadProgressEvent,
+  Visibility,
+} from "@/types/uploader";
+import { dominantZone, suggestFightName, suggestSplitName } from "./naming";
+import {
+  compactBytes,
+  fightLabel,
+  formatDuration,
+  primaryReportUrlForOpen,
+} from "./uploader-shared";
+
+type CheckState = "none" | "some" | "all";
+type CommitMode = "save" | "upload";
+type WorkPhase = "idle" | "preparing" | "uploading" | "partial";
+type WholeSelection = Set<number>;
+type FightSelectionMap = Map<number, Set<number>>;
+
+interface PlannedReport {
+  id: string;
+  session: LogSession;
+  fights: FightSummary[];
+  kind: "whole" | "single-fight" | "subset";
+  fightCount: number;
+  sizeBytes: number;
+  suggestedName: string;
+  zone: string | null;
+  label: string;
+}
+
+export interface SplitUploadRequest {
+  filePath: string;
+  fightCount: number;
+  zone: string | null;
+  onProgress: (event: UploadProgressEvent) => void;
+}
+
+export function SlicePicker({
+  filePath,
+  fileName,
+  preflight,
+  isSignedIn,
+  visibility,
+  onSignIn,
+  onRescan,
+  onFilesWritten,
+  onUploadPreparedLog,
+}: {
+  filePath: string;
+  fileName: string;
+  preflight: LogPreflight;
+  isSignedIn: boolean;
+  visibility: Visibility;
+  onSignIn: () => Promise<void> | void;
+  onRescan: () => Promise<void> | void;
+  onFilesWritten: () => Promise<void> | void;
+  onUploadPreparedLog: (request: SplitUploadRequest) => Promise<UploadDispatch>;
+}) {
+  const sessions = preflight.sessions;
+  const fights = preflight.fights;
+  const omitted = preflight.fightsOmitted;
+  const fightsBySession = useMemo(() => mapFightsBySession(sessions, fights), [sessions, fights]);
+  const defaultState = useMemo(
+    () => buildDefaultState(sessions, fightsBySession, omitted),
+    [sessions, fightsBySession, omitted]
+  );
+
+  const [selectedFights, setSelectedFights] = useState<FightSelectionMap>(defaultState.fights);
+  const [wholeSessions, setWholeSessions] = useState<WholeSelection>(defaultState.whole);
+  const [expanded, setExpanded] = useState<Set<number>>(defaultState.expanded);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
+  const [phase, setPhase] = useState<WorkPhase>("idle");
+  const [progressValue, setProgressValue] = useState(0);
+  const [progressMax, setProgressMax] = useState(1);
+  const [progressText, setProgressText] = useState("");
+  const [partialMessage, setPartialMessage] = useState<string | null>(null);
+  const [partialFiles, setPartialFiles] = useState<{ path: string; plan: PlannedReport }[]>([]);
+  const [stale, setStale] = useState(false);
+  const stopRequestedRef = useRef(false);
+  const stopButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (phase === "preparing" || phase === "uploading") stopButtonRef.current?.focus();
+  }, [phase]);
+
+  const noFightsAtAll = preflight.totalFights === 0 && !omitted;
+  const plans = useMemo(
+    () => buildPlan(sessions, fightsBySession, selectedFights, wholeSessions),
+    [sessions, fightsBySession, selectedFights, wholeSessions]
+  );
+  const selectedFightCount = plans.reduce((sum, p) => sum + p.fightCount, 0);
+  const selectedSize = plans.reduce((sum, p) => sum + p.sizeBytes, 0);
+  const controlsDisabled = phase === "preparing" || phase === "uploading";
+  const allOmitted = omitted && sessions.length > 0 && fights.length === 0;
+  const bossKillsDegraded = fights.length > 0 && fights.every((f) => f.outcome == null);
+  const bossKillsDisabled = allOmitted;
+
+  const resetToDefault = () => {
+    setSelectedFights(cloneFightMap(defaultState.fights));
+    setWholeSessions(new Set(defaultState.whole));
+    setExpanded(new Set(defaultState.expanded));
+    setNameDrafts({});
+    setRenameOpen(false);
+  };
+
+  const setSessionChecked = (session: LogSession, checked: boolean) => {
+    const inFights = fightsBySession.get(session.index) ?? [];
+    if (omitted || inFights.length === 0) {
+      setWholeSessions((prev) => toggleSet(prev, session.index, checked));
+      return;
+    }
+    setSelectedFights((prev) => {
+      const next = cloneFightMap(prev);
+      if (checked) next.set(session.index, new Set(inFights.map((f) => f.index)));
+      else next.delete(session.index);
+      return next;
+    });
+  };
+
+  const setFightChecked = (session: LogSession, fight: FightSummary, checked: boolean) => {
+    setSelectedFights((prev) => {
+      const next = cloneFightMap(prev);
+      const set = new Set(next.get(session.index) ?? []);
+      if (checked) set.add(fight.index);
+      else set.delete(fight.index);
+      if (set.size > 0) next.set(session.index, set);
+      else next.delete(session.index);
+      return next;
+    });
+  };
+  const applyBossKills = () => {
+    if (bossKillsDisabled) return;
+    const nextFights: FightSelectionMap = new Map();
+    for (const session of sessions) {
+      const inFights = fightsBySession.get(session.index) ?? [];
+      const selected = inFights.filter((f) => {
+        if (!f.bossName) return false;
+        return bossKillsDegraded ? true : f.outcome === "kill";
+      });
+      if (selected.length > 0) nextFights.set(session.index, new Set(selected.map((f) => f.index)));
+    }
+    setWholeSessions(new Set());
+    setSelectedFights(nextFights);
+    setExpanded(new Set(Array.from(nextFights.keys())));
+  };
+
+  const applyWholeLog = () => {
+    const nextFights: FightSelectionMap = new Map();
+    const nextWhole = new Set<number>();
+    const nextExpanded = new Set<number>();
+    for (const session of sessions) {
+      const inFights = fightsBySession.get(session.index) ?? [];
+      if (omitted || inFights.length === 0) nextWhole.add(session.index);
+      else nextFights.set(session.index, new Set(inFights.map((f) => f.index)));
+      nextExpanded.add(session.index);
+    }
+    setSelectedFights(nextFights);
+    setWholeSessions(nextWhole);
+    setExpanded(nextExpanded);
+  };
+
+  const clearAll = () => {
+    setSelectedFights(new Map());
+    setWholeSessions(new Set());
+    setExpanded(new Set());
+  };
+
+  const nameForPlan = (plan: PlannedReport): string | null => {
+    const draft = nameDrafts[plan.id];
+    if (draft === undefined) return plan.suggestedName;
+    return draft.trim() || null;
+  };
+
+  const showPartial = (
+    done: number,
+    total: number,
+    reason: string,
+    files: { path: string; plan: PlannedReport }[]
+  ) => {
+    setPhase("partial");
+    setPartialFiles(files);
+    setPartialMessage(
+      `Kalpa finished ${done} of ${total} file${total === 1 ? "" : "s"} before ${reason}. The finished files are safe and ready to upload.`
+    );
+  };
+
+  const uploadPartialFiles = async (files: { path: string; plan: PlannedReport }[]) => {
+    if (files.length === 0) return;
+    if (!isSignedIn) {
+      await onSignIn();
+      return;
+    }
+    stopRequestedRef.current = false;
+    setPhase("uploading");
+    setProgressMax(files.length);
+    setProgressValue(0);
+    let uploaded = 0;
+    try {
+      for (let i = 0; i < files.length; i++) {
+        if (stopRequestedRef.current) break;
+        const item = files[i]!;
+        const uploadName = basename(item.path);
+        setProgressText(`Uploading report ${i + 1} of ${files.length} - ${uploadName}`);
+        const dispatch = await onUploadPreparedLog({
+          filePath: item.path,
+          fightCount: item.plan.fightCount,
+          zone: item.plan.zone,
+          onProgress: () => {
+            setProgressText(`Uploading report ${i + 1} of ${files.length} - ${uploadName}`);
+          },
+        });
+        uploaded += 1;
+        setProgressValue(uploaded);
+        if (dispatch.report) {
+          toast.success(`Report ready - ${uploadName}`, {
+            duration: 9000,
+            action: {
+              label: "Open report",
+              onClick: () => void openReport(dispatch.report!, visibility),
+            },
+            cancel: { label: "Show in folder", onClick: () => void showInFolder(item.path) },
+          });
+        } else {
+          toast.success(dispatch.detail || `Report handed off - ${uploadName}`, { duration: 9000 });
+        }
+      }
+      await onFilesWritten();
+      if (uploaded < files.length)
+        showPartial(uploaded, files.length, "stopping", files.slice(0, uploaded));
+      else setPhase("idle");
+    } catch (error) {
+      showPartial(uploaded, files.length, getTauriErrorMessage(error), files.slice(0, uploaded));
+    }
+  };
+  const commit = async (mode: CommitMode) => {
+    if (mode === "upload" && !isSignedIn) {
+      await onSignIn();
+      return;
+    }
+    if (plans.length === 0 || noFightsAtAll) return;
+    stopRequestedRef.current = false;
+    setPartialMessage(null);
+    setStale(false);
+    const writtenFiles: { path: string; plan: PlannedReport }[] = [];
+
+    try {
+      setPhase("preparing");
+      const totalBytes = Math.max(
+        1,
+        plans.reduce((sum, p) => sum + p.sizeBytes, 0)
+      );
+      let copiedBytes = 0;
+      setProgressMax(totalBytes);
+      setProgressValue(0);
+      for (let i = 0; i < plans.length; i++) {
+        if (stopRequestedRef.current) break;
+        const plan = plans[i]!;
+        setProgressText(
+          `Preparing report ${i + 1} of ${plans.length} - 0 of ${compactBytes(plan.sizeBytes)}`
+        );
+        const paths = await writePlan(filePath, preflight, plan, nameForPlan(plan));
+        copiedBytes += plan.sizeBytes;
+        setProgressValue(Math.min(totalBytes, copiedBytes));
+        setProgressText(
+          `Preparing report ${i + 1} of ${plans.length} - ${compactBytes(plan.sizeBytes)} of ${compactBytes(plan.sizeBytes)}`
+        );
+        if (paths[0]) writtenFiles.push({ path: paths[0], plan });
+      }
+      await onFilesWritten();
+
+      if (stopRequestedRef.current || writtenFiles.length < plans.length) {
+        showPartial(writtenFiles.length, plans.length, "stopping", writtenFiles);
+        return;
+      }
+
+      if (mode === "save") {
+        setPhase("idle");
+        toast.success("Saved. Your files are in Kalpa Splits whenever you're ready.", {
+          duration: 7000,
+          action: writtenFiles[0]
+            ? { label: "Show in folder", onClick: () => void showInFolder(writtenFiles[0]!.path) }
+            : undefined,
+        });
+        return;
+      }
+
+      setPhase("uploading");
+      setProgressMax(writtenFiles.length);
+      setProgressValue(0);
+      let uploaded = 0;
+      for (let i = 0; i < writtenFiles.length; i++) {
+        if (stopRequestedRef.current) break;
+        const item = writtenFiles[i]!;
+        const uploadName = basename(item.path);
+        setProgressText(`Uploading report ${i + 1} of ${writtenFiles.length} - ${uploadName}`);
+        const dispatch = await onUploadPreparedLog({
+          filePath: item.path,
+          fightCount: item.plan.fightCount,
+          zone: item.plan.zone,
+          onProgress: () => {
+            setProgressText(`Uploading report ${i + 1} of ${writtenFiles.length} - ${uploadName}`);
+          },
+        });
+        uploaded += 1;
+        setProgressValue(uploaded);
+        if (dispatch.report) {
+          toast.success(`Report ready - ${uploadName}`, {
+            duration: 9000,
+            action: {
+              label: "Open report",
+              onClick: () => void openReport(dispatch.report!, visibility),
+            },
+            cancel: { label: "Show in folder", onClick: () => void showInFolder(item.path) },
+          });
+        } else {
+          toast.success(dispatch.detail || `Report handed off - ${uploadName}`, {
+            duration: 9000,
+            action: { label: "Show in folder", onClick: () => void showInFolder(item.path) },
+          });
+        }
+      }
+      await onFilesWritten();
+      if (uploaded < writtenFiles.length) {
+        showPartial(uploaded, writtenFiles.length, "stopping", writtenFiles.slice(0, uploaded));
+        return;
+      }
+      setPhase("idle");
+      resetToDefault();
+    } catch (error) {
+      const message = getTauriErrorMessage(error);
+      if (/log changed since it was scanned|log changed while/i.test(message)) setStale(true);
+      if (writtenFiles.length > 0)
+        showPartial(writtenFiles.length, plans.length, message, writtenFiles);
+      else {
+        setPhase("idle");
+        toast.error(`Kalpa couldn't finish cutting the file. Nothing was uploaded. ${message}`);
+      }
+    }
+  };
+  return (
+    <div className="space-y-3">
+      <GlassPanel
+        variant="default"
+        className={cn(
+          "border-l-[3px] p-3",
+          preflight.recommendSplit ? "border-l-status-warning" : "border-l-accent-sky"
+        )}
+      >
+        <div className="space-y-3">
+          <div className="min-w-0 space-y-1">
+            <SectionHeader className="flex items-center gap-2 text-foreground">
+              <Scissors className="size-3.5" aria-hidden /> Upload part of this log
+            </SectionHeader>
+            <p
+              className={cn(
+                "text-xs",
+                preflight.recommendSplit ? "text-status-warning" : "text-muted-foreground"
+              )}
+            >
+              {preflight.recommendSplit
+                ? "This log is too big for one report - pick part of it. "
+                : ""}
+              {fileName} - {compactBytes(preflight.sizeBytes)} - {sessions.length} night
+              {sessions.length === 1 ? "" : "s"} - {preflight.totalFights} fight
+              {preflight.totalFights === 1 ? "" : "s"}
+            </p>
+            {stale && (
+              <Alert className="mt-2 border-status-warning/30 bg-status-warning/[0.06]">
+                <AlertTriangle className="size-4 text-status-warning" aria-hidden />
+                <AlertTitle>This log changed while you were choosing</AlertTitle>
+                <AlertDescription>
+                  The game probably wrote new combat. Rescan before uploading this slice.
+                </AlertDescription>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={() => void onRescan()}
+                >
+                  Rescan
+                </Button>
+              </Alert>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={resetToDefault}
+              disabled={controlsDisabled}
+            >
+              Tonight's raid
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={applyBossKills}
+              disabled={controlsDisabled || bossKillsDisabled}
+              aria-label={
+                bossKillsDegraded
+                  ? "Boss kills only (kills unknown for this log - selecting all boss fights)"
+                  : "Boss kills only"
+              }
+            >
+              Boss kills only
+            </Button>
+            <Button variant="outline" size="sm" onClick={applyWholeLog} disabled={controlsDisabled}>
+              Whole log
+            </Button>
+            <Button variant="outline" size="sm" onClick={clearAll} disabled={controlsDisabled}>
+              Clear
+            </Button>
+            {bossKillsDisabled && (
+              <span className="text-xs text-muted-foreground">
+                Boss kills are unavailable because fights were not listed.
+              </span>
+            )}
+          </div>
+
+          <div className="border-t border-white/[0.06] pt-2" aria-busy={controlsDisabled}>
+            {noFightsAtAll ? (
+              <Alert>
+                <AlertTriangle className="size-4" aria-hidden />
+                <AlertTitle>No fights in this file yet</AlertTitle>
+                <AlertDescription>
+                  In game, type /encounterlog to start recording combat, then check back.
+                </AlertDescription>
+              </Alert>
+            ) : sessions.length === 0 ? (
+              <Alert>
+                <AlertTriangle className="size-4" aria-hidden />
+                <AlertTitle>No logging sessions found</AlertTitle>
+                <AlertDescription>
+                  This file does not contain a session Kalpa can split.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <div className="space-y-0">
+                {sessions.map((session) => {
+                  const inFights = fightsBySession.get(session.index) ?? [];
+                  return (
+                    <SessionGroup
+                      key={session.index}
+                      session={session}
+                      fights={inFights}
+                      omitted={omitted}
+                      expanded={expanded.has(session.index)}
+                      disabled={controlsDisabled}
+                      wholeSelected={wholeSessions.has(session.index)}
+                      selected={selectedFights.get(session.index) ?? new Set()}
+                      onToggleExpanded={() =>
+                        setExpanded((prev) =>
+                          toggleSet(prev, session.index, !prev.has(session.index))
+                        )
+                      }
+                      onSessionChecked={(checked) => setSessionChecked(session, checked)}
+                      onFightChecked={(fight, checked) => setFightChecked(session, fight, checked)}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </GlassPanel>
+
+      <GlassPanel
+        variant="primary"
+        className="sticky bottom-0 z-10 p-3 shadow-[0_-10px_30px_-20px_var(--scrim-80)]"
+      >
+        <div className="space-y-2">
+          <div className="space-y-1" aria-live="polite">
+            {phase === "preparing" || phase === "uploading" ? (
+              <>
+                <p className="text-sm text-foreground">{progressText}</p>
+                <ProgressBar value={progressValue} max={progressMax} label={progressText} />
+                {phase === "preparing" && (
+                  <p className="text-xs text-muted-foreground">
+                    Big files take a minute - Kalpa is copying only the parts you picked.
+                  </p>
+                )}
+              </>
+            ) : phase === "partial" && partialMessage ? (
+              <p className="text-sm text-foreground">{partialMessage}</p>
+            ) : plans.length === 0 || noFightsAtAll ? (
+              <p className="text-sm text-foreground">
+                Nothing picked - tick a fight or a night above.
+              </p>
+            ) : (
+              <p className="text-sm text-foreground">
+                {plans.length} report{plans.length === 1 ? "" : "s"} - {selectedFightCount} fight
+                {selectedFightCount === 1 ? "" : "s"} - ~{compactBytes(selectedSize)}
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Fights you pick from the same night go into one report.
+            </p>
+          </div>
+
+          {plans.length > 0 && phase === "idle" && (
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span
+                className="min-w-0 flex-1 truncate"
+                title={plans.map((p) => `${nameForPlan(p) ?? p.suggestedName}.log`).join(" - ")}
+              >
+                {plans.map((p) => `${nameForPlan(p) ?? p.suggestedName}.log`).join(" - ")}
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-expanded={renameOpen}
+                onClick={() => setRenameOpen((open) => !open)}
+              >
+                Rename...
+              </Button>
+            </div>
+          )}
+
+          {renameOpen && phase === "idle" && plans.length > 0 && (
+            <div className="grid gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 sm:grid-cols-2">
+              {plans.map((plan) => (
+                <Input
+                  key={plan.id}
+                  value={nameDrafts[plan.id] ?? plan.suggestedName}
+                  onChange={(event) =>
+                    setNameDrafts((prev) => ({ ...prev, [plan.id]: event.target.value }))
+                  }
+                  aria-label={`File name for ${plan.label}`}
+                  className="h-8 text-xs"
+                />
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {phase === "preparing" || phase === "uploading" ? (
+              <Button
+                ref={stopButtonRef}
+                variant="ghost"
+                size="sm"
+                onClick={() => (stopRequestedRef.current = true)}
+              >
+                <X className="size-3.5" /> Stop
+              </Button>
+            ) : phase === "partial" ? (
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={() => void commit("upload")}>
+                  Try again
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void uploadPartialFiles(partialFiles)}
+                  disabled={partialFiles.length === 0}
+                >
+                  Upload the {partialFiles.length} finished file
+                  {partialFiles.length === 1 ? "" : "s"}
+                </Button>
+              </div>
+            ) : (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={plans.length === 0 || noFightsAtAll}
+                  onClick={() => void commit("save")}
+                >
+                  Save without uploading
+                </Button>
+                <Button
+                  disabled={plans.length === 0 || noFightsAtAll}
+                  onClick={() => void commit("upload")}
+                >
+                  {isSignedIn ? <Upload className="size-3.5" /> : null}
+                  {isSignedIn
+                    ? `Upload ${plans.length} report${plans.length === 1 ? "" : "s"}`
+                    : "Sign in to upload"}
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      </GlassPanel>
+    </div>
+  );
+}
+function SessionGroup({
+  session,
+  fights,
+  omitted,
+  expanded,
+  disabled,
+  wholeSelected,
+  selected,
+  onToggleExpanded,
+  onSessionChecked,
+  onFightChecked,
+}: {
+  session: LogSession;
+  fights: FightSummary[];
+  omitted: boolean;
+  expanded: boolean;
+  disabled: boolean;
+  wholeSelected: boolean;
+  selected: Set<number>;
+  onToggleExpanded: () => void;
+  onSessionChecked: (checked: boolean) => void;
+  onFightChecked: (fight: FightSummary, checked: boolean) => void;
+}) {
+  const state = sessionCheckState(fights, omitted, wholeSelected, selected);
+  const headerId = `slice-session-${session.index}`;
+  const groupId = `slice-session-fights-${session.index}`;
+  const realm = session.realm?.replace(/megaserver/i, "").trim() || null;
+  const killCount = fights.filter((f) => f.outcome === "kill").length;
+  const bossFights = fights.filter((f) => f.bossName);
+  const allVeteran = bossFights.length > 0 && bossFights.every((f) => f.difficulty === "veteran");
+  const dominant = dominantZone(fights);
+  const hasChildren = !omitted && fights.length > 0;
+  const noFights = !omitted && fights.length === 0;
+  const attempts = attemptOrdinals(fights);
+
+  return (
+    <div className="border-t border-white/[0.06] first:border-t-0">
+      <div className="flex min-h-11 items-start gap-2 py-2">
+        <Checkbox
+          checked={state === "all"}
+          indeterminate={state === "some"}
+          disabled={disabled}
+          aria-label={`Include ${sessionLabel(session)}`}
+          onCheckedChange={() => onSessionChecked(state !== "all")}
+          className="mt-1"
+        />
+        {hasChildren ? (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            disabled={disabled}
+            aria-expanded={expanded}
+            aria-controls={groupId}
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${sessionLabel(session)}`}
+            onClick={onToggleExpanded}
+          >
+            {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+          </Button>
+        ) : (
+          <span className="size-7 shrink-0" aria-hidden />
+        )}
+        <button
+          type="button"
+          disabled={!hasChildren || disabled}
+          onClick={onToggleExpanded}
+          className="min-w-0 flex-1 text-left disabled:cursor-default"
+        >
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              id={headerId}
+              className="font-heading text-[11px] font-bold tracking-[0.05em] text-foreground uppercase"
+            >
+              {sessionLabel(session)}
+            </span>
+            {dominant ? <span className="truncate text-xs text-foreground">{dominant}</span> : null}
+            {noFights ? (
+              <span className="text-xs text-muted-foreground">No fights recorded</span>
+            ) : null}
+            {allVeteran ? (
+              <InfoPill color="gold" aria-label="Veteran">
+                VET
+              </InfoPill>
+            ) : null}
+            {realm ? <InfoPill color="muted">{realm}</InfoPill> : null}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span>
+              {session.fightCount} fight{session.fightCount === 1 ? "" : "s"}
+            </span>
+            <span>-</span>
+            <span>
+              <span className="text-foreground">
+                {killCount} kill{killCount === 1 ? "" : "s"}
+              </span>
+            </span>
+            <span>-</span>
+            <span>{compactBytes(session.sizeBytes)}</span>
+          </div>
+          {omitted && (
+            <div className="mt-1 text-xs text-muted-foreground">
+              Too big to list every fight - uploads as one whole night.
+            </div>
+          )}
+        </button>
+      </div>
+      {hasChildren && expanded && (
+        <div id={groupId} role="group" aria-labelledby={headerId} className="pb-1">
+          {fights.map((fight) => (
+            <FightRow
+              key={fight.index}
+              fight={fight}
+              selected={selected.has(fight.index)}
+              disabled={disabled}
+              ordinal={attempts.get(fight.index)}
+              onCheckedChange={(checked) => onFightChecked(fight, checked)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FightRow({
+  fight,
+  selected,
+  disabled,
+  ordinal,
+  onCheckedChange,
+}: {
+  fight: FightSummary;
+  selected: boolean;
+  disabled: boolean;
+  ordinal?: { position: number; total: number };
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  const outcome = fight.outcome ?? null;
+  const isKill = outcome === "kill";
+  const isWipe = outcome === "wipe";
+  const isTrash = !fight.bossName;
+  const durationMs = Math.max(0, fight.endMs - fight.startMs);
+  const name = fightName(fight, ordinal);
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 border-l-[3px] px-2 transition-colors duration-150",
+        isTrash ? "min-h-7 py-1" : "min-h-10 py-2",
+        selected ? "bg-accent-sky/[0.04]" : isKill ? "bg-status-success/[0.04]" : "bg-transparent",
+        isKill
+          ? "border-l-status-success"
+          : isWipe
+            ? "border-l-status-danger"
+            : "border-l-transparent"
+      )}
+    >
+      <Checkbox
+        checked={selected}
+        disabled={disabled}
+        aria-label={fightAriaLabel(fight, name)}
+        onCheckedChange={(checked) => onCheckedChange(checked === true)}
+      />
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-foreground",
+          isTrash ? "text-xs" : "text-sm font-medium"
+        )}
+        title={name}
+      >
+        {name}
+      </span>
+      <span className="flex shrink-0 items-center gap-1.5">
+        {fight.difficulty === "veteran" && !isTrash ? (
+          <InfoPill color="gold" aria-label="Veteran">
+            VET
+          </InfoPill>
+        ) : null}
+        {isKill ? <InfoPill color="emerald">Kill</InfoPill> : null}
+        {isWipe ? <InfoPill color="red">Wipe</InfoPill> : null}
+      </span>
+      <span className="hidden w-16 shrink-0 text-right text-xs tabular-nums text-muted-foreground sm:inline">
+        {formatClock(fight.startMs)}
+      </span>
+      <span className="hidden w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground sm:inline">
+        {compactBytes(Math.max(0, fight.endOffset - fight.startOffset))}
+      </span>
+      <span
+        className={cn(
+          "w-12 shrink-0 text-right text-xs tabular-nums",
+          isKill ? "font-medium text-foreground" : "text-muted-foreground"
+        )}
+      >
+        {formatDuration(durationMs)}
+      </span>
+    </div>
+  );
+}
+function buildDefaultState(
+  sessions: LogSession[],
+  fightsBySession: Map<number, FightSummary[]>,
+  omitted: boolean
+) {
+  const cluster = nightCluster(sessions);
+  const selected: FightSelectionMap = new Map();
+  const whole = new Set<number>();
+  const expanded = new Set<number>();
+  for (const session of sessions) {
+    if (!cluster.has(session.index)) continue;
+    expanded.add(session.index);
+    const fights = fightsBySession.get(session.index) ?? [];
+    if (omitted || fights.length === 0) whole.add(session.index);
+    else selected.set(session.index, new Set(fights.map((f) => f.index)));
+  }
+  return { fights: selected, whole, expanded };
+}
+
+function nightCluster(sessions: LogSession[]): Set<number> {
+  if (sessions.length === 0) return new Set();
+  const latest = sessions.reduce(
+    (best, s) => (s.startTimeMs > best.startTimeMs ? s : best),
+    sessions[0]!
+  );
+  const byIndex = new Map(sessions.map((s) => [s.index, s]));
+  const out = new Set<number>([latest.index]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of sessions) {
+      if (out.has(candidate.index)) continue;
+      for (const selectedIndex of out) {
+        const selected = byIndex.get(selectedIndex);
+        if (
+          selected &&
+          Math.abs(candidate.startTimeMs - selected.startTimeMs) <= 6 * 60 * 60 * 1000
+        ) {
+          out.add(candidate.index);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function mapFightsBySession(
+  sessions: LogSession[],
+  fights: FightSummary[]
+): Map<number, FightSummary[]> {
+  const map = new Map<number, FightSummary[]>();
+  for (const session of sessions) map.set(session.index, []);
+  for (const fight of fights) {
+    const session = sessions.find(
+      (s) => fight.startOffset >= s.startOffset && fight.startOffset < s.endOffset
+    );
+    if (session) map.get(session.index)?.push(fight);
+  }
+  return map;
+}
+
+function buildPlan(
+  sessions: LogSession[],
+  fightsBySession: Map<number, FightSummary[]>,
+  selectedFights: FightSelectionMap,
+  wholeSessions: WholeSelection
+): PlannedReport[] {
+  const plans: PlannedReport[] = [];
+  for (const session of sessions) {
+    const fights = fightsBySession.get(session.index) ?? [];
+    const selectedSet = selectedFights.get(session.index) ?? new Set<number>();
+    const selected = fights.filter((f) => selectedSet.has(f.index));
+    if (
+      wholeSessions.has(session.index) ||
+      (fights.length > 0 && selected.length === fights.length)
+    ) {
+      plans.push(planFor(session, fights, "whole"));
+    } else if (selected.length === 1) {
+      plans.push(planFor(session, selected, "single-fight"));
+    } else if (selected.length > 1) {
+      plans.push(planFor(session, selected, "subset"));
+    }
+  }
+  return plans;
+}
+
+function planFor(
+  session: LogSession,
+  fights: FightSummary[],
+  kind: PlannedReport["kind"]
+): PlannedReport {
+  const firstFight = fights[0];
+  const suggestedName =
+    kind === "single-fight" && firstFight
+      ? suggestFightName(firstFight, 1)
+      : suggestSplitName(session, fights);
+  const sizeBytes =
+    kind === "whole"
+      ? session.sizeBytes
+      : fights.reduce((sum, f) => sum + Math.max(0, f.endOffset - f.startOffset), 0);
+  return {
+    id: `${session.index}:${kind}:${fights.map((f) => f.index).join(",")}`,
+    session,
+    fights,
+    kind,
+    fightCount: kind === "whole" ? session.fightCount : fights.length,
+    sizeBytes,
+    suggestedName,
+    zone: dominantZone(fights),
+    label: sessionLabel(session, fights),
+  };
+}
+
+async function writePlan(
+  filePath: string,
+  preflight: LogPreflight,
+  plan: PlannedReport,
+  name: string | null
+): Promise<string[]> {
+  if (plan.kind === "whole") {
+    const selection: SplitSelection = {
+      index: plan.session.index,
+      name,
+      startOffset: plan.session.startOffset,
+      startTimeMs: plan.session.startTimeMs,
+    };
+    return invokeOrThrow<string[]>("uploader_split_to_disk_named", {
+      filePath,
+      sessions: preflight.sessions,
+      selections: [selection],
+    });
+  }
+
+  const fightSelections: FightSelection[] = plan.fights.map((fight) => ({
+    index: fight.index,
+    name: plan.kind === "single-fight" ? name : null,
+    startOffset: fight.startOffset,
+    startMs: fight.startMs,
+  }));
+
+  if (plan.kind === "single-fight") {
+    return invokeOrThrow<string[]>("uploader_split_fights_to_disk", {
+      filePath,
+      sessions: preflight.sessions,
+      fights: preflight.fights,
+      selections: fightSelections,
+    });
+  }
+
+  return invokeOrThrow<string[]>("uploader_split_session_fights_to_disk", {
+    filePath,
+    sessions: preflight.sessions,
+    fights: preflight.fights,
+    selection: {
+      index: plan.session.index,
+      name,
+      startOffset: plan.session.startOffset,
+      startTimeMs: plan.session.startTimeMs,
+      fights: fightSelections,
+    },
+  });
+}
+
+function sessionCheckState(
+  fights: FightSummary[],
+  omitted: boolean,
+  wholeSelected: boolean,
+  selected: Set<number>
+): CheckState {
+  if (omitted || fights.length === 0) return wholeSelected ? "all" : "none";
+  if (selected.size === 0) return "none";
+  return selected.size >= fights.length ? "all" : "some";
+}
+
+function cloneFightMap(map: FightSelectionMap): FightSelectionMap {
+  return new Map(Array.from(map.entries()).map(([key, value]) => [key, new Set(value)]));
+}
+
+function toggleSet<T>(set: Set<T>, value: T, present: boolean): Set<T> {
+  const next = new Set(set);
+  if (present) next.add(value);
+  else next.delete(value);
+  return next;
+}
+
+function attemptOrdinals(fights: FightSummary[]): Map<number, { position: number; total: number }> {
+  const out = new Map<number, { position: number; total: number }>();
+  let i = 0;
+  while (i < fights.length) {
+    const boss = fights[i]?.bossName;
+    if (!boss) {
+      i += 1;
+      continue;
+    }
+    let j = i + 1;
+    while (j < fights.length && fights[j]?.bossName === boss) j += 1;
+    const total = j - i;
+    if (total > 1) {
+      for (let n = i; n < j; n++) out.set(fights[n]!.index, { position: n - i + 1, total });
+    }
+    i = j;
+  }
+  return out;
+}
+
+function fightName(fight: FightSummary, ordinal?: { position: number; total: number }): string {
+  if (!fight.bossName) return `Trash - ${fight.zoneName || "Unknown zone"}`;
+  if (ordinal) return `${fight.bossName} - pull ${ordinal.position}/${ordinal.total}`;
+  return fightLabel(fight);
+}
+
+function fightAriaLabel(fight: FightSummary, name: string): string {
+  const parts = [`Include ${name}`];
+  if (fight.difficulty === "veteran") parts.push("veteran");
+  if (fight.outcome === "kill") parts.push("kill");
+  if (fight.outcome === "wipe") parts.push("wipe");
+  parts.push(formatDuration(fight.endMs - fight.startMs));
+  parts.push(compactBytes(Math.max(0, fight.endOffset - fight.startOffset)));
+  return parts.join(", ");
+}
+
+function sessionLabel(session: LogSession, fights: FightSummary[] = []): string {
+  const start = new Date(session.startTimeMs);
+  const endMs = fights.length > 0 ? Math.max(...fights.map((f) => f.endMs)) : session.startTimeMs;
+  const day = start
+    .toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+    .toUpperCase();
+  return `${day} - ${formatClock(start.getTime())}-${formatClock(endMs)}`;
+}
+
+function formatClock(ms: number): string {
+  if (!ms) return "--";
+  return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function basename(path: string): string {
+  return path.split(/[/\\]/).pop() ?? path;
+}
+
+async function showInFolder(path: string): Promise<void> {
+  try {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    await revealItemInDir(path);
+  } catch {
+    toast.error("Couldn't show the file in its folder.");
+  }
+}
+
+async function openReport(
+  report: NonNullable<UploadDispatch["report"]>,
+  visibility: Visibility
+): Promise<void> {
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(await primaryReportUrlForOpen(report, visibility));
+  } catch {
+    toast.error("Couldn't open the report - copy the link and open it manually.");
+  }
+}

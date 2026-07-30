@@ -307,7 +307,7 @@ export function formatDuration(ms: number): string {
 }
 
 /** A short label for a fight: boss > zone > 1-based ordinal fallback. Shared so the
- *  timeline, live ticker, split workbench, and preflight peek all read the same. */
+ *  timeline, live ticker, slice picker, and preflight peek all read the same. */
 export function fightLabel(fight: {
   bossName: string | null;
   zoneName: string | null;
@@ -319,7 +319,7 @@ export function fightLabel(fight: {
 /** A duration-derived hint for a fight (honest, not a kill/wipe claim): a very
  *  short fight is usually a quick reset/pull, a long one a sustained attempt.
  *  Null = no strong signal, so callers show nothing rather than guess. Shared by
- *  the fight timeline and the split workbench so both read the same. */
+ *  the fight timeline and the slice picker so both read the same. */
 export function fightDurationHint(
   ms: number | undefined
 ): { label: string; color: "muted" | "amber" } | null {

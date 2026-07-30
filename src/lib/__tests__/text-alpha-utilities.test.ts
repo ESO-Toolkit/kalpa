@@ -1,4 +1,4 @@
-﻿import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -67,7 +67,6 @@ const ALLOWLIST: Record<string, AllowlistReason> = {
   "src/components/uploader/log-picker.tsx|text-muted-foreground/40": "aria-hidden",
   "src/components/uploader/log-picker.tsx|text-muted-foreground/60": "icon",
   "src/components/uploader/log-picker.tsx|text-muted-foreground/70": "icon-button",
-  "src/components/uploader/split-workbench.tsx|text-primary/70": "aria-hidden",
   "src/components/uploader/upload-progress.tsx|text-primary/40": "aria-hidden",
   "src/components/uploader/uploader-shared.tsx|text-primary/80": "aria-hidden",
   "src/components/uploader/uploader-workspace.tsx|text-foreground/50": "aria-hidden",
@@ -75,7 +74,6 @@ const ALLOWLIST: Record<string, AllowlistReason> = {
   "src/components/uploader/uploader-workspace.tsx|text-muted-foreground/40": "aria-hidden",
   "src/components/uploader/uploader-workspace.tsx|text-muted-foreground/50": "aria-hidden",
   "src/components/uploader/uploader-workspace.tsx|text-muted-foreground/60": "icon",
-  "src/components/uploader/uploader-workspace.tsx|text-primary/60": "aria-hidden",
 };
 
 // opacity-<n> is intentionally not scanned here. Kalpa uses opacity utilities heavily

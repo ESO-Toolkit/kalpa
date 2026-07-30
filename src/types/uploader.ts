@@ -229,7 +229,7 @@ export type LiveEvent =
 /// best-effort guess at whether a fresh logging session is coming, used only to pick
 /// which guidance the "waiting" state opens with — never to gate going live.
 export interface LiveReadiness {
-  /// `activeNoHeader` = logging is already running (no fresh BEGIN_LOG coming → needs
+  /// `activeNoHeader` = logging is already running (no fresh BEGIN_LOG coming â†’ needs
   /// /reloadui); `loggingOff` = not logging yet (turn on /encounterlog); `noLog` = no
   /// log file found; `uncertain` = couldn't tell (soft guidance).
   verdict: "activeNoHeader" | "loggingOff" | "noLog" | "uncertain";
@@ -253,7 +253,7 @@ export interface LiveFight {
   durationMs: number;
 }
 
-/** One session's choice in the split workbench: which session (by `index`,
+/** One session's choice in the slice picker: which session (by `index`,
  *  matching `LogSession.index`) and an optional custom name. Mirrors the Rust
  *  `SplitSelection`. Only sessions present in the selection are written. */
 export interface SplitSelection {
@@ -267,7 +267,7 @@ export interface SplitSelection {
   startTimeMs: number | null;
 }
 
-/** One fight's choice in the per-fight split workbench: which fight (by `index`,
+/** One fight's choice in the per-fight slice picker: which fight (by `index`,
  *  matching `FightSummary.index`) and an optional custom name. Mirrors the Rust
  *  `FightSelection`. Each selected fight is written as its own self-contained
  *  single-fight `.log` (session preamble + only that fight's combat). */
