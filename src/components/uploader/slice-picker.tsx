@@ -112,12 +112,20 @@ export function SlicePicker({
   const selectedSize = plans.reduce((sum, p) => sum + p.sizeBytes, 0);
   const controlsDisabled = phase === "preparing" || phase === "uploading";
   const allOmitted = omitted && sessions.length > 0 && fights.length === 0;
-  const bossKillsDisabled = allOmitted;
-  // How many boss fights we cannot classify. Kill detection needs a death event
-  // matching a boss UNIT_ADDED, and outside trials there is no END_TRIAL at all,
-  // so "unknown" is the normal case in dungeons — worth saying out loud rather
-  // than letting the count look arbitrary.
-  const unknownBossFights = fights.filter((f) => f.bossName && f.outcome == null).length;
+  const bossFightsDisabled = allOmitted;
+  // Two distinct questions, so two chips rather than one that guesses.
+  //
+  // A kill is positive evidence: a boss unit declared by UNIT_ADDED later died.
+  // Validated against five real logs — a single-boss Asylum run reports exactly
+  // one kill on "Saint Olms the Just", a Lucent Citadel clear reports three.
+  //
+  // The ABSENCE of a kill proves nothing. An abandoned run emits BEGIN_TRIAL with
+  // no END_TRIAL at all, so a wipe and an unclassified pull look identical. That
+  // is why "boss fights" cannot be derived by excluding wipes, and why an empty
+  // kill set disables its chip instead of quietly selecting something else.
+  const killCount = fights.filter((f) => f.outcome === "kill").length;
+  const bossFightCount = fights.filter((f) => f.bossName).length;
+  const bossKillsDisabled = allOmitted || killCount === 0;
 
   const resetToDefault = () => {
     setSelectedFights(cloneFightMap(defaultState.fights));
@@ -152,21 +160,29 @@ export function SlicePicker({
       return next;
     });
   };
-  const applyBossKills = () => {
-    if (bossKillsDisabled) return;
+  const selectMatchingFights = (predicate: (fight: FightSummary) => boolean) => {
     const nextFights: FightSelectionMap = new Map();
     for (const session of sessions) {
-      const inFights = fightsBySession.get(session.index) ?? [];
-      // Drop only fights we KNOW were wipes. Requiring outcome === "kill" made
-      // this chip assert knowledge we do not have: an undetermined boss fight is
-      // unknown, not a loss, and silently dropping a real kill is far worse than
-      // including a pull the user can untick.
-      const selected = inFights.filter((f) => Boolean(f.bossName) && f.outcome !== "wipe");
+      const selected = (fightsBySession.get(session.index) ?? []).filter(predicate);
       if (selected.length > 0) nextFights.set(session.index, new Set(selected.map((f) => f.index)));
     }
     setWholeSessions(new Set());
     setSelectedFights(nextFights);
     setExpanded(new Set(Array.from(nextFights.keys())));
+  };
+
+  /** Only fights we positively know ended in a kill — the clean run, without the
+   *  resets before it. Disabled outright when the log has none, rather than
+   *  falling back to a wider set the label does not promise. */
+  const applyBossKills = () => {
+    if (bossKillsDisabled) return;
+    selectMatchingFights((f) => f.outcome === "kill");
+  };
+
+  /** Every pull at a named boss, kills and resets alike. */
+  const applyBossFights = () => {
+    if (bossFightsDisabled) return;
+    selectMatchingFights((f) => Boolean(f.bossName));
   };
 
   const applyWholeLog = () => {
@@ -423,12 +439,21 @@ export function SlicePicker({
               onClick={applyBossKills}
               disabled={controlsDisabled || bossKillsDisabled}
               aria-label={
-                unknownBossFights > 0
-                  ? `Boss fights, skipping known wipes. ${unknownBossFights} of these have no recorded result and are included.`
-                  : "Boss fights, skipping known wipes"
+                killCount > 0
+                  ? `Boss kills only, ${killCount} in this log`
+                  : "Boss kills only, none recorded in this log"
               }
             >
-              Boss fights
+              Boss kills{killCount > 0 ? ` (${killCount})` : ""}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={applyBossFights}
+              disabled={controlsDisabled || bossFightsDisabled}
+              aria-label={`Every pull at a named boss, kills and resets alike, ${bossFightCount} in this log`}
+            >
+              Boss fights{bossFightCount > 0 ? ` (${bossFightCount})` : ""}
             </Button>
             <Button variant="outline" size="sm" onClick={applyWholeLog} disabled={controlsDisabled}>
               Whole log
@@ -436,15 +461,16 @@ export function SlicePicker({
             <Button variant="outline" size="sm" onClick={clearAll} disabled={controlsDisabled}>
               Clear
             </Button>
-            {bossKillsDisabled ? (
+            {bossFightsDisabled ? (
               <span className="text-xs text-muted-foreground">
-                Boss fights are unavailable because fights were not listed.
+                Boss filters are unavailable because fights were not listed.
               </span>
             ) : (
-              unknownBossFights > 0 && (
+              killCount === 0 &&
+              bossFightCount > 0 && (
                 <span className="text-xs text-muted-foreground">
-                  {unknownBossFights} boss fight{unknownBossFights === 1 ? " has" : "s have"} no
-                  recorded result, so {unknownBossFights === 1 ? "it is" : "they are"} included.
+                  No kills were recorded in this log. A run that ends without finishing writes
+                  nothing to say so, so use Boss fights and pick from there.
                 </span>
               )
             )}
