@@ -112,8 +112,12 @@ export function SlicePicker({
   const selectedSize = plans.reduce((sum, p) => sum + p.sizeBytes, 0);
   const controlsDisabled = phase === "preparing" || phase === "uploading";
   const allOmitted = omitted && sessions.length > 0 && fights.length === 0;
-  const bossKillsDegraded = fights.length > 0 && fights.every((f) => f.outcome == null);
   const bossKillsDisabled = allOmitted;
+  // How many boss fights we cannot classify. Kill detection needs a death event
+  // matching a boss UNIT_ADDED, and outside trials there is no END_TRIAL at all,
+  // so "unknown" is the normal case in dungeons — worth saying out loud rather
+  // than letting the count look arbitrary.
+  const unknownBossFights = fights.filter((f) => f.bossName && f.outcome == null).length;
 
   const resetToDefault = () => {
     setSelectedFights(cloneFightMap(defaultState.fights));
@@ -153,10 +157,11 @@ export function SlicePicker({
     const nextFights: FightSelectionMap = new Map();
     for (const session of sessions) {
       const inFights = fightsBySession.get(session.index) ?? [];
-      const selected = inFights.filter((f) => {
-        if (!f.bossName) return false;
-        return bossKillsDegraded ? true : f.outcome === "kill";
-      });
+      // Drop only fights we KNOW were wipes. Requiring outcome === "kill" made
+      // this chip assert knowledge we do not have: an undetermined boss fight is
+      // unknown, not a loss, and silently dropping a real kill is far worse than
+      // including a pull the user can untick.
+      const selected = inFights.filter((f) => Boolean(f.bossName) && f.outcome !== "wipe");
       if (selected.length > 0) nextFights.set(session.index, new Set(selected.map((f) => f.index)));
     }
     setWholeSessions(new Set());
@@ -418,12 +423,12 @@ export function SlicePicker({
               onClick={applyBossKills}
               disabled={controlsDisabled || bossKillsDisabled}
               aria-label={
-                bossKillsDegraded
-                  ? "Boss kills only (kills unknown for this log - selecting all boss fights)"
-                  : "Boss kills only"
+                unknownBossFights > 0
+                  ? `Boss fights, skipping known wipes. ${unknownBossFights} of these have no recorded result and are included.`
+                  : "Boss fights, skipping known wipes"
               }
             >
-              Boss kills only
+              Boss fights
             </Button>
             <Button variant="outline" size="sm" onClick={applyWholeLog} disabled={controlsDisabled}>
               Whole log
@@ -431,10 +436,17 @@ export function SlicePicker({
             <Button variant="outline" size="sm" onClick={clearAll} disabled={controlsDisabled}>
               Clear
             </Button>
-            {bossKillsDisabled && (
+            {bossKillsDisabled ? (
               <span className="text-xs text-muted-foreground">
-                Boss kills are unavailable because fights were not listed.
+                Boss fights are unavailable because fights were not listed.
               </span>
+            ) : (
+              unknownBossFights > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  {unknownBossFights} boss fight{unknownBossFights === 1 ? " has" : "s have"} no
+                  recorded result, so {unknownBossFights === 1 ? "it is" : "they are"} included.
+                </span>
+              )
             )}
           </div>
 
@@ -806,7 +818,7 @@ function buildDefaultState(
   fightsBySession: Map<number, FightSummary[]>,
   omitted: boolean
 ) {
-  const cluster = nightCluster(sessions);
+  const cluster = nightCluster(sessions, fightsBySession);
   const selected: FightSelectionMap = new Map();
   const whole = new Set<number>();
   const expanded = new Set<number>();
@@ -820,31 +832,44 @@ function buildDefaultState(
   return { fights: selected, whole, expanded };
 }
 
-function nightCluster(sessions: LogSession[]): Set<number> {
+/** The most recent run of sessions that belong to one sitting.
+ *
+ *  A crash-and-relaunch mid-raid is minutes apart, so those sessions must stay
+ *  together. The first rule chained transitively on start-to-start distance,
+ *  which merged anything within six hours of anything already in the set:
+ *  sessions at 00:00, 05:00, 10:00, 15:00 and 20:00 all linked, and "tonight's
+ *  raid" selected a twenty-hour span. It also never asked how long a session
+ *  actually ran, so a four-hour raid and a session starting five hours after it
+ *  began — one hour after it ended — were treated the same as two unrelated
+ *  logins.
+ *
+ *  So: walk back from the latest session over a CONTIGUOUS run, and measure the
+ *  gap from when a session actually stopped to when the next one started. Stop
+ *  at the first real break rather than hopping over it. */
+export function nightCluster(
+  sessions: LogSession[],
+  fightsBySession: Map<number, FightSummary[]>
+): Set<number> {
   if (sessions.length === 0) return new Set();
-  const latest = sessions.reduce(
-    (best, s) => (s.startTimeMs > best.startTimeMs ? s : best),
-    sessions[0]!
-  );
-  const byIndex = new Map(sessions.map((s) => [s.index, s]));
-  const out = new Set<number>([latest.index]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const candidate of sessions) {
-      if (out.has(candidate.index)) continue;
-      for (const selectedIndex of out) {
-        const selected = byIndex.get(selectedIndex);
-        if (
-          selected &&
-          Math.abs(candidate.startTimeMs - selected.startTimeMs) <= 6 * 60 * 60 * 1000
-        ) {
-          out.add(candidate.index);
-          changed = true;
-          break;
-        }
-      }
+
+  const GAP_MS = 3 * 60 * 60 * 1000;
+  const ordered = [...sessions].sort((a, b) => a.startTimeMs - b.startTimeMs);
+
+  // `endMs` is relative to the session's own BEGIN_LOG. When the fight list was
+  // omitted (very large log) we can only fall back to the start time, which just
+  // makes the measured gap larger — it never merges sessions that should stay apart.
+  const endOf = (session: LogSession) => {
+    let last = 0;
+    for (const fight of fightsBySession.get(session.index) ?? []) {
+      if (fight.endMs > last) last = fight.endMs;
     }
+    return session.startTimeMs + last;
+  };
+
+  const out = new Set<number>([ordered[ordered.length - 1]!.index]);
+  for (let i = ordered.length - 2; i >= 0; i--) {
+    if (ordered[i + 1]!.startTimeMs - endOf(ordered[i]!) > GAP_MS) break;
+    out.add(ordered[i]!.index);
   }
   return out;
 }
