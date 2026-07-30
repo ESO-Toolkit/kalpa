@@ -107,7 +107,7 @@ interface UploaderWorkspaceProps {
 type Mode = "manual" | "live";
 
 /** The phase the pinned header's single adaptive status pill reflects. Priority
- *  order (highest first): a running live session (armedâ†’live), an in-flight manual
+ *  order (highest first): a running live session (armed→live), an in-flight manual
  *  upload, an in-progress scan, a scanned-ready selection, else idle. */
 type HeaderPhase =
   "idle" | "scanning" | "ready" | "uploading" | "armed" | "live" | "attention" | "signedOut";
@@ -151,7 +151,7 @@ async function openReportUrl(url: string): Promise<void> {
  *  Returns true (use official) if EITHER opt-out key is set OR a store read fails —
  *  the native path speaks ESO Logs' private endpoints, so a degraded store that
  *  can't confirm the opt-out must NOT silently route there against the user. The two
- *  keys are written as one unit (the unified Settings toggle), so either set â‡’
+ *  keys are written as one unit (the unified Settings toggle), so either set ⇒
  *  opted out. Used by both manual and live routing so they can never disagree. */
 async function usesOfficialUploader(): Promise<boolean> {
   // Order this read AFTER any pending settings write: the Settings toggle writes the
@@ -267,7 +267,7 @@ export function UploaderWorkspace({
   // Direct (native) upload state, lifted here so both the promoted Direct Upload
   // section and the upload action can reflect which transport will run. Native is
   // now the DEFAULT for manual too: `nativeOptIn` = NOT the `manualUseOfficialUploader`
-  // opt-out (default false â†’ native), mirroring live's `liveUseOfficialUploader`.
+  // opt-out (default false → native), mirroring live's `liveUseOfficialUploader`.
   // `hasSession` is whether the in-app esologs upload cookie is present. Direct upload
   // is the *intended* path only when nativeOptIn AND hasSession — the backend coverage
   // gate still has final say per log (an unproven event type falls back).
@@ -332,7 +332,7 @@ export function UploaderWorkspace({
   // (Native path) whether a logging session has anchored yet — i.e. the driver saw
   // its first BEGIN_LOG and is now streaming. Until then the native path is "armed but
   // waiting" (the encoder needs a session header). Flips on the SessionAnchored event,
-  // instantly (no timeout). Drives the waitingâ†”streaming UI.
+  // instantly (no timeout). Drives the waiting↔streaming UI.
   const [sessionAnchored, setSessionAnchored] = useState(false);
   // The pre-Go-Live readiness probe result (native only) — seeds which "waiting"
   // guidance to show first; SessionAnchored then takes over as ground truth.
@@ -478,7 +478,7 @@ export function UploaderWorkspace({
     try {
       const [manual, session, live] = await Promise.all([
         // Manual now mirrors live: native is the DEFAULT, opt-OUT via
-        // `manualUseOfficialUploader` (default false â†’ native). Read FAIL-CLOSED so a
+        // `manualUseOfficialUploader` (default false → native). Read FAIL-CLOSED so a
         // store error presents as opted-out, never claiming "direct" in the readout
         // against an opt-out it couldn't confirm (matches routing's usesOfficialUploader).
         getSettingChecked<boolean>("manualUseOfficialUploader", false),
@@ -808,8 +808,8 @@ export function UploaderWorkspace({
   // naive "newest / isActive" pick. But it has no BEGIN_LOG and the native encoder
   // can't anchor a session on it, so it must NEVER be a live target. We therefore
   // restrict to encounter logs and prefer, in order: the active `Encounter.log` (the
-  // hot file) â†’ any active encounter log (a just-rotated session that's still hot) â†’
-  // the literal `Encounter.log` even if cold â†’ the newest encounter log. Archives
+  // hot file) → any active encounter log (a just-rotated session that's still hot) →
+  // the literal `Encounter.log` even if cold → the newest encounter log. Archives
   // (`Archive-…-Encounter-….log`) are historical and belong in manual upload, but they
   // ARE encounter logs, so they remain a last-resort candidate rather than Interface.log.
   // Called from the Live-tab click and as a Go-Live fallback (NOT from an effect — the
@@ -1073,7 +1073,7 @@ export function UploaderWorkspace({
           if (liveFightCountRef.current > 0) autoOpenLiveAnalysisOnce(liveReportRef.current);
           break;
         case "sessionAnchored":
-          // Native: the first BEGIN_LOG landed — flip waitingâ†’streaming instantly.
+          // Native: the first BEGIN_LOG landed — flip waiting→streaming instantly.
           setSessionAnchored(true);
           break;
         case "fightDetected": {
@@ -1398,7 +1398,7 @@ export function UploaderWorkspace({
     })();
   }, [open, isLoggedIn, refreshNativeState]);
 
-  // â”€â”€ Pinned header derivations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Pinned header derivations ───────────────────────────────────────────────
   // The single adaptive status pill in the header reflects, in priority order: a
   // running live session (ARMED until its first BEGIN_LOG anchors, then LIVE), an
   // in-flight manual upload, an in-progress scan, a scanned-and-ready selection,
@@ -1782,14 +1782,14 @@ export function UploaderWorkspace({
                   // (handoff = a separate uploader app; native = Kalpa uploads).
                   handedOff={liveHandedOff}
                   visibility={liveVisibility}
-                  // Native waitingâ†”streaming: anchored once the first BEGIN_LOG lands.
+                  // Native waiting↔streaming: anchored once the first BEGIN_LOG lands.
                   sessionAnchored={sessionAnchored}
                   // Best-effort pre-start guess of what's coming (which waiting copy).
                   readiness={liveReadiness}
                   // Wrap so the click PointerEvent is NOT passed as the first arg
                   // (`forceHandoff`): a bare `onStart={handleStartLive}` made every
-                  // Go Live receive the event as a truthy forceHandoff â†’ preferOfficial
-                  // â†’ silent handoff to the official uploader. This is THE "it still
+                  // Go Live receive the event as a truthy forceHandoff → preferOfficial
+                  // → silent handoff to the official uploader. This is THE "it still
                   // opened the other uploader" bug.
                   onStart={() => void handleStartLive()}
                   onStop={handleStopLive}
@@ -2034,7 +2034,7 @@ function DeleteLogConfirm({
   );
 }
 
-// â”€â”€ Sub-components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Sub-components ───────────────────────────────────────────────────────────
 
 // The pinned header's single adaptive status pill: one glanceable phase word
 // (Idle / Scanning / Ready / Uploading / Armed / Live / Signed out) with an
@@ -2200,7 +2200,7 @@ function AccountChip({
   );
 }
 
-// The route pipeline: your log â†’ the active engine â†’ esologs.com, then (as a
+// The route pipeline: your log → the active engine → esologs.com, then (as a
 // sibling terminal) the account chip. The engine chip reflects the effective
 // transport (direct = sky/Zap, official = muted). esologs.com stays NEUTRAL — gold
 // is reserved exclusively for the Upload action.
@@ -2359,7 +2359,7 @@ function MissionControlBand({
     );
   }
 
-  // â”€â”€ Slim instrument row (idle / scanning / ready / uploading) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Slim instrument row (idle / scanning / ready / uploading) ──────────────
   // The phase-specific lead: what the header confirms at a glance right now.
   let lead: ReactNode;
   if (phase === "ready") {
@@ -2578,7 +2578,7 @@ function FightTicker({
             <li key={f.index} className="flex items-center justify-between gap-2 text-xs">
               <span className="flex min-w-0 items-center gap-1.5">
                 <span className="text-muted-foreground/40" aria-hidden>
-                  â–¸
+                  ▸
                 </span>
                 <span
                   className={cn("truncate", i === 0 ? "text-foreground" : "text-muted-foreground")}
@@ -3695,7 +3695,7 @@ function LiveDashboard({
   // The native path has a WAITING phase: armed, but the encoder needs a BEGIN_LOG to
   // anchor a session, so nothing streams until one arrives. `sessionAnchored` (the
   // SessionAnchored event = first BEGIN_LOG) is the ground truth that flips
-  // waitingâ†’streaming — instant, no timeout. The handoff path has no waiting phase (the
+  // waiting→streaming — instant, no timeout. The handoff path has no waiting phase (the
   // official uploader picks up mid-session), so it's never "waiting" here.
   const isNative = running && !handedOff;
   const waiting = isNative && !sessionAnchored;
@@ -3848,7 +3848,7 @@ function LiveDashboard({
           streaming state below the instant a session header lands. */}
       {waiting &&
         (alreadyLogging ? (
-          // Logging is ALREADY running â†’ Kalpa joins the in-progress session (mid-session
+          // Logging is ALREADY running → Kalpa joins the in-progress session (mid-session
           // warm-up replays the current session from disk to seed the encoder), so NO
           // /reloadui is needed to start. Reassure while warm-up runs; /reloadui is only a
           // fallback (it also forces ESO's disk-buffer flush outside raids), and the
@@ -3875,7 +3875,7 @@ function LiveDashboard({
             </p>
           </div>
         ) : (
-          // Not logging yet (or uncertain) â†’ turning on /encounterlog writes the header.
+          // Not logging yet (or uncertain) → turning on /encounterlog writes the header.
           <div className="rounded-lg border border-accent-sky/20 bg-accent-sky/[0.05] p-3">
             <div className="flex items-center gap-2 text-xs font-medium text-accent-sky/90">
               <Radio className="size-3.5 shrink-0" aria-hidden />
@@ -3950,7 +3950,7 @@ function LiveDashboard({
  *  leaving ordinary names (and user-named splits) intact. */
 function tidyLogLabel(fileName: string): string {
   const base = fileName.replace(/\.log$/i, "");
-  // Archive pattern with a session number â†’ keep the readable "session NN".
+  // Archive pattern with a session number → keep the readable "session NN".
   const sess = base.match(/-session(\d+)/i);
   if (/^Archive-/i.test(base) && sess) {
     const datePart = base.match(/Archive-(\d{4}-\d{2}-\d{2})/);
@@ -3958,7 +3958,7 @@ function tidyLogLabel(fileName: string): string {
       ? `Archive ${datePart[1]} · session ${Number(sess[1])}`
       : `Session ${Number(sess[1])}`;
   }
-  // ISO-stamped archive (Archive-20260614T190354Z-Encounter) â†’ "Archive Jun 14".
+  // ISO-stamped archive (Archive-20260614T190354Z-Encounter) → "Archive Jun 14".
   const iso = base.match(/^Archive-(\d{4})(\d{2})(\d{2})T\d+Z?/i);
   if (iso) {
     const [, y, m, d] = iso;
@@ -4308,7 +4308,7 @@ function StatusBadge({
     case "paused":
       return <InfoPill color="amber">Paused</InfoPill>;
     case "handedOff":
-      // Once a link is attached, the report is observable â†’ "Done". Until then it's
+      // Once a link is attached, the report is observable → "Done". Until then it's
       // "Link needed" (amber), paired with the row's always-visible explainer strip
       // so the badge is never jargon standing alone.
       return hasReport ? (

@@ -229,7 +229,7 @@ export type LiveEvent =
 /// best-effort guess at whether a fresh logging session is coming, used only to pick
 /// which guidance the "waiting" state opens with — never to gate going live.
 export interface LiveReadiness {
-  /// `activeNoHeader` = logging is already running (no fresh BEGIN_LOG coming â†’ needs
+  /// `activeNoHeader` = logging is already running (no fresh BEGIN_LOG coming → needs
   /// /reloadui); `loggingOff` = not logging yet (turn on /encounterlog); `noLog` = no
   /// log file found; `uncertain` = couldn't tell (soft guidance).
   verdict: "activeNoHeader" | "loggingOff" | "noLog" | "uncertain";
