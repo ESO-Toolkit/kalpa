@@ -64,6 +64,7 @@ export function SlicePicker({
   onRescan,
   onFilesWritten,
   onUploadPreparedLog,
+  onBusyChange,
 }: {
   filePath: string;
   fileName: string;
@@ -74,6 +75,11 @@ export function SlicePicker({
   onRescan: () => Promise<void> | void;
   onFilesWritten: () => Promise<void> | void;
   onUploadPreparedLog: (request: SplitUploadRequest) => Promise<UploadDispatch>;
+  /** Raised while this picker is cutting or uploading. The workspace uses it to
+   *  keep its own whole-log Upload disabled and to refuse a log switch, either of
+   *  which would otherwise run concurrently with — or silently orphan — a batch
+   *  that can take minutes on a multi-GB log. */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const sessions = preflight.sessions;
   const fights = preflight.fights;
@@ -95,6 +101,7 @@ export function SlicePicker({
   const [progressText, setProgressText] = useState("");
   const [partialMessage, setPartialMessage] = useState<string | null>(null);
   const [partialFiles, setPartialFiles] = useState<{ path: string; plan: PlannedReport }[]>([]);
+  const [partialMode, setPartialMode] = useState<CommitMode>("upload");
   const [stale, setStale] = useState(false);
   const stopRequestedRef = useRef(false);
   const stopButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -102,6 +109,13 @@ export function SlicePicker({
   useEffect(() => {
     if (phase === "preparing" || phase === "uploading") stopButtonRef.current?.focus();
   }, [phase]);
+
+  const busy = phase === "preparing" || phase === "uploading";
+  useEffect(() => {
+    onBusyChange?.(busy);
+    // Unmounting mid-batch must not strand the workspace in a busy state.
+    return () => onBusyChange?.(false);
+  }, [busy, onBusyChange]);
 
   const noFightsAtAll = preflight.totalFights === 0 && !omitted;
   const plans = useMemo(
@@ -212,16 +226,26 @@ export function SlicePicker({
     return draft.trim() || null;
   };
 
+  /** Enter the recovery state.
+   *
+   *  `files` is what is still OUTSTANDING, never what already succeeded. `mode`
+   *  is the commit the user actually asked for: a run they started with Save
+   *  must not be offered an upload as its recovery, because publishing a combat
+   *  log is a decision they explicitly declined. */
   const showPartial = (
     done: number,
     total: number,
     reason: string,
-    files: { path: string; plan: PlannedReport }[]
+    files: { path: string; plan: PlannedReport }[],
+    mode: CommitMode
   ) => {
     setPhase("partial");
     setPartialFiles(files);
+    setPartialMode(mode);
     setPartialMessage(
-      `Kalpa finished ${done} of ${total} file${total === 1 ? "" : "s"} before ${reason}. The finished files are safe and ready to upload.`
+      mode === "save"
+        ? `Kalpa finished ${done} of ${total} file${total === 1 ? "" : "s"} before ${reason}. The finished files are safe in Kalpa Splits.`
+        : `Kalpa finished ${done} of ${total} file${total === 1 ? "" : "s"} before ${reason}. The finished files are safe and ready to upload.`
     );
   };
 
@@ -266,11 +290,22 @@ export function SlicePicker({
         }
       }
       await onFilesWritten();
+      // The recovery set is what is still OUTSTANDING, i.e. everything from the
+      // first item that did not upload. Passing the successful prefix instead
+      // would re-upload reports that already exist — esologs.com assigns a report
+      // code per request with no client idempotency key, so a retry would publish
+      // duplicates — while never retrying the item that actually failed.
       if (uploaded < files.length)
-        showPartial(uploaded, files.length, "stopping", files.slice(0, uploaded));
+        showPartial(uploaded, files.length, "stopping", files.slice(uploaded), "upload");
       else setPhase("idle");
     } catch (error) {
-      showPartial(uploaded, files.length, getTauriErrorMessage(error), files.slice(0, uploaded));
+      showPartial(
+        uploaded,
+        files.length,
+        getTauriErrorMessage(error),
+        files.slice(uploaded),
+        "upload"
+      );
     }
   };
   const commit = async (mode: CommitMode) => {
@@ -283,6 +318,10 @@ export function SlicePicker({
     setPartialMessage(null);
     setStale(false);
     const writtenFiles: { path: string; plan: PlannedReport }[] = [];
+    // Hoisted so the catch below can tell which files are still outstanding.
+    // Scoped inside the try, a mid-upload throw could only offer every written
+    // file again, re-publishing the reports that had already succeeded.
+    let uploaded = 0;
 
     try {
       setPhase("preparing");
@@ -310,7 +349,9 @@ export function SlicePicker({
       await onFilesWritten();
 
       if (stopRequestedRef.current || writtenFiles.length < plans.length) {
-        showPartial(writtenFiles.length, plans.length, "stopping", writtenFiles);
+        // Nothing has uploaded yet at this point, so every written file is
+        // outstanding. `mode` decides whether recovery offers an upload at all.
+        showPartial(writtenFiles.length, plans.length, "stopping", writtenFiles, mode);
         return;
       }
 
@@ -328,7 +369,6 @@ export function SlicePicker({
       setPhase("uploading");
       setProgressMax(writtenFiles.length);
       setProgressValue(0);
-      let uploaded = 0;
       for (let i = 0; i < writtenFiles.length; i++) {
         if (stopRequestedRef.current) break;
         const item = writtenFiles[i]!;
@@ -358,11 +398,27 @@ export function SlicePicker({
             duration: 9000,
             action: { label: "Show in folder", onClick: () => void showInFolder(item.path) },
           });
+          // No report code means Kalpa handed this file to the official uploader,
+          // an external app that now owns the rest of the exchange. Continuing the
+          // loop would launch it once per remaining slice, stacking windows and
+          // claiming success for uploads Kalpa never performed. Park the rest and
+          // let the user send them once this one is done.
+          if (uploaded < writtenFiles.length) {
+            showPartial(
+              uploaded,
+              writtenFiles.length,
+              "handing the first file to the official uploader",
+              writtenFiles.slice(uploaded),
+              mode
+            );
+            return;
+          }
+          break;
         }
       }
       await onFilesWritten();
       if (uploaded < writtenFiles.length) {
-        showPartial(uploaded, writtenFiles.length, "stopping", writtenFiles.slice(0, uploaded));
+        showPartial(uploaded, writtenFiles.length, "stopping", writtenFiles.slice(uploaded), mode);
         return;
       }
       setPhase("idle");
@@ -370,9 +426,14 @@ export function SlicePicker({
     } catch (error) {
       const message = getTauriErrorMessage(error);
       if (/log changed since it was scanned|log changed while/i.test(message)) setStale(true);
-      if (writtenFiles.length > 0)
-        showPartial(writtenFiles.length, plans.length, message, writtenFiles);
-      else {
+      // Outstanding = written but not yet uploaded. A throw partway through the
+      // upload loop must not re-offer the slices that already published.
+      if (writtenFiles.length > uploaded)
+        showPartial(uploaded, plans.length, message, writtenFiles.slice(uploaded), mode);
+      else if (writtenFiles.length > 0) {
+        setPhase("idle");
+        toast.error(`Every prepared file was sent, but the run ended early. ${message}`);
+      } else {
         setPhase("idle");
         toast.error(`Kalpa couldn't finish cutting the file. Nothing was uploaded. ${message}`);
       }
@@ -603,17 +664,31 @@ export function SlicePicker({
               </Button>
             ) : phase === "partial" ? (
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => void commit("upload")}>
+                <Button variant="outline" size="sm" onClick={() => void commit(partialMode)}>
                   Try again
                 </Button>
-                <Button
-                  size="sm"
-                  onClick={() => void uploadPartialFiles(partialFiles)}
-                  disabled={partialFiles.length === 0}
-                >
-                  Upload the {partialFiles.length} finished file
-                  {partialFiles.length === 1 ? "" : "s"}
-                </Button>
+                {/* A run started with Save is never recovered by uploading:
+                    publishing the log is a decision this user declined. */}
+                {partialMode === "upload" ? (
+                  <Button
+                    size="sm"
+                    onClick={() => void uploadPartialFiles(partialFiles)}
+                    disabled={partialFiles.length === 0}
+                  >
+                    Upload the {partialFiles.length} remaining file
+                    {partialFiles.length === 1 ? "" : "s"}
+                  </Button>
+                ) : (
+                  partialFiles[0] && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void showInFolder(partialFiles[0]!.path)}
+                    >
+                      Show in folder
+                    </Button>
+                  )
+                )}
               </div>
             ) : (
               <>
@@ -756,6 +831,7 @@ function SessionGroup({
               selected={selected.has(fight.index)}
               disabled={disabled}
               ordinal={attempts.get(fight.index)}
+              sessionStartMs={session.startTimeMs}
               onCheckedChange={(checked) => onFightChecked(fight, checked)}
             />
           ))}
@@ -770,12 +846,16 @@ function FightRow({
   selected,
   disabled,
   ordinal,
+  sessionStartMs,
   onCheckedChange,
 }: {
   fight: FightSummary;
   selected: boolean;
   disabled: boolean;
   ordinal?: { position: number; total: number };
+  /** Wall-clock start of the enclosing session. `fight.startMs` is an offset from
+   *  it, not an epoch, so the clock is only meaningful once the two are added. */
+  sessionStartMs: number;
   onCheckedChange: (checked: boolean) => void;
 }) {
   const outcome = fight.outcome ?? null;
@@ -823,7 +903,7 @@ function FightRow({
         {isWipe ? <InfoPill color="red">Wipe</InfoPill> : null}
       </span>
       <span className="hidden w-16 shrink-0 text-right text-xs tabular-nums text-muted-foreground sm:inline">
-        {formatClock(fight.startMs)}
+        {formatClock(sessionStartMs + fight.startMs)}
       </span>
       <span className="hidden w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground sm:inline">
         {compactBytes(Math.max(0, fight.endOffset - fight.startOffset))}
@@ -926,10 +1006,14 @@ function buildPlan(
     const fights = fightsBySession.get(session.index) ?? [];
     const selectedSet = selectedFights.get(session.index) ?? new Set<number>();
     const selected = fights.filter((f) => selectedSet.has(f.index));
-    if (
-      wholeSessions.has(session.index) ||
-      (fights.length > 0 && selected.length === fights.length)
-    ) {
+    // Promoting "every listed fight" to "the whole session" is only sound when
+    // the list is COMPLETE. A very large log ships a truncated fight list
+    // (`fightsOmitted`), so ticking everything on screen can be a small subset of
+    // the session — and promoting it would silently write and upload the entire
+    // night instead of the few pulls that were chosen. `fightCount` is the
+    // session's true total and is never truncated.
+    const listIsComplete = fights.length > 0 && fights.length === session.fightCount;
+    if (wholeSessions.has(session.index) || (listIsComplete && selected.length === fights.length)) {
       plans.push(planFor(session, fights, "whole"));
     } else if (selected.length === 1) {
       plans.push(planFor(session, selected, "single-fight"));

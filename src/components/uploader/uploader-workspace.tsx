@@ -247,6 +247,14 @@ export function UploaderWorkspace({
   // Monotonic token guarding against an out-of-order async scan result
   // overwriting the currently-selected log's fights.
   const selectTokenRef = useRef(0);
+  // Mirrored into a ref because `handleSelectLog` is a useCallback that would
+  // otherwise capture a stale `false` and let a switch through mid-batch.
+  const [slicePickerBusy, setSlicePickerBusy] = useState(false);
+  const slicePickerBusyRef = useRef(false);
+  const handleSlicePickerBusyChange = useCallback((busy: boolean) => {
+    slicePickerBusyRef.current = busy;
+    setSlicePickerBusy(busy);
+  }, []);
   const [options, setOptions] = useState<UploadOptions>(loadSavedOptions);
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
@@ -696,6 +704,13 @@ export function UploaderWorkspace({
 
   const handleSelectLog = useCallback(
     async (path: string) => {
+      // The slice picker is keyed on the selected log, so switching while it is
+      // cutting or uploading would remount it and abandon a batch that is still
+      // writing multi-GB files — with no UI left to report what happened.
+      if (slicePickerBusyRef.current) {
+        toast.info("Finish or stop the current split before switching logs.");
+        return;
+      }
       // Guard against a slow scan of a previously-selected log resolving after a
       // newer selection and overwriting its results.
       const token = ++selectTokenRef.current;
@@ -1695,6 +1710,7 @@ export function UploaderWorkspace({
                   if (logsDir) await loadLogs(logsDir);
                 }}
                 onUploadPreparedLog={handleUploadPreparedSplit}
+                onBusyChange={handleSlicePickerBusyChange}
               />
             )}
 
@@ -1757,6 +1773,7 @@ export function UploaderWorkspace({
                     !!selectedLog &&
                     !uploading &&
                     !scanning &&
+                    !slicePickerBusy &&
                     preflight !== null &&
                     liveSessionId === null
                   }

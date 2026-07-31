@@ -20,6 +20,26 @@ const COPY_BUF: usize = 8 * 1024 * 1024;
 
 /// Copy a byte range `[start, end)` from `src` into a new file at `dst`.
 fn copy_range(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String> {
+    discard_partial_on_error(dst, copy_range_inner(src, dst, start, end))
+}
+
+/// Remove a half-written output when its writer failed.
+///
+/// Only the "source shrank" branch used to clean up, so a failed seek, read,
+/// write or flush left a truncated file behind. That was survivable while splits
+/// lived in app data, but they are now written inside the ESO Logs folder and
+/// `discovery::list_log_files` enumerates them — a partial file would appear in
+/// Kalpa's own log list as an ordinary log and could be uploaded as though it
+/// were complete. The inner call owns its file handles and has dropped them by
+/// the time it returns, which Windows requires before the file can be removed.
+fn discard_partial_on_error(dst: &Path, result: Result<(), String>) -> Result<(), String> {
+    if result.is_err() {
+        let _ = std::fs::remove_file(dst);
+    }
+    result
+}
+
+fn copy_range_inner(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String> {
     if end <= start {
         return Err("Empty byte range".into());
     }
@@ -589,6 +609,10 @@ fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) 
 /// like [`copy_range`] — fails loudly (removing the partial output) if the source
 /// shrank under a segment, so a truncated log never yields a silently-corrupt file.
 fn copy_ranges(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<(), String> {
+    discard_partial_on_error(dst, copy_ranges_inner(src, dst, segments))
+}
+
+fn copy_ranges_inner(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<(), String> {
     let mut reader = BufReader::new(File::open(src).map_err(|e| format!("Open source: {e}"))?);
     let mut writer = BufWriter::new(File::create(dst).map_err(|e| format!("Create output: {e}"))?);
     let mut buf = vec![0u8; COPY_BUF];
@@ -2004,5 +2028,62 @@ mod real_log_roundtrip {
         );
 
         let _ = std::fs::remove_dir_all(&out_dir);
+    }
+}
+
+#[cfg(test)]
+mod partial_output_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A failure that is NOT the "source shrank" case must still leave no file
+    /// behind. An empty range fails before any bytes are copied, but `File::create`
+    /// has already truncated/created `dst`.
+    #[test]
+    fn a_failed_copy_leaves_no_partial_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"0,BEGIN_LOG,1,15\n").unwrap();
+
+        // Pre-create dst so we can prove the failure path removes it rather than
+        // merely never creating it.
+        let mut f = std::fs::File::create(&dst).unwrap();
+        f.write_all(b"stale").unwrap();
+        drop(f);
+
+        let err = copy_range(&src, &dst, 10, 10).unwrap_err();
+        assert!(err.contains("Empty byte range"), "unexpected error: {err}");
+        assert!(
+            !dst.exists(),
+            "a failed split must not leave a file in the Logs folder"
+        );
+    }
+
+    /// Truncating the source mid-copy is the original shrank case; it must still
+    /// clean up now that it routes through the shared helper.
+    #[test]
+    fn a_shrunk_source_leaves_no_partial_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"short").unwrap();
+
+        // Ask for far more than the file holds.
+        let err = copy_range(&src, &dst, 0, 5_000).unwrap_err();
+        assert!(err.contains("shrank"), "unexpected error: {err}");
+        assert!(!dst.exists(), "partial output must be removed");
+    }
+
+    #[test]
+    fn a_successful_copy_keeps_its_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"0,BEGIN_LOG,1,15\n200,BEGIN_COMBAT\n").unwrap();
+
+        copy_range(&src, &dst, 0, 17).unwrap();
+        assert!(dst.is_file());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"0,BEGIN_LOG,1,15\n");
     }
 }
