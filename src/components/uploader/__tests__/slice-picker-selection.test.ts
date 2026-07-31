@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nightCluster } from "../slice-picker";
+import { nightCluster, outstandingAfter } from "../slice-picker";
 import type { FightSummary, LogSession } from "@/types/uploader";
 
 const HOUR = 60 * 60 * 1000;
@@ -118,5 +118,28 @@ describe("nightCluster", () => {
     );
 
     expect(nightCluster(sessions, fights)).toEqual(new Set([2, 1]));
+  });
+});
+
+describe("outstandingAfter", () => {
+  const files = ["a", "b", "c"];
+
+  it("returns the slices still owed, never the ones that succeeded", () => {
+    // The regression: this used to return files.slice(0, uploaded) — the
+    // successful prefix — so "upload the remaining files" re-published finished
+    // reports and never retried the one that failed.
+    expect(outstandingAfter(files, 1)).toEqual(["b", "c"]);
+    expect(outstandingAfter(files, 2)).toEqual(["c"]);
+  });
+
+  it("returns everything when nothing uploaded, and nothing when all did", () => {
+    expect(outstandingAfter(files, 0)).toEqual(["a", "b", "c"]);
+    expect(outstandingAfter(files, 3)).toEqual([]);
+  });
+
+  it("never re-offers work when the count is out of range", () => {
+    expect(outstandingAfter(files, 99)).toEqual([]);
+    expect(outstandingAfter(files, -1)).toEqual(["a", "b", "c"]);
+    expect(outstandingAfter([], 0)).toEqual([]);
   });
 });

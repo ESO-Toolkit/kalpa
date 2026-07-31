@@ -296,14 +296,20 @@ export function SlicePicker({
       // code per request with no client idempotency key, so a retry would publish
       // duplicates — while never retrying the item that actually failed.
       if (uploaded < files.length)
-        showPartial(uploaded, files.length, "stopping", files.slice(uploaded), "upload");
+        showPartial(
+          uploaded,
+          files.length,
+          "stopping",
+          outstandingAfter(files, uploaded),
+          "upload"
+        );
       else setPhase("idle");
     } catch (error) {
       showPartial(
         uploaded,
         files.length,
         getTauriErrorMessage(error),
-        files.slice(uploaded),
+        outstandingAfter(files, uploaded),
         "upload"
       );
     }
@@ -408,7 +414,7 @@ export function SlicePicker({
               uploaded,
               writtenFiles.length,
               "handing the first file to the official uploader",
-              writtenFiles.slice(uploaded),
+              outstandingAfter(writtenFiles, uploaded),
               mode
             );
             return;
@@ -418,7 +424,13 @@ export function SlicePicker({
       }
       await onFilesWritten();
       if (uploaded < writtenFiles.length) {
-        showPartial(uploaded, writtenFiles.length, "stopping", writtenFiles.slice(uploaded), mode);
+        showPartial(
+          uploaded,
+          writtenFiles.length,
+          "stopping",
+          outstandingAfter(writtenFiles, uploaded),
+          mode
+        );
         return;
       }
       setPhase("idle");
@@ -429,7 +441,13 @@ export function SlicePicker({
       // Outstanding = written but not yet uploaded. A throw partway through the
       // upload loop must not re-offer the slices that already published.
       if (writtenFiles.length > uploaded)
-        showPartial(uploaded, plans.length, message, writtenFiles.slice(uploaded), mode);
+        showPartial(
+          uploaded,
+          plans.length,
+          message,
+          outstandingAfter(writtenFiles, uploaded),
+          mode
+        );
       else if (writtenFiles.length > 0) {
         setPhase("idle");
         toast.error(`Every prepared file was sent, but the run ended early. ${message}`);
@@ -759,7 +777,7 @@ function SessionGroup({
           checked={state === "all"}
           indeterminate={state === "some"}
           disabled={disabled}
-          aria-label={`Include ${sessionLabel(session)}`}
+          aria-label={`Include ${sessionLabel(session, fights)}`}
           onCheckedChange={() => onSessionChecked(state !== "all")}
           className="mt-1"
         />
@@ -770,7 +788,7 @@ function SessionGroup({
             disabled={disabled}
             aria-expanded={expanded}
             aria-controls={groupId}
-            aria-label={`${expanded ? "Collapse" : "Expand"} ${sessionLabel(session)}`}
+            aria-label={`${expanded ? "Collapse" : "Expand"} ${sessionLabel(session, fights)}`}
             onClick={onToggleExpanded}
           >
             {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
@@ -789,7 +807,7 @@ function SessionGroup({
               id={headerId}
               className="font-heading text-[11px] font-bold tracking-[0.05em] text-foreground uppercase"
             >
-              {sessionLabel(session)}
+              {sessionLabel(session, fights)}
             </span>
             {dominant ? <span className="truncate text-xs text-foreground">{dominant}</span> : null}
             {noFights ? (
@@ -1161,11 +1179,16 @@ function fightAriaLabel(fight: FightSummary, name: string): string {
 
 function sessionLabel(session: LogSession, fights: FightSummary[] = []): string {
   const start = new Date(session.startTimeMs);
-  const endMs = fights.length > 0 ? Math.max(...fights.map((f) => f.endMs)) : session.startTimeMs;
   const day = start
     .toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
     .toUpperCase();
-  return `${day} - ${formatClock(start.getTime())}-${formatClock(endMs)}`;
+  // `endMs` is an offset from the session's BEGIN_LOG, not an epoch, so it only
+  // becomes a clock time once added to the session start — the same mistake the
+  // fight rows made. Without a fight list there is no end to show at all, and
+  // repeating the start produced a meaningless "12:25 AM-12:25 AM".
+  if (fights.length === 0) return `${day} - ${formatClock(session.startTimeMs)}`;
+  const endMs = session.startTimeMs + Math.max(...fights.map((f) => f.endMs));
+  return `${day} - ${formatClock(session.startTimeMs)}-${formatClock(endMs)}`;
 }
 
 function formatClock(ms: number): string {
@@ -1175,6 +1198,18 @@ function formatClock(ms: number): string {
 
 function basename(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
+}
+
+/** The slices still owed after `uploadedCount` of them succeeded.
+ *
+ *  Exported for test because the UI path is hard to reach on purpose — each
+ *  report takes only a few seconds, so a Stop lands between two of them mostly by
+ *  luck. Getting this backwards is expensive and silent: esologs.com assigns a
+ *  report code per request with no client idempotency key, so re-sending a
+ *  finished slice publishes a duplicate while the slice that actually failed is
+ *  never retried. */
+export function outstandingAfter<T>(files: T[], uploadedCount: number): T[] {
+  return files.slice(Math.max(0, Math.min(uploadedCount, files.length)));
 }
 
 async function showInFolder(path: string): Promise<void> {
