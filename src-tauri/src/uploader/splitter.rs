@@ -854,6 +854,172 @@ pub fn split_selected_fights(
     Ok(written)
 }
 
+/// One output file containing a strict subset of fights from a single session.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFightSelection {
+    /// The [`LogSession::index`] this selection refers to.
+    pub index: usize,
+    /// A user-supplied name (sanitized before use); falls back to the session auto name.
+    pub name: Option<String>,
+    /// Absolute byte offset of the session's `BEGIN_LOG` line.
+    pub start_offset: Option<u64>,
+    /// The session's `start_time_ms` at selection time.
+    pub start_time_ms: Option<u64>,
+    /// The fights to keep inside this session.
+    pub fights: Vec<FightSelection>,
+}
+
+/// Split selected fights from ONE session into ONE self-contained `.log`.
+///
+/// The output keeps the session header and non-combat definition/preamble lines up
+/// to the last selected fight, while carving out every unselected fight block in
+/// that span. Selected fight blocks are copied in their original order, so byte
+/// ranges stay line-aligned and the result remains parseable as an Encounter log.
+pub fn split_session_fights_selected(
+    source_path: &str,
+    out_dir: &str,
+    sessions: Option<Vec<LogSession>>,
+    fights: Option<Vec<FightSummary>>,
+    selection: SessionFightSelection,
+) -> Result<Vec<String>, String> {
+    let src = Path::new(source_path);
+    if !src.is_file() {
+        return Err(format!("Source log not found: {source_path}"));
+    }
+    if selection.fights.is_empty() {
+        return Err("No fights were selected to split.".into());
+    }
+    const MAX_SELECTIONS: usize = 1024;
+    if selection.fights.len() > MAX_SELECTIONS {
+        return Err("Too many fights selected.".into());
+    }
+
+    let out = PathBuf::from(out_dir);
+    std::fs::create_dir_all(&out).map_err(|e| format!("Create output dir: {e}"))?;
+
+    let snapshot_len = std::fs::metadata(src)
+        .map_err(|e| format!("Failed to stat source: {e}"))?
+        .len();
+    let (sessions, all_fights, snapshot_len) =
+        resolve_scan(src, source_path, sessions, fights, snapshot_len)?;
+    let last_session_index = sessions.len() - 1;
+
+    let Some((session_pos, session)) = sessions.iter().enumerate().find(|(_, s)| {
+        selection
+            .start_offset
+            .map(|offset| s.start_offset == offset)
+            .unwrap_or(s.index == selection.index)
+    }) else {
+        return Err("The selected session could not be found.".into());
+    };
+    if let Some(expected) = selection.start_time_ms {
+        if session.start_time_ms != expected {
+            return Err(
+                "The log changed since it was scanned. Re-select it and try the split again."
+                    .into(),
+            );
+        }
+    }
+
+    let session_end = clamped_session_end(session, session_pos == last_session_index, snapshot_len);
+    if session_end <= session.start_offset {
+        return Err("The selected session is empty.".into());
+    }
+
+    let mut selected = Vec::with_capacity(selection.fights.len());
+    let mut seen = std::collections::HashSet::new();
+    for sel in &selection.fights {
+        if !seen.insert(sel.index) {
+            continue;
+        }
+        let found = all_fights.iter().find(|f| {
+            sel.start_offset
+                .map(|offset| f.start_offset == offset)
+                .unwrap_or(f.index == sel.index)
+        });
+        let Some(fight) = found else {
+            continue;
+        };
+        if let Some(expected) = sel.start_ms {
+            if fight.start_ms != expected {
+                return Err(
+                    "The log changed since it was scanned. Re-select it and try the split again."
+                        .into(),
+                );
+            }
+        }
+        if fight.start_offset < session.start_offset || fight.start_offset >= session_end {
+            continue;
+        }
+        let fight_end = fight.end_offset.min(session_end).min(snapshot_len);
+        if fight_end > fight.start_offset {
+            selected.push((fight.start_offset, fight_end, fight));
+        }
+    }
+    if selected.is_empty() {
+        return Err("None of the selected fights could be written.".into());
+    }
+    selected.sort_by_key(|&(start, _, _)| start);
+
+    let last_selected_end = selected.iter().map(|&(_, end, _)| end).max().unwrap();
+    let selected_ranges: std::collections::HashSet<(u64, u64)> = selected
+        .iter()
+        .map(|&(start, end, _)| (start, end))
+        .collect();
+
+    let mut holes: Vec<(u64, u64)> = all_fights
+        .iter()
+        .filter_map(|f| {
+            if f.start_offset < session.start_offset || f.start_offset >= last_selected_end {
+                return None;
+            }
+            let end = f
+                .end_offset
+                .min(last_selected_end)
+                .min(session_end)
+                .min(snapshot_len);
+            if end <= f.start_offset || selected_ranges.contains(&(f.start_offset, end)) {
+                None
+            } else {
+                Some((f.start_offset, end))
+            }
+        })
+        .collect();
+    holes.sort_by_key(|&(start, _)| start);
+
+    let mut segments: Vec<(u64, u64)> = Vec::with_capacity(holes.len() + 1);
+    let mut cursor = session.start_offset;
+    for (start, end) in holes {
+        if start > cursor {
+            segments.push((cursor, start));
+        }
+        cursor = cursor.max(end);
+    }
+    if last_selected_end > cursor {
+        segments.push((cursor, last_selected_end));
+    }
+    if segments.is_empty() {
+        return Err("None of the selected fights could be written.".into());
+    }
+
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Encounter");
+    let mut used = std::collections::HashSet::new();
+    let base = selection
+        .name
+        .as_deref()
+        .and_then(sanitize_split_stem)
+        .map(|s| format!("{s}.log"))
+        .unwrap_or_else(|| session_file_name(stem, session));
+    let name = unique_name(&mut used, base);
+    let dst = out.join(&name);
+    copy_ranges(src, &dst, &segments)?;
+    Ok(vec![dst.to_string_lossy().into_owned()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,6 +1213,62 @@ mod tests {
         let second = std::fs::read(&written[1]).unwrap();
         assert!(second.windows(3).any(|w| w == b"CCC"));
         assert!(!second.windows(3).any(|w| w == b"AAA"));
+    }
+
+    #[test]
+    fn split_session_fights_writes_one_file_with_selected_fights_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(&log, &three_fight_session());
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(scan.fights.len(), 3);
+
+        let written = split_session_fights_selected(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(scan.sessions.clone()),
+            Some(scan.fights.clone()),
+            SessionFightSelection {
+                index: scan.sessions[0].index,
+                name: Some("selected-pulls".into()),
+                start_offset: Some(scan.sessions[0].start_offset),
+                start_time_ms: Some(scan.sessions[0].start_time_ms),
+                fights: vec![
+                    FightSelection {
+                        index: scan.fights[0].index,
+                        name: None,
+                        start_offset: Some(scan.fights[0].start_offset),
+                        start_ms: Some(scan.fights[0].start_ms),
+                    },
+                    FightSelection {
+                        index: scan.fights[2].index,
+                        name: None,
+                        start_offset: Some(scan.fights[2].start_offset),
+                        start_ms: Some(scan.fights[2].start_ms),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].ends_with("selected-pulls.log"),
+            "got {}",
+            written[0]
+        );
+        let bytes = std::fs::read(&written[0]).unwrap();
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        let begin_count = bytes
+            .windows(b"BEGIN_LOG".len())
+            .filter(|w| *w == b"BEGIN_LOG")
+            .count();
+        assert_eq!(begin_count, 1, "session preamble must appear exactly once");
+        assert!(has(b"AAA"), "fight 1 must be present");
+        assert!(has(b"CCC"), "fight 3 must be present");
+        assert!(!has(b"BBB"), "fight 2 must be omitted");
     }
 
     // A pinned start_ms that no longer matches the resolved fight (the log changed

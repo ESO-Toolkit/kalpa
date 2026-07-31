@@ -293,8 +293,11 @@ fn logs_root(allowed: &State<'_, AllowedAddonsPath>) -> Result<PathBuf, String> 
 /// that passed confinement — closing the check-then-open (TOCTOU) window where a
 /// junction/symlink could be repointed between validation and use.
 fn confine_log_path(allowed: &State<'_, AllowedAddonsPath>, path: &str) -> Result<PathBuf, String> {
-    let p = Path::new(path);
+    let root = logs_root(allowed)?;
+    confine_existing_log_path(&root, Path::new(path))
+}
 
+fn confine_existing_log_path(root: &Path, p: &Path) -> Result<PathBuf, String> {
     if has_unc_or_verbatim_prefix(p) {
         return Err("Network and special paths are not allowed.".into());
     }
@@ -308,62 +311,28 @@ fn confine_log_path(allowed: &State<'_, AllowedAddonsPath>, path: &str) -> Resul
         return Err("Only .log files can be processed.".into());
     }
 
-    let root = logs_root(allowed)?;
     // The file must exist to be read; canonicalize resolves symlinks/`..`. Use
     // `dunce` so the canonical form is drive-letter (not verbatim `\\?\`), keeping
     // it consistent with `root` and safe to round-trip back through the frontend.
     let canonical = dunce::canonicalize(p)
         .map_err(|_| "That log file could not be found in your Logs folder.".to_string())?;
+    let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     if !canonical.starts_with(&root) {
         return Err("Log files must live in your ESO Logs folder.".into());
     }
     Ok(canonical)
 }
 
-/// App-owned output root for split files: `<app_data>/uploader-splits`.
-fn split_output_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Could not resolve app data dir: {e}"))?
-        .join("uploader-splits");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create output dir: {e}"))?;
-    Ok(dir)
+/// User-visible output root for split files: `<ESO Logs>/Kalpa Splits`.
+fn split_output_root(allowed: &State<'_, AllowedAddonsPath>) -> Result<PathBuf, String> {
+    split_output_root_from_logs_root(&logs_root(allowed)?)
 }
 
-/// Keep at most this many `split-*` output folders; older ones are pruned.
-const KEEP_SPLIT_FOLDERS: usize = 3;
-
-/// Remove the oldest `split-*` folders, keeping the `keep` most recent. Split
-/// output is full-byte copies of (multi-GB) logs; without pruning, repeated
-/// splits would accumulate in app data forever. Best-effort: errors are logged,
-/// never propagated, and the prune runs before a new split so the just-created
-/// folder is always retained. Mirrors `prune_auto_snapshots` in commands.rs.
-fn prune_split_folders(root: &Path, keep: usize) {
-    let prefix = "split-";
-    let mut dirs: Vec<_> = match std::fs::read_dir(root) {
-        Ok(rd) => rd
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir())
-            .collect(),
-        Err(_) => return,
-    };
-    if dirs.len() <= keep {
-        return;
-    }
-    // Names embed epoch-ms timestamps (constant 13-digit width through year
-    // 2286), so lexicographic order == chronological order.
-    dirs.sort_by_key(|e| e.file_name());
-    let to_remove = dirs.len() - keep;
-    for entry in dirs.into_iter().take(to_remove) {
-        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
-            eprintln!(
-                "Warning: failed to prune old split folder {:?}: {}",
-                entry.path(),
-                e
-            );
-        }
-    }
+fn split_output_root_from_logs_root(logs: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(logs).map_err(|e| format!("Could not create Logs dir: {e}"))?;
+    let dir = logs.join("Kalpa Splits");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create output dir: {e}"))?;
+    Ok(dir)
 }
 
 /// App-owned recycle bin for deleted logs: `<app_data>/uploader-recycle`. A
@@ -673,7 +642,6 @@ pub async fn uploader_probe_live_readiness(
 /// webview cannot write outside the app's split folder.
 #[tauri::command]
 pub async fn uploader_split_to_disk(
-    app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
     file_path: String,
     sessions: Option<Vec<LogSession>>,
@@ -681,12 +649,7 @@ pub async fn uploader_split_to_disk(
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();
-    let out_root = split_output_root(&app)?;
-    // Prune old split folders before creating the new one so the total stays at
-    // KEEP_SPLIT_FOLDERS (these hold full multi-GB copies — see prune_split_folders).
-    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
-    // Each split goes in its own timestamped subfolder so repeated splits of
-    // different logs don't collide.
+    let out_root = split_output_root(&allowed)?;
     let out_dir = out_root.join(format!("split-{}", now_ms()));
     let out_str = out_dir.to_string_lossy().into_owned();
     // Reuse the preflight's sessions (the UI passes them) to avoid a second full
@@ -701,15 +664,13 @@ pub async fn uploader_split_to_disk(
 /// destination and confinement as the full split workbench.
 #[tauri::command]
 pub async fn uploader_split_latest_session_to_disk(
-    app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
     file_path: String,
 ) -> Result<Vec<String>, String> {
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();
-    let out_root = split_output_root(&app)?;
-    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_root = split_output_root(&allowed)?;
     let out_dir = out_root.join(format!("split-{}", now_ms()));
     let out_str = out_dir.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || splitter::split_latest_session(&safe, &out_str))
@@ -1000,7 +961,6 @@ pub async fn uploader_restore_log(
 /// webview cannot write outside the split folder or traverse via a crafted name.
 #[tauri::command]
 pub async fn uploader_split_to_disk_named(
-    app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
     file_path: String,
     sessions: Option<Vec<LogSession>>,
@@ -1009,8 +969,7 @@ pub async fn uploader_split_to_disk_named(
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();
-    let out_root = split_output_root(&app)?;
-    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_root = split_output_root(&allowed)?;
     let out_dir = out_root.join(format!("split-{}", now_ms()));
     let out_str = out_dir.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || {
@@ -1029,7 +988,6 @@ pub async fn uploader_split_to_disk_named(
 /// the splitter re-scans itself only when those offsets can no longer be trusted.
 #[tauri::command]
 pub async fn uploader_split_fights_to_disk(
-    app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
     file_path: String,
     sessions: Option<Vec<LogSession>>,
@@ -1039,12 +997,33 @@ pub async fn uploader_split_fights_to_disk(
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();
-    let out_root = split_output_root(&app)?;
-    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_root = split_output_root(&allowed)?;
     let out_dir = out_root.join(format!("split-{}", now_ms()));
     let out_str = out_dir.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || {
         splitter::split_selected_fights(&safe, &out_str, sessions, fights, selections)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Split selected fights from one session into one self-contained `.log`.
+#[tauri::command]
+pub async fn uploader_split_session_fights_to_disk(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+    sessions: Option<Vec<LogSession>>,
+    fights: Option<Vec<FightSummary>>,
+    selection: splitter::SessionFightSelection,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&allowed)?;
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        splitter::split_session_fights_selected(&safe, &out_str, sessions, fights, selection)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -3202,8 +3181,27 @@ mod native_live_routing_tests {
 
 #[cfg(test)]
 mod uploader_command_tests {
-    use super::{path_has_log_extension, run_sign_out, validate_import_source, SignOut};
+    use super::{
+        confine_existing_log_path, path_has_log_extension, run_sign_out,
+        split_output_root_from_logs_root, validate_import_source, SignOut,
+    };
     use std::path::Path;
+
+    #[test]
+    fn split_output_under_logs_confines_after_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = tmp.path().join("Logs");
+        let output_root = split_output_root_from_logs_root(&logs).unwrap();
+        let split_dir = output_root.join("split-123");
+        std::fs::create_dir_all(&split_dir).unwrap();
+        let split = split_dir.join("raid.log");
+        std::fs::write(&split, b"0,BEGIN_LOG,1000\n").unwrap();
+
+        let confined = confine_existing_log_path(&logs, &split).unwrap();
+
+        assert_eq!(confined, dunce::canonicalize(&split).unwrap());
+        assert!(confined.starts_with(dunce::canonicalize(&logs).unwrap()));
+    }
 
     // B4: the import extension gate must hold on BOTH the raw caller path AND the
     // canonicalized target. A `.log` name whose resolved target is not `.log` (the

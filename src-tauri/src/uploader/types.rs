@@ -110,6 +110,26 @@ pub struct FightSummary {
     pub zone_name: Option<String>,
     /// Best-effort boss / monster name, if one was seen.
     pub boss_name: Option<String>,
+    /// Best-effort difficulty from the nearest `ZONE_CHANGED` before this fight.
+    #[serde(default)]
+    pub difficulty: Option<Difficulty>,
+    /// Conservative kill/wipe outcome when the scan can determine it confidently.
+    #[serde(default)]
+    pub outcome: Option<Outcome>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Difficulty {
+    Veteran,
+    Normal,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Outcome {
+    Kill,
+    Wipe,
 }
 
 /// A preflight summary of a whole log file: cheap-to-compute info shown before
