@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{Emitter, Manager, PhysicalSize, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -9661,7 +9661,6 @@ fn clamp_text_zoom(factor: f64) -> f64 {
     }
 }
 
-#[cfg(test)]
 pub fn text_zoom_from_path(path: &Path) -> Result<f64, String> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -9676,6 +9675,12 @@ pub fn text_zoom_from_path(path: &Path) -> Result<f64, String> {
         .and_then(serde_json::Value::as_f64)
         .map(clamp_text_zoom)
         .unwrap_or(TEXT_ZOOM_MIN))
+}
+
+pub fn startup_text_zoom<R: Runtime>(app: &AppHandle<R>) -> Result<f64, String> {
+    let path = tauri_plugin_store::resolve_store_path(app, "settings.json")
+        .map_err(|error| format!("Failed to resolve text zoom setting path: {error}"))?;
+    text_zoom_from_path(&path)
 }
 
 #[cfg(windows)]
@@ -9711,7 +9716,7 @@ fn set_webview_zoom(window: &WebviewWindow, factor: f64, _wait: bool) -> Result<
         .map_err(|error| format!("Failed to set text zoom: {error}"))
 }
 
-fn apply_text_zoom_to_window(
+pub(crate) fn apply_text_zoom_to_window(
     window: &WebviewWindow,
     factor: f64,
     wait_for_zoom: bool,

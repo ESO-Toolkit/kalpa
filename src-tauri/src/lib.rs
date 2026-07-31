@@ -30,7 +30,10 @@ static BENCH_ALLOC: bench_alloc::TrackingAlloc = bench_alloc::TrackingAlloc;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -389,6 +392,48 @@ mod webview_power {
     pub fn on_live_session_ended(_app: &AppHandle) {}
 }
 
+static INITIAL_MAIN_WINDOW_REVEALED: AtomicBool = AtomicBool::new(false);
+
+fn reveal_initial_main_window(app: &tauri::AppHandle, reason: &str) {
+    if INITIAL_MAIN_WINDOW_REVEALED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[text-zoom] Could not show startup window ({reason}): main window missing");
+        return;
+    };
+
+    if let Err(error) = commands::startup_text_zoom(app)
+        .and_then(|factor| commands::apply_text_zoom_to_window(&window, factor, true))
+    {
+        eprintln!("[text-zoom] Startup text zoom failed before show ({reason}): {error}");
+    }
+
+    webview_power::on_shown(app);
+    if let Err(error) = window.show() {
+        eprintln!("[text-zoom] Failed to show startup window ({reason}): {error}");
+    }
+    if let Err(error) = window.set_focus() {
+        eprintln!("[text-zoom] Failed to focus startup window ({reason}): {error}");
+    }
+}
+
+fn schedule_initial_main_window_watchdog(app: &tauri::AppHandle) {
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let dispatch_handle = app_handle.clone();
+        let fallback_handle = app_handle.clone();
+        if let Err(error) = app_handle.run_on_main_thread(move || {
+            reveal_initial_main_window(&dispatch_handle, "startup watchdog");
+        }) {
+            eprintln!("[text-zoom] Failed to dispatch startup watchdog: {error}");
+            reveal_initial_main_window(&fallback_handle, "startup watchdog dispatch failure");
+        }
+    });
+}
+
 pub fn run() {
     // msWebView2CodeCache: V8 bytecode caching for the app bundle. wry serves
     // the frontend through WebView2's WebResourceRequested interception, which
@@ -433,6 +478,13 @@ pub fn run() {
         .manage(std::sync::Arc::new(
             uploader::native::session::StoredSessionProvider::new(),
         ))
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+            {
+                reveal_initial_main_window(webview.app_handle(), "page load finished");
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
@@ -449,7 +501,17 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                        | tauri_plugin_window_state::StateFlags::DECORATIONS
+                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -467,9 +529,9 @@ pub fn run() {
             // is opened, so this is the only recovery pass that always runs.
             settings_store::recover(app.handle());
 
-            // Text zoom is applied by the frontend once the Tauri bridge is live.
-            // Applying it here can run before the WebView2 dispatcher is ready,
-            // which makes window metrics calls fail or silently queues a no-op.
+            // The initial window starts hidden. Text zoom is applied from the
+            // page-load hook once the WebView dispatcher exists, then the window
+            // is shown; a watchdog below shows it anyway if that hook never fires.
             // Parse any startup deep link BEFORE the native-mode gate: kalpa://
             // flows (pack installs from the browser) are WebView features, so a
             // deep-link activation boots the WebView UI even when native mode is
@@ -494,6 +556,8 @@ pub fn run() {
                     }
                 }
             }
+
+            schedule_initial_main_window_watchdog(app.handle());
 
             // Consume the sidecar's re-entry flags, then scrub them from this
             // process's environment: children (including a sidecar launched by
