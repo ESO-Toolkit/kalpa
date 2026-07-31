@@ -15,7 +15,6 @@ import {
   Link as LinkIcon,
   Radio,
   RefreshCw,
-  Scissors,
   Upload,
   ExternalLink,
   Copy,
@@ -94,7 +93,7 @@ import {
 import { UploadOptionsControl } from "./upload-options";
 import { UploadProgressPanel, type UploadProgressState } from "./upload-progress";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
-import { SplitWorkbench } from "./split-workbench";
+import { SlicePicker, type SplitUploadRequest } from "./slice-picker";
 import { dominantZone, shortDate } from "./naming";
 
 interface UploaderWorkspaceProps {
@@ -106,8 +105,6 @@ interface UploaderWorkspaceProps {
 }
 
 type Mode = "manual" | "live";
-type WorkbenchGranularity = "session" | "fight";
-type WorkbenchScope = "full" | "latest";
 
 /** The phase the pinned header's single adaptive status pill reflects. Priority
  *  order (highest first): a running live session (armed→live), an in-flight manual
@@ -250,7 +247,14 @@ export function UploaderWorkspace({
   // Monotonic token guarding against an out-of-order async scan result
   // overwriting the currently-selected log's fights.
   const selectTokenRef = useRef(0);
-  const latestActionTokenRef = useRef(0);
+  // Mirrored into a ref because `handleSelectLog` is a useCallback that would
+  // otherwise capture a stale `false` and let a switch through mid-batch.
+  const [slicePickerBusy, setSlicePickerBusy] = useState(false);
+  const slicePickerBusyRef = useRef(false);
+  const handleSlicePickerBusyChange = useCallback((busy: boolean) => {
+    slicePickerBusyRef.current = busy;
+    setSlicePickerBusy(busy);
+  }, []);
   const [options, setOptions] = useState<UploadOptions>(loadSavedOptions);
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
@@ -259,13 +263,6 @@ export function UploaderWorkspace({
   // per-upload Channel. Null when no native progress is being reported (idle, or a
   // handoff upload whose work Kalpa can't observe).
   const [uploadProgress, setUploadProgress] = useState<UploadProgressState | null>(null);
-  const [workbenchOpen, setWorkbenchOpen] = useState(false);
-  const [workbenchPreflight, setWorkbenchPreflight] = useState<LogPreflight | null>(null);
-  const [workbenchInitialGranularity, setWorkbenchInitialGranularity] =
-    useState<WorkbenchGranularity>("session");
-  const [workbenchScope, setWorkbenchScope] = useState<WorkbenchScope>("full");
-  const [latestSplitting, setLatestSplitting] = useState(false);
-  const [latestFightsLoading, setLatestFightsLoading] = useState(false);
   // True while a file is dragged over the window — drives the picker drop-zone
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
   const [dragOver, setDragOver] = useState(false);
@@ -387,16 +384,12 @@ export function UploaderWorkspace({
 
   const clearSelection = useCallback(() => {
     selectTokenRef.current++; // drop any in-flight scan result
-    latestActionTokenRef.current++;
     setSelectedLog(null);
     setPreflight(null);
     setFights([]);
     setScanning(false);
     setPreflightDeferred(false);
     setPreflightError(null);
-    setWorkbenchOpen(false);
-    setWorkbenchPreflight(null);
-    setWorkbenchScope("full");
   }, []);
 
   // Persist options whenever they change.
@@ -711,10 +704,16 @@ export function UploaderWorkspace({
 
   const handleSelectLog = useCallback(
     async (path: string) => {
+      // The slice picker is keyed on the selected log, so switching while it is
+      // cutting or uploading would remount it and abandon a batch that is still
+      // writing multi-GB files — with no UI left to report what happened.
+      if (slicePickerBusyRef.current) {
+        toast.info("Finish or stop the current split before switching logs.");
+        return;
+      }
       // Guard against a slow scan of a previously-selected log resolving after a
       // newer selection and overwriting its results.
       const token = ++selectTokenRef.current;
-      latestActionTokenRef.current++;
       const log = logs.find((l) => l.path === path);
       const deferFullScan = (log?.sizeBytes ?? 0) > DEFER_FULL_PREFLIGHT_BYTES;
       setSelectedLog(path);
@@ -723,11 +722,6 @@ export function UploaderWorkspace({
       setScanning(!deferFullScan);
       setPreflightDeferred(deferFullScan);
       setPreflightError(null);
-      setWorkbenchOpen(false);
-      setWorkbenchPreflight(null);
-      setWorkbenchScope("full");
-      setLatestFightsLoading(false);
-      setLatestSplitting(false);
       if (deferFullScan) {
         const sel = CSS.escape(path);
         setTimeout(() => {
@@ -772,17 +766,11 @@ export function UploaderWorkspace({
     if (!selectedLog) return;
     const path = selectedLog;
     const token = ++selectTokenRef.current;
-    latestActionTokenRef.current++;
     setPreflight(null);
     setFights([]);
     setScanning(true);
     setPreflightDeferred(false);
     setPreflightError(null);
-    setWorkbenchOpen(false);
-    setWorkbenchPreflight(null);
-    setWorkbenchScope("full");
-    setLatestFightsLoading(false);
-    setLatestSplitting(false);
     try {
       const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
       if (selectTokenRef.current !== token) return;
@@ -957,85 +945,53 @@ export function UploaderWorkspace({
     }
   };
 
-  // Opening the split workbench: the rich modal authors the per-session plan and
-  // performs the named split itself (uploader_split_to_disk_named). Requires the
-  // preflight to be loaded so the workbench has sessions to show.
-  const handleSplit = () => {
-    if (!selectedLog || !preflight) return;
-    setWorkbenchPreflight(preflight);
-    setWorkbenchInitialGranularity("session");
-    setWorkbenchScope("full");
-    setWorkbenchOpen(true);
-  };
+  const handleSliceSignIn = useCallback(async () => {
+    await signInWithDirectUploadSetup({
+      context: "uploader",
+      onAuthChange,
+    });
+    await refreshNativeState();
+  }, [onAuthChange, refreshNativeState]);
 
-  const handleWorkbenchOpenChange = useCallback((nextOpen: boolean) => {
-    setWorkbenchOpen(nextOpen);
-    if (!nextOpen) setWorkbenchPreflight(null);
-  }, []);
-
-  const handleSplitLatest = useCallback(async () => {
-    if (!selectedLog) return;
-    const path = selectedLog;
-    const actionToken = ++latestActionTokenRef.current;
-    setLatestSplitting(true);
-    try {
-      const written = await invokeOrThrow<string[]>("uploader_split_latest_session_to_disk", {
-        filePath: path,
-      });
-      if (latestActionTokenRef.current !== actionToken || selectedLogRef.current !== path) return;
-      toast.success(
-        `Latest session split into ${written.length} file${written.length === 1 ? "" : "s"}.`,
-        { duration: 6000 }
-      );
+  const handleUploadPreparedSplit = useCallback(
+    async ({ filePath, fightCount, zone, onProgress }: SplitUploadRequest) => {
+      setUploading(true);
+      setUploadProgress(null);
       try {
-        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-        if (written[0]) await revealItemInDir(written[0]);
-      } catch {
-        /* reveal is best-effort */
+        const [useOfficial, hasSession] = await Promise.all([
+          usesOfficialUploader(),
+          invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        ]);
+        const nativeOptIn = !useOfficial && hasSession;
+        const startMs = Date.now();
+        const progress = new Channel<UploadProgressEvent>();
+        progress.onmessage = (ev) => {
+          setUploadProgress({
+            phase: ev.phase,
+            segmentsDone: ev.segmentsDone,
+            segmentsTotal: ev.segmentsTotal,
+            startMs,
+          });
+          onProgress(ev);
+        };
+        const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
+          filePath,
+          options,
+          preferCli: transport?.officialUploaderInstalled ?? false,
+          fightCount,
+          nativeOptIn,
+          zone,
+          progress,
+        });
+        await refreshHistory();
+        return dispatch;
+      } finally {
+        setUploading(false);
+        setUploadProgress(null);
       }
-    } catch (e) {
-      if (latestActionTokenRef.current !== actionToken || selectedLogRef.current !== path) return;
-      toast.error(`Couldn't split latest session: ${getTauriErrorMessage(e)}`);
-    } finally {
-      if (latestActionTokenRef.current === actionToken) setLatestSplitting(false);
-    }
-  }, [selectedLog]);
-
-  const handleOpenLatestFights = useCallback(async () => {
-    if (!selectedLog) return;
-    const path = selectedLog;
-    const selectionToken = selectTokenRef.current;
-    const actionToken = ++latestActionTokenRef.current;
-    setLatestFightsLoading(true);
-    try {
-      const latest = await invokeOrThrow<LogPreflight>("uploader_preflight_latest_session", {
-        filePath: path,
-      });
-      if (
-        latestActionTokenRef.current !== actionToken ||
-        selectTokenRef.current !== selectionToken ||
-        selectedLogRef.current !== path
-      ) {
-        return;
-      }
-      setWorkbenchPreflight(latest);
-      setWorkbenchInitialGranularity(latest.fights.length > 0 ? "fight" : "session");
-      setWorkbenchScope("latest");
-      setWorkbenchOpen(true);
-    } catch (e) {
-      if (
-        latestActionTokenRef.current !== actionToken ||
-        selectTokenRef.current !== selectionToken ||
-        selectedLogRef.current !== path
-      ) {
-        return;
-      }
-      toast.error(`Couldn't scan latest session fights: ${getTauriErrorMessage(e)}`);
-    } finally {
-      if (latestActionTokenRef.current === actionToken) setLatestFightsLoading(false);
-    }
-  }, [selectedLog]);
-
+    },
+    [options, refreshHistory, transport?.officialUploaderInstalled]
+  );
   const handleStartLive = async (forceHandoffArg: boolean = false) => {
     // Harden against an event accidentally being passed (e.g. onClick={handleStartLive}
     // instead of a wrapper): coerce to a real boolean so a leaked PointerEvent can never
@@ -1617,274 +1573,267 @@ export function UploaderWorkspace({
           )}
         </DialogHeader>
 
-        {!isLoggedIn ? (
-          <LoggedOut onAuthChange={onAuthChange} />
-        ) : (
-          // The body is a DARKER inset canvas than the dialog chrome, so the
-          // raised content surfaces below it actually read as raised (you can't
-          // elevate from a surface the same color as everything else). The
-          // negative margins bleed it to the dialog edges; a top inset shadow
-          // sells the "sunken work surface" depth.
-          <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[var(--bg-base)] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_var(--scrim-60)]">
-            <div className="space-y-3.5">
-              <WhatGetsUploaded />
+        {!isLoggedIn && <LoggedOut onAuthChange={onAuthChange} />}
 
-              {liveSessionId && mode !== "live" && (
-                <LiveSessionMiniBar
-                  phase={livePhase}
-                  startMs={liveStartMs}
-                  fightCount={liveFightCount}
-                  report={liveReport}
-                  handedOff={liveHandedOff}
-                  visibility={liveVisibility}
-                  sessionAnchored={sessionAnchored}
-                  onOpen={() => setMode("live")}
-                  onStop={handleStopLive}
-                  onCopyLink={copyLink}
-                />
-              )}
+        {/* The body is a darker inset canvas than the dialog chrome, so the raised
+            content surfaces below it read as raised. The negative margins bleed it
+            to the dialog edges; a top inset shadow sells the sunken work surface depth. */}
+        <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[var(--bg-base)] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_var(--scrim-60)]">
+          <div className="space-y-3.5">
+            <WhatGetsUploaded />
 
-              {/* Mode tabs — a segmented control sitting in a recessed track, so
+            {liveSessionId && mode !== "live" && (
+              <LiveSessionMiniBar
+                phase={livePhase}
+                startMs={liveStartMs}
+                fightCount={liveFightCount}
+                report={liveReport}
+                handedOff={liveHandedOff}
+                visibility={liveVisibility}
+                sessionAnchored={sessionAnchored}
+                onOpen={() => setMode("live")}
+                onStop={handleStopLive}
+                onCopyLink={copyLink}
+              />
+            )}
+
+            {/* Mode tabs — a segmented control sitting in a recessed track, so
                   the active tab reads as raised out of the well, not as two equal
                   panels. */}
-              <div className="grid grid-cols-2 gap-1.5 rounded-2xl border border-scrim-40 bg-scrim-25 p-1.5 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]">
-                <ModeTab
-                  buttonRef={firstTabRef}
-                  active={mode === "manual"}
-                  onClick={() => {
-                    setMode("manual");
-                  }}
-                  Icon={Upload}
-                  title="Upload a Log"
-                  hint="Send a finished log after your session."
-                />
-                <ModeTab
-                  active={mode === "live"}
-                  onClick={() => {
-                    setMode("live");
-                    // Entering Live re-targets the ACTIVE Encounter.log, overriding any
-                    // selection carried over from Manual (e.g. an archive you were
-                    // about to upload) — live has exactly one correct target, and a
-                    // stale manual pick would silently make Go Live stream the wrong
-                    // (or a dead) file. The user can still click a different log AFTER
-                    // switching to Live to override. Guard on the REFS (not the
-                    // `liveSessionId` state, which lags) so this can't clobber the
-                    // selection of an in-flight start.
-                    if (!liveSessionIdRef.current && !startingRef.current) autoSelectActiveLog();
-                  }}
-                  Icon={Radio}
-                  title="Live Log"
-                  hint="Stream fights during an ongoing raid."
-                />
-              </div>
+            <div className="grid grid-cols-2 gap-1.5 rounded-2xl border border-scrim-40 bg-scrim-25 p-1.5 shadow-[inset_0_2px_8px_-2px_var(--scrim-60)]">
+              <ModeTab
+                buttonRef={firstTabRef}
+                active={mode === "manual"}
+                onClick={() => {
+                  setMode("manual");
+                }}
+                Icon={Upload}
+                title="Upload a Log"
+                hint="Send a finished log after your session."
+              />
+              <ModeTab
+                active={mode === "live"}
+                onClick={() => {
+                  setMode("live");
+                  // Entering Live re-targets the ACTIVE Encounter.log, overriding any
+                  // selection carried over from Manual (e.g. an archive you were
+                  // about to upload) — live has exactly one correct target, and a
+                  // stale manual pick would silently make Go Live stream the wrong
+                  // (or a dead) file. The user can still click a different log AFTER
+                  // switching to Live to override. Guard on the REFS (not the
+                  // `liveSessionId` state, which lags) so this can't clobber the
+                  // selection of an in-flight start.
+                  if (!liveSessionIdRef.current && !startingRef.current) autoSelectActiveLog();
+                }}
+                Icon={Radio}
+                title="Live Log"
+                hint="Stream fights during an ongoing raid."
+              />
+            </div>
 
-              {/* Direct upload routing. Shown before the picker in both modes so the
+            {/* Direct upload routing. Shown before the picker in both modes so the
                   user knows whether Kalpa will upload directly or hand off to the
                   official ESO Logs uploader before selecting a log. */}
-              {liveSessionId === null && (
-                <div
-                  ref={directUploadSectionRef}
-                  id="direct-upload-route"
-                  tabIndex={-1}
-                  className="scroll-mt-4 rounded-xl outline-none focus:ring-2 focus:ring-status-warning/35"
-                >
-                  <DirectUploadSection
-                    // This section represents the UNIFIED direct-upload state (it's shown
-                    // in both modes), so "opted in" requires native for BOTH manual and
-                    // live - i.e. neither opt-out key set. A migrated user with only the
-                    // live opt-out (manualUseOfficialUploader=false, liveUseOfficialUploader
-                    // =true) must NOT see "ready" while Go Live hands off; they see Enable,
-                    // which clears BOTH keys. Manual-only routing still uses `nativeOptIn`.
-                    optIn={nativeOptIn && !liveUseOfficial}
-                    hasSession={hasNativeSession}
-                    onChanged={refreshNativeState}
+            {liveSessionId === null && (
+              <div
+                ref={directUploadSectionRef}
+                id="direct-upload-route"
+                tabIndex={-1}
+                className="scroll-mt-4 rounded-xl outline-none focus:ring-2 focus:ring-status-warning/35"
+              >
+                <DirectUploadSection
+                  // This section represents the UNIFIED direct-upload state (it's shown
+                  // in both modes), so "opted in" requires native for BOTH manual and
+                  // live - i.e. neither opt-out key set. A migrated user with only the
+                  // live opt-out (manualUseOfficialUploader=false, liveUseOfficialUploader
+                  // =true) must NOT see "ready" while Go Live hands off; they see Enable,
+                  // which clears BOTH keys. Manual-only routing still uses `nativeOptIn`.
+                  optIn={nativeOptIn && !liveUseOfficial}
+                  hasSession={hasNativeSession}
+                  onChanged={refreshNativeState}
+                />
+              </div>
+            )}
+            {/* Log picker */}
+            <LogPicker
+              detection={detection}
+              logsDir={logsDir}
+              logs={logs}
+              listError={listError}
+              selectedLog={selectedLog}
+              scanning={scanning}
+              dragOver={dragOver}
+              importing={importing}
+              onSelect={handleSelectLog}
+              onRefresh={() => void handleRefreshLogs()}
+              onPickFolder={handlePickFolder}
+              onResetFolder={handleResetFolder}
+              onOpenFolder={handleOpenLogsFolder}
+              onReveal={handleRevealLog}
+              onCopyPath={handleCopyPath}
+              onRequestDelete={setDeleteTarget}
+            />
+
+            {/* Selected-log summary: the confident "here's what you're uploading"
+                moment before the action. */}
+            {selectedLog && preflight && !scanning && (
+              <LogSummaryCard
+                fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
+                preflight={preflight}
+                fights={fights}
+                willUseNative={activeWillUseNative}
+              />
+            )}
+
+            {/* Inline split picker */}
+            {selectedLog && !preflight && (
+              <Preflight
+                preflight={preflight}
+                scanning={scanning}
+                deferred={preflightDeferred}
+                preflightError={preflightError}
+                scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
+                onScanFull={handleScanFullLog}
+              />
+            )}
+            {selectedLog && preflight && !scanning && mode === "manual" && (
+              <SlicePicker
+                key={`${selectedLog}:${preflight.sessions.map((s) => s.startOffset).join("-")}:${preflight.fights.length}`}
+                filePath={selectedLog}
+                fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
+                preflight={preflight}
+                isSignedIn={isLoggedIn}
+                visibility={options.visibility}
+                onSignIn={handleSliceSignIn}
+                onRescan={handleScanFullLog}
+                onFilesWritten={async () => {
+                  if (logsDir) await loadLogs(logsDir);
+                }}
+                onUploadPreparedLog={handleUploadPreparedSplit}
+                onBusyChange={handleSlicePickerBusyChange}
+              />
+            )}
+
+            {/* The flat fight list is the picker's predecessor: once the picker is
+                up it shows the same fights as a selectable tree, so rendering both
+                duplicated the list AND reintroduced a capped scroller (max-h-64),
+                which at 150% text zoom is the ~250px porthole the picker exists to
+                avoid. It still earns its place while a scan is running or after one
+                fails, where it carries the only explanation of what happened. */}
+            {selectedLog &&
+              !(preflight && !scanning && mode === "manual") &&
+              (mode === "live" ? null : (
+                <div className={cn(WORK_PANEL, "p-3.5")}>
+                  <SectionHeader className="mb-2">Fights</SectionHeader>
+                  <FightList
+                    fights={rowsFromSummaries(fights)}
+                    emptyHint={
+                      scanning
+                        ? "Scanning the log..."
+                        : preflightError
+                          ? "Full log scan failed."
+                          : preflightDeferred
+                            ? "Full log scan deferred."
+                            : preflight?.fightsOmitted
+                              ? "Fight list omitted for this log."
+                              : "No fights found in this log yet."
+                    }
                   />
                 </div>
-              )}
-              {/* Log picker */}
-              <LogPicker
-                detection={detection}
-                logsDir={logsDir}
-                logs={logs}
-                listError={listError}
-                selectedLog={selectedLog}
-                scanning={scanning}
-                dragOver={dragOver}
-                importing={importing}
-                onSelect={handleSelectLog}
-                onRefresh={() => void handleRefreshLogs()}
-                onPickFolder={handlePickFolder}
-                onResetFolder={handleResetFolder}
-                onOpenFolder={handleOpenLogsFolder}
-                onReveal={handleRevealLog}
-                onCopyPath={handleCopyPath}
-                onRequestDelete={setDeleteTarget}
-              />
+              ))}
 
-              {/* Selected-log summary: the confident "here's what you're uploading"
-                moment before the action. */}
-              {selectedLog && preflight && !scanning && (
-                <LogSummaryCard
-                  fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
-                  preflight={preflight}
-                  fights={fights}
+            {/* Upload options */}
+            {selectedLog && (
+              <div className={cn(WORK_PANEL, "p-4")}>
+                <UploadOptionsControl
+                  options={options}
+                  onChange={setOptions}
+                  disabled={uploading || liveSessionId !== null}
                   willUseNative={activeWillUseNative}
+                  officialInstalled={transport?.officialUploaderInstalled ?? false}
+                  fights={fights}
+                  whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
                 />
-              )}
-
-              {/* Preflight + fights */}
-              {selectedLog && (
-                <Preflight
-                  preflight={preflight}
-                  scanning={scanning}
-                  deferred={preflightDeferred}
-                  preflightError={preflightError}
-                  scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
-                  onSplit={handleSplit}
-                  onSplitLatest={handleSplitLatest}
-                  onOpenLatestFights={handleOpenLatestFights}
-                  onScanFull={handleScanFullLog}
-                  latestSplitting={latestSplitting}
-                  latestFightsLoading={latestFightsLoading}
-                />
-              )}
-
-              {selectedLog &&
-                (mode === "live" ? null : (
-                  <div className={cn(WORK_PANEL, "p-3.5")}>
-                    <SectionHeader className="mb-2">Fights</SectionHeader>
-                    <FightList
-                      fights={rowsFromSummaries(fights)}
-                      emptyHint={
-                        scanning
-                          ? "Scanning the log..."
-                          : preflightError
-                            ? "Full log scan failed."
-                            : preflightDeferred
-                              ? "Full log scan deferred."
-                              : preflight?.fightsOmitted
-                                ? "Fight list omitted for this log."
-                                : "No fights found in this log yet."
-                      }
-                    />
-                  </div>
-                ))}
-
-              {/* Upload options */}
-              {selectedLog && (
-                <div className={cn(WORK_PANEL, "p-4")}>
-                  <UploadOptionsControl
+                {mode === "live" && (
+                  <LiveToggles
                     options={options}
                     onChange={setOptions}
-                    disabled={uploading || liveSessionId !== null}
-                    willUseNative={activeWillUseNative}
-                    officialInstalled={transport?.officialUploaderInstalled ?? false}
-                    fights={fights}
-                    whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
-                  />
-                  {mode === "live" && (
-                    <LiveToggles
-                      options={options}
-                      onChange={setOptions}
-                      disabled={liveSessionId !== null}
-                    />
-                  )}
-                </div>
-              )}
-
-              {/* Action area. Keyed on `mode` so switching cross-fades the panel.
-                Live sessions keep running until the explicit Stop control is used. */}
-              <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
-                {mode === "manual" ? (
-                  <ManualActions
-                    canUpload={
-                      !!selectedLog &&
-                      !uploading &&
-                      !scanning &&
-                      preflight !== null &&
-                      liveSessionId === null
-                    }
-                    uploading={uploading}
-                    progress={uploadProgress}
-                    fileName={
-                      selectedLog ? (selectedLog.split(/[/\\]/).pop() ?? selectedLog) : null
-                    }
-                    transport={transport}
-                    willUseNative={willUseNative}
-                    onUpload={handleManualUpload}
-                  />
-                ) : (
-                  <LiveDashboard
-                    running={liveSessionId !== null}
-                    starting={starting}
-                    // Always enabled (the listError empty-state aside, handled by the
-                    // panel): handleStartLive resolves the active Encounter.log itself
-                    // and surfaces an honest toast when the folder is empty — so gating
-                    // on a selection or logs.length>0 made both the auto-select fallback
-                    // AND the empty-folder toast unreachable from the button.
-                    canStart={true}
-                    startMs={liveStartMs}
-                    liveFights={liveFights}
-                    liveFightCount={liveFightCount}
-                    liveReport={liveReport}
-                    // Fights already in the selected log before going live. Live
-                    // streams only NEW fights (tail starts at EOF), so this drives the
-                    // "earlier fights won't be uploaded" expectation note.
-                    priorFightCount={preflight?.totalFights ?? 0}
-                    // Which path the running session took — drives the callout/copy
-                    // (handoff = a separate uploader app; native = Kalpa uploads).
-                    handedOff={liveHandedOff}
-                    visibility={liveVisibility}
-                    // Native waiting↔streaming: anchored once the first BEGIN_LOG lands.
-                    sessionAnchored={sessionAnchored}
-                    // Best-effort pre-start guess of what's coming (which waiting copy).
-                    readiness={liveReadiness}
-                    // Wrap so the click PointerEvent is NOT passed as the first arg
-                    // (`forceHandoff`): a bare `onStart={handleStartLive}` made every
-                    // Go Live receive the event as a truthy forceHandoff → preferOfficial
-                    // → silent handoff to the official uploader. This is THE "it still
-                    // opened the other uploader" bug.
-                    onStart={() => void handleStartLive()}
-                    onStop={handleStopLive}
-                    onCopyLink={copyLink}
-                    onForceHandoff={handleForceHandoffLive}
+                    disabled={liveSessionId !== null}
                   />
                 )}
               </div>
+            )}
 
-              {/* History */}
-              <HistoryPanel
-                history={history}
-                onCopyLink={copyLink}
-                onRefresh={refreshHistory}
-                onAttachReport={handleAttachReport}
-                onDelete={handleDeleteHistory}
-              />
+            {/* Action area. Keyed on `mode` so switching cross-fades the panel.
+                Live sessions keep running until the explicit Stop control is used. */}
+            <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
+              {mode === "manual" ? (
+                <ManualActions
+                  canUpload={
+                    !!selectedLog &&
+                    !uploading &&
+                    !scanning &&
+                    !slicePickerBusy &&
+                    preflight !== null &&
+                    liveSessionId === null
+                  }
+                  uploading={uploading}
+                  progress={uploadProgress}
+                  fileName={selectedLog ? (selectedLog.split(/[/\\]/).pop() ?? selectedLog) : null}
+                  transport={transport}
+                  willUseNative={willUseNative}
+                  onUpload={handleManualUpload}
+                />
+              ) : (
+                <LiveDashboard
+                  running={liveSessionId !== null}
+                  starting={starting}
+                  // Always enabled (the listError empty-state aside, handled by the
+                  // panel): handleStartLive resolves the active Encounter.log itself
+                  // and surfaces an honest toast when the folder is empty — so gating
+                  // on a selection or logs.length>0 made both the auto-select fallback
+                  // AND the empty-folder toast unreachable from the button.
+                  canStart={true}
+                  startMs={liveStartMs}
+                  liveFights={liveFights}
+                  liveFightCount={liveFightCount}
+                  liveReport={liveReport}
+                  // Fights already in the selected log before going live. Live
+                  // streams only NEW fights (tail starts at EOF), so this drives the
+                  // "earlier fights won't be uploaded" expectation note.
+                  priorFightCount={preflight?.totalFights ?? 0}
+                  // Which path the running session took — drives the callout/copy
+                  // (handoff = a separate uploader app; native = Kalpa uploads).
+                  handedOff={liveHandedOff}
+                  visibility={liveVisibility}
+                  // Native waiting↔streaming: anchored once the first BEGIN_LOG lands.
+                  sessionAnchored={sessionAnchored}
+                  // Best-effort pre-start guess of what's coming (which waiting copy).
+                  readiness={liveReadiness}
+                  // Wrap so the click PointerEvent is NOT passed as the first arg
+                  // (`forceHandoff`): a bare `onStart={handleStartLive}` made every
+                  // Go Live receive the event as a truthy forceHandoff → preferOfficial
+                  // → silent handoff to the official uploader. This is THE "it still
+                  // opened the other uploader" bug.
+                  onStart={() => void handleStartLive()}
+                  onStop={handleStopLive}
+                  onCopyLink={copyLink}
+                  onForceHandoff={handleForceHandoffLive}
+                />
+              )}
             </div>
-          </div>
-        )}
-      </DialogContent>
 
-      {/* The split workbench overlays as its own modal when invoked from the
-          preflight's Split control. Rendered here so it shares the uploader's
-          lifetime but layers above the main dialog. */}
-      {selectedLog && (
-        // key on the selected log so switching logs REMOUNTS the workbench,
-        // resetting its per-session drafts (include/name) — otherwise a new log
-        // with the same session indices would inherit the previous log's choices.
-        <SplitWorkbench
-          key={`${selectedLog}:${workbenchInitialGranularity}:${workbenchScope}:${
-            workbenchPreflight?.sessions.map((s) => s.startOffset).join("-") ?? "none"
-          }`}
-          open={workbenchOpen}
-          onOpenChange={handleWorkbenchOpenChange}
-          filePath={selectedLog}
-          fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
-          preflight={workbenchPreflight}
-          initialGranularity={workbenchInitialGranularity}
-          scope={workbenchScope}
-        />
-      )}
+            {/* History */}
+            <HistoryPanel
+              history={history}
+              onCopyLink={copyLink}
+              onRefresh={refreshHistory}
+              onAttachReport={handleAttachReport}
+              onDelete={handleDeleteHistory}
+            />
+          </div>
+        </div>
+      </DialogContent>
 
       {/* Delete confirmation — soft delete to the recycle bin (recoverable). */}
       <DeleteLogConfirm
@@ -3490,68 +3439,25 @@ function Preflight({
   deferred,
   preflightError,
   scanningSizeBytes,
-  onSplit,
-  onSplitLatest,
-  onOpenLatestFights,
   onScanFull,
-  latestSplitting,
-  latestFightsLoading,
 }: {
   preflight: LogPreflight | null;
   scanning: boolean;
   deferred: boolean;
   preflightError: string | null;
   scanningSizeBytes: number | null;
-  onSplit: () => void;
-  onSplitLatest: () => void;
-  onOpenLatestFights: () => void;
   onScanFull: () => void;
-  latestSplitting: boolean;
-  latestFightsLoading: boolean;
 }) {
-  if (scanning && !preflight) {
-    // Surface the known file size so a long scan of a multi-GB log reads as
-    // expected work, not a hang, and show skeleton pills shaped like the real
-    // result so the layout doesn't jump when it resolves.
+  if (preflight) return null;
+
+  if (scanning) {
     const sizeHint = scanningSizeBytes ? ` (${compactBytes(scanningSizeBytes)})` : "";
     const big = (scanningSizeBytes ?? 0) > 256 * 1024 * 1024;
     return (
       <div className="space-y-2 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span className="size-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
-            Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
-          </div>
-          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onOpenLatestFights}
-              disabled={latestFightsLoading || latestSplitting}
-              className="min-w-0 flex-1 border-accent-sky/30 bg-accent-sky/[0.05] text-accent-sky hover:bg-accent-sky/[0.12] sm:flex-none"
-            >
-              {latestFightsLoading ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : (
-                <Swords className="size-3.5" aria-hidden />
-              )}
-              Latest fights
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onSplitLatest}
-              disabled={latestSplitting || latestFightsLoading}
-              className="min-w-0 flex-1 border-accent-sky/30 bg-accent-sky/[0.05] text-accent-sky hover:bg-accent-sky/[0.12] sm:flex-none"
-            >
-              {latestSplitting ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : (
-                <Scissors className="size-3.5" aria-hidden />
-              )}
-              Latest session
-            </Button>
-          </div>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="size-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+          Scanning the log{sizeHint}...{big ? " this may take a moment." : ""}
         </div>
         <div className="flex gap-2" aria-hidden>
           <span className="h-5 w-16 animate-pulse rounded-lg bg-structure-05" />
@@ -3561,7 +3467,8 @@ function Preflight({
       </div>
     );
   }
-  if (!preflight && (deferred || preflightError)) {
+
+  if (deferred || preflightError) {
     const sizeHint = scanningSizeBytes ? compactBytes(scanningSizeBytes) : null;
     const hasError = Boolean(preflightError);
     return (
@@ -3586,181 +3493,19 @@ function Preflight({
             <div className="mt-0.5 text-xs text-muted-foreground">
               {hasError
                 ? preflightError
-                : `Full scan is deferred${sizeHint ? ` for ${sizeHint}` : ""}. Latest-session actions stay fast.`}
+                : `Full scan is deferred${sizeHint ? ` for ${sizeHint}` : ""}. Scan the full log to choose sessions and fights.`}
             </div>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onOpenLatestFights}
-              disabled={latestFightsLoading || latestSplitting}
-              className="border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
-            >
-              {latestFightsLoading ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : (
-                <Swords className="size-3.5" aria-hidden />
-              )}
-              Latest fights
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onSplitLatest}
-              disabled={latestSplitting || latestFightsLoading}
-              className="border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
-            >
-              {latestSplitting ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : (
-                <Scissors className="size-3.5" aria-hidden />
-              )}
-              Latest session
-            </Button>
-            <Button variant="outline" size="sm" onClick={onScanFull}>
-              <Search className="size-3.5" aria-hidden />
-              Scan full log
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" onClick={onScanFull}>
+            <Search className="size-3.5" aria-hidden />
+            Scan full log
+          </Button>
         </div>
       </div>
     );
   }
-  if (!preflight) return null;
 
-  // A PROMINENT split entry point — the old thin row was easy to miss. A bordered
-  // card with an icon chip, a clear heading, the session/fight counts, and an
-  // obvious CTA. It stays sky (or amber when the log is large enough to need
-  // splitting) — never gold, which is reserved for the Upload climax below it.
-  const sessionCount = preflight.sessions.length;
-  const fightCount = preflight.totalFights;
-  const urgent = preflight.recommendSplit;
-  // Per-fight split needs the parsed fight list, which the backend omits for very
-  // large logs — so don't promise it in the card when the workbench can't offer it.
-  const perFightAvailable = preflight.fights.length > 0;
-  const fightsOmitted = preflight.fightsOmitted;
-  const counts =
-    sessionCount > 0
-      ? `${sessionCount} session${sessionCount === 1 ? "" : "s"}` +
-        (fightCount > 0 ? ` · ${fightCount} fight${fightCount === 1 ? "" : "s"}` : "")
-      : "";
-  // A peek at what's in the log, right on the card, so the user sees the fights
-  // before opening the workbench. Only when the per-fight list was scanned.
-  const fightPreview = perFightAvailable ? preflight.fights.slice(0, 4) : [];
-  const moreFights = preflight.fights.length - fightPreview.length;
-  return (
-    <div
-      className={cn(
-        "rounded-xl border border-l-[3px] p-3 transition-colors",
-        urgent
-          ? "border-status-warning/25 border-l-status-warning bg-status-warning/[0.05]"
-          : "border-accent-sky/20 border-l-accent-sky/70 bg-accent-sky/[0.04]"
-      )}
-    >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <span
-          className={cn(
-            "flex size-9 shrink-0 items-center justify-center rounded-lg",
-            urgent
-              ? "bg-status-warning/12 text-status-warning-soft"
-              : "bg-accent-sky/12 text-accent-sky"
-          )}
-        >
-          <Scissors className="size-4" aria-hidden />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold text-foreground">
-            {urgent ? "This log is large — split it to upload" : "Split this log"}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            {perFightAvailable
-              ? "Carve it into per-session or per-fight files — upload a single fight or a whole night on its own."
-              : fightsOmitted
-                ? "Fight rows were omitted to keep this log responsive. Split by session, or scan just the latest session for fights."
-                : "Carve it into per-session files so each uploads cleanly."}
-            {counts && <span className="text-muted-foreground"> {counts}.</span>}
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onOpenLatestFights}
-            disabled={latestFightsLoading || latestSplitting}
-            className={cn(
-              "shrink-0",
-              urgent
-                ? "border-status-warning/35 bg-status-warning/[0.06] text-status-warning-muted hover:bg-status-warning/[0.14]"
-                : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
-            )}
-          >
-            {latestFightsLoading ? (
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-            ) : (
-              <Swords className="size-3.5" aria-hidden />
-            )}
-            Latest fights
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onSplitLatest}
-            disabled={latestSplitting || latestFightsLoading}
-            className={cn(
-              "shrink-0",
-              urgent
-                ? "border-status-warning/35 bg-status-warning/[0.06] text-status-warning-muted hover:bg-status-warning/[0.14]"
-                : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
-            )}
-          >
-            {latestSplitting ? (
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-            ) : (
-              <Scissors className="size-3.5" aria-hidden />
-            )}
-            Latest session
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onSplit}
-            className={cn(
-              "shrink-0",
-              urgent
-                ? "border-status-warning/40 bg-status-warning/[0.08] text-status-warning-muted hover:bg-status-warning/[0.16]"
-                : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
-            )}
-          >
-            <Scissors className="size-3.5" aria-hidden />
-            Split log…
-          </Button>
-        </div>
-      </div>
-
-      {/* Fight peek — the first few fights with their durations, so the content is
-          visible before opening the workbench. */}
-      {fightPreview.length > 0 && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-structure-06 pt-2.5">
-          {fightPreview.map((f) => (
-            <span
-              key={f.index}
-              className="inline-flex items-center gap-1.5 rounded-md border border-structure-08 bg-structure-02 px-2 py-0.5 text-[11px]"
-            >
-              <Swords className="size-2.5 shrink-0 text-primary/60" aria-hidden />
-              <span className="max-w-[150px] truncate text-foreground">{fightLabel(f)}</span>
-              <span className="tabular-nums text-muted-foreground">
-                {formatDuration(f.endMs - f.startMs)}
-              </span>
-            </span>
-          ))}
-          {moreFights > 0 && (
-            <span className="text-xs text-muted-foreground">+{moreFights} more</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
+  return null;
 }
 
 function LiveToggles({

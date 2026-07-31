@@ -25,7 +25,6 @@
 //! string would misalign every subsequent range. Content is decoded lossily
 //! only for field parsing, never for offset math.
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -326,6 +325,18 @@ pub struct ScanResult {
     pub total_fights: usize,
 }
 
+/// Index of the TARGET unit's id in a `COMBAT_EVENT` line.
+///
+/// The line is `<header 0..=8>,<source unit state 9..=18>,<target unit state
+/// 19..=28>`; each unit state is ten fields (`unitId,health,magicka,stamina,
+/// ultimate,werewolf,shield,x,y,heading`). For a `DIED`/`DIED_XP` event the unit
+/// that died is the target, so its id is the first field of the second state.
+const TARGET_UNIT_ID_FIELD: usize = 19;
+
+/// Index of the SOURCE unit's id in a `COMBAT_EVENT` line — the first field of
+/// the first unit state, immediately after the nine-field header.
+const SOURCE_UNIT_ID_FIELD: usize = 9;
+
 /// Running boundary-detection state, shared by the full-file and chunk scanners.
 ///
 /// Feeding lines (with their absolute byte offsets) drives session and fight
@@ -344,7 +355,14 @@ struct Detector {
     pending_zone: Option<String>,
     pending_boss: Option<String>,
     pending_difficulty: Option<Difficulty>,
-    boss_unit_ids: HashSet<String>,
+    /// Declared boss units for this session, id -> name. Ids are per-spawn, so a
+    /// boss re-pulled after a reset appears under a new id each attempt.
+    boss_units: std::collections::HashMap<String, String>,
+    /// Name of a boss that actually took part in the CURRENT fight, as witnessed
+    /// by a combat event naming its unit id. `pending_boss` records where a boss
+    /// *spawned*, which is often the previous pull — attributing by engagement is
+    /// what keeps the name on the same fight as the kill.
+    fight_boss: Option<String>,
     current_fight_outcome: Option<Outcome>,
     /// Chunk-scan only: absolute offset of the first `BEGIN_LOG` seen *after*
     /// the chunk started in an already-open session (a `/encounterlog`
@@ -384,7 +402,8 @@ impl Detector {
                 self.pending_zone = None;
                 self.pending_boss = None;
                 self.pending_difficulty = None;
-                self.boss_unit_ids.clear();
+                self.boss_units.clear();
+                self.fight_boss = None;
                 self.current_fight_outcome = None;
 
                 let start_time_ms = field(line, 2)
@@ -432,13 +451,16 @@ impl Detector {
                 // filter is kept as defense in depth so only monster names
                 // are ever adopted.
                 if field(line, 7).is_some_and(|f| f.eq_ignore_ascii_case("T")) {
+                    let name = field(line, 10)
+                        .filter(|s| !s.is_empty() && !s.starts_with('@'))
+                        .map(|s| s.trim_matches('"').to_string());
                     if let Some(unit_id) = field(line, 2).filter(|s| !s.is_empty()) {
-                        self.boss_unit_ids.insert(unit_id.to_string());
+                        if let Some(name) = name.clone() {
+                            self.boss_units.insert(unit_id.to_string(), name);
+                        }
                     }
-                    if let Some(name) =
-                        field(line, 10).filter(|s| !s.is_empty() && !s.starts_with('@'))
-                    {
-                        self.pending_boss = Some(name.to_string());
+                    if let Some(name) = name {
+                        self.pending_boss = Some(name);
                     }
                 }
             }
@@ -461,21 +483,49 @@ impl Detector {
                             start_ms,
                             end_ms: parse_rel_ms(line),
                             zone_name: self.pending_zone.clone(),
-                            boss_name: self.pending_boss.clone(),
+                            // Engagement first, spawn only as a fallback.
+                            boss_name: self
+                                .fight_boss
+                                .clone()
+                                .or_else(|| self.pending_boss.clone()),
                             difficulty: self.pending_difficulty,
                             outcome: self.current_fight_outcome,
                         });
                     }
                     self.pending_boss.take();
+                    self.fight_boss.take();
                     self.current_fight_outcome = None;
                     self.total_fights += 1;
                     self.session_fight_count += 1;
                 }
             }
             LineType::CombatEvent => {
-                if self.fight_start.is_some()
-                    && matches!(field(line, 2), Some(v) if v.eq_ignore_ascii_case("DIED") || v.eq_ignore_ascii_case("DIED_XP"))
-                    && field(line, 11).is_some_and(|unit_id| self.boss_unit_ids.contains(unit_id))
+                // A `COMBAT_EVENT` carries TWO unit states, each ten fields wide:
+                // the source at 9..=18 and the target at 19..=28 (29 fields total).
+                // The unit that died is the TARGET, so its id is field 19 — field 11
+                // is the source's magicka pair ("13173/13173") and can never match a
+                // unit id, which silently disabled this rule entirely. Verified
+                // against real logs: field 19 matched ten boss deaths in one arena
+                // run where field 11 matched none.
+                if self.fight_start.is_none() {
+                    return;
+                }
+
+                // Any combat event naming a boss unit — as attacker or victim —
+                // proves that boss was engaged in THIS fight.
+                if self.fight_boss.is_none() {
+                    for idx in [SOURCE_UNIT_ID_FIELD, TARGET_UNIT_ID_FIELD] {
+                        if let Some(name) = field(line, idx).and_then(|id| self.boss_units.get(id))
+                        {
+                            self.fight_boss = Some(name.clone());
+                            break;
+                        }
+                    }
+                }
+
+                if matches!(field(line, 2), Some(v) if v.eq_ignore_ascii_case("DIED") || v.eq_ignore_ascii_case("DIED_XP"))
+                    && field(line, TARGET_UNIT_ID_FIELD)
+                        .is_some_and(|unit_id| self.boss_units.contains_key(unit_id))
                 {
                     self.current_fight_outcome = Some(Outcome::Kill);
                 }
@@ -787,18 +837,68 @@ mod tests {
         assert_eq!(r.fights[0].end_ms, 5200);
     }
 
+    /// A `COMBAT_EVENT` shaped exactly like the game writes one: 29 fields, with
+    /// the source unit state at 9..=18 and the target's at 19..=28. `died_unit`
+    /// lands at field 19. The previous fixture was only 13 fields wide and put the
+    /// unit id at 11, which matched a bug rather than the format — it passed while
+    /// the rule was incapable of firing on a real log.
+    fn died_line(rel_ms: u64, died_unit: &str) -> String {
+        format!(
+            "{rel_ms},COMBAT_EVENT,DIED_XP,DISEASE,0,0,0,5000,100,\
+             1,19253/19253,13173/13173,24726/24726,471/500,1000/1000,0,0.8807,0.8035,2.2274,\
+             {died_unit},0/1,0/0,0/0,0/0,0/0,0,0.8574,0.8172,-1.5381"
+        )
+    }
+
     #[test]
     fn detects_boss_death_as_kill() {
+        let log = format!(
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"10.0\"\n\
+             100,ZONE_CHANGED,1301,\"Sunspire\",VETERAN\n\
+             150,UNIT_ADDED,30,MONSTER,F,0,88330,T,0,0,\"Lokkestiiz\",\"\"\n\
+             200,BEGIN_COMBAT\n\
+             {}\n\
+             400,END_COMBAT\n",
+            died_line(300, "30")
+        );
+        let r = scan_text(&log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].boss_name.as_deref(), Some("Lokkestiiz"));
+        assert_eq!(r.fights[0].outcome, Some(Outcome::Kill));
+    }
+
+    #[test]
+    fn a_dying_trash_mob_is_not_a_kill() {
+        // Unit 44 was never declared a boss, so its death proves nothing. This also
+        // pins the field index: 13173/13173 sits at field 11, so a rule reading
+        // that position could never match any unit id.
+        let log = format!(
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"10.0\"\n\
+             100,ZONE_CHANGED,1301,\"Sunspire\",VETERAN\n\
+             150,UNIT_ADDED,30,MONSTER,F,0,88330,T,0,0,\"Lokkestiiz\",\"\"\n\
+             200,BEGIN_COMBAT\n\
+             {}\n\
+             400,END_COMBAT\n",
+            died_line(300, "44")
+        );
+        let r = scan_text(&log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].outcome, None);
+    }
+
+    #[test]
+    fn a_truncated_combat_event_is_ignored_rather_than_misread() {
+        // Real logs contain short DIED lines (20 fields, no target state). Reading
+        // past the end must yield no outcome instead of a wrong one.
         let log = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"10.0\"\n\
                    100,ZONE_CHANGED,1301,\"Sunspire\",VETERAN\n\
                    150,UNIT_ADDED,30,MONSTER,F,0,88330,T,0,0,\"Lokkestiiz\",\"\"\n\
                    200,BEGIN_COMBAT\n\
-                   300,COMBAT_EVENT,DIED_XP,DISEASE,1,92,0,5000,100,1,0/1,30,0/100\n\
+                   300,COMBAT_EVENT,DIED,DISEASE,0,0,0,5000,100,30,0/1,0/0,0/0,0/0,0/0,0,0.1,0.2,0.3\n\
                    400,END_COMBAT\n";
         let r = scan_text(log);
         assert_eq!(r.fights.len(), 1);
-        assert_eq!(r.fights[0].boss_name.as_deref(), Some("Lokkestiiz"));
-        assert_eq!(r.fights[0].outcome, Some(Outcome::Kill));
+        assert_eq!(r.fights[0].outcome, None);
     }
 
     #[test]
@@ -1286,5 +1386,65 @@ mod tests {
         let path = temp_log("empty", "");
         assert!(find_current_session_begin(&path, 0).unwrap().is_none());
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod real_log_tests {
+    use super::*;
+
+    /// Scans a real `Encounter.log` and reports what the outcome/difficulty rules
+    /// actually produced. Ignored by default because it needs a local file:
+    ///
+    /// ```text
+    /// KALPA_REAL_LOG="…/Logs/blackrose.log" cargo test real_log -- --ignored --nocapture
+    /// ```
+    ///
+    /// Synthetic fixtures cannot catch a wrong field index — the previous kill rule
+    /// read the source's magicka pair instead of the target's unit id and passed its
+    /// own test while being incapable of firing on a real log.
+    #[test]
+    #[ignore]
+    fn report_outcomes_for_a_real_log() {
+        let Ok(path) = std::env::var("KALPA_REAL_LOG") else {
+            eprintln!("set KALPA_REAL_LOG to a real Encounter.log");
+            return;
+        };
+        let r = scan_file(&path).expect("scan should succeed");
+
+        let kills = r
+            .fights
+            .iter()
+            .filter(|f| f.outcome == Some(Outcome::Kill))
+            .count();
+        let wipes = r
+            .fights
+            .iter()
+            .filter(|f| f.outcome == Some(Outcome::Wipe))
+            .count();
+        let unknown = r.fights.iter().filter(|f| f.outcome.is_none()).count();
+        let vet = r
+            .fights
+            .iter()
+            .filter(|f| f.difficulty == Some(Difficulty::Veteran))
+            .count();
+
+        println!("sessions={} fights={}", r.sessions.len(), r.fights.len());
+        println!("kill={kills} wipe={wipes} unknown={unknown} veteran={vet}");
+        for f in r.fights.iter().take(50) {
+            println!(
+                "  #{:<3} {:<28} {:<22} {:?} {:?}",
+                f.index,
+                f.boss_name.as_deref().unwrap_or("-"),
+                f.zone_name.as_deref().unwrap_or("-"),
+                f.difficulty,
+                f.outcome
+            );
+        }
+
+        // Deliberately report-only: a legitimately kill-free log (an abandoned
+        // run emits BEGIN_TRIAL with no END_TRIAL) must not read as a failure.
+        // Regression protection lives in `detects_boss_death_as_kill`, whose
+        // fixture is shaped like a real 29-field COMBAT_EVENT.
     }
 }

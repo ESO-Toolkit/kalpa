@@ -132,22 +132,36 @@ fn extract_with_rollback(
     // genuinely new directories on failure (or cancel). Names come from the
     // central directory (`file_names`) so this pass doesn't pay a local-header
     // read per entry, and each unique top-level folder is stat'd only once.
+    // An archive whose files sit at its own root is re-rooted under one folder, so
+    // the top-level name it creates is that wrap — not the entry names. Both the
+    // pre-existing snapshot and the rollback set must use it, or a failed extract
+    // would hunt for folders that were never created and leave the wrap behind.
+    let wrap_name = flat_archive_wrap_name(&archive);
+
+    let top_level: HashSet<String> = match wrap_name {
+        Some(ref name) => HashSet::from([name.clone()]),
+        None => collect_zip_top_folders(&archive),
+    };
+
     let mut pre_existing: HashSet<String> = HashSet::new();
-    let mut stated: HashSet<String> = HashSet::new();
-    for name in archive.file_names() {
-        if let Some(folder) = enclosed_top_component(name) {
-            if stated.insert(folder.clone()) && addons_dir.join(&folder).is_dir() {
-                pre_existing.insert(folder);
-            }
+    for folder in &top_level {
+        if addons_dir.join(folder).is_dir() {
+            pre_existing.insert(folder.clone());
         }
     }
 
-    let result = extract_addon_zip_inner(&mut archive, addons_dir, skip_files, hooks);
+    let result = extract_addon_zip_inner(
+        &mut archive,
+        addons_dir,
+        skip_files,
+        hooks,
+        wrap_name.as_deref(),
+    );
 
     if let Err(ref err_msg) = result {
         // Remove only folders that were newly created (not pre-existing) so a
         // failed or cancelled update never destroys the user's existing addon.
-        let created = collect_zip_top_folders(&archive);
+        let created = top_level;
         for folder in &created {
             if !pre_existing.contains(folder) {
                 let folder_path = addons_dir.join(folder);
@@ -178,6 +192,13 @@ fn extract_with_rollback(
 /// therefore read them straight from the central directory (`file_names`)
 /// instead of paying a per-entry local-header read via `by_index`.
 fn enclosed_top_component(name: &str) -> Option<String> {
+    enclosed_components(name)?.into_iter().next()
+}
+
+/// Every normalized component of a contained archive path, or `None` when the
+/// name escapes its root. Shared with [`enclosed_top_component`] so the depth
+/// rules that keep extraction contained have exactly one definition.
+fn enclosed_components(name: &str) -> Option<Vec<String>> {
     if name.contains('\0') {
         return None;
     }
@@ -201,7 +222,7 @@ fn enclosed_top_component(name: &str) -> Option<String> {
             Utf8WindowsComponent::CurDir => (),
         }
     }
-    components.first().map(|s| (*s).to_string())
+    Some(components.into_iter().map(|s| s.to_string()).collect())
 }
 
 /// Collect top-level folder names from a ZIP archive's central directory.
@@ -215,6 +236,106 @@ fn collect_zip_top_folders(archive: &zip::ZipArchive<fs::File>) -> HashSet<Strin
     folders
 }
 
+/// The folder a FLAT archive's contents must be wrapped in, if it is flat.
+///
+/// ESO loads an addon from `AddOns/<Name>/<Name>.txt`, so an archive whose files
+/// sit at its own root has no valid destination as-is. Zipping an addon's
+/// *contents* rather than its folder is a common authoring mistake, and extracting
+/// one verbatim scatters loose files across the AddOns root and installs something
+/// the game will never load. UL_LootLog did exactly this: four files plus a
+/// `bindings/` folder landed beside every other addon, and the hash step then
+/// reported "Addon path is not a directory" for each loose file.
+///
+/// The signal is a manifest at the archive root: ESO requires the folder name to
+/// equal the manifest name, so a root `<Name>.txt` means the root IS the addon
+/// folder's contents. Anything else — including an archive with a stray readme
+/// beside a proper addon folder — is left alone, because wrapping there would
+/// nest a correct addon one level too deep.
+fn flat_archive_wrap_name(archive: &zip::ZipArchive<fs::File>) -> Option<String> {
+    let mut manifest_stems: Vec<String> = Vec::new();
+    let mut root_stems: HashSet<String> = HashSet::new();
+
+    for name in archive.file_names() {
+        // A trailing separator marks a directory entry; those are not root files.
+        if name.ends_with('/') || name.ends_with('\\') {
+            continue;
+        }
+        let Some(components) = enclosed_components(name) else {
+            continue;
+        };
+        // Exactly one component == the entry sits at the archive root.
+        let [single] = components.as_slice() else {
+            continue;
+        };
+        let (stem, ext) = match single.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s, e),
+            _ => continue,
+        };
+        root_stems.insert(stem.to_string());
+        if ext.eq_ignore_ascii_case("txt") {
+            manifest_stems.push(stem.to_string());
+        }
+    }
+
+    // Require a manifest at the root. It is the only trustworthy evidence that the
+    // root IS an addon folder's contents, and ESO requires the destination folder
+    // to carry that exact name. Deriving a name from anything else (the archive's
+    // own file name, say) risks a versioned folder like "UL_LootLog-1.2" that the
+    // game silently refuses to load — worse than not wrapping at all.
+    let chosen = match manifest_stems.as_slice() {
+        [only] => only.clone(),
+        [] => return None,
+        many => {
+            // Several root .txt files: a manifest plus a readme, most likely. The
+            // manifest is the one sharing its name with another root file
+            // (`UL_LootLog.txt` beside `UL_LootLog.lua`). If that is still
+            // ambiguous, leave the archive alone rather than guess a folder name.
+            let mut matched = many
+                .iter()
+                .filter(|s| root_stems.contains(*s) && has_sibling_with_stem(archive, s));
+            let first = matched.next()?;
+            if matched.next().is_some() {
+                return None;
+            }
+            first.clone()
+        }
+    };
+    sanitize_wrap_name(&chosen)
+}
+
+/// Whether a root-level file other than `<stem>.txt` also carries `stem` — the
+/// signal that `stem` names the addon rather than a stray readme.
+fn has_sibling_with_stem(archive: &zip::ZipArchive<fs::File>, stem: &str) -> bool {
+    archive.file_names().any(|name| {
+        enclosed_components(name)
+            .filter(|c| c.len() == 1)
+            .and_then(|c| c.into_iter().next())
+            .and_then(|f| {
+                f.rsplit_once('.')
+                    .map(|(s, e)| (s.to_string(), e.to_string()))
+            })
+            .is_some_and(|(s, e)| s == stem && !e.eq_ignore_ascii_case("txt"))
+    })
+}
+
+/// A wrap folder name must be a single, ordinary path component. Anything with a
+/// separator, a traversal segment, or a NUL would defeat the containment that
+/// `enclosed_name` provides for the entries themselves.
+fn sanitize_wrap_name(name: &str) -> Option<String> {
+    let trimmed = name.trim().trim_end_matches('.');
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+        || trimmed.contains(':')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Inner extraction loop, separated so [`extract_with_rollback`] can clean up on
 /// error. Files whose forward-slash key is in `skip_files` are left untouched
 /// (conflict "keep mine"); an empty set extracts everything. Between entries it
@@ -224,6 +345,7 @@ fn extract_addon_zip_inner(
     addons_dir: &Path,
     skip_files: &HashSet<String>,
     hooks: ExtractHooks,
+    wrap_name: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let mut created_folders: HashSet<String> = HashSet::new();
     let mut total_extracted: u64 = 0;
@@ -249,13 +371,25 @@ fn extract_addon_zip_inner(
         }
 
         // Use enclosed_name for path traversal safety
-        let relative_path = match entry.enclosed_name() {
+        let enclosed = match entry.enclosed_name() {
             Some(p) => p.to_owned(),
             None => continue,
         };
 
+        // A flat archive's entries are re-rooted under the addon's own folder, so
+        // its files land at AddOns/<Name>/… instead of loose in the AddOns root.
+        // The wrap is applied AFTER enclosed_name, so containment is unaffected —
+        // it only ever adds a leading component, and the name itself was validated
+        // by `sanitize_wrap_name`.
+        let relative_path = match wrap_name {
+            Some(name) => Path::new(name).join(&enclosed),
+            None => enclosed.clone(),
+        };
+
         // Honor "keep mine" conflict decisions (no-op when skip_files is empty).
-        let key = relative_path.to_string_lossy().replace('\\', "/");
+        // Keyed on the ARCHIVE-relative path, which is what the conflict scan
+        // reported, so wrapping must not change the key.
+        let key = enclosed.to_string_lossy().replace('\\', "/");
         if skip_files.contains(&key) {
             continue;
         }
@@ -431,6 +565,102 @@ mod tests {
         assert!(msg.contains("Failed to extract"));
         assert!(msg.contains("corrupt"));
         assert!(!msg.contains("Controlled Folder Access"));
+    }
+
+    /// Create a ZIP from an explicit list of entry paths, so a test can express a
+    /// FLAT archive (files at the archive root) that no folder-based helper can.
+    fn create_zip_with_entries(dir: &Path, zip_name: &str, entries: &[&str]) -> PathBuf {
+        let zip_path = dir.join(zip_name);
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for e in entries {
+            archive.start_file(*e, options).unwrap();
+            archive.write_all(b"x").unwrap();
+        }
+        archive.finish().unwrap();
+        zip_path
+    }
+
+    /// The UL_LootLog shape: the addon's *contents* were zipped instead of its
+    /// folder, so four files and a `bindings/` folder sat at the archive root.
+    /// Extracted verbatim they scattered across the AddOns root and the addon
+    /// could not load, because ESO only reads AddOns/<Name>/<Name>.txt.
+    #[test]
+    fn flat_archive_is_wrapped_in_the_addon_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "UL_LootLog.zip",
+            &[
+                "UL_LootLog.txt",
+                "UL_LootLog.lua",
+                "UL_LootLog.xml",
+                "bindings/Bindings.lua",
+            ],
+        );
+
+        let folders = extract_addon_zip(&zip_path, &addons_dir).unwrap();
+        assert_eq!(folders, vec!["UL_LootLog".to_string()]);
+
+        assert!(addons_dir.join("UL_LootLog/UL_LootLog.txt").is_file());
+        assert!(addons_dir.join("UL_LootLog/UL_LootLog.lua").is_file());
+        assert!(addons_dir
+            .join("UL_LootLog/bindings/Bindings.lua")
+            .is_file());
+
+        // Nothing may be left loose in the AddOns root.
+        assert!(!addons_dir.join("UL_LootLog.txt").exists());
+        assert!(!addons_dir.join("bindings").exists());
+    }
+
+    /// A correctly authored archive must be untouched — wrapping one would nest a
+    /// working addon a level too deep and break every install.
+    #[test]
+    fn a_normal_foldered_archive_is_not_wrapped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "Thing.zip",
+            &["MyAddon/MyAddon.txt", "MyAddon/core.lua"],
+        );
+
+        let folders = extract_addon_zip(&zip_path, &addons_dir).unwrap();
+        assert_eq!(folders, vec!["MyAddon".to_string()]);
+        assert!(addons_dir.join("MyAddon/MyAddon.txt").is_file());
+        assert!(!addons_dir.join("MyAddon/MyAddon").exists());
+    }
+
+    /// A stray file beside a proper addon folder is NOT the flat shape: there is no
+    /// root manifest naming an addon, so the folder must be left where it is.
+    #[test]
+    fn a_stray_readme_beside_a_folder_does_not_trigger_wrapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "Thing.zip",
+            &["readme.md", "MyAddon/MyAddon.txt"],
+        );
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+        assert!(addons_dir.join("MyAddon/MyAddon.txt").is_file());
+    }
+
+    #[test]
+    fn a_wrap_name_may_never_escape_the_addons_dir() {
+        assert_eq!(sanitize_wrap_name("UL_LootLog"), Some("UL_LootLog".into()));
+        for bad in ["..", ".", "", "   ", "a/b", "a\\b", "C:", "x\0y"] {
+            assert_eq!(sanitize_wrap_name(bad), None, "must reject {bad:?}");
+        }
     }
 
     /// Create a simple valid ZIP with one folder and one file.

@@ -20,6 +20,26 @@ const COPY_BUF: usize = 8 * 1024 * 1024;
 
 /// Copy a byte range `[start, end)` from `src` into a new file at `dst`.
 fn copy_range(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String> {
+    discard_partial_on_error(dst, copy_range_inner(src, dst, start, end))
+}
+
+/// Remove a half-written output when its writer failed.
+///
+/// Only the "source shrank" branch used to clean up, so a failed seek, read,
+/// write or flush left a truncated file behind. That was survivable while splits
+/// lived in app data, but they are now written inside the ESO Logs folder and
+/// `discovery::list_log_files` enumerates them — a partial file would appear in
+/// Kalpa's own log list as an ordinary log and could be uploaded as though it
+/// were complete. The inner call owns its file handles and has dropped them by
+/// the time it returns, which Windows requires before the file can be removed.
+fn discard_partial_on_error(dst: &Path, result: Result<(), String>) -> Result<(), String> {
+    if result.is_err() {
+        let _ = std::fs::remove_file(dst);
+    }
+    result
+}
+
+fn copy_range_inner(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String> {
     if end <= start {
         return Err("Empty byte range".into());
     }
@@ -589,6 +609,10 @@ fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) 
 /// like [`copy_range`] — fails loudly (removing the partial output) if the source
 /// shrank under a segment, so a truncated log never yields a silently-corrupt file.
 fn copy_ranges(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<(), String> {
+    discard_partial_on_error(dst, copy_ranges_inner(src, dst, segments))
+}
+
+fn copy_ranges_inner(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<(), String> {
     let mut reader = BufReader::new(File::open(src).map_err(|e| format!("Open source: {e}"))?);
     let mut writer = BufWriter::new(File::create(dst).map_err(|e| format!("Create output: {e}"))?);
     let mut buf = vec![0u8; COPY_BUF];
@@ -1882,5 +1906,184 @@ mod tests {
             !first.windows(4).any(|w| w == b"2000"),
             "session A's split leaked session B's content"
         );
+    }
+}
+
+#[cfg(test)]
+mod real_log_roundtrip {
+    use super::*;
+
+    /// Round-trips the subset writer against a REAL `Encounter.log`: carve the
+    /// boss kills out of one session, then re-scan the written file and check it
+    /// is a valid log containing exactly those fights.
+    ///
+    /// ```text
+    /// KALPA_REAL_LOG="…/Logs/blackrose.log" cargo test real_log_roundtrip -- --ignored --nocapture
+    /// ```
+    ///
+    /// This is the check a click-through cannot make: a subtly malformed slice
+    /// still uploads, and only the resulting report shows the damage.
+    ///
+    /// Observed on a real arena log, and expected: re-scanning the slice can show
+    /// FEWER kills and different boss names than the source. Definitions emitted
+    /// lazily inside an earlier, unselected fight are not carried over — the same
+    /// deliberate tradeoff [`split_selected_fights`] documents. The combat events
+    /// themselves are intact, so damage and healing stay correct; only a unit that
+    /// was first declared inside a discarded block reads as unknown. This test
+    /// therefore asserts STRUCTURE (one preamble, one session, the right fight
+    /// count, no truncated final line) and deliberately not attribution.
+    #[test]
+    #[ignore]
+    fn subset_of_a_real_session_is_a_valid_log() {
+        let Ok(path) = std::env::var("KALPA_REAL_LOG") else {
+            eprintln!("set KALPA_REAL_LOG to a real Encounter.log");
+            return;
+        };
+        let scan = crate::uploader::scanner::scan_file(&path).expect("source scan");
+        let session = scan.sessions.first().expect("at least one session").clone();
+
+        // Prefer the known kills; fall back to the first few fights.
+        let picked: Vec<_> = {
+            let kills: Vec<_> = scan
+                .fights
+                .iter()
+                .filter(|f| f.outcome == Some(crate::uploader::types::Outcome::Kill))
+                .cloned()
+                .collect();
+            if kills.is_empty() {
+                scan.fights.iter().take(3).cloned().collect()
+            } else {
+                kills
+            }
+        };
+        assert!(!picked.is_empty(), "log has no fights to carve");
+
+        let out_dir = std::env::temp_dir().join("kalpa-subset-roundtrip");
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir).expect("out dir");
+
+        let selection = SessionFightSelection {
+            index: session.index,
+            name: Some("roundtrip".into()),
+            start_offset: Some(session.start_offset),
+            start_time_ms: Some(session.start_time_ms),
+            fights: picked
+                .iter()
+                .map(|f| FightSelection {
+                    index: f.index,
+                    name: None,
+                    start_offset: Some(f.start_offset),
+                    start_ms: Some(f.start_ms),
+                })
+                .collect(),
+        };
+
+        let written = split_session_fights_selected(
+            &path,
+            out_dir.to_str().unwrap(),
+            Some(scan.sessions.clone()),
+            Some(scan.fights.clone()),
+            selection,
+        )
+        .expect("subset split should succeed");
+        assert_eq!(written.len(), 1, "a subset must produce exactly one file");
+
+        let out = &written[0];
+        let bytes = std::fs::metadata(out).expect("written file").len();
+        let text = std::fs::read_to_string(out).expect("readable");
+        let begin_logs = text.matches("BEGIN_LOG").count();
+
+        let rescan = crate::uploader::scanner::scan_file(out).expect("rescan of the slice");
+
+        println!("picked {} fight(s) from {}", picked.len(), path);
+        println!("wrote {out} ({bytes} bytes)");
+        println!(
+            "rescan: sessions={} fights={} BEGIN_LOG occurrences={}",
+            rescan.sessions.len(),
+            rescan.fights.len(),
+            begin_logs
+        );
+        for f in &rescan.fights {
+            println!(
+                "   {:<26} {:?} {:?}",
+                f.boss_name.as_deref().unwrap_or("-"),
+                f.difficulty,
+                f.outcome
+            );
+        }
+
+        assert_eq!(
+            begin_logs, 1,
+            "the slice must carry the preamble exactly once"
+        );
+        assert_eq!(rescan.sessions.len(), 1, "the slice must be one session");
+        assert_eq!(
+            rescan.fights.len(),
+            picked.len(),
+            "the slice must contain exactly the fights that were selected"
+        );
+        assert!(
+            text.ends_with('\n'),
+            "the slice must not end mid-line — a truncated final line breaks parsers"
+        );
+
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+}
+
+#[cfg(test)]
+mod partial_output_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A failure that is NOT the "source shrank" case must still leave no file
+    /// behind. An empty range fails before any bytes are copied, but `File::create`
+    /// has already truncated/created `dst`.
+    #[test]
+    fn a_failed_copy_leaves_no_partial_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"0,BEGIN_LOG,1,15\n").unwrap();
+
+        // Pre-create dst so we can prove the failure path removes it rather than
+        // merely never creating it.
+        let mut f = std::fs::File::create(&dst).unwrap();
+        f.write_all(b"stale").unwrap();
+        drop(f);
+
+        let err = copy_range(&src, &dst, 10, 10).unwrap_err();
+        assert!(err.contains("Empty byte range"), "unexpected error: {err}");
+        assert!(
+            !dst.exists(),
+            "a failed split must not leave a file in the Logs folder"
+        );
+    }
+
+    /// Truncating the source mid-copy is the original shrank case; it must still
+    /// clean up now that it routes through the shared helper.
+    #[test]
+    fn a_shrunk_source_leaves_no_partial_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"short").unwrap();
+
+        // Ask for far more than the file holds.
+        let err = copy_range(&src, &dst, 0, 5_000).unwrap_err();
+        assert!(err.contains("shrank"), "unexpected error: {err}");
+        assert!(!dst.exists(), "partial output must be removed");
+    }
+
+    #[test]
+    fn a_successful_copy_keeps_its_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"0,BEGIN_LOG,1,15\n200,BEGIN_COMBAT\n").unwrap();
+
+        copy_range(&src, &dst, 0, 17).unwrap();
+        assert!(dst.is_file());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"0,BEGIN_LOG,1,15\n");
     }
 }

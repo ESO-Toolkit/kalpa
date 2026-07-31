@@ -217,12 +217,21 @@ export function AccountSettings({
                 {directReadFailed
                   ? "Kalpa could not confirm upload routing. The official uploader handoff still works."
                   : directOptIn
-                    ? "Kalpa needs to refresh the ESO Logs upload session before direct upload can run."
+                    ? "Your ESO Logs upload session expired. Reconnect to send logs straight from Kalpa."
                     : "Uploads will use the official uploader until direct upload is restored."}
               </p>
             </div>
+            {/* "Off" must mean "you opted out", nothing else — see account-chip.
+                An opted-in user whose web session lapsed was told "Off" and went
+                hunting for a switch they never touched. */}
             <InfoPill color={directChecking ? "muted" : "amber"} className="shrink-0 text-[10px]">
-              {directChecking ? "Checking..." : "Off"}
+              {directChecking
+                ? "Checking..."
+                : directReadFailed
+                  ? "Unknown"
+                  : directOptIn
+                    ? "Session expired"
+                    : "Off"}
             </InfoPill>
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -239,7 +248,11 @@ export function AccountSettings({
               ) : (
                 <Zap className="size-3.5" />
               )}
-              {directEnabling ? "Opening ESO Logs..." : "Enable direct upload"}
+              {directEnabling
+                ? "Opening ESO Logs..."
+                : directOptIn
+                  ? "Reconnect ESO Logs"
+                  : "Enable direct upload"}
             </Button>
           </div>
         </div>
