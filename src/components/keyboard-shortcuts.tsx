@@ -72,8 +72,9 @@ function shortcutGroups(): ShortcutGroup[] {
           spoken: `${spokenModifier} plus I`,
         },
         {
-          action: "Leave a text box, close Discover, or clear the selection",
-          keys: ["Esc"],
+          action:
+            "Contextual: leave a text box; otherwise close Discover; otherwise clear selections",
+          keys: ["Escape"],
           spoken: "Escape",
         },
         {
