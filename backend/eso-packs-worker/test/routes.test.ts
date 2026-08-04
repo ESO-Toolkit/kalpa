@@ -1,8 +1,9 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import worker from "../src/index";
-import { putPack, putPackIndex } from "../src/kv";
+import worker, { invalidatePackListCache } from "../src/index";
+import { putPack, putPackIndex, putVote } from "../src/kv";
+import { resetTokenCache } from "../src/shares";
 import type { Env, PackIndex } from "../src/types";
 import {
   TEST_USER,
@@ -21,7 +22,7 @@ const e = env as unknown as Env;
 let fetchSpy: ReturnType<typeof vi.fn>;
 const originalFetch = globalThis.fetch;
 
-beforeEach(() => {
+beforeEach(async () => {
   fetchSpy = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.includes("esologs.com")) {
@@ -30,6 +31,11 @@ beforeEach(() => {
     return originalFetch(input);
   });
   globalThis.fetch = fetchSpy as typeof fetch;
+  // The worker memoizes resolved tokens per isolate, but these cases resolve
+  // the same token to different identities, and every spelling of the default
+  // list view now shares one cache entry.
+  resetTokenCache();
+  await invalidatePackListCache(new URL(BASE));
 });
 
 afterEach(() => {
@@ -207,6 +213,28 @@ describe("GET /packs", () => {
     const body2 = await page2.json<{ packs: unknown[] }>();
     expect(body2.packs).toHaveLength(5);
   });
+
+  it("reports user_voted per pack for a signed-in viewer", async () => {
+    await putPackIndex(e, {
+      packs: [makePack("list-voted"), makePack("list-unvoted")],
+    });
+    await putVote(e, "list-voted", String(TEST_USER.id));
+
+    const res = await call(authedRequest(`${BASE}/packs`));
+    const body = await res.json<{
+      packs: Array<{ id: string; user_voted?: boolean }>;
+    }>();
+    expect(body.packs.find((p) => p.id === "list-voted")!.user_voted).toBe(true);
+    expect(body.packs.find((p) => p.id === "list-unvoted")!.user_voted).toBe(false);
+  });
+
+  it("omits user_voted for anonymous callers", async () => {
+    await putPackIndex(e, { packs: [makePack("list-anon")] });
+
+    const res = await call(new Request(`${BASE}/packs`));
+    const body = await res.json<{ packs: Array<Record<string, unknown>> }>();
+    expect(body.packs[0].user_voted).toBeUndefined();
+  });
 });
 
 // ── POST /packs ───────────────────────────────────────────────────
@@ -263,6 +291,102 @@ describe("POST /packs", () => {
     const body = await res.json<{ pack: { id: string } }>();
     expect(body.pack.id).toMatch(/^my-cool-pack/);
   });
+
+  it("honors a requested published status instead of forcing draft", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(
+          validPackBody({ title: "Published On Create", status: "published" }),
+        ),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json<{ pack: { id: string; status: string } }>();
+    expect(body.pack.status).toBe("published");
+
+    // A draft would be invisible to everyone but its author.
+    const detail = await call(new Request(`${BASE}/packs/${body.pack.id}`));
+    expect(detail.status).toBe(200);
+  });
+
+  it("defaults to draft when no status is requested", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(validPackBody({ title: "No Status Given" })),
+      }),
+    );
+    const body = await res.json<{ pack: { status: string } }>();
+    expect(body.pack.status).toBe("draft");
+  });
+
+  it("falls back to a usable id when the title slugifies to nothing", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(validPackBody({ title: "日本語のパック" })),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json<{ pack: { id: string } }>();
+    expect(body.pack.id).not.toBe("");
+    // Must satisfy the /packs/:id route pattern, or the pack is unreachable.
+    expect(body.pack.id).toMatch(/^[a-z0-9-]+$/);
+  });
+
+  it("strips unknown properties from addon entries", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(
+          validPackBody({
+            title: "Sanitized Addons",
+            addons: [
+              {
+                esouiId: 7,
+                name: "Addon",
+                required: true,
+                note: "keep me",
+                junk: "x".repeat(2000),
+              },
+            ],
+          }),
+        ),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json<{ pack: { addons: Record<string, unknown>[] } }>();
+    expect(body.pack.addons[0]).toEqual({
+      esouiId: 7,
+      name: "Addon",
+      required: true,
+      note: "keep me",
+    });
+  });
+
+  it("rejects an oversized body before parsing it", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify({ junk: "x".repeat(300_000) }),
+      }),
+    );
+    expect(res.status).toBe(413);
+  });
+
+  it("enforces the per-user pack limit against the authoritative index", async () => {
+    const packs = Array.from({ length: 25 }, (_, i) => makePack(`quota-${i}`));
+    await putPackIndex(e, { packs });
+
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(validPackBody({ title: "One Too Many" })),
+      }),
+    );
+    expect(res.status).toBe(429);
+  });
 });
 
 // ── GET /packs/:id ────────────────────────────────────────────────
@@ -300,6 +424,32 @@ describe("GET /packs/:id", () => {
       authedRequest(`${BASE}/packs/draft-visible`),
     );
     expect(res.status).toBe(200);
+  });
+
+  it("reports user_voted for a signed-in viewer who already voted", async () => {
+    await putPack(e, makePack("voted-detail"));
+    await putVote(e, "voted-detail", String(TEST_USER.id));
+
+    const res = await call(authedRequest(`${BASE}/packs/voted-detail`));
+    const body = await res.json<{ pack: { user_voted: boolean } }>();
+    expect(body.pack.user_voted).toBe(true);
+    // Per-viewer state must never be cached.
+    expect(res.headers.get("Cache-Control")).toBeNull();
+  });
+
+  it("reports user_voted false for a signed-in viewer who has not voted", async () => {
+    await putPack(e, makePack("unvoted-detail"));
+    const res = await call(authedRequest(`${BASE}/packs/unvoted-detail`));
+    const body = await res.json<{ pack: { user_voted: boolean } }>();
+    expect(body.pack.user_voted).toBe(false);
+  });
+
+  it("omits user_voted for anonymous viewers and stays cacheable", async () => {
+    await putPack(e, makePack("anon-detail"));
+    const res = await call(new Request(`${BASE}/packs/anon-detail`));
+    const body = await res.json<{ pack: Record<string, unknown> }>();
+    expect(body.pack.user_voted).toBeUndefined();
+    expect(res.headers.get("Cache-Control")).toContain("max-age=300");
   });
 });
 
@@ -460,6 +610,21 @@ describe("DELETE /packs/:id", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  it("deletes the pack's vote records so a recycled id starts clean", async () => {
+    const pack = makePack("recyclable");
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+    await putVote(e, "recyclable", String(TEST_USER.id));
+
+    const res = await call(
+      authedRequest(`${BASE}/packs/recyclable`, { method: "DELETE" }),
+    );
+    expect(res.status).toBe(200);
+
+    expect(await e.ESO_PACKS.get(`vote:recyclable:${TEST_USER.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`user-votes:${TEST_USER.id}:recyclable`)).toBeNull();
+  });
 });
 
 // ── POST /packs/:id/vote ──────────────────────────────────────────
@@ -498,6 +663,39 @@ describe("POST /packs/:id/vote", () => {
       new Request(`${BASE}/packs/noauth-vote/vote`, { method: "POST" }),
     );
     expect(res.status).toBe(401);
+  });
+
+  it("404s on a draft pack instead of revealing it via 401", async () => {
+    await putPack(e, makePack("draft-vote", { status: "draft" }));
+
+    const anonymous = await call(
+      new Request(`${BASE}/packs/draft-vote/vote`, { method: "POST" }),
+    );
+    expect(anonymous.status).toBe(404);
+
+    const authed = await call(
+      authedRequest(`${BASE}/packs/draft-vote/vote`, { method: "POST" }),
+    );
+    expect(authed.status).toBe(404);
+  });
+
+  it("does not double-apply a rapid vote/unvote", async () => {
+    const pack = makePack("rapid-toggle", { vote_count: 0 });
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+
+    for (let i = 0; i < 4; i++) {
+      await call(authedRequest(`${BASE}/packs/rapid-toggle/vote`, { method: "POST" }));
+    }
+
+    // vote, unvote, vote, unvote — the record is gone and the counter is back
+    // to where it started, regardless of how stale the KV read was.
+    const final = await call(
+      authedRequest(`${BASE}/packs/rapid-toggle/vote`, { method: "POST" }),
+    );
+    const body = await final.json<{ voted: boolean; voteCount: number }>();
+    expect(body.voted).toBe(true);
+    expect(body.voteCount).toBe(1);
   });
 });
 
@@ -541,6 +739,26 @@ describe("POST /packs/:id/install", () => {
     const body2 = await res2.json<{ installCount: number }>();
     // Second call returns current count without incrementing
     expect(body2.installCount).toBe(1);
+  });
+
+  it("404s on a draft pack rather than bumping and disclosing its count", async () => {
+    const pack = makePack("draft-install", { status: "draft", install_count: 0 });
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+
+    const res = await call(
+      new Request(`${BASE}/packs/draft-install/install`, {
+        method: "POST",
+        headers: { "CF-Connecting-IP": "9.9.9.9" },
+      }),
+    );
+    expect(res.status).toBe(404);
+
+    const stored = await e.ESO_PACKS.get<{ install_count: number }>(
+      "pack:draft-install",
+      "json",
+    );
+    expect(stored!.install_count).toBe(0);
   });
 });
 

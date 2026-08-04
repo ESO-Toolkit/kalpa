@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validatePack } from "../src/validate";
+import { MAX_BODY_BYTES, readJsonBody, sanitizeAddons, validatePack } from "../src/validate";
 
 function validPack(overrides: Record<string, unknown> = {}) {
   return {
@@ -287,5 +287,52 @@ describe("validatePack", () => {
       addons: "not-array",
     });
     expect(errors.length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("sanitizeAddons", () => {
+  it("drops unknown properties", () => {
+    expect(
+      sanitizeAddons([{ esouiId: 1, name: "A", required: true, junk: "x" }]),
+    ).toEqual([{ esouiId: 1, name: "A", required: true }]);
+  });
+
+  it("keeps the optional fields when present and well-typed", () => {
+    expect(
+      sanitizeAddons([
+        { esouiId: 2, name: "B", required: false, defaultEnabled: true, note: "hi" },
+      ]),
+    ).toEqual([
+      { esouiId: 2, name: "B", required: false, defaultEnabled: true, note: "hi" },
+    ]);
+  });
+
+  it("omits optional fields of the wrong type", () => {
+    expect(
+      sanitizeAddons([
+        { esouiId: 3, name: "C", required: true, defaultEnabled: "yes", note: 7 },
+      ]),
+    ).toEqual([{ esouiId: 3, name: "C", required: true }]);
+  });
+});
+
+describe("readJsonBody", () => {
+  function post(body: string): Request {
+    return new Request("https://example.com/packs", { method: "POST", body });
+  }
+
+  it("parses a normal body", async () => {
+    const result = await readJsonBody(post(JSON.stringify({ title: "ok" })));
+    expect(result).toEqual({ ok: true, body: { title: "ok" } });
+  });
+
+  it("reports invalid JSON", async () => {
+    const result = await readJsonBody(post("{not json"));
+    expect(result).toEqual({ ok: false, reason: "invalid-json" });
+  });
+
+  it("refuses an oversized body without parsing it", async () => {
+    const result = await readJsonBody(post(JSON.stringify({ blob: "x".repeat(MAX_BODY_BYTES) })));
+    expect(result).toEqual({ ok: false, reason: "too-large" });
   });
 });

@@ -6,10 +6,13 @@ import {
   putPack,
   putPackIndex,
   getVote,
+  getVotedPackIds,
   putVote,
   deleteVote,
+  deleteVotesForPack,
+  listAllVotes,
 } from "../src/kv";
-import type { Pack, PackIndex } from "../src/types";
+import type { Pack, PackIndex, VoteRecord } from "../src/types";
 
 function makePack(id: string): Pack {
   return {
@@ -82,5 +85,48 @@ describe("vote KV operations", () => {
     await deleteVote(e, "pack2", "user2");
     const vote = await getVote(e, "pack2", "user2");
     expect(vote).toBeNull();
+  });
+
+  it("reports which of a set of packs the viewer voted on", async () => {
+    const e = env as unknown as import("../src/types").Env;
+    await putVote(e, "voted-pack", "user3");
+    const voted = await getVotedPackIds(e, "user3", ["voted-pack", "other-pack"]);
+    expect(voted.has("voted-pack")).toBe(true);
+    expect(voted.has("other-pack")).toBe(false);
+  });
+
+  it("deletes every vote record for a pack plus its reverse keys", async () => {
+    const e = env as unknown as import("../src/types").Env;
+    await putVote(e, "doomed", "user4");
+    await putVote(e, "doomed", "user5");
+    await putVote(e, "survivor", "user4");
+
+    const removed = await deleteVotesForPack(e, "doomed");
+    expect(removed).toBe(2);
+    expect(await getVote(e, "doomed", "user4")).toBeNull();
+    expect(await getVote(e, "doomed", "user5")).toBeNull();
+    expect(await e.ESO_PACKS.get("user-votes:user4:doomed")).toBeNull();
+    expect(await e.ESO_PACKS.get("user-votes:user5:doomed")).toBeNull();
+    // An unrelated pack's vote by the same user is untouched.
+    expect(await getVote(e, "survivor", "user4")).not.toBeNull();
+  });
+
+  it("mirrors each vote into its key metadata so the backup can enumerate by list()", async () => {
+    const e = env as unknown as import("../src/types").Env;
+    await putVote(e, "enumerated", "user6");
+
+    // The metadata is what keeps the daily backup off a per-vote get(), which
+    // is what used to blow the per-invocation subrequest cap.
+    const page = await e.ESO_PACKS.list<VoteRecord>({ prefix: "vote:enumerated:" });
+    expect(page.keys[0]?.metadata).toMatchObject({
+      userId: "user6",
+      packId: "enumerated",
+    });
+
+    const votes = await listAllVotes(e);
+    expect(votes["enumerated:user6"]).toMatchObject({
+      userId: "user6",
+      packId: "enumerated",
+    });
   });
 });

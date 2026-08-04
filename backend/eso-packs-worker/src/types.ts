@@ -29,6 +29,17 @@ export interface Pack {
   status: PackStatus;
 }
 
+/**
+ * A pack as returned to one specific viewer. `user_voted` is derived per
+ * request from `vote:{id}:{userId}` and is never stored — the Rust HubPack
+ * declares it `#[serde(default)] Option<bool>` and the client renders its vote
+ * button from it, so omitting it made every pack look unvoted and turned the
+ * client's toggle into an unvote. Responses carrying it must not be cached.
+ */
+export interface PackView extends Pack {
+  user_voted?: boolean;
+}
+
 // ── Index (stores full packs for list queries) ────────────────────────
 export interface PackIndex {
   packs: Pack[];
