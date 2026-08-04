@@ -30,8 +30,10 @@ Thumbs.db
 # Logs
 *.log
 
-# Plan file (working doc)
+# Session working docs
 PLAN.md
+HANDOFF_NEXT_SESSION.md
+PR_MERGE_READY_PROMPT.md
 
 # Generated types
 worker-configuration.d.ts
@@ -43,6 +45,9 @@ playwright-report/
 
 # Claude Code
 .claude/
+
+# Codex
+.codex/
 
 # DeepSec scanner workspace
 .deepsec/

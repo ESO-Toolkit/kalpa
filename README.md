@@ -306,10 +306,13 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
 git clone https://github.com/ESO-Toolkit/kalpa.git
 cd kalpa
 npm install
-npm run check:env       # verify prerequisites
-npm run tauri dev       # development mode
-npm run tauri build     # production build
+cp .env.example .env.local   # sets VITE_PORT, which devUrl expects
+npm run check:env            # verify prerequisites
+npm run tauri dev            # development mode
+npm run tauri build          # production build
 ```
+
+`.env.local` is machine-local and gitignored, so it does not exist on a fresh clone. Without it Vite serves on a different port than `src-tauri/tauri.conf.json`'s `devUrl`, and `npm run tauri dev` waits indefinitely for a dev server that never appears.
 
 Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `.app` and `.dmg` on macOS, `.AppImage`, `.deb`, and `.rpm` on Linux.
 
@@ -323,6 +326,7 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 | **Antivirus blocks the app**                                    | Add an exception for `kalpa.exe` or its install directory                                                                                           |
 | **Updates fail with "access denied", or addons vanish in-game** | Windows Controlled Folder Access is blocking writes. Kalpa offers a guided fix, or allow `kalpa.exe` under Windows Security → Ransomware protection |
 | **`npm run tauri dev` fails**                                   | `npm run check:env` reports which prerequisite is missing                                                                                           |
+| **`npm run tauri dev` hangs waiting for the dev server**        | `.env.local` is missing: `cp .env.example .env.local` so Vite's port matches `devUrl` in `src-tauri/tauri.conf.json`                                |
 | **macOS: "Kalpa is damaged and can't be opened"**               | Not notarized yet: `xattr -dr com.apple.quarantine /Applications/Kalpa.app`                                                                         |
 | **Linux: sign-in doesn't persist**                              | Install or enable a Secret Service keyring (GNOME Keyring or KWallet)                                                                               |
 | **Linux: ESO install not detected**                             | Kalpa scans Steam Proton prefixes, including Flatpak and Snap. Launch ESO once so the prefix exists, or set the AddOns path manually in Settings    |

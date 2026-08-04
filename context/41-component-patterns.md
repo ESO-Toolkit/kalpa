@@ -1,5 +1,7 @@
 # Component Patterns — shadcn Implementation Recipes
 
+> **Partly superseded:** these recipes predate the light-theme token migration. The `GlassPanel` and `InfoPill` recipes below have been updated to the classes those components actually ship; the remaining snippets still quote literal `white/[0.0x]`, `rgba(…)` and raw palette utilities (`emerald-400`, `sky-400`, `#c4a44a`). **Do not copy those literals into new code** — they render wrong on the three light and two high-contrast themes. Substitute the theme-aware ladders: `structure-*` for borders and structural fills, `scrim-*` for shadows and overlays, `status-*` for semantic status colors, `primary` / `accent-sky` for accents. See `context/42-theme-tokens.md`, and read the real component in `src/components/ui/` before following any recipe here.
+
 Concrete patterns for building addon manager UI using shadcn (base-nova) + Tailwind v4, derived from the ESO Log Aggregator design language.
 
 ## Utility: cn() + CVA
@@ -20,11 +22,11 @@ const glassPanelVariants = cva(
     variants: {
       variant: {
         primary:
-          "bg-[rgba(15,23,42,0.84)] border border-white/[0.09] shadow-[0_8px_32px_rgba(0,0,0,0.32),inset_0_1px_0_rgba(255,255,255,0.05)]",
+          "bg-glass-bg border border-structure-09 shadow-[0_8px_32px_var(--scrim-32),inset_0_1px_0_var(--structure-05)]",
         default:
-          "bg-[rgba(15,23,42,0.66)] border border-white/[0.06] shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
+          "bg-glass-bg-light border border-structure-06 shadow-[0_4px_16px_var(--scrim-20)]",
         subtle:
-          "bg-white/[0.02] border border-white/[0.04] shadow-none",
+          "bg-structure-02 border border-structure-04 shadow-[inset_0_1px_0_var(--structure-03)] hover:border-structure-07 transition-colors duration-200",
       },
     },
     defaultVariants: { variant: "default" },
@@ -111,13 +113,13 @@ const infoPillVariants = cva(
   {
     variants: {
       color: {
-        gold: "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] text-[#c4a44a]",
-        sky: "border-sky-400/20 bg-sky-400/[0.04] text-sky-400",
-        emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
-        amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
-        red: "border-red-400/20 bg-red-400/[0.04] text-red-400",
-        violet: "border-violet-400/20 bg-violet-400/[0.04] text-violet-400",
-        muted: "border-white/10 bg-white/[0.03] text-muted-foreground",
+        gold: "border-primary/20 bg-primary/[0.04] text-primary",
+        sky: "border-accent-sky/20 bg-accent-sky/[0.04] text-accent-sky",
+        emerald: "border-status-success/20 bg-status-success/[0.04] text-status-success",
+        amber: "border-status-warning/20 bg-status-warning/[0.04] text-status-warning",
+        red: "border-status-danger/20 bg-status-danger/[0.04] text-status-danger",
+        violet: "border-status-library/20 bg-status-library/[0.04] text-status-library",
+        muted: "border-structure-10 bg-structure-03 text-muted-foreground",
       },
     },
     defaultVariants: { color: "muted" },

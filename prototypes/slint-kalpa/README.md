@@ -1,13 +1,25 @@
-# Kalpa Slint Prototype
+# Kalpa Native UI Sidecar (Slint)
 
-This is a contained native UI port workspace for evaluating whether Kalpa can
-keep its current dark glass UI while removing WebView2 from the desktop shell.
+This crate is Kalpa's shipped native performance UI, not an experiment. `npm run
+build:native-slint` compiles it and installs the binary as
+`src-tauri/binaries/kalpa-slint-<triple>` (run as part of `npm run
+build:release-assets`); users opt into it from Settings on Windows, and the
+launcher relaunches Kalpa into this shell instead of the WebView2 one.
 
-It is intentionally mock-data only. The goal is to port the current UI
-component by component, compare against WebView screenshots, and measure native
-UI memory before porting application behavior.
+It operates on real user data. It `#[path]`-imports the production `esoui.rs`,
+`metadata.rs`, and `saved_variables` modules from `src-tauri/src`, and it
+installs and updates addons, rewrites `.kalpa-metadata`, edits SavedVariables,
+creates and restores backups, and signs in to ESO Logs against the user's live
+game folders. There is no mock-data mode: every change here ships to users'
+machines and touches their real data, so it needs the same input validation,
+atomic-write, and locking discipline as `src-tauri`.
 
-With no environment variables the prototype selects the `standard` preset and
+The directory name and the render-preset material below are historical — this
+started as a port workspace for evaluating whether Kalpa could keep its dark
+glass UI while removing WebView2 from the desktop shell, and the measurement
+notes from that evaluation are still the reference for renderer choices.
+
+With no environment variables the sidecar selects the `standard` preset and
 Slint's `winit-femtovg` backend, matching the production launcher's default.
 `low-memory` is the explicit opt-in to the software renderer.
 
@@ -68,7 +80,7 @@ cargo run --release
 
 from this directory.
 
-With no environment variables, the prototype uses the persisted active theme if
+With no environment variables, the sidecar uses the persisted active theme if
 one has been saved, and otherwise the app's current `DEFAULT_THEME_ID`
 (`nordic-runestone`). To compare against the older ESO Gold
 reference screenshot, launch with `KALPA_THEME=eso-gold`.
@@ -83,18 +95,21 @@ cargo run --release
 ```
 
 `KALPA_REDUCED_MOTION=1` disables the ambient backdrop drift and loading spinner
-timers in the prototype. Production should eventually source that token from the
-app settings/accessibility layer.
+timers. The sidecar should eventually source that token from the app
+settings/accessibility layer instead.
 
-Built-in prototype theme ids are generated from the React catalog in
+Built-in theme ids are generated from the React catalog in
 `src/lib/theme-presets.ts`:
 
 ```powershell
 npm run export:native-themes
 ```
 
-The generated native catalog currently includes 49 built-in themes in
-`assets/themes/builtin-themes.json`. The theme bridge is deliberately seed-based
+The generated native catalog lives in `assets/themes/builtin-themes.json` and is
+compiled into the sidecar with `include_str!`, so it has to be re-exported and
+committed whenever a theme is added or changed in `theme-presets.ts` — otherwise
+the native picker silently ships an older theme list than the WebView UI. The
+theme bridge is deliberately seed-based
 so production can load the real built-in and custom theme data without
 per-component color rewrites.
 
@@ -116,7 +131,7 @@ The generated skin assets preserve the existing texture SVG, motif SVG,
 the CSS gradient stack, backdrop blur, and browser color-mix behavior with native
 gradients and precomputed tokens.
 
-The prototype can also ingest the same 12-color seed shape used by the current
+The sidecar can also ingest the same 12-color seed shape used by the current
 custom theme editor:
 
 ```powershell
