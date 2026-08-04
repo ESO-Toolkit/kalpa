@@ -164,8 +164,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Install Playwright
-        run: npx playwright install chromium --with-deps
+      # No `playwright install`: the specs use connectOverCDP against the running
+      # WebView2, so no browser binary is ever launched locally.
 
       - name: Prepare native Slint sidecar placeholder
         run: |

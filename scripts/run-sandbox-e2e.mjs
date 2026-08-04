@@ -28,6 +28,7 @@ import {
   CDP_ENDPOINT,
   assertNoExistingCdp,
   assertNoExistingKalpaProcess,
+  delay,
   killProcessTree,
   launchKalpaDetached,
   proveOwnedLaunch,
@@ -74,9 +75,14 @@ async function main() {
   const sandboxDir = path.join(root, "AddOns");
   const fixturesDir = path.join(root, "fixtures");
   const fixtureZip = path.join(fixturesDir, `${FIXTURE_FOLDER}.zip`);
+  // Give WebView2 its own user-data folder rather than letting it default to
+  // one beside the exe. A run that cannot create that folder brings the app up
+  // without a webview — so no window, and no debug port to attach to.
+  const webviewDataDir = path.join(root, "webview2");
 
   mkdirSync(sandboxDir, { recursive: true });
   mkdirSync(fixturesDir, { recursive: true });
+  mkdirSync(webviewDataDir, { recursive: true });
   writeFileSync(fixtureZip, makeAddonZip(FIXTURE_FOLDER, { title: "Kalpa E2E Fixture" }));
   console.log(`[${TAG}] sandbox ${sandboxDir}`);
 
@@ -84,10 +90,15 @@ async function main() {
   try {
     child = launchKalpaDetached(binaryPath, {
       tag: TAG,
-      env: { KALPA_ADDONS_DIR: sandboxDir },
+      env: {
+        KALPA_ADDONS_DIR: sandboxDir,
+        WEBVIEW2_USER_DATA_FOLDER: webviewDataDir,
+      },
     });
     await proveOwnedLaunch(child);
-    await waitForCdp(child);
+    // Generous: a cold WebView2 on a fresh CI runner has to build its user-data
+    // folder before it serves anything, which is far slower than a warm dev box.
+    await waitForCdp(child, 120_000);
     await run(
       process.execPath,
       [playwrightCli, "test", "--grep", "@sandbox"],
@@ -107,11 +118,24 @@ async function main() {
     if (child?.pid) {
       await killProcessTree(child.pid, TAG);
     }
-    // Only after the app is gone: it holds the metadata file open.
+    // Only after the app is gone: it holds the metadata file open, and
+    // WebView2 keeps a handle on its user-data folder for a moment past
+    // taskkill — so retry rather than warning on a race that resolves itself.
+    await removeWithRetry(root);
+  }
+}
+
+async function removeWithRetry(dir, attempts = 10) {
+  for (let i = 0; i < attempts; i++) {
     try {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+      return;
     } catch (error) {
-      console.warn(`[${TAG}] could not remove ${root}: ${error.message}`);
+      if (i === attempts - 1) {
+        console.warn(`[${TAG}] could not remove ${dir}: ${error.message}`);
+        return;
+      }
+      await delay(300);
     }
   }
 }

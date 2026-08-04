@@ -115,7 +115,35 @@ export async function waitForCdp(child, timeoutMs = 30_000) {
       await delay(500);
     }
   }
-  throw new Error(`Timed out waiting for ${CDP_ENDPOINT}: ${lastError}`);
+  // Say WHICH failure this was. "Timed out" alone cannot distinguish a WebView2
+  // that never started (no desktop, no runtime) from one that started but never
+  // bound the debug port — and those want completely different fixes.
+  const webviewCount = await countProcesses("msedgewebview2.exe");
+  throw new Error(
+    `Timed out waiting for ${CDP_ENDPOINT} after ${Math.round(timeoutMs / 1000)}s: ${lastError}. ` +
+      `Kalpa is ${child.exitCode === null ? "still running" : `gone (exit ${child.exitCode})`}; ` +
+      `msedgewebview2.exe processes: ${webviewCount}. ` +
+      (webviewCount === 0
+        ? "Zero means WebView2 never initialized — the host has no usable WebView2 runtime or desktop session."
+        : "Non-zero means WebView2 is up but the debug port is not listening.")
+  );
+}
+
+/** How many processes with this image name are running (0 on any error). */
+export async function countProcesses(imageName) {
+  try {
+    const { stdout } = await execFileAsync(
+      "tasklist",
+      ["/FI", `IMAGENAME eq ${imageName}`, "/FO", "CSV", "/NH"],
+      { windowsHide: true }
+    );
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.includes("No tasks")).length;
+  } catch {
+    return 0;
+  }
 }
 
 export async function assertNoExistingCdp() {
