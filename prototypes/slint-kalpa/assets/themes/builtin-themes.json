@@ -989,6 +989,106 @@
         "orb3": "#4a5a52"
       },
       "skinId": "nordic-runestone"
+    },
+    {
+      "id": "high-contrast-dark",
+      "name": "High Contrast",
+      "category": "Accessibility",
+      "description": "Maximum legibility on a near-black field. Pure white body text, a bright amber accent, and borders strong enough to read as edges rather than hints.",
+      "colors": {
+        "bgBase": "#000000",
+        "background": "#0a0b0d",
+        "surface": "#16181c",
+        "foreground": "#ffffff",
+        "mutedForeground": "#d6d8dc",
+        "primary": "#f2c75c",
+        "primaryForeground": "#000000",
+        "accent": "#7fd4ff",
+        "border": "#5a5f68",
+        "orb1": "#f2c75c",
+        "orb2": "#7fd4ff",
+        "orb3": "#3a4048"
+      }
+    },
+    {
+      "id": "high-contrast-gold",
+      "name": "High Contrast Gold",
+      "category": "Accessibility",
+      "description": "The same legibility floor kept in Kalpa's own colours — warm near-black, parchment-white text, and ESO gold bright enough to hold as body copy.",
+      "colors": {
+        "bgBase": "#000000",
+        "background": "#0c0a06",
+        "surface": "#1a160e",
+        "foreground": "#fff8e8",
+        "mutedForeground": "#ded3bb",
+        "primary": "#ffc94d",
+        "primaryForeground": "#000000",
+        "accent": "#8fd8ff",
+        "border": "#6b5f43",
+        "orb1": "#ffc94d",
+        "orb2": "#8fd8ff",
+        "orb3": "#4a3f28"
+      }
+    },
+    {
+      "id": "a11y-paper-white",
+      "name": "Paper White",
+      "category": "Accessibility",
+      "description": "A clean white accessibility theme with ink-dark text, strong blue actions, and structure that stays visible on bright surfaces.",
+      "colors": {
+        "bgBase": "#ffffff",
+        "background": "#f7fafc",
+        "surface": "#ffffff",
+        "foreground": "#111827",
+        "mutedForeground": "#374151",
+        "primary": "#0f4c81",
+        "primaryForeground": "#ffffff",
+        "accent": "#006b8f",
+        "border": "#cbd5e1",
+        "orb1": "#dbeafe",
+        "orb2": "#bae6fd",
+        "orb3": "#e0f2fe"
+      }
+    },
+    {
+      "id": "a11y-soft-grey",
+      "name": "Soft Grey",
+      "category": "Accessibility",
+      "description": "Light grey panels with near-black text and quiet teal accents for high legibility without a pure-white field.",
+      "colors": {
+        "bgBase": "#e5e7eb",
+        "background": "#eef2f7",
+        "surface": "#f8fafc",
+        "foreground": "#111827",
+        "mutedForeground": "#334155",
+        "primary": "#374151",
+        "primaryForeground": "#ffffff",
+        "accent": "#0f766e",
+        "border": "#cbd5e1",
+        "orb1": "#d1d5db",
+        "orb2": "#99f6e4",
+        "orb3": "#bfdbfe"
+      }
+    },
+    {
+      "id": "a11y-warm-parchment",
+      "name": "Warm Parchment",
+      "category": "Accessibility",
+      "description": "A light yellow reading theme with dark charcoal text, restrained sepia actions, and high-contrast teal links.",
+      "colors": {
+        "bgBase": "#fff8d7",
+        "background": "#fff3bf",
+        "surface": "#fffbea",
+        "foreground": "#1f2937",
+        "mutedForeground": "#4b5563",
+        "primary": "#6b4e00",
+        "primaryForeground": "#ffffff",
+        "accent": "#0b6f68",
+        "border": "#d8bd64",
+        "orb1": "#fde68a",
+        "orb2": "#99f6e4",
+        "orb3": "#fed7aa"
+      }
     }
   ]
 }
