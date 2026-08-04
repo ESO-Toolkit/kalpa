@@ -22,7 +22,7 @@ const USER: &str = "auth_tokens";
 // ── Chunked credential-store implementation ─────────────────────────────
 //
 // The chunking below exists for Windows but is used on every platform so the
-// storage layout stays identical everywhere (one code path, one set of tests):
+// storage layout stays identical everywhere (one code path):
 // Windows Credential Manager caps a credential blob at 2560 bytes of UTF-16
 // (≈1280 ASCII chars). An ESO Logs access+refresh JWT pair serialized to JSON
 // far exceeds that, so a single `set_password` of the whole token JSON fails —
@@ -32,6 +32,7 @@ const USER: &str = "auth_tokens";
 // credential entries, well under the limit.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use std::sync::Mutex;
 
 /// Blob key prefix for the auth tokens: count sentinel at `auth_tokens.count`,
 /// chunk N at `auth_tokens.{N}` (the historical layout, preserved exactly).
@@ -52,11 +53,22 @@ fn entry(user: &str) -> Option<keyring::Entry> {
 // tokens and the upload-session cookie. A blob is addressed by a `key` prefix:
 // the count sentinel lives at `{key}.count` and chunk N at `{key}.{N}`.
 
+/// Serialises [`save_chunked`] within this process. The write clears the count
+/// sentinel, overwrites chunk slots IN PLACE, then commits the new count — so two
+/// concurrent writers (two commands both refreshing an expired token, say)
+/// interleave their chunks and whichever commit lands last publishes a valid
+/// count over a base64 splice of both blobs. The next load then decodes garbage
+/// and the user is silently signed out, while both callers were told the save
+/// succeeded. The credential store offers no atomic multi-key write, so an
+/// in-process lock is the guarantee available.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Write `data` (an arbitrary byte string) under `key` using the fail-closed
 /// chunked scheme. Returns false (after logging) if any chunk write failed; on
 /// failure the count sentinel is left cleared so a reader fails closed rather
 /// than reading a half-written blob.
 fn save_chunked(key: &str, data: &[u8]) -> bool {
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let count_key = format!("{key}.count");
     // base64 → pure ASCII so each char is exactly 2 UTF-16 bytes; chunk by byte
     // count, which (ASCII) equals char count.
@@ -314,5 +326,59 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
             "[token_store] migration: commit/verify failed (committed={committed}, \
              verified={verified}); leaving plaintext intact"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These cover the size/encoding invariants that make the chunked layout work.
+    // The write ORDERING (sentinel clear → chunks → commit) is not covered:
+    // keyring 3's mock store is `CredentialPersistence::EntryOnly`, so a value
+    // written through one `Entry` is invisible to the next `Entry` for the same
+    // key and no round-trip is observable without injecting a store trait.
+
+    /// Windows Credential Manager rejects a blob larger than 2560 bytes of
+    /// UTF-16. base64 output is ASCII — exactly 2 UTF-16 bytes per char — so a
+    /// CHUNK_LEN at or above 1280 makes every save fail and breaks login, the
+    /// original bug this chunking exists to fix.
+    #[test]
+    // The operands are deliberately constants: this test exists to fail the
+    // moment someone edits CHUNK_LEN past the credential cap, which is a
+    // compile-time-known value by design.
+    #[allow(clippy::assertions_on_constants)]
+    fn chunk_len_stays_under_the_credential_manager_limit() {
+        assert!(
+            CHUNK_LEN * 2 < 2560,
+            "a {CHUNK_LEN}-char chunk exceeds the 2560-byte credential cap"
+        );
+    }
+
+    /// The chunk budget must cover a realistic ESO Logs access+refresh JWT pair
+    /// with room to spare, or `save_chunked` writes chunks the loader's
+    /// `MAX_CHUNKS` guard then refuses to read back.
+    #[test]
+    fn max_chunks_covers_a_realistic_token_blob() {
+        let encoded_len = STANDARD.encode(vec![b'x'; 8 * 1024]).len();
+        assert!(encoded_len.div_ceil(CHUNK_LEN) < MAX_CHUNKS);
+    }
+
+    /// The writer splits the base64 by byte count and the loader concatenates the
+    /// chunk strings back. That split must be lossless at every length, including
+    /// one landing exactly on a chunk boundary.
+    #[test]
+    fn chunked_base64_reassembles_exactly() {
+        for len in [1usize, 750, CHUNK_LEN, CHUNK_LEN + 1, 4096] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let b64 = STANDARD.encode(&data);
+            let joined: String = b64
+                .as_bytes()
+                .chunks(CHUNK_LEN)
+                .map(|c| std::str::from_utf8(c).expect("base64 output is ascii"))
+                .collect();
+            assert_eq!(joined, b64, "reassembly differs for a {len}-byte blob");
+            assert_eq!(STANDARD.decode(joined.as_bytes()).unwrap(), data);
+        }
     }
 }

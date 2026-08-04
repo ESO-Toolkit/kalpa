@@ -149,8 +149,27 @@ pub fn crossover_documents_roots() -> Vec<PathBuf> {
 pub fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // Release builds are GUI-subsystem, so a console child spawned without
+        // this flag flashes a visible console window during sign-in.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        // cmd.exe re-parses its own command line, and Rust only quotes arguments
+        // that contain whitespace — so an unquoted `&` (present in any
+        // multi-parameter query string) would truncate the URL and hand the
+        // remainder to cmd as a second command. Write the quotes in explicitly
+        // via raw_arg. A URL containing a double quote would break back out of
+        // them, so refuse it rather than build a command line we can't reason
+        // about.
+        if url.contains('"') {
+            return Err("Refusing to open a URL containing a quote character.".to_string());
+        }
         std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+            .arg("/C")
+            .arg("start")
+            .raw_arg("\"\"")
+            .raw_arg(format!("\"{url}\""))
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| format!("Failed to open browser: {e}"))?;
     }

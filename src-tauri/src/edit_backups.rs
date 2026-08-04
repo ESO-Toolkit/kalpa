@@ -24,12 +24,19 @@ fn backups_dir(addons_dir: &Path) -> std::path::PathBuf {
     addons_dir.join(".kalpa-backups")
 }
 
-fn timestamp_string() -> String {
-    let now = SystemTime::now()
+/// The manifest's `backed_up_at` value and the directory name derived from it.
+///
+/// Both MUST come from a single instant: [`restore_backup_file`] rebuilds the
+/// directory name from the manifest field, so reading the clock twice strands
+/// every backup whose copy phase happened to cross a second boundary.
+fn backup_timestamps() -> (String, String) {
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    metadata::format_timestamp(secs).replace(':', "-")
+        .unwrap_or_default()
+        .as_secs();
+    let stamp = metadata::format_timestamp(secs);
+    let dir_name = stamp.replace(':', "-");
+    (stamp, dir_name)
 }
 
 /// Back up user-edited files before they're overwritten by an update.
@@ -45,7 +52,7 @@ pub fn backup_user_files(
         return Ok(());
     }
 
-    let ts = timestamp_string();
+    let (backed_up_at, ts) = backup_timestamps();
     let backup_root = backups_dir(addons_dir).join(folder_name).join(&ts);
 
     fs::create_dir_all(&backup_root)
@@ -55,14 +62,17 @@ pub fn backup_user_files(
     let mut backed_up = Vec::new();
 
     for rel_path in files {
-        let src = addon_path.join(rel_path.replace('/', "\\"));
+        // Relative paths are forward-slash normalized (see file_hashes::relative_key).
+        // Join them verbatim: Windows accepts '/' as a separator, while rewriting to
+        // '\' would make the whole path a single literal component on macOS/Linux.
+        let src = addon_path.join(rel_path);
         if !src.exists() {
             eprintln!(
                 "Warning: backup source not found for {folder_name}/{rel_path}, skipping: {rel_path}"
             );
             continue;
         }
-        let dest = backup_root.join(rel_path.replace('/', "\\"));
+        let dest = backup_root.join(rel_path);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create backup subdirectory: {e}"))?;
@@ -73,12 +83,7 @@ pub fn backup_user_files(
 
     let manifest = BackupManifest {
         addon_folder: folder_name.to_string(),
-        backed_up_at: metadata::format_timestamp(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        ),
+        backed_up_at,
         update_from: from_version.to_string(),
         update_to: to_version.to_string(),
         files: backed_up,
@@ -133,15 +138,13 @@ pub fn restore_backup_file(
     let backup_file = backups_dir(addons_dir)
         .join(folder_name)
         .join(&timestamp_dir)
-        .join(relative_path.replace('/', "\\"));
+        .join(relative_path);
 
     if !backup_file.exists() {
         return Err(format!("Backup file not found: {relative_path}"));
     }
 
-    let dest = addons_dir
-        .join(folder_name)
-        .join(relative_path.replace('/', "\\"));
+    let dest = addons_dir.join(folder_name).join(relative_path);
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
@@ -262,5 +265,77 @@ mod tests {
         let result = backup_user_files(tmp.path(), "TestAddon", &[], "1.0", "2.0");
         assert!(result.is_ok());
         assert!(!backups_dir(tmp.path()).exists());
+    }
+
+    #[test]
+    fn backup_and_restore_roundtrip_for_nested_path() {
+        // Relative paths are forward-slash normalized. Rewriting them to '\' made
+        // the whole path one literal component on macOS/Linux, so the source was
+        // never found and every nested restore failed.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_path = addons_dir.join("TestAddon");
+        fs::create_dir_all(addon_path.join("Libs/LibFoo")).unwrap();
+        fs::write(addon_path.join("Libs/LibFoo/LAM.lua"), "user edit").unwrap();
+
+        backup_user_files(
+            &addons_dir,
+            "TestAddon",
+            &["Libs/LibFoo/LAM.lua".to_string()],
+            "1.0",
+            "2.0",
+        )
+        .unwrap();
+
+        let manifest = list_backups(&addons_dir, "TestAddon")
+            .into_iter()
+            .next()
+            .expect("a backup manifest");
+        assert_eq!(manifest.files, vec!["Libs/LibFoo/LAM.lua".to_string()]);
+
+        // Simulate the update overwriting the user's edit, then restore it.
+        fs::write(addon_path.join("Libs/LibFoo/LAM.lua"), "upstream").unwrap();
+        restore_backup_file(
+            &addons_dir,
+            "TestAddon",
+            &manifest.backed_up_at,
+            "Libs/LibFoo/LAM.lua",
+        )
+        .unwrap();
+
+        let restored = fs::read_to_string(addon_path.join("Libs/LibFoo/LAM.lua")).unwrap();
+        assert_eq!(restored, "user edit");
+    }
+
+    #[test]
+    fn manifest_timestamp_names_the_backup_directory() {
+        // restore_backup_file rebuilds the directory name from backed_up_at, so a
+        // second clock read would strand any backup crossing a second boundary.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_path = addons_dir.join("TestAddon");
+        fs::create_dir_all(&addon_path).unwrap();
+        fs::write(addon_path.join("init.lua"), "content").unwrap();
+
+        backup_user_files(
+            &addons_dir,
+            "TestAddon",
+            &["init.lua".to_string()],
+            "1.0",
+            "2.0",
+        )
+        .unwrap();
+
+        let manifest = list_backups(&addons_dir, "TestAddon")
+            .into_iter()
+            .next()
+            .expect("a backup manifest");
+        let dir = backups_dir(&addons_dir)
+            .join("TestAddon")
+            .join(manifest.backed_up_at.replace(':', "-"));
+        assert!(
+            dir.is_dir(),
+            "manifest backed_up_at must name the on-disk backup directory"
+        );
     }
 }

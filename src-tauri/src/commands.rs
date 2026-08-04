@@ -477,8 +477,8 @@ fn try_install_dep(
         }
     };
     let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
-    let dep_tmp =
-        esoui::download_addon(&dep_info.download_url, None).map_err(|_| "download_failed")?;
+    let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
+        .map_err(|_| "download_failed")?;
     let dep_folders =
         installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
 
@@ -708,6 +708,14 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
 }
 
 /// Look for a manifest file inside `dir` with the given `base_name`.
+///
+/// The manifest stem must equal the folder name — that is ESO's own rule, so it
+/// stays exact. Only the CASE is resolved leniently: on a case-sensitive
+/// filesystem (Linux/Proton on ext4) an addon shipping `MyAddon/myaddon.txt`
+/// loads fine in game because Wine matches case-insensitively, but the exact
+/// probes below miss it and the addon reads as manifest-less. The directory
+/// listing runs only after both probes fail, so the common path costs no extra
+/// I/O.
 fn find_manifest_in(dir: &std::path::Path, base_name: &str) -> Option<PathBuf> {
     let txt = dir.join(format!("{base_name}.txt"));
     if txt.exists() {
@@ -717,7 +725,21 @@ fn find_manifest_in(dir: &std::path::Path, base_name: &str) -> Option<PathBuf> {
     if addon.exists() {
         return Some(addon);
     }
-    None
+
+    let lower = base_name.to_lowercase();
+    let wanted_txt = format!("{lower}.txt");
+    let wanted_addon = format!("{lower}.addon");
+    let mut addon_match: Option<PathBuf> = None;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name == wanted_txt {
+            return Some(entry.path());
+        }
+        if name == wanted_addon && addon_match.is_none() {
+            addon_match = Some(entry.path());
+        }
+    }
+    addon_match
 }
 
 pub(crate) fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
@@ -1000,9 +1022,15 @@ pub fn detect_addons_folder() -> Result<String, String> {
 ///
 /// Use this command in place of `detect_addons_folders` for the setup wizard
 /// and the instance-switcher in settings.
+///
+/// The scan probes every candidate documents root and counts manifests per
+/// instance, so it runs on the blocking pool — a sync command would run it on
+/// the main thread and freeze the window while Settings opens.
 #[tauri::command]
-pub fn detect_game_instances() -> Vec<crate::game_instances::GameInstance> {
-    crate::game_instances::detect_all_game_instances()
+pub async fn detect_game_instances() -> Result<Vec<crate::game_instances::GameInstance>, String> {
+    tokio::task::spawn_blocking(crate::game_instances::detect_all_game_instances)
+        .await
+        .map_err(|e| format!("Task failed: {e}"))
 }
 
 #[tauri::command]
@@ -1491,7 +1519,7 @@ pub async fn install_dependency(
         };
         let dep_info = esoui::fetch_addon_info(dep_id)
             .map_err(|_| format!("Failed to install {dep_name}: fetch_failed"))?;
-        let dep_tmp = esoui::download_addon(&dep_info.download_url, None)
+        let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
             .map_err(|_| format!("Failed to install {dep_name}: download_failed"))?;
 
         // Acquire lock only for extract + metadata update
@@ -1748,7 +1776,17 @@ fn check_for_updates_metadata(
         let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
 
         if let Some(entry) = store.addons.get_mut(folder_name) {
-            if !has_update && meta.installed_version != api_entry.version {
+            // Sync the raw string only when both sides are real versions that
+            // normalized to the same value (the v-prefix/whitespace case). With
+            // either side empty, `has_update` is false for lack of information,
+            // not because the addon is current — stamping the remote string in
+            // would mark it up to date without downloading anything and mask
+            // that update forever.
+            if !has_update
+                && !remote_ver.is_empty()
+                && !local_ver.is_empty()
+                && meta.installed_version != api_entry.version
+            {
                 entry.installed_version = api_entry.version.clone();
                 metadata_changed = true;
             }
@@ -1927,7 +1965,7 @@ pub async fn update_addon(
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url, None)?;
+        let tmp_file = esoui::download_addon(&info.download_url, Some(&info.checksum))?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
@@ -2288,22 +2326,30 @@ fn generate_session_id(folder_name: &str) -> String {
     file_hashes::to_hex(&hash[..16])
 }
 
-/// Build a conflict report for one addon folder against a downloaded ZIP, and
-/// return the ZIP hash map alongside it so an immediately-following extraction
-/// can reuse it as the new hash baseline instead of re-hashing the folder.
+/// How every file an update ZIP would write compares to the stored hash
+/// baseline and the addon's current on-disk state.
+struct ClassifiedFiles {
+    safe_files: Vec<String>,
+    auto_kept_files: Vec<String>,
+    conflicts: Vec<FileConflict>,
+}
+
+/// Classify the files `zip_hashes` would write over the installed folder.
+///
+/// Shared by the conflict scan and the apply step so both agree on which files
+/// are the user's edits — the apply step must not have to trust the client to
+/// echo that classification back.
 ///
 /// The on-disk hash pass is skipped entirely when no stored manifest exists:
 /// with `stored == None`, every file resolves to `user_modified == false`
 /// regardless of its disk hash (see the match below), so the disk hashes cannot
-/// affect the report — and roughly two-thirds of installed addons have no
+/// affect the outcome — and roughly two-thirds of installed addons have no
 /// `.kalpa-hashes` manifest yet, making this the common case.
-fn build_conflict_report(
+fn classify_update_files(
     addons_dir: &Path,
     folder_name: &str,
-    zip_path: &Path,
-    update_version: &str,
-    session_id: &str,
-) -> Result<(ConflictReport, HashMap<String, String>), String> {
+    zip_hashes: &HashMap<String, String>,
+) -> Result<ClassifiedFiles, String> {
     let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
     let addon_path = addons_dir.join(folder_name);
 
@@ -2315,22 +2361,26 @@ fn build_conflict_report(
         HashMap::new()
     };
 
-    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
-
     let stored_files = stored.as_ref().map(|m| &m.files);
 
     let mut safe_files = Vec::new();
     let mut auto_kept_files = Vec::new();
     let mut conflicts = Vec::new();
 
-    for (rel_path, zip_hash) in &zip_hashes {
+    for (rel_path, zip_hash) in zip_hashes {
         let stored_hash = stored_files.and_then(|f| f.get(rel_path));
         let disk_hash = disk_hashes.get(rel_path);
 
         let user_modified = match (stored_hash, disk_hash) {
             (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
             (Some(_), None) => true, // file deleted
-            (None, _) => false,      // no stored hash = no baseline = treat as unmodified
+            // No baseline entry but the file is on disk: the user added it and
+            // this release ships one at the same path. `disk_hashes` is only
+            // populated when a manifest exists, so this arm can only be reached
+            // with a baseline to trust — a manifest-less folder still takes the
+            // documented fast path through the arm below.
+            (None, Some(disk)) => !file_hashes::signatures_match(disk, zip_hash),
+            (None, None) => false,
         };
 
         let upstream_changed = match stored_hash {
@@ -2354,20 +2404,37 @@ fn build_conflict_report(
         }
     }
 
-    // New files in ZIP (not in stored manifest) are always safe
-    // They're already in safe_files from the loop above (no baseline = unmodified)
-
     safe_files.sort();
     auto_kept_files.sort();
     conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(ClassifiedFiles {
+        safe_files,
+        auto_kept_files,
+        conflicts,
+    })
+}
+
+/// Build a conflict report for one addon folder against a downloaded ZIP, and
+/// return the ZIP hash map alongside it so an immediately-following extraction
+/// can reuse it as the new hash baseline instead of re-hashing the folder.
+fn build_conflict_report(
+    addons_dir: &Path,
+    folder_name: &str,
+    zip_path: &Path,
+    update_version: &str,
+    session_id: &str,
+) -> Result<(ConflictReport, HashMap<String, String>), String> {
+    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
+    let classified = classify_update_files(addons_dir, folder_name, &zip_hashes)?;
 
     let report = ConflictReport {
         session_id: session_id.to_string(),
         folder_name: folder_name.to_string(),
         update_version: update_version.to_string(),
-        safe_files,
-        auto_kept_files,
-        conflicts,
+        safe_files: classified.safe_files,
+        auto_kept_files: classified.auto_kept_files,
+        conflicts: classified.conflicts,
     };
 
     Ok((report, zip_hashes))
@@ -2376,6 +2443,7 @@ fn build_conflict_report(
 #[tauri::command]
 pub async fn scan_update_conflicts(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     pending: tauri::State<'_, crate::PendingUpdates>,
     addons_path: String,
     folder_name: String,
@@ -2383,17 +2451,26 @@ pub async fn scan_update_conflicts(
 ) -> Result<ConflictReport, String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
     let pending_clone = pending.0.clone();
 
     tokio::task::spawn_blocking(move || {
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url, None)?;
+        let tmp_file = esoui::download_addon(&info.download_url, Some(&info.checksum))?;
 
         let (_, kept_path) = tmp_file
             .keep()
             .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
 
         let session_id = generate_session_id(&folder_name);
+
+        // Take the lock only for the disk pass, never across the download above:
+        // the report is computed from the hash manifest plus live folder state,
+        // which a concurrent locked writer (Update All extracting this same
+        // addon) would otherwise be mutating mid-scan.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
 
         // Keep the ZIP hash map: the apply step (update_addon_with_decisions)
         // reuses it as the new baseline instead of re-decompressing and
@@ -2921,6 +2998,33 @@ fn extract_streamed_downloads(
             kept_files.extend(report.conflicts.iter().map(|c| c.relative_path.clone()));
         }
 
+        // Under "take_update" the conflicting files are about to be overwritten,
+        // so back them up first — the same promise the single-addon decisions
+        // path keeps. A failed backup fails the addon rather than proceeding to
+        // destroy the edits it was supposed to preserve.
+        if has_conflicts && conflict_policy == "take_update" {
+            let files_to_backup: Vec<String> = report
+                .conflicts
+                .iter()
+                .map(|c| c.relative_path.clone())
+                .collect();
+            let from_version = file_hashes::load_hash_manifest(addons_dir, &folder_name)
+                .map(|m| m.installed_version)
+                .unwrap_or_default();
+            if let Err(e) = crate::edit_backups::backup_user_files(
+                addons_dir,
+                &folder_name,
+                &files_to_backup,
+                &from_version,
+                &dl.api_version,
+            ) {
+                emit_phase(&folder_name, "failed", index);
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
+                continue;
+            }
+        }
+
         let skip_files: HashSet<String> = kept_files
             .iter()
             .map(|p| format!("{folder_name}/{p}"))
@@ -3080,11 +3184,20 @@ pub async fn get_conflict_diff(
             (pu.zip_path.clone(), pu.folder_name.clone())
         };
 
-        // Read user's file from disk
-        let user_file_path = addons_dir
-            .join(&folder_name)
-            .join(relative_path.replace('/', "\\"));
+        const MAX_DIFF_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+
+        // Read user's file from disk. Conflict paths are always '/'-separated
+        // (file_hashes normalizes them); joining them verbatim is correct on
+        // every platform, while rewriting them to backslashes would name a
+        // single literal-backslash component on macOS/Linux and silently render
+        // the user's side of the diff as empty.
+        let user_file_path = addons_dir.join(&folder_name).join(&relative_path);
         let user_content = if user_file_path.exists() {
+            let meta = fs::metadata(&user_file_path)
+                .map_err(|e| format!("Failed to read user file: {e}"))?;
+            if meta.len() > MAX_DIFF_SIZE {
+                return Err("File too large for diff view (exceeds 5 MB limit).".to_string());
+            }
             let bytes =
                 fs::read(&user_file_path).map_err(|e| format!("Failed to read user file: {e}"))?;
             if bytes.iter().take(512).any(|&b| b == 0) {
@@ -3108,7 +3221,6 @@ pub async fn get_conflict_diff(
             .by_name(&zip_entry_name)
             .map_err(|e| format!("File not found in ZIP: {e}"))?;
 
-        const MAX_DIFF_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
         if entry.size() > MAX_DIFF_SIZE {
             return Err("File too large for diff view (exceeds 5 MB limit).".to_string());
         }
@@ -3237,11 +3349,39 @@ fn update_with_decisions_inner(
     hooks: installer::ExtractHooks,
     dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
-    let kept_files: Vec<String> = decisions
+    // The ZIP's hash/signature map. Reuse the one computed during conflict
+    // detection (stored on the pending update) so we don't re-decompress and
+    // re-hash the whole archive again here — the dominant cost on many-file
+    // addons. Fall back to hashing it if a pending entry predates that field.
+    // This map becomes the new baseline after extraction (reused by
+    // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
+    // "keep_mine" files so the user's edit stays detectable on the next update.
+    let zip_hashes = if pu.zip_hashes.is_empty() {
+        Arc::new(file_hashes::hash_zip_entries(
+            &pu.zip_path,
+            &pu.folder_name,
+        )?)
+    } else {
+        Arc::clone(&pu.zip_hashes)
+    };
+
+    // Re-derive the user's edits from the baseline and the CURRENT disk state
+    // rather than trusting `decisions` to describe them. The report's auto-kept
+    // files are never sent as decisions in the first place (the UI appends them
+    // by convention, and one forgetful caller would silently destroy them), and
+    // a file edited during the user's deliberation carries no decision at all.
+    let classified = classify_update_files(addons_dir, &pu.folder_name, &zip_hashes)?;
+
+    let mut kept_files: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "keep_mine")
         .map(|d| d.relative_path.clone())
         .collect();
+    for path in &classified.auto_kept_files {
+        if !kept_files.contains(path) {
+            kept_files.push(path.clone());
+        }
+    }
 
     // Collect files to skip during extraction (full ZIP path with folder prefix)
     let skip_files: HashSet<String> = kept_files
@@ -3249,12 +3389,20 @@ fn update_with_decisions_inner(
         .map(|p| format!("{}/{}", pu.folder_name, p))
         .collect();
 
-    // Collect files to back up (user chose "take_update" on their edited files)
-    let files_to_backup: Vec<String> = decisions
+    // Collect files to back up: the ones the user chose "take_update" on, plus
+    // any edit that appeared after the scan and therefore has no decision — both
+    // are about to be overwritten.
+    let mut files_to_backup: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "take_update")
         .map(|d| d.relative_path.clone())
         .collect();
+    for conflict in &classified.conflicts {
+        let path = &conflict.relative_path;
+        if !files_to_backup.contains(path) && !kept_files.contains(path) {
+            files_to_backup.push(path.clone());
+        }
+    }
 
     // Get current version from hash manifest for backup metadata
     let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
@@ -3272,21 +3420,6 @@ fn update_with_decisions_inner(
         )?;
     }
 
-    // The ZIP's hash/signature map. Reuse the one computed during conflict
-    // detection (stored on the pending update) so we don't re-decompress and
-    // re-hash the whole archive again here — the dominant cost on many-file
-    // addons. Fall back to hashing it if a pending entry predates that field.
-    // This map becomes the new baseline after extraction (reused by
-    // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
-    // "keep_mine" files so the user's edit stays detectable on the next update.
-    let zip_hashes = if pu.zip_hashes.is_empty() {
-        Arc::new(file_hashes::hash_zip_entries(
-            &pu.zip_path,
-            &pu.folder_name,
-        )?)
-    } else {
-        Arc::clone(&pu.zip_hashes)
-    };
     let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
         None
     } else {
@@ -3332,6 +3465,16 @@ fn update_with_decisions_inner(
             metadata::remove_entry(&mut store, old);
         }
     }
+    // This path resolves a pending update and never fetched the ESOUI info, so
+    // it has no download URL of its own. Carry the stored one forward instead of
+    // recording an empty string: `record_install_ext` overwrites the field
+    // unconditionally, and the bundled-secondary auto-link heuristic pairs
+    // folders by equal download_url — every ""-vs-"" pair is a false match.
+    let download_url = store
+        .addons
+        .get(&pu.folder_name)
+        .map(|m| m.download_url.clone())
+        .unwrap_or_default();
     record_installed_folders(
         &mut store,
         addons_dir,
@@ -3339,7 +3482,7 @@ fn update_with_decisions_inner(
         pu.esoui_id,
         &pu.update_version,
         &pu.folder_name,
-        "",
+        &download_url,
         0,
     );
 
@@ -3531,9 +3674,11 @@ fn resolve_addon_file_path(
     folder_name: &str,
     relative_path: &str,
 ) -> Result<PathBuf, String> {
-    let file_path = addons_dir
-        .join(folder_name)
-        .join(relative_path.replace('/', "\\"));
+    // `list_addon_files` emits '/'-separated relative paths. Join them verbatim:
+    // Windows accepts forward slashes in every path API, while rewriting them to
+    // backslashes would produce one literal-backslash component on macOS/Linux
+    // and fail to resolve every file below the addon root.
+    let file_path = addons_dir.join(folder_name).join(relative_path);
 
     let canonical_addons = addons_dir
         .canonicalize()
@@ -3587,6 +3732,7 @@ pub async fn read_addon_file(
 #[tauri::command]
 pub async fn write_addon_file(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_name: String,
     relative_path: String,
@@ -3595,11 +3741,38 @@ pub async fn write_addon_file(
     validate_name(&folder_name)?;
     validate_relative_path(&relative_path)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {
         let file_path = resolve_addon_file_path(&addons_dir, &folder_name, &relative_path)?;
 
-        fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
+        // The hash manifest is a read-modify-write shared with the update paths
+        // (which record a fresh baseline under this lock). Hold it across the
+        // file write too, so an update can't land between the write and the
+        // manifest save and get its baseline clobbered by the stale copy.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        // Atomic temp-file + rename: the file being saved is one the user hand
+        // edited, so a crash or a Controlled Folder Access block mid-write must
+        // not be able to truncate it.
+        let tmp_name = format!(
+            "{}.kalpa-edit-tmp",
+            file_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+        );
+        let tmp_path = file_path
+            .parent()
+            .map(|p| p.join(&tmp_name))
+            .unwrap_or_else(|| PathBuf::from(&tmp_name));
+        fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
+        fs::rename(&tmp_path, &file_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to write file: {e}")
+        })?;
 
         // Re-hash only the file we just wrote — compute_addon_hashes would walk
         // the entire addon folder (0.7-1.5 s per Ctrl+S on large addons) just to
@@ -3631,13 +3804,22 @@ pub async fn write_addon_file(
 #[tauri::command]
 pub async fn rescan_addon_hashes(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_name: String,
 ) -> Result<Vec<String>, String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {
+        // detect_modifications is a load → hash-the-whole-folder → save cycle on
+        // the hash manifest, and nothing gates the Files tab's Rescan button
+        // against a running update. Without the lock a rescan started mid-update
+        // overwrites the freshly recorded baseline with the pre-update one.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
         file_hashes::detect_modifications(&addons_dir, &folder_name)
     })
     .await
@@ -3716,38 +3898,44 @@ pub struct ExportData {
     pub addons: Vec<ExportEntry>,
 }
 
+/// Blocking pool: loads kalpa.json and stats every tracked folder, which on a
+/// large install is far too much disk I/O for the main thread.
 #[tauri::command]
-pub fn export_addon_list(
+pub async fn export_addon_list(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<String, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let store = metadata::load_metadata(&addons_dir);
+    tokio::task::spawn_blocking(move || {
+        let store = metadata::load_metadata(&addons_dir);
 
-    let mut entries: Vec<ExportEntry> = store
-        .addons
-        .iter()
-        .filter(|(folder, _)| addons_dir.join(folder).is_dir())
-        .map(|(folder, meta)| ExportEntry {
-            esoui_id: meta.esoui_id,
-            folder_name: folder.clone(),
-            version: meta.installed_version.clone(),
-        })
-        .collect();
+        let mut entries: Vec<ExportEntry> = store
+            .addons
+            .iter()
+            .filter(|(folder, _)| addons_dir.join(folder).is_dir())
+            .map(|(folder, meta)| ExportEntry {
+                esoui_id: meta.esoui_id,
+                folder_name: folder.clone(),
+                version: meta.installed_version.clone(),
+            })
+            .collect();
 
-    entries.sort_by(|a, b| a.folder_name.cmp(&b.folder_name));
+        entries.sort_by(|a, b| a.folder_name.cmp(&b.folder_name));
 
-    // Deduplicate by esoui_id (multiple folders can share an ID),
-    // but keep all untracked entries (esoui_id == 0)
-    let mut seen_ids: HashSet<u32> = HashSet::new();
-    entries.retain(|e| e.esoui_id == 0 || seen_ids.insert(e.esoui_id));
+        // Deduplicate by esoui_id (multiple folders can share an ID),
+        // but keep all untracked entries (esoui_id == 0)
+        let mut seen_ids: HashSet<u32> = HashSet::new();
+        entries.retain(|e| e.esoui_id == 0 || seen_ids.insert(e.esoui_id));
 
-    let export = ExportData {
-        version: 1,
-        addons: entries,
-    };
+        let export = ExportData {
+            version: 1,
+            addons: entries,
+        };
 
-    serde_json::to_string_pretty(&export).map_err(|e| format!("Failed to export: {e}"))
+        serde_json::to_string_pretty(&export).map_err(|e| format!("Failed to export: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4177,7 +4365,8 @@ fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiA
                 return Err(e);
             }
         };
-        match esoui::download_addon(&info.download_url, None) {
+        let download = esoui::download_addon(&info.download_url, Some(&info.checksum));
+        match download {
             Ok(tmp) => return Ok((tmp, info)),
             Err(e) => {
                 last_err = e.clone();
@@ -5022,6 +5211,32 @@ fn prune_auto_snapshots(backups_dir: &std::path::Path, prefix: &str, keep: usize
     }
 }
 
+/// Ceiling on the bytes a restore may hold in memory at once. Both restore
+/// modes deliberately buffer every file before writing anything (see the
+/// all-or-nothing phase split below), so without a gate a SavedVariables tree
+/// that reached the multi-GB sizes trade addons produce becomes an unbounded
+/// allocation — and a Rust allocation failure aborts the whole app.
+const MAX_RESTORE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+
+/// Refuse a restore whose phase-1 buffer would exceed [`MAX_RESTORE_BUFFER_BYTES`].
+/// Called before anything is read, so refusing leaves the live data untouched.
+fn ensure_restore_buffer_fits(planned_bytes: u64) -> Result<(), String> {
+    if planned_bytes > MAX_RESTORE_BUFFER_BYTES {
+        return Err(format!(
+            "Backup is too large to restore safely ({:.1} GB; the limit is {} GB). Copy the files out of the backup folder manually instead.",
+            planned_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+            MAX_RESTORE_BUFFER_BYTES / (1024 * 1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+/// On-disk size of `path`, or 0 when it cannot be stat'd (missing live files
+/// contribute nothing to the restore's memory footprint).
+fn file_len_or_zero(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 /// Restore a per-character (v2) backup by MERGING each stored character subtree
 /// into the matching live SavedVariables file, leaving other characters and all
 /// account-wide data byte-identical. Returns `(restored_file_count, failures)`.
@@ -5064,12 +5279,9 @@ fn restore_character_subtrees_merge(
         }
     };
 
-    // Phase 1: read + extract + merge every backup file into memory without
-    // touching any live SavedVariables file. If any file fails, abort
-    // immediately (before phase 2 writes anything) so a mid-list failure can
-    // never leave the live data in a mixed old/new state.
-    let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
-
+    // Collect the eligible files first so the phase-1 footprint can be gated
+    // before anything is read.
+    let mut sources: Vec<(String, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -5083,6 +5295,26 @@ fn restore_character_subtrees_merge(
         if name_str.starts_with('.') || path.extension().and_then(|e| e.to_str()) != Some("lua") {
             continue;
         }
+        sources.push((name_str, path));
+    }
+
+    // Each entry buffers the stored file plus the live file it merges into.
+    let planned: u64 = sources
+        .iter()
+        .map(|(name_str, path)| file_len_or_zero(path) + file_len_or_zero(&sv_dir.join(name_str)))
+        .sum();
+    if let Err(e) = ensure_restore_buffer_fits(planned) {
+        failed.push(e);
+        return (0, failed);
+    }
+
+    // Phase 1: read + extract + merge every backup file into memory without
+    // touching any live SavedVariables file. If any file fails, abort
+    // immediately (before phase 2 writes anything) so a mid-list failure can
+    // never leave the live data in a mixed old/new state.
+    let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for (name_str, path) in sources {
         let stored = match fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
@@ -5238,25 +5470,34 @@ pub async fn restore_backup_safe(
             // live data half-restored.
             let entries =
                 fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
-            let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut sources: Vec<(String, PathBuf)> = Vec::new();
             for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name() {
-                    // Skip dot-prefixed metadata (e.g. the character-backup marker);
-                    // it isn't a SavedVariables file and must not land in the game dir.
-                    if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
-                        continue;
-                    }
-                    let name_str = name.to_string_lossy().to_string();
-                    match fs::read(&path) {
-                        Ok(bytes) => buffered.push((name_str, bytes)),
-                        Err(e) => {
-                            failed.push(format!("{name_str}: {e}"));
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(name) = path.file_name() {
+                        // Skip dot-prefixed metadata (e.g. the character-backup marker);
+                        // it isn't a SavedVariables file and must not land in the game dir.
+                        if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
+                            continue;
                         }
+                        sources.push((name.to_string_lossy().to_string(), path));
                     }
                 }
             }
+
+            // Gate the whole set before phase 1 reads it into memory.
+            ensure_restore_buffer_fits(
+                sources.iter().map(|(_, path)| file_len_or_zero(path)).sum(),
+            )?;
+
+            let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+            for (name_str, path) in sources {
+                match fs::read(&path) {
+                    Ok(bytes) => buffered.push((name_str, bytes)),
+                    Err(e) => {
+                        failed.push(format!("{name_str}: {e}"));
+                    }
+                }
             }
 
             if failed.is_empty() {
@@ -5470,6 +5711,24 @@ fn save_profiles_with_mirror(
     Ok(())
 }
 
+/// Serializes every `profiles.json` load -> modify -> save cycle.
+///
+/// Five commands mutate the store, and `activate_profile` sits between its load
+/// and its save for as long as the folder renames take; without this lock a
+/// profile created or renamed during an activation is erased when the
+/// activation writes its pre-mutation snapshot back. The guard is deliberately
+/// NOT held across `apply_profile` — the renames run unlocked and the store is
+/// re-loaded afterwards, so the cheap mutators never wait seconds on it.
+static PROFILE_STORE_LOCK: Mutex<()> = Mutex::new(());
+
+fn profile_store_guard() -> std::sync::MutexGuard<'static, ()> {
+    // The lock guards no data of its own, so a poisoned mutex (a panic in some
+    // other profile command) is safe to take over — same call as the backup locks.
+    PROFILE_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     load_profiles_with_mirror(
         addons_dir,
@@ -5528,30 +5787,41 @@ fn now_timestamp() -> String {
     )
 }
 
+/// Blocking pool: the snapshot walks the whole AddOns folder probing a manifest
+/// per candidate, which would stall the window if it ran on the main thread.
 #[tauri::command]
-pub fn create_profile(
+pub async fn create_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     profile_name: String,
 ) -> Result<AddonProfile, String> {
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let mut store = load_profiles(&addons_dir);
+    tokio::task::spawn_blocking(move || {
+        // Walk the AddOns folder before taking the guard: it reads no profile
+        // state, so it must not hold the store lock for its whole duration.
+        let enabled_addons = snapshot_enabled_addons(&addons_dir);
 
-    if store.profiles.iter().any(|p| p.name == profile_name) {
-        return Err(format!("Profile '{profile_name}' already exists."));
-    }
+        let _guard = profile_store_guard();
+        let mut store = load_profiles(&addons_dir);
 
-    let profile = AddonProfile {
-        name: profile_name,
-        enabled_addons: snapshot_enabled_addons(&addons_dir),
-        created_at: now_timestamp(),
-    };
+        if store.profiles.iter().any(|p| p.name == profile_name) {
+            return Err(format!("Profile '{profile_name}' already exists."));
+        }
 
-    store.profiles.push(profile.clone());
-    save_profiles(&addons_dir, &store)?;
+        let profile = AddonProfile {
+            name: profile_name,
+            enabled_addons,
+            created_at: now_timestamp(),
+        };
 
-    Ok(profile)
+        store.profiles.push(profile.clone());
+        save_profiles(&addons_dir, &store)?;
+
+        Ok(profile)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5839,17 +6109,25 @@ pub async fn activate_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        let mut store = load_profiles(&addons_dir);
+        let profile = {
+            let _guard = profile_store_guard();
+            let store = load_profiles(&addons_dir);
+            store
+                .profiles
+                .iter()
+                .find(|p| p.name == profile_name)
+                .cloned()
+                .ok_or_else(|| format!("Profile '{profile_name}' not found."))?
+        };
 
-        let profile = store
-            .profiles
-            .iter()
-            .find(|p| p.name == profile_name)
-            .cloned()
-            .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
-
+        // Unlocked: the renames take seconds, and holding the lock across them
+        // would freeze every other profile command for the duration.
         let result = apply_profile(&addons_dir, &profile);
 
+        // Re-load rather than writing the pre-apply snapshot back: a profile
+        // created, renamed or deleted while the renames ran must survive.
+        let _guard = profile_store_guard();
+        let mut store = load_profiles(&addons_dir);
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
 
@@ -5884,28 +6162,38 @@ pub async fn preview_profile(
 
 /// Re-snapshot the currently enabled addons into an existing profile,
 /// refreshing its timestamp — "update profile from current state".
+///
+/// Blocking pool for the same reason as [`create_profile`].
 #[tauri::command]
-pub fn update_profile(
+pub async fn update_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     profile_name: String,
 ) -> Result<AddonProfile, String> {
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let mut store = load_profiles(&addons_dir);
+    tokio::task::spawn_blocking(move || {
+        // See `create_profile`: the walk stays outside the guard.
+        let enabled = snapshot_enabled_addons(&addons_dir);
 
-    let profile = store
-        .profiles
-        .iter_mut()
-        .find(|p| p.name == profile_name)
-        .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
+        let _guard = profile_store_guard();
+        let mut store = load_profiles(&addons_dir);
 
-    profile.enabled_addons = snapshot_enabled_addons(&addons_dir);
-    profile.created_at = now_timestamp();
-    let updated = profile.clone();
+        let profile = store
+            .profiles
+            .iter_mut()
+            .find(|p| p.name == profile_name)
+            .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
 
-    save_profiles(&addons_dir, &store)?;
-    Ok(updated)
+        profile.enabled_addons = enabled;
+        profile.created_at = now_timestamp();
+        let updated = profile.clone();
+
+        save_profiles(&addons_dir, &store)?;
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5918,6 +6206,7 @@ pub fn rename_profile(
     validate_name(&old_name)?;
     validate_name(&new_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _guard = profile_store_guard();
     let mut store = load_profiles(&addons_dir);
 
     if old_name == new_name {
@@ -5948,6 +6237,7 @@ pub fn delete_profile(
 ) -> Result<(), String> {
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _guard = profile_store_guard();
     let mut store = load_profiles(&addons_dir);
 
     store.profiles.retain(|p| p.name != profile_name);
@@ -6052,32 +6342,44 @@ pub(crate) fn copy_addons_between(
 #[tauri::command]
 pub async fn copy_addons_to_instance(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     target_addons_path: String,
 ) -> Result<CopyAddonsResult, String> {
     let source = require_allowed_path(&state, &addons_path)?;
-    let target = PathBuf::from(&target_addons_path);
-    let target_canonical = target
-        .canonicalize()
-        .map_err(|e| format!("Target AddOns folder is not accessible: {e}"))?;
+    let lock = meta_lock.0.clone();
 
-    let is_detected_instance = crate::game_instances::detect_all_game_instances()
-        .iter()
-        .any(|inst| {
-            PathBuf::from(&inst.addons_path)
-                .canonicalize()
-                .is_ok_and(|p| p == target_canonical)
-        });
-    if !is_detected_instance {
-        return Err("Target folder is not a detected ESO game instance.".to_string());
-    }
-    if source.canonicalize().is_ok_and(|p| p == target_canonical) {
-        return Err("Source and target are the same instance.".to_string());
-    }
+    tokio::task::spawn_blocking(move || {
+        let target = PathBuf::from(&target_addons_path);
+        let target_canonical = target
+            .canonicalize()
+            .map_err(|e| format!("Target AddOns folder is not accessible: {e}"))?;
 
-    tokio::task::spawn_blocking(move || Ok(copy_addons_between(&source, &target_canonical)))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        // Instance detection walks every documents-root candidate, so it belongs
+        // on the blocking pool with the copy rather than on a tokio worker.
+        let is_detected_instance = crate::game_instances::detect_all_game_instances()
+            .iter()
+            .any(|inst| {
+                PathBuf::from(&inst.addons_path)
+                    .canonicalize()
+                    .is_ok_and(|p| p == target_canonical)
+            });
+        if !is_detected_instance {
+            return Err("Target folder is not a detected ESO game instance.".to_string());
+        }
+        if source.canonicalize().is_ok_and(|p| p == target_canonical) {
+            return Err("Source and target are the same instance.".to_string());
+        }
+
+        // The copy read-modify-writes the target instance's kalpa.json; the lock
+        // is global, so it also covers a concurrent writer on the source.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        Ok(copy_addons_between(&source, &target_canonical))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Multi-Character SavedVariables ──────────────────────────
@@ -6892,10 +7194,17 @@ pub fn detect_minion() -> Result<bool, String> {
 #[tauri::command]
 pub async fn migrate_from_minion(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
 ) -> Result<MinionMigrationResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // The import is a kalpa.json read-modify-write; a batch update holding
+        // the lock would otherwise lose either its versions or these entries.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
         let result = safe_migration::execute_migration(&addons_dir)?;
         Ok(MinionMigrationResult {
             found: true,
@@ -6912,13 +7221,17 @@ pub async fn migrate_from_minion(
 
 use crate::safe_migration;
 
+/// Blocking pool: the ESO/Minion checks spawn `tasklist` (or `pgrep`) up to four
+/// times, which froze the window for a second or two as the wizard opened.
 #[tauri::command]
-pub fn migration_check_preconditions(
+pub async fn migration_check_preconditions(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<safe_migration::PreconditionResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    Ok(safe_migration::check_preconditions(&addons_dir))
+    tokio::task::spawn_blocking(move || safe_migration::check_preconditions(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))
 }
 
 #[tauri::command]
@@ -6949,21 +7262,33 @@ pub async fn migration_dry_run(
 #[tauri::command]
 pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
 ) -> Result<safe_migration::MigrationResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || safe_migration::execute_migration(&addons_dir))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        // See `migrate_from_minion`: the import rewrites kalpa.json.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        safe_migration::execute_migration(&addons_dir)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Blocking pool: loads kalpa.json and stats every tracked addon plus the
+/// SavedVariables folder.
 #[tauri::command]
-pub fn migration_check_integrity(
+pub async fn migration_check_integrity(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<safe_migration::IntegrityResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    Ok(safe_migration::check_integrity(&addons_dir))
+    tokio::task::spawn_blocking(move || safe_migration::check_integrity(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))
 }
 
 #[tauri::command]
@@ -7201,7 +7526,7 @@ pub struct PackPage {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn list_packs(
-    state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
     pack_type: Option<String>,
     tag: Option<String>,
     query: Option<String>,
@@ -7210,7 +7535,7 @@ pub async fn list_packs(
     author: Option<String>,
     status: Option<String>,
 ) -> Result<PackPage, String> {
-    let access_token = get_current_token(&state);
+    let access_token = pack_hub_read_token(&app).await;
 
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
@@ -7271,9 +7596,9 @@ pub async fn list_packs(
 }
 
 #[tauri::command]
-pub async fn get_pack(state: tauri::State<'_, AuthState>, id: String) -> Result<Pack, String> {
+pub async fn get_pack(app: tauri::AppHandle, id: String) -> Result<Pack, String> {
     validate_pack_id(&id)?;
-    let access_token = get_current_token(&state);
+    let access_token = pack_hub_read_token(&app).await;
 
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
@@ -7309,13 +7634,84 @@ pub async fn get_pack(state: tauri::State<'_, AuthState>, id: String) -> Result<
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Extract the current access token from auth state (if signed in).
-fn get_current_token(state: &tauri::State<'_, AuthState>) -> Option<String> {
-    state
-        .tokens
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|t| t.access_token.clone()))
+/// Whether a failure from [`auth::ensure_valid_token`] is ESO Logs definitively
+/// rejecting the session, rather than the network being unreachable.
+///
+/// `auth.rs` returns these exact messages for a missing refresh token and for a
+/// non-2xx refresh/validation response; every other failure ("Token refresh
+/// failed: …", "User validation failed: …", a parse error) is transport-level.
+/// Clearing the session on those would sign a user out permanently — with a
+/// still-valid refresh token — just for launching before Wi-Fi connects.
+fn is_session_rejection(err: &str) -> bool {
+    err.starts_with("Session expired") || err == "Token validation failed"
+}
+
+/// Drop the in-memory session, but only when ESO Logs actually rejected it.
+fn clear_session_if_rejected(state: &tauri::State<'_, AuthState>, err: &str) {
+    if !is_session_rejection(err) {
+        return;
+    }
+    if let Ok(mut guard) = state.tokens.lock() {
+        *guard = None;
+    }
+}
+
+/// Resolve the access token for an authenticated Pack Hub / share call.
+///
+/// Refreshing goes through [`AuthState::get_valid_token_persisting`], which
+/// holds `refresh_lock` across the token re-read, the refresh and the
+/// credential-store write: two commands issued while the token is expired can
+/// therefore neither POST the same (server-rotated) refresh_token twice nor
+/// interleave their chunked credential writes. `not_signed_in` is returned when
+/// there is no session at all.
+async fn authed_pack_hub_token(
+    app: &tauri::AppHandle,
+    not_signed_in: &'static str,
+) -> Result<String, String> {
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AuthState>();
+        match state.get_valid_token_persisting(|tokens| {
+            // Persistence failure is logged in the helper and keeps the
+            // refreshed token working in-memory; don't fail the refresh.
+            let _ = save_auth_tokens(&app, tokens);
+        }) {
+            Ok(Some(token)) => Ok(token),
+            Ok(None) => Err(not_signed_in.to_string()),
+            Err(e) => {
+                clear_session_if_rejected(&state, &e);
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// The access token for a Pack Hub *read*, refreshed when it has expired.
+///
+/// The worker treats an expired bearer as an anonymous viewer instead of
+/// answering 401, so sending a stale token silently drops the caller's drafts
+/// and own anonymous packs out of My Packs. Reads stay best-effort: with no
+/// session — or when the refresh cannot be completed — the request goes out
+/// anonymously rather than failing.
+async fn pack_hub_read_token(app: &tauri::AppHandle) -> Option<String> {
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AuthState>();
+        match state.get_valid_token_persisting(|tokens| {
+            let _ = save_auth_tokens(&app, tokens);
+        }) {
+            Ok(token) => token,
+            Err(e) => {
+                clear_session_if_rejected(&state, &e);
+                eprintln!("[auth] pack hub read continuing as anonymous: {e}");
+                None
+            }
+        }
+    })
+    .await
+    .unwrap_or(None)
 }
 
 // ── Vote response from the hub API ──────────────────────────────────────
@@ -7328,54 +7724,9 @@ pub struct VoteResponse {
 }
 
 #[tauri::command]
-pub async fn vote_pack(
-    state: tauri::State<'_, AuthState>,
-    app: tauri::AppHandle,
-    pack_id: String,
-) -> Result<VoteResponse, String> {
+pub async fn vote_pack(app: tauri::AppHandle, pack_id: String) -> Result<VoteResponse, String> {
     validate_pack_id(&pack_id)?;
-    // Get current access token (refresh if needed)
-    let access_token = {
-        let tokens = {
-            let guard = state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        let Some(tokens) = tokens else {
-            return Err("Sign in to vote on packs.".to_string());
-        };
-
-        match tokio::task::spawn_blocking({
-            let tokens = tokens.clone();
-            move || auth::ensure_valid_token(&tokens)
-        })
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        {
-            Ok(Some(new_tokens)) => {
-                let token = new_tokens.access_token.clone();
-                // Persistence failure is logged in the helper and keeps the
-                // refreshed token working in-memory; don't fail the refresh.
-                let _ = save_auth_tokens(&app, &new_tokens);
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-                token
-            }
-            Ok(None) => tokens.access_token.clone(),
-            Err(e) => {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                return Err(e);
-            }
-        }
-    };
+    let access_token = authed_pack_hub_token(&app, "Sign in to vote on packs.").await?;
 
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
@@ -7574,48 +7925,66 @@ pub async fn auth_get_user(
         return Ok(None);
     };
 
-    // Check if token needs refresh
-    match tokio::task::spawn_blocking({
-        let tokens = tokens.clone();
-        move || auth::ensure_valid_token(&tokens)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
-    {
-        Ok(Some(new_tokens)) => {
-            // Persistence failure is logged in the helper; keep the refreshed
-            // token working in-memory rather than failing the refresh. Report the
-            // durability so a status check can also reflect a memory-only session.
-            let persisted = save_auth_tokens(&app, &new_tokens);
+    // Refresh under the shared lock so a concurrent pack-hub command cannot
+    // spend the same refresh_token on a second POST.
+    let refreshed = {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            // `None` while no refresh happened, so the durability stays
+            // unchanged/unknown instead of being reported as a failure.
+            let mut persisted: Option<bool> = None;
+            let result = app
+                .state::<AuthState>()
+                .get_valid_token_persisting(|new_tokens| {
+                    // Persistence failure is logged in the helper; keep the
+                    // refreshed token working in-memory rather than failing the
+                    // refresh. The durability is reported so a status check can
+                    // reflect a memory-only session.
+                    persisted = Some(save_auth_tokens(&app, new_tokens));
+                });
+            result.map(|token| (token, persisted))
+        })
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+    };
 
-            let user = AuthUser {
-                user_id: new_tokens.user_id.clone(),
-                user_name: new_tokens.user_name.clone(),
-                session_persisted: Some(persisted),
-            };
-
-            *state
+    match refreshed {
+        Ok((Some(_), persisted)) => {
+            // The helper already stored the (possibly refreshed) pair; read the
+            // identity back from it rather than from the pre-refresh copy.
+            let guard = state
                 .tokens
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-            Ok(Some(user))
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
+            let Some(current) = guard.as_ref() else {
+                return Ok(None);
+            };
+            Ok(Some(AuthUser {
+                user_id: current.user_id.clone(),
+                user_name: current.user_name.clone(),
+                session_persisted: persisted,
+            }))
         }
-        Ok(None) => {
-            // Token still valid (no save happened) — durability unchanged/unknown.
+        Ok((None, _)) => Ok(None),
+        Err(e) => {
+            // Only a definitive rejection ends the session. A connect/timeout
+            // failure (launching offline, or before Wi-Fi is up) must leave the
+            // still-valid refresh token in the credential store, or the user is
+            // permanently signed out by a transient error.
+            if is_session_rejection(&e) {
+                *state
+                    .tokens
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
+                clear_auth_and_upload_sessions(&app, &upload_session);
+                return Ok(None);
+            }
+            eprintln!("[auth] keeping the stored session after a transient refresh failure: {e}");
             Ok(Some(AuthUser {
                 user_id: tokens.user_id,
                 user_name: tokens.user_name,
                 session_persisted: None,
             }))
-        }
-        Err(_) => {
-            // Refresh failed — clear session
-            *state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-            clear_auth_and_upload_sessions(&app, &upload_session);
-            Ok(None)
         }
     }
 }
@@ -7647,52 +8016,10 @@ pub struct UpdatePackPayload {
 
 #[tauri::command]
 pub async fn create_pack(
-    state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
     payload: CreatePackPayload,
 ) -> Result<Pack, String> {
-    // Get current access token (refresh if needed)
-    let access_token = {
-        let tokens = {
-            let guard = state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        let Some(tokens) = tokens else {
-            return Err("Not signed in. Please sign in first.".to_string());
-        };
-
-        match tokio::task::spawn_blocking({
-            let tokens = tokens.clone();
-            move || auth::ensure_valid_token(&tokens)
-        })
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        {
-            Ok(Some(new_tokens)) => {
-                let token = new_tokens.access_token.clone();
-                // Persistence failure is logged in the helper and keeps the
-                // refreshed token working in-memory; don't fail the refresh.
-                let _ = save_auth_tokens(&app, &new_tokens);
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-                token
-            }
-            Ok(None) => tokens.access_token.clone(),
-            Err(e) => {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                return Err(e);
-            }
-        }
-    };
+    let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
     // POST to Pack Hub API
     tokio::task::spawn_blocking(move || {
@@ -7748,53 +8075,11 @@ pub async fn create_pack(
 
 #[tauri::command]
 pub async fn update_pack(
-    state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
     payload: UpdatePackPayload,
 ) -> Result<Pack, String> {
     validate_pack_id(&payload.id)?;
-
-    let access_token = {
-        let tokens = {
-            let guard = state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        let Some(tokens) = tokens else {
-            return Err("Not signed in. Please sign in first.".to_string());
-        };
-
-        match tokio::task::spawn_blocking({
-            let tokens = tokens.clone();
-            move || auth::ensure_valid_token(&tokens)
-        })
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        {
-            Ok(Some(new_tokens)) => {
-                let token = new_tokens.access_token.clone();
-                // Persistence failure is logged in the helper and keeps the
-                // refreshed token working in-memory; don't fail the refresh.
-                let _ = save_auth_tokens(&app, &new_tokens);
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-                token
-            }
-            Ok(None) => tokens.access_token.clone(),
-            Err(e) => {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                return Err(e);
-            }
-        }
-    };
+    let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
@@ -7847,54 +8132,9 @@ pub async fn update_pack(
 }
 
 #[tauri::command]
-pub async fn delete_pack(
-    state: tauri::State<'_, AuthState>,
-    app: tauri::AppHandle,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_pack(app: tauri::AppHandle, id: String) -> Result<(), String> {
     validate_pack_id(&id)?;
-
-    let access_token = {
-        let tokens = {
-            let guard = state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        let Some(tokens) = tokens else {
-            return Err("Not signed in. Please sign in first.".to_string());
-        };
-
-        match tokio::task::spawn_blocking({
-            let tokens = tokens.clone();
-            move || auth::ensure_valid_token(&tokens)
-        })
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        {
-            Ok(Some(new_tokens)) => {
-                let token = new_tokens.access_token.clone();
-                // Persistence failure is logged in the helper and keeps the
-                // refreshed token working in-memory; don't fail the refresh.
-                let _ = save_auth_tokens(&app, &new_tokens);
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-                token
-            }
-            Ok(None) => tokens.access_token.clone(),
-            Err(e) => {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                return Err(e);
-            }
-        }
-    };
+    let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
@@ -7944,47 +8184,7 @@ pub async fn delete_pack_hub_account(
     app: tauri::AppHandle,
     upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<DeleteAccountSummary, String> {
-    let access_token = {
-        let tokens = {
-            let guard = state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        let Some(tokens) = tokens else {
-            return Err("Not signed in. Please sign in first.".to_string());
-        };
-
-        match tokio::task::spawn_blocking({
-            let tokens = tokens.clone();
-            move || auth::ensure_valid_token(&tokens)
-        })
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        {
-            Ok(Some(new_tokens)) => {
-                let token = new_tokens.access_token.clone();
-                // Persistence failure is logged in the helper and keeps the
-                // refreshed token working in-memory; don't fail the refresh.
-                let _ = save_auth_tokens(&app, &new_tokens);
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-                token
-            }
-            Ok(None) => tokens.access_token.clone(),
-            Err(e) => {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                return Err(e);
-            }
-        }
-    };
+    let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
     let result = tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
@@ -8119,51 +8319,10 @@ fn validate_share_code(code: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn create_share_code(
-    state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
     payload: SharePackPayload,
 ) -> Result<ShareCodeResponse, String> {
-    let access_token = {
-        let tokens = {
-            let guard = state
-                .tokens
-                .lock()
-                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
-            guard.clone()
-        };
-
-        let Some(tokens) = tokens else {
-            return Err("Not signed in. Please sign in first.".to_string());
-        };
-
-        match tokio::task::spawn_blocking({
-            let tokens = tokens.clone();
-            move || auth::ensure_valid_token(&tokens)
-        })
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
-        {
-            Ok(Some(new_tokens)) => {
-                let token = new_tokens.access_token.clone();
-                // Persistence failure is logged in the helper and keeps the
-                // refreshed token working in-memory; don't fail the refresh.
-                let _ = save_auth_tokens(&app, &new_tokens);
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
-                token
-            }
-            Ok(None) => tokens.access_token.clone(),
-            Err(e) => {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                return Err(e);
-            }
-        }
-    };
+    let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
     tokio::task::spawn_blocking(move || {
         let client = share_worker_client();
@@ -8341,16 +8500,13 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&pack)
         .map_err(|e| format!("Failed to serialize pack: {e}"))?;
 
-    // Atomic write: write to .tmp then replace destination
+    // Atomic write: write to .tmp then replace the destination in one step.
+    // `fs::rename` replaces an existing destination atomically on Unix AND on
+    // Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING), so removing the
+    // previous export first would only open a window where a crash leaves the
+    // user with no .esopack at all.
     let tmp_path = file_path.with_extension("esopack.tmp");
     fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {e}"))?;
-    // On Windows, fs::rename fails if the destination exists. Remove it first.
-    if file_path.exists() {
-        fs::remove_file(&file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {e}")
-        })?;
-    }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!("Failed to finalize write: {e}")
@@ -8402,6 +8558,9 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 /// map keyed by addon folder name. Only `$AccountWide` subtrees are retained
 /// (per-character data is not exported in Phase 1).
 ///
+/// An addon is left out of the map when its file is absent, larger than the
+/// export cap, or fails to parse — the map is best-effort, not exhaustive.
+///
 /// The caller merges this map into an `EsoPackFile` and writes it with
 /// `export_pack_file`.
 #[tauri::command]
@@ -8420,14 +8579,39 @@ pub async fn export_sv_settings(
         let sv_dir = sv_io::saved_variables_dir(&addons_dir);
         let mut result: HashMap<String, AddonSettings> = HashMap::new();
 
+        // Parsing a file into a full `SvTreeNode` tree costs several times the
+        // source size, so bound it the way every other SavedVariables read path
+        // does instead of letting one bloated addon file (MasterMerchant-class
+        // files reach hundreds of MB) become a multi-GB transient.
+        const MAX_EXPORT_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
+
         for folder in &addon_folders {
+            // Every sibling SavedVariables command validates the frontend-supplied
+            // name before joining it into a path; without this a traversal or
+            // absolute value would escape the SavedVariables directory.
+            if let Err(e) = validate_name(folder) {
+                eprintln!("export_sv_settings: skipping invalid folder name '{folder}': {e}");
+                continue;
+            }
+
             let sv_file = sv_dir.join(format!("{folder}.lua"));
             if !sv_file.is_file() {
                 continue;
             }
 
-            let content = match fs::read_to_string(&sv_file) {
-                Ok(c) => c,
+            let file_size = fs::metadata(&sv_file).map(|m| m.len()).unwrap_or(0);
+            if file_size > MAX_EXPORT_SIZE {
+                eprintln!(
+                    "export_sv_settings: skipping {} — {:.1} MB exceeds the {} MB export cap",
+                    sv_file.display(),
+                    file_size as f64 / (1024.0 * 1024.0),
+                    MAX_EXPORT_SIZE / (1024 * 1024)
+                );
+                continue;
+            }
+
+            let bytes = match fs::read(&sv_file) {
+                Ok(b) => b,
                 Err(e) => {
                     eprintln!(
                         "export_sv_settings: failed to read {}: {}",
@@ -8436,6 +8620,14 @@ pub async fn export_sv_settings(
                     );
                     continue;
                 }
+            };
+            // SavedVariables files legitimately contain non-UTF8 bytes and the
+            // parser tolerates lossy content, so decode lossily rather than
+            // dropping the addon from a pack the user believes carries its
+            // settings.
+            let content = match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
             };
 
             let file_name = format!("{folder}.lua");
@@ -8598,20 +8790,14 @@ pub async fn import_sv_settings(
                 }
             }
 
-            // Atomic write
+            // Atomic write. `fs::rename` replaces the destination atomically on
+            // Unix AND on Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
+            // so the live file is never removed first — a failure here leaves
+            // the previous settings in place instead of no file at all.
             let tmp = sv_dir.join(format!("{folder}.lua.tmp"));
             if let Err(e) = fs::write(&tmp, &substituted) {
                 errors.push(format!("{folder}: failed to write: {e}"));
                 continue;
-            }
-            if dest.exists() {
-                if let Err(e) = fs::remove_file(&dest) {
-                    let _ = fs::remove_file(&tmp);
-                    errors.push(format!(
-                        "{folder}: failed to replace existing file: {e}"
-                    ));
-                    continue;
-                }
             }
             if let Err(e) = fs::rename(&tmp, &dest) {
                 let _ = fs::remove_file(&tmp);
@@ -10380,6 +10566,100 @@ mod tests {
     }
 
     #[test]
+    fn conflict_report_flags_a_user_added_file_the_update_also_ships() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MyAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("stock.lua"), b"-- stock").unwrap();
+        // Two files the user dropped in themselves: one the new release happens
+        // to ship different bytes for, one that already matches upstream.
+        fs::write(addon_dir.join("extra.lua"), b"-- my own module").unwrap();
+        fs::write(addon_dir.join("same.lua"), b"-- shared").unwrap();
+
+        let mut files = HashMap::new();
+        files.insert(
+            "stock.lua".to_string(),
+            file_hashes::file_signature("stock.lua", &addon_dir.join("stock.lua")).unwrap(),
+        );
+        file_hashes::save_hash_manifest(
+            &addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "MyAddon".to_string(),
+                esoui_ids: vec![123],
+                recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                installed_version: "1.0".to_string(),
+                files,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MyAddon/stock.lua", options).unwrap();
+        archive.write_all(b"-- stock").unwrap();
+        archive.start_file("MyAddon/extra.lua", options).unwrap();
+        archive.write_all(b"-- upstream module").unwrap();
+        archive.start_file("MyAddon/same.lua", options).unwrap();
+        archive.write_all(b"-- shared").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
+
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].relative_path, "extra.lua");
+        assert_eq!(
+            report.safe_files,
+            vec!["same.lua".to_string(), "stock.lua".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_manifest_in_falls_back_to_a_case_insensitive_stem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("MyAddon");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("myaddon.txt"), b"## Title: MyAddon").unwrap();
+
+        let found = find_manifest_in(&dir, "MyAddon").expect("manifest should resolve");
+        assert!(found.is_file());
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy().to_lowercase(),
+            "myaddon.txt"
+        );
+    }
+
+    #[test]
+    fn find_manifest_in_still_requires_the_folder_name_as_the_stem() {
+        // ESO only loads <Folder>/<Folder>.txt, so a stray readme must not pass.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("MyAddon");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("readme.txt"), b"hello").unwrap();
+
+        assert!(find_manifest_in(&dir, "MyAddon").is_none());
+    }
+
+    #[test]
+    fn resolve_addon_file_path_resolves_a_nested_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let nested = addons_dir.join("MyAddon").join("libs");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("LibFoo.lua"), b"-- lib").unwrap();
+
+        let resolved =
+            resolve_addon_file_path(&addons_dir, "MyAddon", "libs/LibFoo.lua").expect("resolved");
+        assert!(resolved.is_file());
+    }
+
+    #[test]
     fn normalize_addon_name_is_case_and_whitespace_insensitive() {
         assert_eq!(normalize_addon_name("LuiMedia"), "luimedia");
         assert_eq!(normalize_addon_name("LUIMEDIA"), "luimedia");
@@ -11416,6 +11696,48 @@ mod tests {
     }
 
     #[test]
+    fn export_pack_file_replaces_an_existing_export_by_rename() {
+        // The export renames over the destination without removing it first,
+        // which only works because fs::rename replaces atomically on Windows
+        // too. If that ever stops holding, this fails instead of the user
+        // losing a previous export to a crash between remove and rename.
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("pack.esopack");
+        fs::write(&dest, b"previous export").unwrap();
+
+        let pack = EsoPackFile {
+            format: "esopack".to_string(),
+            version: 1,
+            pack: EsoPackData {
+                title: "Replacement".to_string(),
+                description: String::new(),
+                pack_type: "addon-pack".to_string(),
+                tags: vec![],
+                addons: vec![],
+            },
+            shared_at: String::new(),
+            shared_by: String::new(),
+            settings: HashMap::new(),
+        };
+        export_pack_file(pack, dest.to_string_lossy().to_string()).unwrap();
+
+        let written = fs::read_to_string(&dest).unwrap();
+        assert!(written.contains("Replacement"));
+        assert!(
+            !tmp.path().join("pack.esopack.tmp").exists(),
+            "the temp file must not survive a successful export"
+        );
+    }
+
+    #[test]
+    fn restore_buffer_gate_refuses_only_above_the_ceiling() {
+        assert!(ensure_restore_buffer_fits(MAX_RESTORE_BUFFER_BYTES).is_ok());
+        let err = ensure_restore_buffer_fits(MAX_RESTORE_BUFFER_BYTES + 1)
+            .expect_err("a set larger than the ceiling must be refused before any read");
+        assert!(err.contains("too large to restore"));
+    }
+
+    #[test]
     fn native_shell_resolver_finds_dev_slint_binary() {
         let root = tempfile::tempdir().unwrap();
         let exe = root
@@ -11697,5 +12019,95 @@ mod tests {
         ] {
             std::env::remove_var(name);
         }
+    }
+
+    #[test]
+    fn only_a_definitive_rejection_ends_the_session() {
+        // The two messages auth.rs returns when the server answers non-2xx (or
+        // when there is no refresh token left to spend).
+        assert!(is_session_rejection(
+            "Session expired. Please sign in again."
+        ));
+        assert!(is_session_rejection("Token validation failed"));
+
+        // Transport failures: launching offline must keep the stored session,
+        // because the refresh token is still perfectly valid.
+        assert!(!is_session_rejection(
+            "Token refresh failed: error sending request for url (https://www.esologs.com/oauth/token)"
+        ));
+        assert!(!is_session_rejection(
+            "User validation failed: operation timed out"
+        ));
+        assert!(!is_session_rejection(
+            "Failed to parse refresh response: EOF while parsing a value"
+        ));
+    }
+
+    /// The worker now returns `user_voted` per viewer; the client's vote button
+    /// is a toggle, so absorbing it as `false` makes an "Upvote" click delete
+    /// the vote the user already cast.
+    #[test]
+    fn hub_pack_carries_the_workers_user_voted_through_to_the_frontend() {
+        let body = serde_json::json!({
+            "id": "raid-starter",
+            "author_id": "123",
+            "author_name": "Faewynd",
+            "is_anonymous": false,
+            "title": "Raid Starter",
+            "description": "Trials essentials",
+            "pack_type": "raid",
+            "addons": [
+                { "esouiId": 7, "name": "LibAddonMenu", "required": true },
+                { "esouiId": 8, "name": "CombatMetrics", "required": false, "note": "optional" }
+            ],
+            "vote_count": 12,
+            "install_count": 3,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "tags": ["trials"],
+            "user_voted": true,
+            "status": "published",
+        });
+
+        let hub: HubPack = serde_json::from_value(body).expect("hub pack");
+        let pack = Pack::from_hub(hub);
+
+        assert!(pack.user_voted);
+        assert_eq!(pack.vote_count, 12);
+        assert_eq!(pack.addons.len(), 2);
+        assert_eq!(pack.addons[0].esoui_id, 7);
+        assert!(pack.addons[0].required);
+        assert_eq!(pack.addons[1].note.as_deref(), Some("optional"));
+    }
+
+    /// The D1 mirror hands `addons` back as a JSON string, and an older worker
+    /// omits `user_voted` entirely — both must still deserialize.
+    #[test]
+    fn hub_pack_accepts_string_addons_and_a_missing_user_voted() {
+        let body = serde_json::json!({
+            "id": "raid-starter",
+            "author_name": "Faewynd",
+            "is_anonymous": true,
+            "title": "Raid Starter",
+            "description": "",
+            "pack_type": "raid",
+            "addons": "[{\"esouiId\":7,\"name\":\"LibAddonMenu\"}]",
+            "vote_count": 0,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "tags": [],
+        });
+
+        let hub: HubPack = serde_json::from_value(body).expect("hub pack");
+        let pack = Pack::from_hub(hub);
+
+        assert!(!pack.user_voted);
+        // An anonymous pack must never carry the author's real name forward.
+        assert_eq!(pack.author_name, "Anonymous");
+        assert_eq!(pack.author_id, "");
+        assert_eq!(pack.status, "published");
+        assert_eq!(pack.addons.len(), 1);
+        // `required` defaults to true when the worker omits it.
+        assert!(pack.addons[0].required);
     }
 }

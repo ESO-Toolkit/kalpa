@@ -235,19 +235,7 @@ pub fn detect_all_game_instances() -> Vec<GameInstance> {
                 onedrive_suffix
             );
 
-            // Build a unique id. The first discovered path for a region gets the plain
-            // env-folder name ("live"); additional same-region paths are numbered
-            // ("live-2", "live-3", …) so React keys never collide.
-            let base_id = region.env_folder();
-            let existing_count = instances
-                .iter()
-                .filter(|i| i.id == base_id || i.id.starts_with(&format!("{base_id}-")))
-                .count();
-            let id = if existing_count == 0 {
-                base_id.to_string()
-            } else {
-                format!("{}-{}", base_id, existing_count + 1)
-            };
+            let id = next_instance_id(region.env_folder(), &instances);
 
             instances.push(GameInstance {
                 id,
@@ -269,6 +257,22 @@ pub fn detect_all_game_instances() -> Vec<GameInstance> {
     instances
 }
 
+/// A unique id for the next instance of `base_id`'s region. The first discovered
+/// path for a region gets the plain env-folder name ("live"); additional
+/// same-region paths are numbered ("live-2", "live-3", …) so React keys never
+/// collide.
+fn next_instance_id(base_id: &str, instances: &[GameInstance]) -> String {
+    let existing_count = instances
+        .iter()
+        .filter(|i| i.id == base_id || i.id.starts_with(&format!("{base_id}-")))
+        .count();
+    if existing_count == 0 {
+        base_id.to_string()
+    } else {
+        format!("{}-{}", base_id, existing_count + 1)
+    }
+}
+
 /// Score an instance by evidence that it is the user's active game directory.
 /// Higher scores surface first; OneDrive paths are penalised.
 fn instance_score(inst: &GameInstance) -> i32 {
@@ -284,6 +288,80 @@ fn instance_score(inst: &GameInstance) -> i32 {
         score -= 10; // cloud-synced copies are less reliable
     }
     score
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(id: &str, region: ServerRegion) -> GameInstance {
+        GameInstance {
+            id: id.to_string(),
+            client_type: ClientType::Native,
+            region,
+            addons_path: format!("C:/Docs/Elder Scrolls Online/{id}/AddOns"),
+            addon_count: 0,
+            is_onedrive: false,
+            has_saved_variables: false,
+            has_addon_settings: false,
+            display_label: id.to_string(),
+        }
+    }
+
+    /// The list is sorted by this score and the setup wizard labels index 0
+    /// "Recommended", so the ordering here decides where a new user installs.
+    fn recommended(mut instances: Vec<GameInstance>) -> GameInstance {
+        instances.sort_by_key(|inst| std::cmp::Reverse(instance_score(inst)));
+        instances.remove(0)
+    }
+
+    #[test]
+    fn played_in_instance_outranks_one_with_a_few_more_addons() {
+        let played = GameInstance {
+            has_saved_variables: true,
+            has_addon_settings: true,
+            addon_count: 0,
+            ..instance("live", ServerRegion::Na)
+        };
+        let untouched = GameInstance {
+            addon_count: 4,
+            ..instance("liveeu", ServerRegion::Eu)
+        };
+
+        assert!(instance_score(&played) > instance_score(&untouched));
+        assert_eq!(recommended(vec![untouched, played]).id, "live");
+    }
+
+    #[test]
+    fn onedrive_penalty_demotes_an_otherwise_best_instance() {
+        let synced = GameInstance {
+            has_saved_variables: true,
+            has_addon_settings: true,
+            addon_count: 8,
+            is_onedrive: true,
+            ..instance("live", ServerRegion::Na)
+        };
+        let local = GameInstance {
+            addon_count: 5,
+            ..instance("live-2", ServerRegion::Na)
+        };
+
+        assert!(instance_score(&local) > instance_score(&synced));
+        assert_eq!(recommended(vec![synced, local]).id, "live-2");
+    }
+
+    #[test]
+    fn duplicate_region_paths_get_numbered_ids() {
+        let mut instances: Vec<GameInstance> = Vec::new();
+        for expected in ["live", "live-2", "live-3"] {
+            let id = next_instance_id("live", &instances);
+            assert_eq!(id, expected);
+            instances.push(instance(&id, ServerRegion::Na));
+        }
+
+        // A different region is numbered independently.
+        assert_eq!(next_instance_id("liveeu", &instances), "liveeu");
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
