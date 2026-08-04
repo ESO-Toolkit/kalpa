@@ -111,6 +111,10 @@ export function PackCreateView({
     setSearchQuery(query);
     if (createSearchTimerRef.current) clearTimeout(createSearchTimerRef.current);
     if (query.trim().length < 2) {
+      // Bump the seq so an already-dispatched search can't repopulate the list
+      // for a query the user has since erased (clearTimeout only catches the
+      // request that hasn't fired yet).
+      createSearchSeqRef.current += 1;
       setSearchResults([]);
       setSearching(false);
       return;
@@ -301,10 +305,18 @@ export function PackCreateView({
       .replace(/[^a-zA-Z0-9-_ ]/g, "")
       .trim()
       .replace(/\s+/g, "-");
-    const path = await saveFileDialog({
-      defaultPath: `${safeName}.esopack`,
-      filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-    });
+    // Inside try/catch: a denied dialog permission rejects here, and an
+    // unhandled rejection from the click handler would look like a dead button.
+    let path: string | null;
+    try {
+      path = await saveFileDialog({
+        defaultPath: `${safeName}.esopack`,
+        filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
+      });
+    } catch (e) {
+      toast.error(`Couldn't open the save dialog: ${getTauriErrorMessage(e)}`);
+      return;
+    }
     if (!path) return;
 
     setSavingToFile(true);

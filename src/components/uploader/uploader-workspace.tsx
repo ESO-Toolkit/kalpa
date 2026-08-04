@@ -81,7 +81,9 @@ import {
 import {
   SessionTimer,
   WhatGetsUploaded,
+  attachRaceSafe,
   compactBytes,
+  deriveNativeState,
   fightLabel,
   formatDuration,
   formatElapsed,
@@ -495,10 +497,10 @@ export function UploaderWorkspace({
       ]);
       // Treat a tainted (untrusted-empty) store as a read failure too.
       const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
-      const readFailed = !manual.ok || !live.ok || tainted;
-      setNativeOptIn(!manual.value && !readFailed);
-      setHasNativeSession(session);
-      setLiveUseOfficial(live.value || readFailed);
+      const next = deriveNativeState({ manual, live, session, tainted });
+      setNativeOptIn(next.nativeOptIn);
+      setHasNativeSession(next.hasNativeSession);
+      setLiveUseOfficial(next.liveUseOfficial);
     } catch {
       /* best-effort — the upload path still reads the setting fresh per upload */
     }
@@ -516,10 +518,10 @@ export function UploaderWorkspace({
       // Fail closed on a store read error OR a tainted store (see refreshNativeState).
       const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
       if (cancelled) return;
-      const readFailed = !manual.ok || !live.ok || tainted;
-      setNativeOptIn(!manual.value && !readFailed);
-      setHasNativeSession(session);
-      setLiveUseOfficial(live.value || readFailed);
+      const next = deriveNativeState({ manual, live, session, tainted });
+      setNativeOptIn(next.nativeOptIn);
+      setHasNativeSession(next.hasNativeSession);
+      setLiveUseOfficial(next.liveUseOfficial);
     })();
     return () => {
       cancelled = true;
@@ -854,34 +856,32 @@ export function UploaderWorkspace({
   // Native file drag-drop over the window. Tauri delivers real OS paths (unlike
   // HTML5 drag-drop in a webview), which the backend then copy-confines. We only
   // act on a single dropped .log; the drag-over state drives the picker visual.
+  // The subscription resolves after two awaits and this effect re-runs whenever
+  // `logs` changes identity, so attachRaceSafe owns the teardown — a cleanup that
+  // beats the resolution would otherwise leave a native listener registered forever.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
     let active = true;
-    void (async () => {
-      try {
-        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-        unlisten = await getCurrentWebview().onDragDropEvent((event) => {
-          if (!active) return;
-          const t = event.payload.type;
-          if (t === "over") {
-            setDragOver(true);
-          } else if (t === "leave") {
-            setDragOver(false);
-          } else if (t === "drop") {
-            setDragOver(false);
-            const paths = event.payload.paths ?? [];
-            const log = paths.find((p) => /\.log$/i.test(p));
-            if (log) void handleImportLog(log);
-            else if (paths.length > 0) toast.error("Drop a .log file to add it.");
-          }
-        });
-      } catch {
-        /* drag-drop is an enhancement; ignore if the webview API is unavailable */
-      }
-    })();
+    const detach = attachRaceSafe(async () => {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      return getCurrentWebview().onDragDropEvent((event) => {
+        if (!active) return;
+        const t = event.payload.type;
+        if (t === "over") {
+          setDragOver(true);
+        } else if (t === "leave") {
+          setDragOver(false);
+        } else if (t === "drop") {
+          setDragOver(false);
+          const paths = event.payload.paths ?? [];
+          const log = paths.find((p) => /\.log$/i.test(p));
+          if (log) void handleImportLog(log);
+          else if (paths.length > 0) toast.error("Drop a .log file to add it.");
+        }
+      });
+    });
     return () => {
       active = false;
-      unlisten?.();
+      detach();
     };
   }, [handleImportLog]);
 

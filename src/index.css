@@ -380,8 +380,12 @@
   --status-danger-muted: #fecaca;
   --status-danger-faint: #fee2e2;
   --status-danger-strong: #ef4444;
-  --status-danger: var(--status-danger);
-  --status-danger-strong: var(--status-danger-strong);
+  /* Aliases kept for consumers that spell the danger tokens "error". Runtime
+   * theming sets them alongside the danger pair (STATUS_ALIAS_VARS in
+   * src/lib/theme-apply.ts), so they must resolve here too when overrides are
+   * cleared for the authored ESO Gold base. */
+  --status-error: var(--status-danger);
+  --status-error-strong: var(--status-danger-strong);
   --status-library: #a78bfa;
   --status-library-strong: #8b5cf6;
   --status-info: #38bdf8;

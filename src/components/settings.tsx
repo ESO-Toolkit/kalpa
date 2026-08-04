@@ -1,11 +1,10 @@
 import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { exampleAddonsPath } from "@/lib/platform";
-import { FEEDBACK_DISCORD_URL, FEEDBACK_ISSUES_URL } from "@/lib/feedback";
+import { FEEDBACK_DISCORD_URL, FEEDBACK_ISSUES_URL, openFeedbackUrl } from "@/lib/feedback";
 import {
   clearSkippedDependencies,
   getSkippedDependencies,
@@ -601,7 +600,12 @@ export function Settings({
                         onCheckedChange={(checked) => {
                           const value = checked === true;
                           setAutoUpdate(value);
-                          setSetting("autoUpdate", value);
+                          void setSetting("autoUpdate", value).then((ok) => {
+                            if (!ok) {
+                              setAutoUpdate(!value);
+                              toast.error("Couldn't save that setting — try again.");
+                            }
+                          });
                         }}
                       />
                       <div>
@@ -654,7 +658,12 @@ export function Settings({
                         onCheckedChange={(checked) => {
                           const value = checked === true;
                           setWarnEsoRunning(value);
-                          setSetting("suppressEsoRunningWarning", !value);
+                          void setSetting("suppressEsoRunningWarning", !value).then((ok) => {
+                            if (!ok) {
+                              setWarnEsoRunning(!value);
+                              toast.error("Couldn't save that setting — try again.");
+                            }
+                          });
                         }}
                       />
                       <div>
@@ -718,7 +727,12 @@ export function Settings({
                         onCheckedChange={(checked) => {
                           const value = checked === true;
                           setAutoOpenAnalysis(value);
-                          void setSetting("autoOpenAnalysis", value);
+                          void setSetting("autoOpenAnalysis", value).then((ok) => {
+                            if (!ok) {
+                              setAutoOpenAnalysis(!value);
+                              toast.error("Couldn't save that setting — try again.");
+                            }
+                          });
                         }}
                       />
                       <div>
@@ -749,8 +763,14 @@ export function Settings({
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
                         onClick={() => {
+                          const previous = conflictPolicy;
                           setConflictPolicy(value);
-                          void setSetting("conflictPolicy", value);
+                          void setSetting("conflictPolicy", value).then((ok) => {
+                            if (!ok) {
+                              setConflictPolicy(previous);
+                              toast.error("Couldn't save that setting — try again.");
+                            }
+                          });
                         }}
                       >
                         <span
@@ -1040,7 +1060,7 @@ function FeedbackToolGroup() {
           variant="outline"
           size="sm"
           className="justify-start"
-          onClick={() => void openUrl(FEEDBACK_ISSUES_URL)}
+          onClick={() => void openFeedbackUrl(FEEDBACK_ISSUES_URL)}
         >
           <Bug className="size-3.5" />
           GitHub Issues
@@ -1050,7 +1070,7 @@ function FeedbackToolGroup() {
           variant="outline"
           size="sm"
           className="justify-start"
-          onClick={() => void openUrl(FEEDBACK_DISCORD_URL)}
+          onClick={() => void openFeedbackUrl(FEEDBACK_DISCORD_URL)}
         >
           <MessageCircle className="size-3.5" />
           Discord

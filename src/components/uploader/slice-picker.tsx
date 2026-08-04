@@ -102,12 +102,32 @@ export function SlicePicker({
   const [partialMessage, setPartialMessage] = useState<string | null>(null);
   const [partialFiles, setPartialFiles] = useState<{ path: string; plan: PlannedReport }[]>([]);
   const [partialMode, setPartialMode] = useState<CommitMode>("upload");
+  /** Reports this run already published before it stopped. Non-zero means a full
+   *  re-run would publish them a second time, so the "Try again" escape hatch is
+   *  withdrawn (see the recovery buttons below). */
+  const [partialPublished, setPartialPublished] = useState(0);
   const [stale, setStale] = useState(false);
   const stopRequestedRef = useRef(false);
   const stopButtonRef = useRef<HTMLButtonElement | null>(null);
+  const commitButtonRef = useRef<HTMLButtonElement | null>(null);
+  const partialActionsRef = useRef<HTMLDivElement | null>(null);
+  const prevPhaseRef = useRef<WorkPhase>("idle");
 
+  // Every phase change unmounts whatever had focus (Stop, or the recovery
+  // buttons), which would otherwise drop the user to <body> at the exact moment
+  // a decision appears. Move focus to the control that replaced it.
   useEffect(() => {
-    if (phase === "preparing" || phase === "uploading") stopButtonRef.current?.focus();
+    const previous = prevPhaseRef.current;
+    prevPhaseRef.current = phase;
+    if (phase === "preparing" || phase === "uploading") {
+      stopButtonRef.current?.focus();
+      return;
+    }
+    if (phase === "partial") {
+      partialActionsRef.current?.querySelector("button")?.focus();
+      return;
+    }
+    if (previous !== "idle") commitButtonRef.current?.focus();
   }, [phase]);
 
   const busy = phase === "preparing" || phase === "uploading";
@@ -231,17 +251,20 @@ export function SlicePicker({
    *  `files` is what is still OUTSTANDING, never what already succeeded. `mode`
    *  is the commit the user actually asked for: a run they started with Save
    *  must not be offered an upload as its recovery, because publishing a combat
-   *  log is a decision they explicitly declined. */
+   *  log is a decision they explicitly declined. `published` counts the reports
+   *  this run already sent to ESO Logs (zero while only cutting files).  */
   const showPartial = (
     done: number,
     total: number,
     reason: string,
     files: { path: string; plan: PlannedReport }[],
-    mode: CommitMode
+    mode: CommitMode,
+    published: number
   ) => {
     setPhase("partial");
     setPartialFiles(files);
     setPartialMode(mode);
+    setPartialPublished(published);
     setPartialMessage(
       mode === "save"
         ? `Kalpa finished ${done} of ${total} file${total === 1 ? "" : "s"} before ${reason}. The finished files are safe in Kalpa Splits.`
@@ -287,6 +310,21 @@ export function SlicePicker({
           });
         } else {
           toast.success(dispatch.detail || `Report handed off - ${uploadName}`, { duration: 9000 });
+          // Same reason commit() parks here: an external uploader now owns the
+          // exchange, so continuing would launch it once per remaining file and
+          // claim success for uploads Kalpa never performed.
+          if (uploaded < files.length) {
+            showPartial(
+              uploaded,
+              files.length,
+              "handing this file to the official uploader",
+              outstandingAfter(files, uploaded),
+              "upload",
+              uploaded
+            );
+            return;
+          }
+          break;
         }
       }
       await onFilesWritten();
@@ -301,17 +339,21 @@ export function SlicePicker({
           files.length,
           "stopping",
           outstandingAfter(files, uploaded),
-          "upload"
+          "upload",
+          uploaded
         );
       else setPhase("idle");
     } catch (error) {
-      showPartial(
-        uploaded,
-        files.length,
-        getTauriErrorMessage(error),
-        outstandingAfter(files, uploaded),
-        "upload"
-      );
+      const message = getTauriErrorMessage(error);
+      const outstanding = outstandingAfter(files, uploaded);
+      if (outstanding.length > 0) {
+        showPartial(uploaded, files.length, message, outstanding, "upload", uploaded);
+      } else {
+        // Nothing is left to retry, and re-sending what already published would
+        // duplicate every report — report the failure instead of offering a rerun.
+        setPhase("idle");
+        toast.error(`Every remaining file was sent, but the run ended early. ${message}`);
+      }
     }
   };
   const commit = async (mode: CommitMode) => {
@@ -357,7 +399,7 @@ export function SlicePicker({
       if (stopRequestedRef.current || writtenFiles.length < plans.length) {
         // Nothing has uploaded yet at this point, so every written file is
         // outstanding. `mode` decides whether recovery offers an upload at all.
-        showPartial(writtenFiles.length, plans.length, "stopping", writtenFiles, mode);
+        showPartial(writtenFiles.length, plans.length, "stopping", writtenFiles, mode, 0);
         return;
       }
 
@@ -415,7 +457,8 @@ export function SlicePicker({
               writtenFiles.length,
               "handing the first file to the official uploader",
               outstandingAfter(writtenFiles, uploaded),
-              mode
+              mode,
+              uploaded
             );
             return;
           }
@@ -429,7 +472,8 @@ export function SlicePicker({
           writtenFiles.length,
           "stopping",
           outstandingAfter(writtenFiles, uploaded),
-          mode
+          mode,
+          uploaded
         );
         return;
       }
@@ -446,7 +490,8 @@ export function SlicePicker({
           plans.length,
           message,
           outstandingAfter(writtenFiles, uploaded),
-          mode
+          mode,
+          uploaded
         );
       else if (writtenFiles.length > 0) {
         setPhase("idle");
@@ -555,7 +600,7 @@ export function SlicePicker({
             )}
           </div>
 
-          <div className="border-t border-white/[0.06] pt-2" aria-busy={controlsDisabled}>
+          <div className="border-t border-structure-06 pt-2" aria-busy={controlsDisabled}>
             {noFightsAtAll ? (
               <Alert>
                 <AlertTriangle className="size-4" aria-hidden />
@@ -611,7 +656,15 @@ export function SlicePicker({
             {phase === "preparing" || phase === "uploading" ? (
               <>
                 <p className="text-sm text-foreground">{progressText}</p>
-                <ProgressBar value={progressValue} max={progressMax} label={progressText} />
+                {/* The cut advances only when a whole plan finishes, so a single
+                    multi-GB plan would hold a determinate bar at 0% for minutes
+                    and read as a hang. */}
+                <ProgressBar
+                  value={progressValue}
+                  max={progressMax}
+                  label={progressText}
+                  indeterminate={phase === "preparing"}
+                />
                 {phase === "preparing" && (
                   <p className="text-xs text-muted-foreground">
                     Big files take a minute - Kalpa is copying only the parts you picked.
@@ -655,7 +708,7 @@ export function SlicePicker({
           )}
 
           {renameOpen && phase === "idle" && plans.length > 0 && (
-            <div className="grid gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 sm:grid-cols-2">
+            <div className="grid gap-2 rounded-lg border border-structure-06 bg-structure-02 p-2 sm:grid-cols-2">
               {plans.map((plan) => (
                 <Input
                   key={plan.id}
@@ -681,10 +734,17 @@ export function SlicePicker({
                 <X className="size-3.5" /> Stop
               </Button>
             ) : phase === "partial" ? (
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => void commit(partialMode)}>
-                  Try again
-                </Button>
+              <div className="flex flex-wrap gap-2" ref={partialActionsRef}>
+                {/* A full re-run re-cuts AND re-uploads every plan, so it is only
+                    safe while nothing has published — esologs.com issues a report
+                    code per request with no client idempotency key, so retrying a
+                    slice that already succeeded publishes a duplicate. Past that
+                    point the outstanding-only button below is the whole recovery. */}
+                {partialPublished === 0 && (
+                  <Button variant="outline" size="sm" onClick={() => void commit(partialMode)}>
+                    Try again
+                  </Button>
+                )}
                 {/* A run started with Save is never recovered by uploading:
                     publishing the log is a decision this user declined. */}
                 {partialMode === "upload" ? (
@@ -719,6 +779,7 @@ export function SlicePicker({
                   Save without uploading
                 </Button>
                 <Button
+                  ref={commitButtonRef}
                   disabled={plans.length === 0 || noFightsAtAll}
                   onClick={() => void commit("upload")}
                 >
@@ -771,7 +832,7 @@ function SessionGroup({
   const attempts = attemptOrdinals(fights);
 
   return (
-    <div className="border-t border-white/[0.06] first:border-t-0">
+    <div className="border-t border-structure-06 first:border-t-0">
       <div className="flex min-h-11 items-start gap-2 py-2">
         <Checkbox
           checked={state === "all"}
@@ -937,7 +998,9 @@ function FightRow({
     </div>
   );
 }
-function buildDefaultState(
+/** Exported for test — the promote-to-whole rules it feeds decide whether a run
+ *  writes a few pulls or an entire night. */
+export function buildDefaultState(
   sessions: LogSession[],
   fightsBySession: Map<number, FightSummary[]>,
   omitted: boolean
@@ -1013,7 +1076,8 @@ function mapFightsBySession(
   return map;
 }
 
-function buildPlan(
+/** Exported for test — see the promotion guard below. */
+export function buildPlan(
   sessions: LogSession[],
   fightsBySession: Map<number, FightSummary[]>,
   selectedFights: FightSelectionMap,
@@ -1119,7 +1183,9 @@ async function writePlan(
   });
 }
 
-function sessionCheckState(
+/** Exported for test — the tri-state drives the session checkbox and its
+ *  indeterminate flag, which is what tells a user a night is only partly picked. */
+export function sessionCheckState(
   fights: FightSummary[],
   omitted: boolean,
   wholeSelected: boolean,

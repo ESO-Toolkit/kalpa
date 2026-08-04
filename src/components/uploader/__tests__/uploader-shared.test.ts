@@ -12,10 +12,8 @@ import {
   esotkReportUrlForOpen,
   KALPA_BUILD_EVIDENCE_DEFLATE_PARAM,
   KALPA_BUILD_EVIDENCE_PARAM,
-  liveExitConfirmCopy,
   parseReportCode,
   primaryReportUrl,
-  shouldConfirmLiveExit,
 } from "../uploader-shared";
 
 const globalWithStreams = globalThis as typeof globalThis & {
@@ -226,29 +224,6 @@ describe("parseReportCode", () => {
   });
 });
 
-describe("shouldConfirmLiveExit", () => {
-  it("confirms only while a live session is active", () => {
-    expect(shouldConfirmLiveExit(true)).toBe(true);
-    expect(shouldConfirmLiveExit(false)).toBe(false);
-  });
-});
-
-describe("liveExitConfirmCopy", () => {
-  it("uses stop-tracking copy on the handoff path (uploader keeps streaming)", () => {
-    const copy = liveExitConfirmCopy(true);
-    expect(copy.title).toBe("Stop tracking in Kalpa?");
-    expect(copy.confirmLabel).toBe("Stop tracking");
-    expect(copy.description).toContain("keeps streaming");
-  });
-
-  it("warns the report closes on the native path", () => {
-    const copy = liveExitConfirmCopy(false);
-    expect(copy.title).toContain("close the report on ESO Logs");
-    expect(copy.confirmLabel).toBe("Stop upload");
-    expect(copy.description).toContain("closes the report on ESO Logs");
-  });
-});
-
 describe("attachRaceSafe", () => {
   it("tears the listener down when unmount races the subscription resolution", async () => {
     let resolveSub: (fn: () => void) => void = () => {};
@@ -296,7 +271,12 @@ describe("deriveNativeState", () => {
         session: true,
         tainted: false,
       })
-    ).toEqual({ nativeOptIn: true, hasNativeSession: true, liveUseOfficial: false });
+    ).toEqual({
+      nativeOptIn: true,
+      hasNativeSession: true,
+      liveUseOfficial: false,
+      readFailed: false,
+    });
   });
 
   it("fails closed on a failed store read (opted out; official for live)", () => {
@@ -307,7 +287,12 @@ describe("deriveNativeState", () => {
         session: true,
         tainted: false,
       })
-    ).toEqual({ nativeOptIn: false, hasNativeSession: true, liveUseOfficial: true });
+    ).toEqual({
+      nativeOptIn: false,
+      hasNativeSession: true,
+      liveUseOfficial: true,
+      readFailed: true,
+    });
   });
 
   it("fails closed on a tainted store", () => {
@@ -318,7 +303,12 @@ describe("deriveNativeState", () => {
         session: false,
         tainted: true,
       })
-    ).toEqual({ nativeOptIn: false, hasNativeSession: false, liveUseOfficial: true });
+    ).toEqual({
+      nativeOptIn: false,
+      hasNativeSession: false,
+      liveUseOfficial: true,
+      readFailed: true,
+    });
   });
 
   it("reports no session but still applies the opt-outs when the session check failed", () => {
@@ -332,6 +322,11 @@ describe("deriveNativeState", () => {
         session: false,
         tainted: false,
       })
-    ).toEqual({ nativeOptIn: false, hasNativeSession: false, liveUseOfficial: false });
+    ).toEqual({
+      nativeOptIn: false,
+      hasNativeSession: false,
+      liveUseOfficial: false,
+      readFailed: false,
+    });
   });
 });

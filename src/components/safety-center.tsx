@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsIndicator, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { formatBytes } from "@/lib/utils";
 import type { SnapshotManifest, IntegrityResult, OpLogEntry } from "@/types";
 
@@ -103,8 +104,14 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
 function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh: () => void }) {
   const [snapshots, setSnapshots] = useState<SnapshotManifest[]>([]);
   const [restoring, setRestoring] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+
+  // A restore rewrites SavedVariables (and possibly the whole AddOns tree), so
+  // no snapshot may be deleted underneath it — and vice versa.
+  const anyOpInFlight = restoring !== null || deleting !== null;
 
   const loadSnapshots = async () => {
     try {
@@ -131,13 +138,25 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
   }, [addonsPath]);
 
   const handleRestore = async (id: string) => {
+    if (anyOpInFlight) return;
     setRestoring(id);
     try {
+      // Same gate as every other write to the ESO tree. It matters most here:
+      // ESO holds SavedVariables in memory and rewrites them at logout, so a
+      // restore applied while the game runs is silently undone afterwards.
+      if (!(await ensureEsoNotBlocking())) return;
       const count = await invokeOrThrow<number>("restore_snapshot", {
         addonsPath,
         snapshotId: id,
       });
-      toast.success(`Restored ${count} files from snapshot`);
+      toast.success(
+        `Restored ${count} files from snapshot. Your previous state was saved as a ` +
+          `"Pre-restore" snapshot in this list — restore it to undo.`,
+        { duration: 7000 }
+      );
+      // The Pre-restore snapshot restore_snapshot just created only appears
+      // once the list is re-read.
+      await loadSnapshots();
       onRefresh();
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
@@ -148,13 +167,16 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
   };
 
   const handleDelete = async (id: string) => {
+    if (anyOpInFlight) return;
+    setDeleting(id);
     try {
       await invokeOrThrow("delete_snapshot", { addonsPath, snapshotId: id });
       toast.success("Snapshot deleted");
-      loadSnapshots();
+      await loadSnapshots();
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
     } finally {
+      setDeleting(null);
       setConfirmDelete(null);
     }
   };
@@ -163,7 +185,8 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
     <div className="space-y-3 mt-2">
       <p className="text-xs text-muted-foreground">
         Snapshots are created automatically before migrations and bulk operations. You can restore
-        to any snapshot to undo changes.
+        to any snapshot to undo changes. Close ESO before restoring — the game rewrites addon
+        settings when it exits, which would undo the restore.
       </p>
 
       <div className="max-h-[300px] overflow-y-auto space-y-2">
@@ -201,7 +224,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                             size="sm"
                             variant="destructive"
                             onClick={() => handleRestore(s.id)}
-                            disabled={restoring !== null}
+                            disabled={anyOpInFlight}
                           >
                             {restoring === s.id ? "Restoring..." : "Yes"}
                           </Button>
@@ -209,6 +232,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                             size="sm"
                             variant="outline"
                             onClick={() => setConfirmRestore(null)}
+                            disabled={anyOpInFlight}
                           >
                             No
                           </Button>
@@ -224,7 +248,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                           <Button
                             size="sm"
                             onClick={() => setConfirmRestore(s.id)}
-                            disabled={restoring !== null}
+                            disabled={anyOpInFlight}
                           >
                             Restore
                           </Button>
@@ -245,13 +269,15 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                             size="sm"
                             variant="destructive"
                             onClick={() => handleDelete(s.id)}
+                            disabled={anyOpInFlight}
                           >
-                            Delete
+                            {deleting === s.id ? "Deleting..." : "Delete"}
                           </Button>
                           <Button
                             size="sm"
                             variant="outline"
                             onClick={() => setConfirmDelete(null)}
+                            disabled={anyOpInFlight}
                           >
                             Keep
                           </Button>
@@ -268,6 +294,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                             size="sm"
                             variant="destructive"
                             onClick={() => setConfirmDelete(s.id)}
+                            disabled={anyOpInFlight}
                           >
                             Delete
                           </Button>

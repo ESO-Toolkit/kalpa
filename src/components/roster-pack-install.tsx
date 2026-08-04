@@ -28,7 +28,6 @@ import {
   PackageIcon,
   XIcon,
   RefreshCwIcon,
-  StopCircleIcon,
 } from "lucide-react";
 import type { RosterPack, PackAddonEntry, AddonManifest } from "../types";
 
@@ -68,8 +67,19 @@ export function RosterPackInstall({
     total: number;
   } | null>(null);
 
-  const cancelledRef = useRef(false);
+  // Set when this dialog's per-addon state stops describing anything the user
+  // can see (the pack was swapped, or the dialog unmounted). It never stops the
+  // backend batch — `batch_install_pack_addons` has no cancellation — so only
+  // the row-status updates are skipped, never the completion side effects.
+  const staleRef = useRef(false);
   const fetchSeqRef = useRef(0);
+
+  // Mirror `installing` into a ref so the reset effect below can consult it
+  // WITHOUT re-running when the batch ends: rebuilding there would overwrite the
+  // reconciled per-addon statuses with the parent's not-yet-rescanned set.
+  const installingRef = useRef(false);
+  // eslint-disable-next-line react-hooks/refs
+  installingRef.current = installing;
 
   const installedEsouiIds = useMemo(
     () => new Set(installedAddons.filter((a) => a.esouiId).map((a) => a.esouiId!)),
@@ -79,7 +89,7 @@ export function RosterPackInstall({
   // Fetch pack data — depends only on packId, does NOT initialize addonStates
   const fetchPack = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
-    cancelledRef.current = true; // abort any in-flight install loop
+    staleRef.current = true; // rows from the previous pack no longer apply
     setLoading(true);
     setError(null);
     setInstalling(false);
@@ -107,8 +117,7 @@ export function RosterPackInstall({
   // Recompute addonStates when pack loads or installedEsouiIds changes,
   // but only when not mid-install (install loop manages its own status)
   useEffect(() => {
-    if (!pack || installing) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!pack || installingRef.current) return;
     setAddonStates(
       pack.addons.map((addon) => ({
         addon,
@@ -116,7 +125,7 @@ export function RosterPackInstall({
         selected: addon.required || !installedEsouiIds.has(addon.esouiId),
       }))
     );
-  }, [pack, installedEsouiIds, installing]);
+  }, [pack, installedEsouiIds]);
 
   const toggleAddon = useCallback(
     (esouiId: number) => {
@@ -146,7 +155,7 @@ export function RosterPackInstall({
     }
 
     // Claim busy before the async ESO check so a double-click can't start two loops.
-    cancelledRef.current = false;
+    staleRef.current = false;
     setInstalling(true);
     if (!(await ensureEsoNotBlocking())) {
       setInstalling(false);
@@ -173,36 +182,39 @@ export function RosterPackInstall({
       }
     );
 
-    if (cancelledRef.current) return;
-
     const completed = result?.installed.length ?? 0;
     const failed = result?.failed.length ?? addonsToInstall.length;
 
-    // If the command failed wholesale, mark any still-pending rows as failed.
-    if (!result) {
-      const targetIds = new Set(addonsToInstall.map((item) => item.addon.esouiId));
-      setAddonStates((prev) =>
-        prev.map((s) =>
-          targetIds.has(s.addon.esouiId) && s.status !== "installed"
-            ? { ...s, status: "failed" }
-            : s
-        )
-      );
-    } else {
-      // Reconcile pills against the authoritative result rather than trusting
-      // the streamed progress events alone. The backend emits "completed" per
-      // addon BEFORE the single kalpa.json save; if that save fails it moves
-      // every installed id into `failed`, so a row can be green here yet absent
-      // from result.installed. Demote those rows so the pills match the toast.
-      const failedIds = new Set(result.failed);
-      const installedIds = new Set(result.installed);
-      setAddonStates((prev) =>
-        prev.map((s) => {
-          if (failedIds.has(s.addon.esouiId)) return { ...s, status: "failed" };
-          if (installedIds.has(s.addon.esouiId)) return { ...s, status: "installed" };
-          return s;
-        })
-      );
+    // Only the row pills are skipped when this dialog's state went stale — the
+    // rescan, toasts and dependency prompts below must still run, because the
+    // batch reached disk whether or not anyone is still looking at these rows.
+    if (!staleRef.current) {
+      // If the command failed wholesale, mark any still-pending rows as failed.
+      if (!result) {
+        const targetIds = new Set(addonsToInstall.map((item) => item.addon.esouiId));
+        setAddonStates((prev) =>
+          prev.map((s) =>
+            targetIds.has(s.addon.esouiId) && s.status !== "installed"
+              ? { ...s, status: "failed" }
+              : s
+          )
+        );
+      } else {
+        // Reconcile pills against the authoritative result rather than trusting
+        // the streamed progress events alone. The backend emits "completed" per
+        // addon BEFORE the single kalpa.json save; if that save fails it moves
+        // every installed id into `failed`, so a row can be green here yet absent
+        // from result.installed. Demote those rows so the pills match the toast.
+        const failedIds = new Set(result.failed);
+        const installedIds = new Set(result.installed);
+        setAddonStates((prev) =>
+          prev.map((s) => {
+            if (failedIds.has(s.addon.esouiId)) return { ...s, status: "failed" };
+            if (installedIds.has(s.addon.esouiId)) return { ...s, status: "installed" };
+            return s;
+          })
+        );
+      }
     }
 
     setInstalling(false);
@@ -233,20 +245,9 @@ export function RosterPackInstall({
     resolvePendingDeps,
   ]);
 
-  const handleCancel = useCallback(() => {
-    if (installing) {
-      cancelledRef.current = true;
-      setInstalling(false);
-      setInstallProgress(null);
-      toast.info("Install cancelled.");
-    } else {
-      onClose();
-    }
-  }, [installing, onClose]);
-
   useEffect(() => {
     return () => {
-      cancelledRef.current = true;
+      staleRef.current = true;
     };
   }, []);
 
@@ -369,6 +370,9 @@ export function RosterPackInstall({
                         </span>
                       )}
                     </p>
+                    <p className="mt-0.5 text-center text-xs text-muted-foreground">
+                      Once started, a pack install runs to completion — it can&apos;t be stopped.
+                    </p>
                   </div>
                 </Fade>
               )}
@@ -377,17 +381,11 @@ export function RosterPackInstall({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={handleCancel}>
-            {installing ? (
-              <>
-                <StopCircleIcon className="mr-1.5 h-4 w-4" />
-                Stop
-              </>
-            ) : allInstalled ? (
-              "Done"
-            ) : (
-              "Cancel"
-            )}
+          {/* No Stop affordance: `batch_install_pack_addons` takes no cancel
+              token, so a "Stop" button could only lie — the downloads and
+              extractions run to completion regardless. */}
+          <Button variant="outline" onClick={onClose} disabled={installing}>
+            {allInstalled ? "Done" : "Cancel"}
           </Button>
           {pack && !allInstalled && (
             <Button

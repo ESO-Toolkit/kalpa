@@ -38,8 +38,12 @@ export function evaluateContrast(c: ThemeColors): ContrastCheck[] {
     check("fg-bg", "Text on background", c.foreground, c.background, 4.5, 7),
     check("muted-surface", "Muted text on panels", c.mutedForeground, c.surface, 4.5, 7),
     // `primary` is rendered as real text (text-primary) across the app, so it
-    // needs the 4.5:1 text floor against the darkest surface it sits on (bg).
+    // needs the 4.5:1 text floor against BOTH backdrops it sits on. `surface`
+    // is not redundant with `background`: on a dark theme it is the lighter of
+    // the two, so it is the worse case for light-on-dark primary text — and it
+    // is what GlassPanel, dialogs and addon rows actually paint behind it.
     check("primary-text", "Primary as text", c.primary, c.background, 4.5, 7),
+    check("primary-surface", "Primary as text on panels", c.primary, c.surface, 4.5, 7),
     check("accent-surface", "Accent on panels", c.accent, c.surface, 3, 4.5),
     check("pfg-primary", "Label on primary button", c.primaryForeground, c.primary, 4.5, 7),
   ];
