@@ -2,8 +2,10 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import {
   chromium,
+  expect,
   type Browser,
   type ConsoleMessage,
+  type Locator,
   type Page,
   type Request,
 } from "@playwright/test";
@@ -130,6 +132,64 @@ export async function importBuiltChunk(
     const imported = await import(/* @vite-ignore */ chunkUrl);
     return { exportNames: Object.keys(imported).sort() };
   }, url);
+}
+
+const ADDON_LIST = '[role="listbox"][aria-roledescription="addon list"]';
+
+/** The installed-addon list container. */
+export function addonList(page: Page): Locator {
+  return page.locator(ADDON_LIST);
+}
+
+/**
+ * How many rows the installed-addon list is currently showing.
+ *
+ * Read from the list's own aria-label because that reflects the FILTERED list.
+ * The "All(N)" filter tab counts the unfiltered set (addon-list.tsx builds
+ * filterCounts from `allAddons`), so it does not move when a search narrows the
+ * rows and cannot be used to prove filtering happened.
+ *
+ * Throws when the list is absent or its label carries no count, so a caller can
+ * never silently read a fabricated zero.
+ */
+export async function readAddonListCount(page: Page): Promise<number> {
+  const label = await addonList(page).getAttribute("aria-label", { timeout: 10_000 });
+  const match = /Installed addons, (\d+) items/.exec(label ?? "");
+  if (!match) {
+    throw new Error(
+      `Addon list carried no row count (aria-label: ${label ?? "missing"}). ` +
+        "The list markup changed or the app is not on the installed view."
+    );
+  }
+  return Number(match[1]);
+}
+
+/** Wait for the list to settle on `expected` rows — search filtering is deferred. */
+export async function expectAddonListCount(
+  page: Page,
+  expected: number,
+  message: string
+): Promise<void> {
+  await expect(addonList(page), message).toHaveAttribute(
+    "aria-label",
+    `Installed addons, ${expected} items`,
+    { timeout: 5_000 }
+  );
+}
+
+/** A filter tab in the installed-addon list, e.g. "All", "Libs", "Outdated". */
+export function addonFilterTab(page: Page, label: string): Locator {
+  return page.locator(`[role="tab"][aria-label="Filter by ${label}"]`);
+}
+
+/** The count a filter tab advertises in its own text, e.g. "Libs(49)" -> 49. */
+export async function readFilterTabCount(page: Page, label: string): Promise<number> {
+  const text = await addonFilterTab(page, label).textContent({ timeout: 5_000 });
+  const match = /\((\d+)\)\s*$/.exec(text ?? "");
+  if (!match) {
+    throw new Error(`Filter tab "${label}" carried no count (text: ${text ?? "missing"}).`);
+  }
+  return Number(match[1]);
 }
 
 /**

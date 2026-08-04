@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test";
 import { connectToTauri, resetAppState } from "./helpers";
 
+/** Tab labels the settings dialog renders, in order (settings.tsx `tabs`). */
+const SETTINGS_TABS = ["General", "Appearance", "Tools", "Data"];
+
 test.describe.serial("Settings Dialog", () => {
   test("settings button opens dialog with tabs", async () => {
     const { browser, page } = await connectToTauri();
@@ -8,102 +11,45 @@ test.describe.serial("Settings Dialog", () => {
     try {
       await resetAppState(page);
 
-      // Find the settings button (gear icon in the header)
-      const settingsBtn = page
-        .locator('button[aria-label*="etting"], header button:has(svg)')
-        .filter({ hasText: /^$/ });
+      // The header's gear button carries aria-label="Settings" (app-header.tsx).
+      // If that name ever changes this must fail rather than skip the test body.
+      const settingsBtn = page.locator('header button[aria-label="Settings"]');
+      await expect(
+        settingsBtn,
+        'header Settings button not found (expected aria-label="Settings")'
+      ).toBeVisible({ timeout: 5_000 });
+      await settingsBtn.click();
 
-      // Try finding it by looking for the settings icon button in the header area
-      const headerButtons = page.locator("header button");
-      const buttonCount = await headerButtons.count();
+      const dialog = page.locator('[role="dialog"]').first();
+      await expect(dialog, "settings dialog did not open").toBeVisible({ timeout: 5_000 });
 
-      let settingsClicked = false;
-      for (let i = 0; i < buttonCount; i++) {
-        const btn = headerButtons.nth(i);
-        const ariaLabel = await btn.getAttribute("aria-label").catch(() => null);
-        const text = await btn.textContent().catch(() => "");
-
-        if (
-          ariaLabel?.toLowerCase().includes("setting") ||
-          text?.toLowerCase().includes("setting")
-        ) {
-          await btn.click();
-          settingsClicked = true;
-          break;
-        }
+      for (const label of SETTINGS_TABS) {
+        await expect(
+          dialog.getByRole("button", { name: label, exact: true }),
+          `settings dialog is missing the "${label}" tab`
+        ).toBeVisible({ timeout: 3_000 });
       }
 
-      // Fallback: try clicking by exact text or by looking for settings icon buttons
-      if (!settingsClicked) {
-        // Look in the right side of the header for icon-only buttons
-        const iconButtons = page.locator('header a, header button, [role="button"]');
-        const count = await iconButtons.count();
-        // Settings is typically one of the last buttons in the header
-        for (let i = count - 1; i >= Math.max(0, count - 6); i--) {
-          const btn = iconButtons.nth(i);
-          const text = await btn.textContent().catch(() => "");
-          if (!text?.trim()) {
-            // Icon-only button — could be settings
-            await btn.click();
-            await page.waitForTimeout(500);
+      // The General tab must show the configured AddOns folder.
+      await expect(
+        dialog.locator("#addons-path"),
+        "settings did not show the configured AddOns folder"
+      ).toHaveValue(/AddOns/i);
 
-            // Check if settings dialog opened
-            const dialog = page.locator('[role="dialog"]').first();
-            const isSettings = await dialog.isVisible().catch(() => false);
-            if (isSettings) {
-              const hasGeneral = await page
-                .locator('text="General"')
-                .first()
-                .isVisible()
-                .catch(() => false);
-              if (hasGeneral) {
-                settingsClicked = true;
-                break;
-              }
-            }
-            // Not settings, close and try next
-            await page.keyboard.press("Escape");
-            await page.waitForTimeout(300);
-          }
-        }
-      }
+      await page.screenshot({ path: "e2e/screenshots/settings-dialog.png" });
 
-      if (settingsClicked) {
-        await page.waitForTimeout(500);
+      await dialog.getByRole("button", { name: "Tools", exact: true }).click();
+      await page.waitForTimeout(500);
+      await page.screenshot({ path: "e2e/screenshots/settings-tools-tab.png" });
 
-        // Verify the settings dialog has the three tabs
-        const generalTab = page.locator('text="General"').first();
-        const toolsTab = page.locator('text="Tools"').first();
-        const dataTab = page.locator('text="Data"').first();
+      await dialog.getByRole("button", { name: "Data", exact: true }).click();
+      await page.waitForTimeout(500);
+      await page.screenshot({ path: "e2e/screenshots/settings-data-tab.png" });
 
-        await expect(generalTab).toBeVisible({ timeout: 3_000 });
-        await expect(toolsTab).toBeVisible({ timeout: 3_000 });
-        await expect(dataTab).toBeVisible({ timeout: 3_000 });
-
-        // Verify the addons path field is visible
-        const pathField = page.locator('text=/AddOns/i').first();
-        await expect(pathField).toBeVisible();
-
-        await page.screenshot({ path: "e2e/screenshots/settings-dialog.png" });
-
-        // Click the Tools tab
-        await toolsTab.click();
-        await page.waitForTimeout(500);
-        await page.screenshot({ path: "e2e/screenshots/settings-tools-tab.png" });
-
-        // Click the Data tab
-        await dataTab.click();
-        await page.waitForTimeout(500);
-        await page.screenshot({ path: "e2e/screenshots/settings-data-tab.png" });
-
-        // Close the dialog
-        await page.keyboard.press("Escape");
-        await page.waitForTimeout(500);
-
-        // Verify dialog is closed
-        const dialogGone = page.locator('[role="dialog"]');
-        await expect(dialogGone).not.toBeVisible({ timeout: 3_000 });
-      }
+      await page.keyboard.press("Escape");
+      await expect(dialog, "Escape did not close the settings dialog").not.toBeVisible({
+        timeout: 3_000,
+      });
     } finally {
       await browser.close();
     }

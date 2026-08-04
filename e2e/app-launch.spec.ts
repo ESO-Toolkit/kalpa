@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { connectToTauri, resetAppState } from "./helpers";
+import { addonFilterTab, connectToTauri, readFilterTabCount, resetAppState } from "./helpers";
 
 test.describe.serial("App Launch", () => {
   test("app loads and renders the header", async () => {
@@ -49,11 +49,26 @@ test.describe.serial("App Launch", () => {
     try {
       await resetAppState(page);
 
-      const updateAllBtn = page.locator('button:has-text("Update All")').first();
-      const hasUpdates = await updateAllBtn.isVisible({ timeout: 5_000 }).catch(() => false);
+      // The "Outdated" filter tab is rendered only when at least one installed
+      // addon has an update, so it is a second, independent read of the fact the
+      // banner reports. Both surfaces must agree — the app must have finished its
+      // on-open update check, which the suite's start-up prerequisite guarantees.
+      const outdatedTab = addonFilterTab(page, "Outdated");
+      const outdatedCount =
+        (await outdatedTab.count()) > 0 ? await readFilterTabCount(page, "Outdated") : 0;
 
-      if (hasUpdates) {
-        await expect(updateAllBtn).toBeVisible();
+      const updateAllBtn = page.getByRole("button", { name: "Update All", exact: true });
+
+      if (outdatedCount > 0) {
+        await expect(
+          updateAllBtn,
+          `${outdatedCount} addon(s) are outdated but the update banner is missing`
+        ).toBeVisible({ timeout: 5_000 });
+      } else {
+        await expect(
+          updateAllBtn,
+          "the update banner is showing but no addon is outdated"
+        ).toHaveCount(0);
       }
 
       await page.screenshot({ path: "e2e/screenshots/update-banner.png" });
