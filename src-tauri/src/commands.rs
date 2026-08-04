@@ -9505,6 +9505,84 @@ pub async fn dev_scrub_saved_variable(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// The sandbox AddOns folder named by `KALPA_ADDONS_DIR`, if one is set.
+///
+/// The e2e suite otherwise drives the developer's REAL ESO install, which is why
+/// no spec has ever touched install, update, remove, restore, migrate or
+/// profile-apply: a destructive assertion would mutate the machine running it.
+/// Pointing the app at a throwaway folder makes those flows testable.
+///
+/// Compiled out of release builds entirely — the same treatment
+/// `KALPA_FORCE_WEBVIEW` and the CDP debug port get. A shipped binary must have
+/// no way for a stray environment variable to aim a real user away from their
+/// real AddOns folder.
+///
+/// The folder is created if absent (an empty sandbox is the point, and a missing
+/// one would drop the app into the setup wizard instead) and returned in
+/// canonical drive-letter form so it compares equal to what `set_addons_path`
+/// stores. Note `validate_addons_path` requires the leaf to be named `AddOns`.
+#[tauri::command]
+pub fn debug_addons_dir_override() -> Result<Option<String>, String> {
+    #[cfg(not(debug_assertions))]
+    {
+        Ok(None)
+    }
+    #[cfg(debug_assertions)]
+    {
+        let Some(raw) = std::env::var_os("KALPA_ADDONS_DIR") else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(raw);
+        if path.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        fs::create_dir_all(&path)
+            .map_err(|e| format!("Could not create the sandbox AddOns folder: {e}"))?;
+        let canonical = dunce::canonicalize(&path)
+            .map_err(|e| format!("Could not resolve the sandbox AddOns folder: {e}"))?;
+        Ok(Some(canonical.to_string_lossy().into_owned()))
+    }
+}
+
+/// Debug-only: install an addon into the sandbox from a LOCAL zip.
+///
+/// The production install path downloads from ESOUI. An e2e spec must not depend
+/// on the network or on whatever a third party happens to be shipping today, so
+/// this runs the same extractor against a fixture zip already on disk — the
+/// spec still exercises the real extraction, flat-archive wrap and rollback
+/// paths rather than a stub.
+///
+/// Refuses unless the sandbox override is active AND the target is that sandbox,
+/// so even in a debug build it cannot be pointed at a real AddOns folder.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_install_fixture_zip(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    zip_path: String,
+) -> Result<Vec<String>, String> {
+    let Some(sandbox) = debug_addons_dir_override()? else {
+        return Err("Fixture installs require KALPA_ADDONS_DIR to be set.".to_string());
+    };
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let resolved = dunce::canonicalize(&addons_dir)
+        .map_err(|e| format!("Could not resolve the AddOns folder: {e}"))?;
+    if resolved != Path::new(&sandbox) {
+        return Err(
+            "Fixture installs are only allowed into the sandbox AddOns folder.".to_string(),
+        );
+    }
+
+    let zip = PathBuf::from(zip_path);
+    if !zip.is_file() {
+        return Err(format!("Fixture zip not found: {}", zip.display()));
+    }
+
+    tokio::task::spawn_blocking(move || installer::extract_addon_zip(&zip, &resolved))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
 #[tauri::command]
 pub fn update_tray_tooltip(
     tray_state: tauri::State<'_, crate::TrayState>,

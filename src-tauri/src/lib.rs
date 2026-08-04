@@ -896,6 +896,9 @@ pub fn run() {
             commands::native_boot_failure_pending,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
+            commands::debug_addons_dir_override,
+            #[cfg(debug_assertions)]
+            commands::debug_install_fixture_zip,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

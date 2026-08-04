@@ -145,9 +145,28 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed s
   - This runs TypeScript, ESLint, and Prettier.
 - Fix all reported issues before considering the work complete.
 
+**End-to-end**
+
+E2E drives the real Tauri webview over CDP, so it is Windows-only (the debug port
+comes from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, which WebKitGTK/WKWebView do
+not have). There are two flavours, and the difference matters:
+
+- `npm run test:e2e` — attaches to whatever `npm run tauri dev` is already
+  running, which is your REAL ESO install. Read-only specs only. Never add a spec
+  here that installs, updates, removes, restores, migrates or applies a profile.
+- `npm run test:e2e:sandbox` — builds the debug binary, launches it with
+  `KALPA_ADDONS_DIR` pointed at a throwaway `AddOns` folder, and runs the
+  `@sandbox` specs against it. This is where destructive coverage belongs. The
+  override is `debug_addons_dir_override` in `commands.rs`, compiled out of
+  release builds so no shipped binary can be aimed away from a user's real
+  folder. Pass `--no-build` when iterating on the specs themselves.
+
 **CI**
 
 - GitHub Actions enforces Rust and frontend checks on every PR.
+- The `e2e-sandbox` job runs the destructive specs on Windows after `check`
+  passes. `test:packaged` stays local-only — it needs a real WebView2 desktop
+  session and the signing-free debug bundle.
 - Treat CI failures as blockers; update code until CI is green.
 
 ---

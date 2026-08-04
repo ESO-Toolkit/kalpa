@@ -603,13 +603,23 @@ function App() {
 
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
-    const [savedSort, savedFilter, savedPath, autoUpdate, introDismissed] = await Promise.all([
-      getSetting<string>("sortMode", "name"),
-      getSetting<string>("filterMode", "all"),
-      getSetting<string>("addonsPath", ""),
-      getSetting<boolean>("autoUpdate", false),
-      getSetting<boolean>("uploaderIntroDismissed", false),
-    ]);
+    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed, sandbox] =
+      await Promise.all([
+        getSetting<string>("sortMode", "name"),
+        getSetting<string>("filterMode", "all"),
+        getSetting<string>("addonsPath", ""),
+        getSetting<boolean>("autoUpdate", false),
+        getSetting<boolean>("uploaderIntroDismissed", false),
+        invokeResult<string | null>("debug_addons_dir_override"),
+      ]);
+
+    // A debug build started with KALPA_ADDONS_DIR runs against a throwaway
+    // AddOns folder instead of the real ESO install, which is what lets the e2e
+    // suite exercise install/remove/restore at all. Never persisted: the sandbox
+    // must not survive into the developer's saved settings. Always Ok(null) in
+    // release builds, where the command is compiled to return nothing.
+    const sandboxPath = sandbox.ok ? (sandbox.data ?? "") : "";
+    const savedPath = sandboxPath || storedPath;
 
     const normalizedSort = isSortMode(savedSort) ? savedSort : "name";
     const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";
