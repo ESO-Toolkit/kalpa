@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
@@ -18,6 +18,15 @@ export function useAppUpdate() {
   const [state, setState] = useState<AppUpdateState>({ status: "idle" });
   // deb/rpm installs can't self-update; they get pointed at the release page.
   const [selfUpdatable, setSelfUpdatable] = useState(true);
+  // Synchronous mirror of the current status. `checkForAppUpdate` must keep a
+  // stable identity (App holds it in a ref for the deep-link handler), so it
+  // cannot read `state` — and a render-lagging mirror would leave the guard
+  // below open for the first moments of a download.
+  const statusRef = useRef<AppUpdateState["status"]>("idle");
+  const applyState = useCallback((next: AppUpdateState) => {
+    statusRef.current = next.status;
+    setState(next);
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -30,20 +39,38 @@ export function useAppUpdate() {
     })();
   }, []);
 
-  const checkForAppUpdate = useCallback(async (silent = true) => {
-    try {
-      const update = await check();
-      if (update) {
-        setState({ status: "available", update });
-      } else if (!silent) {
-        toast.info("You're on the latest version.");
+  const checkForAppUpdate = useCallback(
+    async (silent = true) => {
+      // A download in flight, or an installer already staged, owns the state
+      // machine. Overwriting it with a fresh "available" would offer a second
+      // concurrent downloadAndInstall on a different Update object, or drop the
+      // Restart affordance for an update that is already installed.
+      if (statusRef.current === "downloading" || statusRef.current === "ready") {
+        if (!silent) {
+          toast.info(
+            statusRef.current === "downloading"
+              ? "An update is already downloading."
+              : "An update is ready — restart to apply it."
+          );
+        }
+        return;
       }
-    } catch (e) {
-      if (!silent) {
-        toast.error(`Update check failed: ${e}`);
+
+      try {
+        const update = await check();
+        if (update) {
+          applyState({ status: "available", update });
+        } else if (!silent) {
+          toast.info("You're on the latest version.");
+        }
+      } catch (e) {
+        if (!silent) {
+          toast.error(`Update check failed: ${e}`);
+        }
       }
-    }
-  }, []);
+    },
+    [applyState]
+  );
 
   const downloadAndInstall = useCallback(async () => {
     if (state.status !== "available") return;
@@ -61,7 +88,7 @@ export function useAppUpdate() {
       return;
     }
 
-    setState({ status: "downloading", progress: 0 });
+    applyState({ status: "downloading", progress: 0 });
 
     try {
       let downloaded = 0;
@@ -75,7 +102,7 @@ export function useAppUpdate() {
           case "Progress":
             downloaded += event.data.chunkLength;
             if (contentLength > 0) {
-              setState({
+              applyState({
                 status: "downloading",
                 progress: Math.round((downloaded / contentLength) * 100),
               });
@@ -86,7 +113,7 @@ export function useAppUpdate() {
         }
       });
 
-      setState({ status: "ready" });
+      applyState({ status: "ready" });
       toast.success("Update installed. Restart to apply.", {
         action: {
           label: "Restart Now",
@@ -95,10 +122,10 @@ export function useAppUpdate() {
         duration: Infinity,
       });
     } catch (e) {
-      setState({ status: "available", update });
+      applyState({ status: "available", update });
       toast.error(`Update failed: ${e}`);
     }
-  }, [state, selfUpdatable]);
+  }, [state, selfUpdatable, applyState]);
 
   const restartApp = useCallback(async () => {
     await relaunch();

@@ -54,7 +54,10 @@ interface AddonDetailProps {
   addon: AddonManifest | null;
   installedAddons: AddonManifest[];
   addonsPath: string;
-  onRemove: () => void;
+  /** Rescan the addon list WITHOUT touching the selection. Dependency
+   * install/remove changes other addons, so this pane must stay on screen —
+   * App's scan deliberately re-resolves the selected addon across a rescan. */
+  onRefresh: () => void;
   onRemoveAddon: (folderName: string) => void;
   onToggleDisable: (folderName: string, currentlyDisabled: boolean) => void;
   updateResult: UpdateCheckResult | null;
@@ -69,7 +72,7 @@ function AddonDetailBase({
   addon,
   installedAddons,
   addonsPath,
-  onRemove,
+  onRefresh,
   onRemoveAddon,
   onToggleDisable,
   updateResult,
@@ -390,7 +393,7 @@ function AddonDetailBase({
         toast.success(`Installed ${depName}`);
       }
       setJustInstalledDeps((prev) => new Set(prev).add(depName));
-      onRemove(); // refresh addon list
+      onRefresh(); // refresh addon list, keeping this addon selected
     } catch (e) {
       toast.error(`Failed to install ${depName}: ${getTauriErrorMessage(e)}`);
     } finally {
@@ -406,7 +409,7 @@ function AddonDetailBase({
         folderName: depName,
       });
       toast.success(`Removed ${depName}`);
-      onRemove(); // refresh addon list
+      onRefresh(); // refresh addon list, keeping this addon selected
     } catch (e) {
       toast.error(`Failed to remove ${depName}: ${getTauriErrorMessage(e)}`);
     } finally {

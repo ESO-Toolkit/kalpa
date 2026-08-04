@@ -590,6 +590,7 @@ function PopularContent({
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const pageRef = useRef(0);
+  const loadSeqRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -601,19 +602,24 @@ function PopularContent({
   });
 
   const loadPage = useCallback(async (p: number, sort: PopularSort, append: boolean) => {
+    // A sort switch (or a loadMore overtaken by one) must not have its late
+    // response applied over the newer list — same seq guard the search tab uses.
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     try {
       const page = await invokeOrThrow<BrowsePopularPage>("browse_esoui_popular", {
         page: p,
         sortBy: sort,
       });
+      if (seq !== loadSeqRef.current) return;
       setResults((prev) => (append ? [...prev, ...page.results] : page.results));
       setHasMore(page.hasMore);
       pageRef.current = p;
     } catch (e) {
+      if (seq !== loadSeqRef.current) return;
       toast.error(getTauriErrorMessage(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }, []);
 
@@ -722,6 +728,7 @@ function CategoryContent({
   const [hasMore, setHasMore] = useState(false);
   const [filterText, setFilterText] = useState("");
   const pageRef = useRef(0);
+  const loadSeqRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -735,6 +742,11 @@ function CategoryContent({
   }, []);
 
   const loadPage = useCallback(async (catId: number, p: number, sort: string, append: boolean) => {
+    // A category/sort switch (or a loadMore overtaken by one) must not have its
+    // late response applied over the newer list, and must not leave pageRef
+    // pointing at the previous category's page — same seq guard the search tab
+    // uses.
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     try {
       const r = await invokeOrThrow<EsouiSearchResult[]>("browse_esoui_category", {
@@ -742,13 +754,15 @@ function CategoryContent({
         page: p,
         sortBy: sort,
       });
+      if (seq !== loadSeqRef.current) return;
       setResults((prev) => (append ? [...prev, ...r] : r));
       setHasMore(r.length >= PAGE_SIZE);
       pageRef.current = p;
     } catch (e) {
+      if (seq !== loadSeqRef.current) return;
       toast.error(getTauriErrorMessage(e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   }, []);
 

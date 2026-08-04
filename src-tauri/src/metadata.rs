@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -46,8 +47,8 @@ fn metadata_path(addons_path: &Path) -> std::path::PathBuf {
 ///
 /// Recovery order when the primary file is missing or corrupted:
 /// 1. `.json.tmp` — a completed write that was never renamed into place
-///    (crash between remove and rename in `save_json_with_backup`).
-/// 2. `.json.bak` — the previous good copy made before the write started.
+///    (crash between the temp write and the rename in `save_json_with_backup`).
+/// 2. `.json.bak` — the copy of the previous primary taken during the last save.
 ///
 /// Returns `T::default()` if all sources are missing or corrupted.
 pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
@@ -102,26 +103,38 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 /// Save data as JSON with atomic write and automatic backup.
 ///
-/// Creates a `.json.bak` of the existing file before overwriting,
-/// then writes to a `.json.tmp` file and renames atomically.
+/// Writes and fsyncs `.json.tmp`, copies the current primary to `.json.bak`, then
+/// renames the temp over the primary. The ordering matters: copying to `.bak`
+/// first would overwrite the last good backup with a possibly-corrupt primary
+/// before the replacement was safe on disk — destroying the very copy the `.bak`
+/// recovery in [`load_json_with_backup`] exists to provide.
 pub fn save_json_with_backup<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(data).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    // Create backup of existing file before writing (ignore if file doesn't exist)
+    // Flush the replacement to stable storage before anything else is touched.
+    // Without sync_all a power loss can journal the rename (and the .bak copy)
+    // while both files' data blocks are still in page cache, leaving primary,
+    // .tmp and .bak all zero-length — the whole recovery ladder defeated and the
+    // store silently reset to T::default() on the next load.
+    let tmp = path.with_extension("json.tmp");
+    let write_tmp = || -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()
+    };
+    if let Err(e) = write_tmp() {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("Failed to write temp file: {e}"));
+    }
+
+    // Only now is the previous primary expendable (ignore if it doesn't exist).
     let bak = path.with_extension("json.bak");
     let _ = fs::copy(path, &bak);
 
-    // Write to temp file first, then atomically rename
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Failed to write temp file: {e}"))?;
-    // On Windows, fs::rename fails if the destination exists. Remove it first.
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("Failed to replace existing file: {e}")
-        })?;
-    }
+    // fs::rename replaces the destination atomically on both Unix and Windows
+    // (MoveFileExW with MOVEFILE_REPLACE_EXISTING). Removing the primary first
+    // would only add a window in which no primary exists at all.
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("Failed to finalize write: {e}")
@@ -331,6 +344,36 @@ mod tests {
 
         let loaded: MetadataStore = load_json_with_backup(&path);
         assert!(loaded.addons.is_empty());
+    }
+
+    #[test]
+    fn failed_save_preserves_the_previous_backup() {
+        // The .bak copy must not run until the replacement is safely on disk.
+        // Copying first meant a save that failed mid-write left the primary AND
+        // the last good backup unusable, silently resetting the store.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let bak = tmp.path().join("test.json.bak");
+
+        let mut good = MetadataStore::default();
+        record_install(&mut good, "Good", 1, "1.0", "url");
+        save_json_with_backup(&path, &good).unwrap();
+        // A second save establishes the .bak from the known-good primary.
+        save_json_with_backup(&path, &good).unwrap();
+        assert!(bak.exists());
+
+        // Occupying the temp path with a directory makes the write fail.
+        fs::create_dir(tmp.path().join("test.json.tmp")).unwrap();
+        let mut other = MetadataStore::default();
+        record_install(&mut other, "Other", 2, "2.0", "url");
+        assert!(save_json_with_backup(&path, &other).is_err());
+
+        let backup: MetadataStore =
+            serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
+        assert!(backup.addons.contains_key("Good"));
+        let primary: MetadataStore =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(primary.addons.contains_key("Good"));
     }
 
     #[test]

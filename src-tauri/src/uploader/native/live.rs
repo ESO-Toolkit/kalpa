@@ -46,7 +46,10 @@ use super::encode::split_csv_quoted_pub;
 use super::events::EventEmitter;
 use super::incremental::{IncrementalIndexState, IncrementalMasterState};
 use super::session::SessionProvider;
-use crate::uploader::tail_io::{read_range, MAX_CONSECUTIVE_FAILURES, MAX_READ, POLL_INTERVAL};
+use crate::uploader::tail_io::{
+    file_identity, file_was_replaced, read_range, FileIdentity, MAX_CONSECUTIVE_FAILURES, MAX_READ,
+    POLL_INTERVAL,
+};
 use crate::uploader::types::UploadOptions;
 
 /// The pure, network-free core of the live driver: owns the long-lived emitter, the
@@ -1560,6 +1563,13 @@ struct NotifyTailState {
     last_growth: std::time::Instant,
     last_poll: std::time::Instant,
     ended: bool,
+    /// The tailed file's OS identity, carried across polls so a delete+recreate is
+    /// caught even when the replacement already regrew past `consumed`.
+    identity: Option<FileIdentity>,
+    /// Set once the notify channel disconnects: no FS event can ever arrive again, so
+    /// the loop must pace itself by sleeping instead of spinning on an instantly-
+    /// returning `recv_timeout` (the poll fallback keeps the session correct).
+    notify_dead: bool,
 }
 
 impl NotifyTail {
@@ -1607,6 +1617,8 @@ impl NotifyTail {
                 last_growth: std::time::Instant::now(),
                 last_poll: std::time::Instant::now(),
                 ended: false,
+                identity: None,
+                notify_dead: false,
             }),
             idle_deadline: IDLE_DEADLINE,
             cancel,
@@ -1626,7 +1638,20 @@ impl LiveTail for NotifyTail {
         let p = std::path::Path::new(path);
         loop {
             // Wait for an FS event or the poll deadline (mirrors watcher.rs:239).
-            let _ = st.rx.recv_timeout(POLL_INTERVAL);
+            // A DISCONNECTED channel (the notify backend's worker died — typically the
+            // watched folder was deleted/renamed) returns instantly forever, so without
+            // this the `last_poll` coalescing `continue` below would hot-spin a core for
+            // the rest of the session. Degrade to pure polling instead of tearing down:
+            // the poll fallback alone keeps the tail correct, and a live raid must not
+            // lose its report because the watcher backend went away.
+            if st.notify_dead {
+                std::thread::sleep(POLL_INTERVAL);
+            } else {
+                let waited = st.rx.recv_timeout(POLL_INTERVAL);
+                if matches!(waited, Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) {
+                    st.notify_dead = true;
+                }
+            }
             // Observe a Stop the instant we wake, before any coalesce/stat/read work, so
             // a Stop against a non-growing file returns in one poll window instead of
             // parking here until the idle deadline (A1). The driver maps this to
@@ -1640,8 +1665,8 @@ impl LiveTail for NotifyTail {
             }
             st.last_poll = std::time::Instant::now();
 
-            let size = match std::fs::metadata(p) {
-                Ok(m) => m.len(),
+            let meta = match std::fs::metadata(p) {
+                Ok(m) => m,
                 Err(e) => {
                     st.consecutive_failures += 1;
                     if st.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
@@ -1650,12 +1675,21 @@ impl LiveTail for NotifyTail {
                     continue;
                 }
             };
+            let size = meta.len();
             // NOTE: do NOT reset the failure streak on a successful stat — only a
             // successful READ proves readability (the watcher.rs:290-298 discipline).
 
-            if size < st.consumed {
-                // Truncation / replacement → fresh session (watcher.rs:303-309). The
-                // driver treats the new session's BEGIN_LOG as a second-session cut.
+            // Truncation / replacement → fresh session (watcher.rs:303-309). The driver
+            // treats the new session's BEGIN_LOG as a second-session cut. A size shrink
+            // misses a delete+recreate whose replacement already regrew past `consumed`
+            // within one poll window, so a CHANGED file identity counts as truncation too
+            // — otherwise the next read resumes at a stale offset inside a different file
+            // (mid-line, past its BEGIN_LOG), which the coverage gate turns into a fatal
+            // teardown or, worse, mistimestamps the new session under the old report.
+            let current_identity = file_identity(&meta);
+            let replaced = file_was_replaced(st.identity, current_identity);
+            st.identity = current_identity.or(st.identity);
+            if replaced || size < st.consumed {
                 st.consumed = 0;
                 st.assembler.reset();
                 continue;

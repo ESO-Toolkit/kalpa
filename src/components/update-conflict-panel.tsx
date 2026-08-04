@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import type { FileConflict, FileDecision, DiffData } from "../types";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -36,6 +36,10 @@ export function UpdateConflictPanel({
   const [viewingDiff, setViewingDiff] = useState<string | null>(null);
   const [diffData, setDiffData] = useState<DiffData | null>(null);
   const [loadingDiff, setLoadingDiff] = useState(false);
+  // Guards the shared `diffData` against out-of-order responses: clicking one
+  // conflict then another before the first resolves would otherwise render file
+  // A's contents under file B's header, misinforming a keep-mine decision.
+  const diffSeqRef = useRef(0);
 
   const setDecision = useCallback((path: string, action: "keep_mine" | "take_update") => {
     setDecisions((prev) => ({ ...prev, [path]: action }));
@@ -43,11 +47,15 @@ export function UpdateConflictPanel({
 
   const handleViewDiff = async (relativePath: string) => {
     if (viewingDiff === relativePath) {
+      diffSeqRef.current++;
       setViewingDiff(null);
       setDiffData(null);
+      setLoadingDiff(false);
       return;
     }
+    const seq = ++diffSeqRef.current;
     setViewingDiff(relativePath);
+    setDiffData(null);
     setLoadingDiff(true);
     try {
       const data = await invokeOrThrow<DiffData>("get_conflict_diff", {
@@ -55,11 +63,15 @@ export function UpdateConflictPanel({
         sessionId,
         relativePath,
       });
+      if (seq !== diffSeqRef.current) return;
       setDiffData(data);
     } catch {
+      if (seq !== diffSeqRef.current) return;
       setDiffData(null);
     } finally {
-      setLoadingDiff(false);
+      if (seq === diffSeqRef.current) {
+        setLoadingDiff(false);
+      }
     }
   };
 

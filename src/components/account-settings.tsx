@@ -13,6 +13,7 @@ import {
   setupDirectUploadSession,
   signInWithDirectUploadSetup,
 } from "@/lib/account-auth";
+import { deriveNativeState } from "@/components/uploader/uploader-shared";
 import type { AuthUser } from "@/types";
 
 interface AccountSettingsProps {
@@ -65,10 +66,13 @@ export function AccountSettings({
           invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
         ]);
         const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
-        const readFailed = !manual.ok || !live.ok || tainted;
-        setDirectOptIn(!readFailed && !manual.value && !live.value);
-        setDirectHasSession(hasSession);
-        setDirectReadFailed(readFailed);
+        const next = deriveNativeState({ manual, live, session: hasSession, tainted });
+        // "Direct" here means BOTH paths route natively, so the live opt-out
+        // counts too — the readout must not promise direct uploads for a manual
+        // path the live key has already opted out of.
+        setDirectOptIn(next.nativeOptIn && !next.liveUseOfficial);
+        setDirectHasSession(next.hasNativeSession);
+        setDirectReadFailed(next.readFailed);
       } catch {
         setDirectOptIn(false);
         setDirectHasSession(false);

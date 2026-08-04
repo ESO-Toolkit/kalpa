@@ -1,4 +1,4 @@
-import type { ValidationError } from "./types";
+import type { PackAddonEntry, ValidationError } from "./types";
 
 const VALID_TYPES = ["addon-pack", "build-pack", "roster-pack"];
 const VALID_STATUSES = ["draft", "published"];
@@ -8,6 +8,59 @@ const MAX_NAME_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_TAGS = 10;
 const MAX_ADDONS = 200;
+
+/**
+ * Hard ceiling on any request body, applied before JSON.parse.
+ *
+ * The per-field caps below bound the fields we know about, but nothing bounded
+ * the payload as a whole: an authed caller could attach megabytes of junk that
+ * validated fine, got persisted, and (for packs) went into the shared
+ * `index:packs` value, which fails to write once it crosses KV's 25MB limit.
+ * A fully-populated 200-addon pack is well under 100KB.
+ */
+export const MAX_BODY_BYTES = 256_000;
+
+export type JsonBodyResult =
+  | { ok: true; body: unknown }
+  | { ok: false; reason: "too-large" | "invalid-json" };
+
+/** Read a request body as JSON, refusing anything over MAX_BODY_BYTES. */
+export async function readJsonBody(request: Request): Promise<JsonBodyResult> {
+  const declared = Number(request.headers.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    return { ok: false, reason: "too-large" };
+  }
+  const text = await request.text();
+  if (text.length > MAX_BODY_BYTES) {
+    return { ok: false, reason: "too-large" };
+  }
+  try {
+    return { ok: true, body: JSON.parse(text) };
+  } catch {
+    return { ok: false, reason: "invalid-json" };
+  }
+}
+
+/**
+ * Rebuild addon entries from only the fields we validate.
+ *
+ * validatePack checks known fields but says nothing about unknown ones, so
+ * storing the client's objects by reference persisted (and served back) any
+ * extra property they carried. Callers must run validatePack first — this
+ * assumes the shape is already known-good and only strips the extras.
+ */
+export function sanitizeAddons(addons: unknown): PackAddonEntry[] {
+  return (addons as Record<string, unknown>[]).map((addon) => {
+    const entry: PackAddonEntry = {
+      esouiId: addon.esouiId as number,
+      name: addon.name as string,
+      required: addon.required as boolean,
+    };
+    if (typeof addon.defaultEnabled === "boolean") entry.defaultEnabled = addon.defaultEnabled;
+    if (typeof addon.note === "string") entry.note = addon.note;
+    return entry;
+  });
+}
 
 /** Validate a create/update pack payload from the Rust client. */
 export function validatePack(pack: unknown): ValidationError[] {

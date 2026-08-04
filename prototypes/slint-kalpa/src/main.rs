@@ -289,7 +289,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -728,6 +728,25 @@ thread_local! {
 type NativePendingConflictStore = Arc<Mutex<HashMap<String, NativePendingConflict>>>;
 
 static PENDING_NATIVE_CONFLICTS: OnceLock<NativePendingConflictStore> = OnceLock::new();
+
+/// Serializes every `.kalpa-metadata` read-modify-write inside this process.
+///
+/// Installs, updates, conflict applies, removals, tag writes and the update
+/// check each run on their own worker thread and each does its own
+/// `load_metadata` -> mutate -> `save_metadata` cycle. Without this lock the
+/// last save wins and silently drops the other side's entries — an install's
+/// fresh `esoui_id` linkage vanishing means the addon stops receiving update
+/// checks. The main app guards the same sequences with its `MetadataLock`.
+static METADATA_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire [`METADATA_LOCK`], ignoring poisoning: the guarded sequence is a
+/// plain load/mutate/save, so a panicking writer leaves no shared state that a
+/// later writer could misread.
+fn metadata_guard() -> std::sync::MutexGuard<'static, ()> {
+    METADATA_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Clone)]
 struct AddonModels {
@@ -1238,7 +1257,6 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_batch_actions(&ui, addon_models.clone());
     wire_context_actions(&ui, addon_models.clone());
     let settings_models = addon_models.clone();
-    let safety_models = addon_models.clone();
     let migration_models = addon_models.clone();
     let discover_addon_models = addon_models.clone();
     wire_detail_actions(&ui, addon_models);
@@ -1253,7 +1271,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_uploader_actions(&ui);
     wire_backup_restore_actions(&ui);
     wire_character_actions(&ui);
-    wire_safety_actions(&ui, safety_models);
+    wire_safety_actions(&ui);
     wire_migration_actions(&ui, migration_models);
     if ui.get_pack_hub_open() {
         ui.invoke_open_pack_hub();
@@ -1273,7 +1291,11 @@ fn main() -> Result<(), slint::PlatformError> {
     // mode. Anything that dies before this line leaves the marker in place,
     // and the next kalpa.exe start falls back to the WebView UI.
     confirm_native_boot_marker();
-    ui.run()
+    let result = ui.run();
+    // The sign-in WebView2 window is a separate process; close it with the shell
+    // instead of leaving an orphaned login on screen.
+    kill_login_subprocess();
+    result
 }
 
 fn native_render_config() -> NativeRenderConfig {
@@ -6644,15 +6666,10 @@ fn apply_imported_pack_settings_blocking(
                 .push(format!("{folder}: failed to write: {error}"));
             continue;
         }
-        if destination.exists() {
-            if let Err(error) = fs::remove_file(&destination) {
-                let _ = fs::remove_file(&temp);
-                result.errors.push(format!(
-                    "{folder}: failed to replace existing file: {error}"
-                ));
-                continue;
-            }
-        }
+        // Rename straight over the destination: fs::rename replaces it
+        // atomically on Windows too (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
+        // so deleting it first would only open a window where the live
+        // SavedVariables file is missing.
         if let Err(error) = fs::rename(&temp, &destination) {
             let _ = fs::remove_file(&temp);
             result
@@ -6667,6 +6684,13 @@ fn apply_imported_pack_settings_blocking(
     result
 }
 
+/// Collect this machine's account/character identities so imported pack
+/// settings can have their `${ACCOUNT}`/`${CHAR}` placeholders substituted.
+///
+/// Streams each `.lua` file instead of parsing it into a tree: an SvTreeNode
+/// tree is roughly 10x the source size, and SavedVariables files of hundreds of
+/// MB are routine, so tree-parsing every file here could allocate multiple GB
+/// and abort the process mid-import.
 fn collect_import_saved_variable_identities(
     addons_dir: &Path,
 ) -> saved_variables::scrub::ScrubContext {
@@ -6681,17 +6705,14 @@ fn collect_import_saved_variable_identities(
         if path.extension().and_then(|extension| extension.to_str()) != Some("lua") {
             continue;
         }
-        let Ok(content) = fs::read_to_string(&path) else {
+        let Ok(file) = fs::File::open(&path) else {
             continue;
         };
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("SavedVariables.lua");
-        let Ok(tree) = saved_variables::parser::parse_sv_file(&content, file_name) else {
+        let Ok(ctx) = saved_variables::identity_stream::detect_identities_streaming(
+            std::io::BufReader::new(file),
+        ) else {
             continue;
         };
-        let ctx = saved_variables::scrub::detect_identities_from_tree(&tree);
         merge_unique_strings(&mut merged.accounts, ctx.accounts);
         merge_unique_strings(&mut merged.characters, ctx.characters);
         merge_unique_strings(&mut merged.character_ids, ctx.character_ids);
@@ -8079,24 +8100,88 @@ enum LoginResult {
     Error(String),
 }
 
+/// The `--esologs-login` child while a sign-in window is open.
+///
+/// Nothing else ties that WebView2 window to this shell's lifetime, so quitting
+/// the shell (or switching back to the WebView UI) would leave it on screen for
+/// the rest of its 300s timeout: a user who then completed the login would type
+/// real credentials into a window whose captured cookie is printed to a dead
+/// pipe, with no parent left to persist it. [`kill_login_subprocess`] closes it
+/// on shutdown instead.
+type LoginSubprocess = Arc<Mutex<std::process::Child>>;
+
+static LOGIN_SUBPROCESS: Mutex<Option<LoginSubprocess>> = Mutex::new(None);
+
+/// Close the sign-in window if one is still open. Called once the Slint event
+/// loop has ended.
+fn kill_login_subprocess() {
+    let child = LOGIN_SUBPROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(child) = child {
+        let mut child = child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 /// Spawn `<this exe> --esologs-login` and decode its outcome. The child runs the
 /// WebView2 sign-in on its own main thread (out-of-process so it can't fault the
 /// Slint event loop) and prints the cookie header prefixed with the marker.
+///
+/// The child is registered in [`LOGIN_SUBPROCESS`] and waited on by polling, so
+/// shutdown can take the same handle and kill it; stdout is drained on its own
+/// thread so a full pipe can never wedge the child.
 fn run_login_subprocess_capture() -> LoginResult {
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => return LoginResult::Error(format!("Could not locate Kalpa: {error}")),
     };
-    let output = match std::process::Command::new(exe)
+    let mut child = match std::process::Command::new(exe)
         .arg(uploader_login::LOGIN_SUBPROCESS_FLAG)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .spawn()
     {
-        Ok(output) => output,
+        Ok(child) => child,
         Err(error) => return LoginResult::Error(format!("Could not open sign-in: {error}")),
     };
-    match output.status.code() {
+
+    let stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buffer = String::new();
+        if let Some(mut stdout) = stdout {
+            let _ = std::io::Read::read_to_string(&mut stdout, &mut buffer);
+        }
+        buffer
+    });
+
+    let child = Arc::new(Mutex::new(child));
+    *LOGIN_SUBPROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(child.clone());
+
+    let status = loop {
+        let poll = child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_wait();
+        match poll {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(150)),
+            Err(error) => {
+                clear_login_subprocess(&child);
+                return LoginResult::Error(format!("Sign-in could not be tracked: {error}"));
+            }
+        }
+    };
+    clear_login_subprocess(&child);
+
+    match status.code() {
         Some(0) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stdout = reader.join().unwrap_or_default();
             match stdout
                 .lines()
                 .find_map(|line| line.strip_prefix(uploader_login::COOKIE_STDOUT_MARKER))
@@ -8110,6 +8195,19 @@ fn run_login_subprocess_capture() -> LoginResult {
         Some(2) => LoginResult::Cancelled,
         Some(3) => LoginResult::TimedOut,
         _ => LoginResult::Error("Sign-in did not complete.".to_string()),
+    }
+}
+
+/// Vacate the shutdown slot, but only if it still holds THIS sign-in's child.
+fn clear_login_subprocess(child: &LoginSubprocess) {
+    let mut slot = LOGIN_SUBPROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, child))
+    {
+        *slot = None;
     }
 }
 
@@ -8950,6 +9048,45 @@ fn reload_real_addon_models(ui: &KalpaWindow, models: &AddonModels) -> Result<()
     Ok(())
 }
 
+/// Set while a backup / snapshot / restore job is running on a worker thread.
+///
+/// Those jobs all rewrite the same `SavedVariables` + `kalpa-backups` trees, and
+/// their buttons stay clickable while the work is off the UI thread, so this is
+/// what stops a second dispatch from copying over the first one's output.
+static MAINTENANCE_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Claim [`MAINTENANCE_BUSY`]. Returns false when a job is already running.
+fn begin_maintenance_job() -> bool {
+    !MAINTENANCE_BUSY.swap(true, Ordering::SeqCst)
+}
+
+/// Run a blocking maintenance job off the Slint event loop and deliver its
+/// result back on the loop.
+///
+/// Slint has no separate render thread, so a multi-GB snapshot ZIP or a
+/// whole-tree SavedVariables copy inside a callback freezes the window (Windows
+/// paints it "Not Responding") and invites a force-kill mid-write. The caller
+/// must have claimed [`begin_maintenance_job`]; this releases it.
+fn spawn_maintenance_job<T, F, A>(ui: slint::Weak<KalpaWindow>, work: F, apply: A)
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    A: FnOnce(&KalpaWindow, T) + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let value = work();
+        MAINTENANCE_BUSY.store(false, Ordering::SeqCst);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui.upgrade() {
+                apply(&ui, value);
+            }
+        });
+    });
+}
+
+/// Status line shown when a second maintenance job is refused.
+const MAINTENANCE_BUSY_MESSAGE: &str = "Another backup or restore is still running.";
+
 fn wire_backup_restore_actions(ui: &KalpaWindow) {
     let open_ui = ui.as_weak();
     ui.on_open_backup_restore(move || {
@@ -8978,15 +9115,25 @@ fn wire_backup_restore_actions(ui: &KalpaWindow) {
             );
             return;
         };
-        match create_settings_backup(&addons_root, label.as_str()) {
-            Ok(summary) => {
-                ui.set_status_error_message(format!("Backup saved - {summary}.").into());
-                ui.set_backup_label_draft("".into());
-                ui.set_backup_restore_view(0);
-                apply_backup_restore_model(&ui);
-            }
-            Err(error) => ui.set_status_error_message(format!("Backup failed: {error}").into()),
+        if !begin_maintenance_job() {
+            ui.set_status_error_message(MAINTENANCE_BUSY_MESSAGE.into());
+            return;
         }
+        let label = label.to_string();
+        ui.set_status_error_message("Creating backup...".into());
+        spawn_maintenance_job(
+            ui.as_weak(),
+            move || create_settings_backup(&addons_root, &label),
+            |ui, result| match result {
+                Ok(summary) => {
+                    ui.set_status_error_message(format!("Backup saved - {summary}.").into());
+                    ui.set_backup_label_draft("".into());
+                    ui.set_backup_restore_view(0);
+                    apply_backup_restore_model(ui);
+                }
+                Err(error) => ui.set_status_error_message(format!("Backup failed: {error}").into()),
+            },
+        );
     });
 
     let restore_ui = ui.as_weak();
@@ -9005,19 +9152,31 @@ fn wire_backup_restore_actions(ui: &KalpaWindow) {
             ui.set_status_error_message("Choose a backup to restore.".into());
             return;
         };
-        match restore_settings_backup(&addons_root, backup.name.as_str()) {
-            Ok(summary) => {
-                ui.set_backup_restore_view(0);
-                ui.set_status_error_message(format!("Restored backup - {summary}.").into());
-                apply_backup_restore_model(&ui);
-                if let Some(addons_root) = addons_source_root() {
-                    if let Ok(addons) = real_addon_entries(&addons_root) {
-                        apply_saved_variables_model(&ui, &addons);
+        if !begin_maintenance_job() {
+            ui.set_status_error_message(MAINTENANCE_BUSY_MESSAGE.into());
+            return;
+        }
+        let backup_name = backup.name.to_string();
+        ui.set_status_error_message("Restoring backup...".into());
+        spawn_maintenance_job(
+            ui.as_weak(),
+            move || restore_settings_backup(&addons_root, &backup_name),
+            |ui, result| match result {
+                Ok(summary) => {
+                    ui.set_backup_restore_view(0);
+                    ui.set_status_error_message(format!("Restored backup - {summary}.").into());
+                    apply_backup_restore_model(ui);
+                    if let Some(addons_root) = addons_source_root() {
+                        if let Ok(addons) = real_addon_entries(&addons_root) {
+                            apply_saved_variables_model(ui, &addons);
+                        }
                     }
                 }
-            }
-            Err(error) => ui.set_status_error_message(format!("Restore failed: {error}").into()),
-        }
+                Err(error) => {
+                    ui.set_status_error_message(format!("Restore failed: {error}").into())
+                }
+            },
+        );
     });
 
     let delete_ui = ui.as_weak();
@@ -9101,34 +9260,44 @@ fn wire_character_actions(ui: &KalpaWindow) {
             return;
         };
 
-        match create_character_settings_backup(
-            &addons_root,
-            character.name.as_str(),
-            character.server.as_str(),
-            label.as_str(),
-        ) {
-            Ok(count) => {
-                ui.set_status_error_message(
-                    format!(
-                        "Backed up {}'s settings ({} addon file{}).",
-                        character.name.as_str(),
-                        count,
-                        if count == 1 { "" } else { "s" }
-                    )
-                    .into(),
-                );
-                ui.set_character_backup_label_draft("".into());
-                apply_backup_restore_model(&ui);
-                apply_character_roster_model(&ui);
-            }
-            Err(error) => {
-                ui.set_status_error_message(format!("Character backup failed: {error}").into())
-            }
+        if !begin_maintenance_job() {
+            ui.set_status_error_message(MAINTENANCE_BUSY_MESSAGE.into());
+            return;
         }
+        let character_name = character.name.to_string();
+        let server = character.server.to_string();
+        let label = label.to_string();
+        ui.set_status_error_message(format!("Backing up {character_name}'s settings...").into());
+        spawn_maintenance_job(
+            ui.as_weak(),
+            move || {
+                let result = create_character_settings_backup(
+                    &addons_root,
+                    &character_name,
+                    &server,
+                    &label,
+                );
+                (character_name, result)
+            },
+            |ui, (character_name, result)| match result {
+                Ok((copied, worlds_spanned)) => {
+                    ui.set_status_error_message(
+                        character_backup_status_message(&character_name, copied, worlds_spanned)
+                            .into(),
+                    );
+                    ui.set_character_backup_label_draft("".into());
+                    apply_backup_restore_model(ui);
+                    apply_character_roster_model(ui);
+                }
+                Err(error) => {
+                    ui.set_status_error_message(format!("Character backup failed: {error}").into())
+                }
+            },
+        );
     });
 }
 
-fn wire_safety_actions(ui: &KalpaWindow, models: AddonModels) {
+fn wire_safety_actions(ui: &KalpaWindow) {
     let open_ui = ui.as_weak();
     ui.on_open_safety(move || {
         let Some(ui) = open_ui.upgrade() else {
@@ -9161,7 +9330,6 @@ fn wire_safety_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let restore_ui = ui.as_weak();
-    let restore_models = models.clone();
     ui.on_safety_restore_snapshot(move |index| {
         let Some(ui) = restore_ui.upgrade() else {
             return;
@@ -9177,19 +9345,31 @@ fn wire_safety_actions(ui: &KalpaWindow, models: AddonModels) {
             ui.set_status_error_message("Choose a snapshot to restore.".into());
             return;
         };
-        match safe_migration::restore_snapshot(&addons_root, snapshot.id.as_str()) {
-            Ok(count) => {
-                ui.set_status_error_message(
-                    format!("Restored {count} files from snapshot.").into(),
-                );
-                let _ = reload_real_addon_models(&ui, &restore_models);
-                apply_safety_center_model(&ui);
-                apply_backup_restore_model(&ui);
-            }
-            Err(error) => {
-                ui.set_status_error_message(format!("Snapshot restore failed: {error}").into())
-            }
+        if !begin_maintenance_job() {
+            ui.set_status_error_message(MAINTENANCE_BUSY_MESSAGE.into());
+            return;
         }
+        let snapshot_id = snapshot.id.to_string();
+        ui.set_status_error_message("Restoring snapshot...".into());
+        spawn_maintenance_job(
+            ui.as_weak(),
+            move || safe_migration::restore_snapshot(&addons_root, &snapshot_id),
+            |ui, result| match result {
+                Ok(count) => {
+                    // Rescan through the shared refresh callback: the addon models
+                    // live on the event loop and cannot cross the worker thread.
+                    ui.invoke_refresh_requested();
+                    ui.set_status_error_message(
+                        format!("Restored {count} files from snapshot.").into(),
+                    );
+                    apply_safety_center_model(ui);
+                    apply_backup_restore_model(ui);
+                }
+                Err(error) => {
+                    ui.set_status_error_message(format!("Snapshot restore failed: {error}").into())
+                }
+            },
+        );
     });
 
     let delete_ui = ui.as_weak();
@@ -9263,29 +9443,48 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
             );
             return;
         };
-        match safe_migration::create_pre_migration_snapshot(&addons_root, include_addons) {
-            Ok(snapshot) => {
+        if !begin_maintenance_job() {
+            ui.set_status_error_message(MAINTENANCE_BUSY_MESSAGE.into());
+            return;
+        }
+        // With the AddOns toggle on, this zips the whole AddOns tree plus
+        // SavedVariables — routinely gigabytes, i.e. minutes of work.
+        ui.set_migration_status("Creating restore point...".into());
+        spawn_maintenance_job(
+            ui.as_weak(),
+            move || {
+                let created =
+                    safe_migration::create_pre_migration_snapshot(&addons_root, include_addons);
+                let snapshot = match created {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return Err(format!("Migration snapshot failed: {error}")),
+                };
                 let summary = format!(
                     "Restore point saved: {} files, {}.",
                     snapshot.file_count,
                     format_size(snapshot.total_size)
                 );
-                ui.set_migration_snapshot_summary(summary.into());
-                apply_safety_center_model(&ui);
-                match safe_migration::dry_run_migration(&addons_root) {
-                    Ok(dry_run) => {
-                        apply_migration_dry_run(&ui, dry_run);
-                        ui.set_migration_phase(2);
+                Ok((summary, safe_migration::dry_run_migration(&addons_root)))
+            },
+            |ui, result| match result {
+                // The restore point exists even when the preview fails, so report
+                // it either way rather than losing it with the preview error.
+                Ok((summary, dry_run)) => {
+                    ui.set_migration_snapshot_summary(summary.into());
+                    apply_safety_center_model(ui);
+                    match dry_run {
+                        Ok(dry_run) => {
+                            apply_migration_dry_run(ui, dry_run);
+                            ui.set_migration_phase(2);
+                        }
+                        Err(error) => ui.set_status_error_message(
+                            format!("Migration preview failed: {error}").into(),
+                        ),
                     }
-                    Err(error) => ui.set_status_error_message(
-                        format!("Migration preview failed: {error}").into(),
-                    ),
                 }
-            }
-            Err(error) => {
-                ui.set_status_error_message(format!("Migration snapshot failed: {error}").into())
-            }
-        }
+                Err(error) => ui.set_status_error_message(error.into()),
+            },
+        );
     });
 
     let execute_ui = ui.as_weak();
@@ -10091,6 +10290,12 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         let Some(ui) = apply_conflict_ui.upgrade() else {
             return;
         };
+        // The pending conflict is only dropped from the store once the worker
+        // succeeds, so a second click would re-read it and run a second extract
+        // of the same ZIP into the live folder.
+        if ui.get_checking_updates() {
+            return;
+        }
         let Some(pending) = selected_pending_conflict(&ui) else {
             ui.set_status_error_message("No pending conflict is selected.".into());
             return;
@@ -10646,17 +10851,88 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let install_ui = ui.as_weak();
-    let install_models = models.clone();
-    ui.on_install_dependency(move |name, optional| {
-        if let Some(ui) = install_ui.upgrade() {
-            update_selected_dependency(&ui, &install_models, name.as_str(), optional, true);
+    ui.on_install_dependency(move |name, _optional| {
+        let Some(ui) = install_ui.upgrade() else {
+            return;
+        };
+        if ui.get_checking_updates() {
+            return;
         }
+        let dep_name = name.trim().to_string();
+        if dep_name.is_empty() {
+            return;
+        }
+        let Some(addons_dir) = addons_source_root() else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Set it before installing dependencies.".into(),
+            );
+            return;
+        };
+
+        let eso_running = addon_write_eso_running_warning_active(&ui);
+        ui.set_checking_updates(true);
+        ui.set_status_error_message(
+            addon_write_status_message(format!("Installing {dep_name}..."), eso_running).into(),
+        );
+
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = install_dependency_blocking(&addons_dir, &dep_name);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_checking_updates(false);
+                match result {
+                    Ok(folders) => {
+                        // Rescan from disk rather than flipping the dependency row:
+                        // the row may only claim "installed" once the library is
+                        // actually there.
+                        ui.invoke_refresh_requested();
+                        let message = format!(
+                            "Installed {dep_name} ({} folder{} added).",
+                            folders.len(),
+                            if folders.len() == 1 { "" } else { "s" }
+                        );
+                        ui.set_status_error_message(
+                            addon_write_status_message(message, eso_running).into(),
+                        );
+                    }
+                    Err(error) => {
+                        ui.set_status_error_message(format!("Install failed: {error}").into());
+                    }
+                }
+            });
+        });
     });
 
     let remove_dep_ui = ui.as_weak();
-    ui.on_remove_dependency(move |name, optional| {
-        if let Some(ui) = remove_dep_ui.upgrade() {
-            update_selected_dependency(&ui, &models, name.as_str(), optional, false);
+    ui.on_remove_dependency(move |name, _optional| {
+        let Some(ui) = remove_dep_ui.upgrade() else {
+            return;
+        };
+        let dep_name = name.trim().to_string();
+        if dep_name.is_empty() {
+            return;
+        }
+        let eso_running = addon_write_eso_running_warning_active(&ui);
+        let Some(addons_root) = disk_root_for_addon(&dep_name) else {
+            ui.set_status_error_message(
+                format!("{dep_name} is not installed in the configured AddOns folder.").into(),
+            );
+            return;
+        };
+        match remove_addon_from_disk(&addons_root, &dep_name) {
+            Ok(()) => {
+                remove_master_addon(&models, &dep_name);
+                apply_addon_view(&ui, &models);
+                ui.set_status_error_message(
+                    addon_write_status_message(format!("Removed {dep_name}."), eso_running).into(),
+                );
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Remove failed: {error}").into());
+            }
         }
     });
 }
@@ -11849,6 +12125,10 @@ fn wire_discover(
 
     let install_ui = ui.as_weak();
     let install_ids = installed_ids.clone();
+    // ESOUI ids whose install worker is still running. Without it a double-click
+    // dispatches two concurrent downloads+extractions of the same addon, which
+    // race each other over the live folders and the metadata store.
+    let install_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     ui.on_discover_install(move |index| {
         let Some(ui) = install_ui.upgrade() else {
             return;
@@ -11869,6 +12149,18 @@ fn wire_discover(
             }
         };
 
+        {
+            let mut in_flight = install_in_flight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !in_flight.insert(esoui_id.clone()) {
+                ui.set_status_error_message(
+                    format!("{} is already installing.", entry.title.as_str()).into(),
+                );
+                return;
+            }
+        }
+
         let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_status_error_message(
             addon_write_status_message(
@@ -11879,6 +12171,8 @@ fn wire_discover(
         );
 
         let installed_ids = install_ids.clone();
+        let in_flight = install_in_flight.clone();
+        let in_flight_id = esoui_id.clone();
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = install_discover_entry_blocking(&addons_dir, entry).map(|installed| {
@@ -11888,6 +12182,10 @@ fn wire_discover(
                     esoui_id,
                 )
             });
+            in_flight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&in_flight_id);
 
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
@@ -12083,6 +12381,7 @@ fn install_downloaded_addon_blocking(
     let installed_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
     file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
 
+    let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     record_native_installed_folders(
         &mut store,
@@ -12154,6 +12453,7 @@ fn check_native_addon_updates_blocking(
     addons_dir: &Path,
 ) -> Result<Vec<NativeAddonUpdateCheck>, String> {
     let api_lookup = esoui::fetch_filelist_lookup()?;
+    let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     let folder_names = store.addons.keys().cloned().collect::<Vec<_>>();
     let mut metadata_changed = false;
@@ -12281,6 +12581,10 @@ fn start_native_addon_update_apply(
     eso_running: bool,
 ) {
     let pending_store = pending_conflict_store();
+    let targeted_folders = targets
+        .iter()
+        .map(|target| target.folder_name.clone())
+        .collect::<HashSet<_>>();
     std::thread::spawn(move || {
         let result = apply_native_addon_updates_blocking(&addons_dir, targets, conflict_policy);
         let _ = slint::invoke_from_event_loop(move || {
@@ -12291,17 +12595,23 @@ fn start_native_addon_update_apply(
             match result {
                 Ok(result) => {
                     if let Some(store) = pending_store.as_ref() {
-                        replace_pending_conflicts(store, result.conflicts.clone());
+                        let conflicts = result.conflicts.clone();
+                        merge_pending_conflicts(store, &targeted_folders, conflicts);
                     }
                     let message = addon_write_status_message(
                         update_apply_status_message(&result),
                         eso_running,
                     );
-                    let conflict_count = result.conflicts.len() as i32;
+                    // Report the whole review queue, not just this run's share:
+                    // conflicts from earlier runs are still waiting.
+                    let conflict_count = pending_store
+                        .as_ref()
+                        .and_then(|store| store.lock().ok().map(|pending| pending.len()))
+                        .unwrap_or(result.conflicts.len());
                     ui.invoke_addon_update_apply_finished(
                         slint_update_check_model(result.checks),
                         message.into(),
-                        conflict_count,
+                        conflict_count as i32,
                     );
                 }
                 Err(error) => {
@@ -12461,6 +12771,7 @@ fn apply_native_pending_conflict_files_blocking(
         hash_overrides.as_ref(),
     )?;
 
+    let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     remove_stale_native_metadata(&mut store, pending.esoui_id, &installed_folders);
     record_native_installed_folders(
@@ -12677,6 +12988,7 @@ fn apply_native_single_addon_update(
         hash_overrides.as_ref(),
     )?;
 
+    let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     remove_stale_native_metadata(&mut store, target.esoui_id, &installed_folders);
     record_native_installed_folders(
@@ -13009,6 +13321,29 @@ fn native_try_install_dep(
     Ok(dep_folders)
 }
 
+/// Install one missing dependency by name and record it, the same way the
+/// update paths do. This is what the detail pane's dependency "Install" button
+/// runs — the row must only change once the library is really on disk.
+fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Vec<String>, String> {
+    let _guard = metadata_guard();
+    let mut store = metadata::load_metadata(addons_dir);
+    let installed = native_try_install_dep(dep_name, addons_dir, &mut store);
+    let folders = installed.map_err(|reason| match reason {
+        "not_found" => format!("{dep_name} was not found on ESOUI."),
+        "search_failed" => format!("Could not search ESOUI for {dep_name}."),
+        "fetch_failed" => format!("Could not read {dep_name} on ESOUI."),
+        "download_failed" => format!("Could not download {dep_name}."),
+        "extract_failed" => format!("Could not extract {dep_name}."),
+        "hash_record_failed" => {
+            format!("Installed {dep_name}, but could not record its file hashes.")
+        }
+        other => format!("Could not install {dep_name} ({other})."),
+    })?;
+    let _ = native_resolve_transitive_deps(addons_dir, &folders, &mut store);
+    metadata::save_metadata(addons_dir, &store)?;
+    Ok(folders)
+}
+
 fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
     let folder_dir = addons_dir.join(folder_name);
     let txt = folder_dir.join(format!("{folder_name}.txt"));
@@ -13211,32 +13546,6 @@ fn api_compat_summary(info: &NativeApiCompatInfo) -> String {
     )
 }
 
-fn update_selected_dependency(
-    ui: &KalpaWindow,
-    models: &AddonModels,
-    dependency_name: &str,
-    optional: bool,
-    install: bool,
-) {
-    let index = ui.get_selected_index().max(0) as usize;
-    let Some(mut addon) = models.visible.row_data(index) else {
-        return;
-    };
-
-    if optional {
-        addon.optional_dependencies =
-            updated_dependency_model(&addon.optional_dependencies, dependency_name, install);
-    } else {
-        addon.required_dependencies =
-            updated_dependency_model(&addon.required_dependencies, dependency_name, install);
-    }
-
-    let folder_name = addon.folder_name.to_string();
-    models.visible.set_row_data(index, addon.clone());
-    update_master_addon(models, &folder_name, addon);
-    apply_addon_view(ui, models);
-}
-
 fn update_master_addon(models: &AddonModels, folder_name: &str, addon: AddonEntry) {
     if let Some(existing) = models
         .all
@@ -13315,6 +13624,7 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     // The folder is already deleted — removal has succeeded. Treat the kalpa.json
     // metadata cleanup as best-effort so a transient lock (OneDrive/AV) or a CFA
     // block doesn't report "Remove failed" for an addon that is actually gone.
+    let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_root);
     metadata::remove_entry(&mut store, folder_name);
     let _ = metadata::save_metadata(addons_root, &store);
@@ -13336,6 +13646,7 @@ fn persist_addon_tags(
     tags: Vec<String>,
 ) -> Result<(), String> {
     validate_addon_folder_name(folder_name)?;
+    let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_root);
     match store.addons.get_mut(folder_name) {
         Some(meta) => meta.tags = tags,
@@ -13454,26 +13765,6 @@ fn mark_addon_disabled(entry: &mut AddonEntry, disabled: bool) {
         entry.badge3 = "".into();
         entry.badge3_kind = 0;
     }
-}
-
-fn updated_dependency_model(
-    dependencies: &ModelRc<DependencyEntry>,
-    dependency_name: &str,
-    install: bool,
-) -> ModelRc<DependencyEntry> {
-    let next = (0..dependencies.row_count())
-        .filter_map(|index| dependencies.row_data(index))
-        .map(|mut dependency| {
-            if dependency.name.as_str() == dependency_name {
-                dependency.missing = !install;
-                dependency.outdated = false;
-                dependency.install_action = !install;
-            }
-            dependency
-        })
-        .collect::<Vec<_>>();
-
-    dependency_model(next)
 }
 
 fn initial_tags(folder_name: &str, favorite: bool, state: i32) -> Vec<&'static str> {
@@ -14083,13 +14374,28 @@ fn cleanup_pending_conflict_zip(pending: &NativePendingConflict) {
     }
 }
 
-fn replace_pending_conflicts(
+/// Fold the conflicts an update run produced into the pending store.
+///
+/// Only the folders this run actually targeted are re-evaluated, so only their
+/// previous entries (and preserved ZIPs) are discarded. Conflicts from earlier
+/// runs — including any keep/update decisions the user has already recorded
+/// against them — are left untouched; a single-addon update must not throw away
+/// the review queue for every other addon.
+fn merge_pending_conflicts(
     store: &NativePendingConflictStore,
+    targeted_folders: &HashSet<String>,
     conflicts: Vec<NativePendingConflict>,
 ) {
     if let Ok(mut pending) = store.lock() {
-        for old in pending.drain().map(|(_, old)| old) {
-            cleanup_pending_conflict_zip(&old);
+        let stale = pending
+            .keys()
+            .filter(|folder| targeted_folders.contains(folder.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for folder in stale {
+            if let Some(old) = pending.remove(&folder) {
+                cleanup_pending_conflict_zip(&old);
+            }
         }
         for conflict in conflicts {
             pending.insert(conflict.folder_name.clone(), conflict);
@@ -14435,8 +14741,11 @@ fn restore_edit_backup_file(
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create directory: {error}"))?;
     }
-    fs::copy(&source, &destination).map_err(|error| format!("Failed to restore file: {error}"))?;
-    Ok(())
+    // fs::copy truncates the destination and then streams into it, so a crash or
+    // a Controlled Folder Access block mid-copy would leave the live addon file
+    // truncated. Stage the bytes and rename over it instead.
+    let bytes = fs::read(&source).map_err(|error| format!("Failed to read backup: {error}"))?;
+    write_file_atomically(&destination, &bytes)
 }
 
 fn current_file_entry(ui: &KalpaWindow, relative_path: &str) -> Option<FileEntry> {
@@ -14967,6 +15276,11 @@ struct NativeCharacterRoster {
 
 const UNKNOWN_SERVER: &str = "Unknown";
 
+/// Reload the characters overlay.
+///
+/// The roster scan streams every SavedVariables file, which on a large install
+/// is seconds of disk work, so it runs on a worker thread and the models are
+/// rebuilt back on the event loop.
 fn apply_character_roster_model(ui: &KalpaWindow) {
     let Some(addons_root) = configured_addons_path() else {
         ui.set_characters(Rc::new(VecModel::from(Vec::<CharacterEntry>::new())).into());
@@ -14977,7 +15291,20 @@ fn apply_character_roster_model(ui: &KalpaWindow) {
         return;
     };
 
-    match native_character_roster(&addons_root) {
+    ui.set_characters_summary("Loading characters...".into());
+    let ui_weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let roster = native_character_roster(&addons_root);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                apply_character_roster(&ui, roster);
+            }
+        });
+    });
+}
+
+fn apply_character_roster(ui: &KalpaWindow, roster: Result<NativeCharacterRoster, String>) {
+    match roster {
         Ok(mut roster) => {
             roster.characters.sort_by(|left, right| {
                 let left_unknown = left.server == UNKNOWN_SERVER;
@@ -15455,6 +15782,13 @@ struct CharBackupMeta {
     version: u32,
     character: String,
     server: String,
+    /// Count of DISTINCT world-scoped layers this backup's subtrees span (see
+    /// `stage_character_subtrees`). Always `<= 1` for a known-server backup; a
+    /// value `> 1` only occurs for an Unknown-server backup and means a
+    /// same-named twin on another megaserver was silently bundled in. Additive
+    /// field: `#[serde(default)]` so older backups without it read as `0`.
+    #[serde(default)]
+    worlds_spanned: u32,
 }
 
 enum CharRestoreMode {
@@ -15639,12 +15973,17 @@ fn create_settings_backup(addons_root: &Path, requested_name: &str) -> Result<St
     Ok(backup_detail(file_count, total_size))
 }
 
+/// Back up one character's per-character SavedVariables subtrees.
+///
+/// Returns `(copied, worlds_spanned)`; `worlds_spanned > 1` means an
+/// Unknown-server backup bundled a same-named twin from another megaserver, so
+/// restoring it will roll that twin back too.
 fn create_character_settings_backup(
     addons_root: &Path,
     character_name: &str,
     server: &str,
     requested_name: &str,
-) -> Result<u32, String> {
+) -> Result<(u32, u32), String> {
     let character_name = character_name.trim();
     if character_name.is_empty() {
         return Err("Character name cannot be empty.".to_string());
@@ -15689,7 +16028,7 @@ fn create_character_settings_backup(
     fs::create_dir_all(&staging)
         .map_err(|error| format!("Failed to create backup folder: {error}"))?;
 
-    let (matched, copied, last_copy_error) = match stage_character_subtrees(
+    let (matched, copied, last_copy_error, worlds_spanned) = match stage_character_subtrees(
         &sv_dir,
         character_name,
         world,
@@ -15730,6 +16069,7 @@ fn create_character_settings_backup(
         version: CHAR_BACKUP_VERSION,
         character: character_name.to_string(),
         server: server.to_string(),
+        worlds_spanned,
     };
     match serde_json::to_vec_pretty(&meta) {
         Ok(json) => {
@@ -15746,7 +16086,30 @@ fn create_character_settings_backup(
 
     finalize_character_backup_replace(&staging, &final_dir, &tombstone)
         .map_err(|error| format!("Failed to finalize backup: {error}"))?;
-    Ok(copied)
+    Ok((copied, worlds_spanned))
+}
+
+/// Status line for a finished character backup. When the backup spanned more
+/// than one megaserver the user has to be told: restoring it will also roll
+/// back the same-named character on the other server.
+fn character_backup_status_message(
+    character_name: &str,
+    copied: u32,
+    worlds_spanned: u32,
+) -> String {
+    let message = format!(
+        "Backed up {}'s settings ({} addon file{}).",
+        character_name,
+        copied,
+        if copied == 1 { "" } else { "s" }
+    );
+    if worlds_spanned > 1 {
+        format!(
+            "{message} This character's server is unknown, so settings from {worlds_spanned} megaservers were bundled in - restoring will also roll back the same-named character on the other server."
+        )
+    } else {
+        message
+    }
 }
 
 fn validate_character_backup_name(name: &str) -> Result<(), String> {
@@ -15806,18 +16169,29 @@ fn safe_backup_name_component(value: &str) -> String {
     }
 }
 
+/// Extract `character_name`'s per-character subtree from each `.lua`
+/// SavedVariables file into `staging`. `world` restricts world-scoped subtrees
+/// to a single megaserver (`None` = take any, used for `Unknown`-server
+/// characters).
+///
+/// Returns `(matched, copied, last_error, worlds_spanned)`, where
+/// `worlds_spanned` is the count of DISTINCT world-scoped layers seen across
+/// every matched block (account-only data contributes 0). It is only ever `> 1`
+/// for an Unknown-server backup, and that means a same-named twin on another
+/// megaserver was silently bundled into this backup.
 fn stage_character_subtrees(
     sv_dir: &Path,
     character_name: &str,
     world: Option<&str>,
     staging: &Path,
-) -> Result<(u32, u32, Option<String>), String> {
+) -> Result<(u32, u32, Option<String>, u32), String> {
     let base = char_backup::char_base(character_name.as_bytes()).to_vec();
     let entries = fs::read_dir(sv_dir)
         .map_err(|error| format!("Failed to read SavedVariables folder: {error}"))?;
     let mut matched = 0u32;
     let mut copied = 0u32;
     let mut last_error = None;
+    let mut worlds_seen: HashSet<Vec<u8>> = HashSet::new();
 
     for entry in entries {
         let entry =
@@ -15840,6 +16214,11 @@ fn stage_character_subtrees(
             continue;
         }
         matched += 1;
+        for block in &blocks {
+            if let Some(layer) = block.world_layer() {
+                worlds_seen.insert(layer.to_vec());
+            }
+        }
         match char_backup::build_backup_file(&blocks) {
             Ok(content) => match fs::write(staging.join(&file_name), &content) {
                 Ok(()) => copied += 1,
@@ -15849,7 +16228,7 @@ fn stage_character_subtrees(
         }
     }
 
-    Ok((matched, copied, last_error))
+    Ok((matched, copied, last_error, worlds_seen.len() as u32))
 }
 
 fn character_backup_replaceable(final_dir: &Path) -> bool {
@@ -17282,78 +17661,20 @@ fn extract_saved_variable_profile_count(path: &Path) -> usize {
     extract_saved_variable_profiles_from_path(path).len()
 }
 
+/// Character (profile) keys stored in one SavedVariables file.
+///
+/// Streams the whole file through the production extractor rather than scanning
+/// a fixed prefix: SavedVariables files routinely run to tens or hundreds of MB,
+/// and characters whose subtree starts past the prefix would otherwise never
+/// appear as a copy source or destination.
 fn extract_saved_variable_profiles_from_path(path: &Path) -> BTreeSet<String> {
-    let Ok(mut file) = fs::File::open(path) else {
+    let Ok(file) = fs::File::open(path) else {
         return BTreeSet::new();
     };
-    let mut buffer = vec![0u8; 256 * 1024];
-    let Ok(count) = std::io::Read::read(&mut file, &mut buffer) else {
-        return BTreeSet::new();
-    };
-    buffer.truncate(count);
-    let content = String::from_utf8_lossy(&buffer);
-    extract_saved_variable_profiles(&content)
-}
-
-fn extract_saved_variable_profiles(content: &str) -> BTreeSet<String> {
-    let mut profiles = BTreeSet::new();
-    let mut depth: i32 = 0;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if depth == 3 {
-            if let Some(key) = saved_variable_key(trimmed) {
-                if key != "$AccountWide" {
-                    profiles.insert(key.to_string());
-                }
-            }
-        }
-        depth += brace_delta_ignoring_strings(line);
-    }
-
-    profiles
-}
-
-fn saved_variable_key(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("[\"")?;
-    let end = rest.find("\"]")?;
-    let after = rest[end + 2..].trim_start();
-    if !after.starts_with('=') {
-        return None;
-    }
-    Some(&rest[..end])
-}
-
-fn brace_delta_ignoring_strings(line: &str) -> i32 {
-    let bytes = line.as_bytes();
-    let mut index = 0usize;
-    let mut delta = 0i32;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' | b'\'' => {
-                let quote = bytes[index];
-                index += 1;
-                while index < bytes.len() && bytes[index] != quote {
-                    if bytes[index] == b'\\' {
-                        index += 1;
-                    }
-                    index += 1;
-                }
-                index += 1;
-            }
-            b'-' if index + 1 < bytes.len() && bytes[index + 1] == b'-' => break,
-            b'{' => {
-                delta += 1;
-                index += 1;
-            }
-            b'}' => {
-                delta -= 1;
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    delta
+    saved_variables::io::extract_character_keys_from_reader(std::io::BufReader::new(file))
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
 }
 
 fn format_short_date(epoch_secs: u64) -> String {
@@ -17413,8 +17734,29 @@ fn write_text_file(
     content: &str,
 ) -> Result<(), String> {
     let file_path = addon_file_path(addons_root, folder_name, relative_path)?;
-    fs::write(&file_path, content).map_err(|error| format!("Failed to write file: {error}"))?;
+    // Temp file + rename instead of writing in place: a crash or a Controlled
+    // Folder Access block mid-write would otherwise leave the live addon file
+    // truncated, and update_hash_manifest_for_file would immediately record the
+    // truncation as the file's new signature.
+    write_file_atomically(&file_path, content.as_bytes())?;
     update_hash_manifest_for_file(addons_root, folder_name, relative_path, &file_path)
+}
+
+/// Replace `file_path` with `content` via a sibling temp file and a rename.
+/// `fs::rename` replaces the destination atomically on Windows as well
+/// (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
+fn write_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
+    let file_name = file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Invalid file path.".to_string())?;
+    let temp_path = file_path.with_file_name(format!("{file_name}.kalpa-tmp"));
+    fs::write(&temp_path, content)
+        .map_err(|error| format!("Failed to write temp file: {error}"))?;
+    fs::rename(&temp_path, file_path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        format!("Failed to finalize write: {error}")
+    })
 }
 
 fn update_hash_manifest_for_file(
@@ -19755,6 +20097,8 @@ mod tests {
             end_ms: 1000,
             zone_name: None,
             boss_name: None,
+            difficulty: None,
+            outcome: None,
         };
         assert_eq!(uploader_split_fight_title(&base), "Fight 3");
 
@@ -20409,29 +20753,6 @@ mod tests {
     }
 
     #[test]
-    fn dependency_action_updates_model_state() {
-        let dependencies = dependency_model(vec![dependency_entry(
-            "LibCombat",
-            "v82+",
-            true,
-            false,
-            true,
-        )]);
-
-        let installed = updated_dependency_model(&dependencies, "LibCombat", true);
-        let installed_dep = installed.row_data(0).expect("installed dependency exists");
-        assert!(!installed_dep.missing);
-        assert!(!installed_dep.outdated);
-        assert!(!installed_dep.install_action);
-
-        let removed = updated_dependency_model(&installed, "LibCombat", false);
-        let removed_dep = removed.row_data(0).expect("removed dependency exists");
-        assert!(removed_dep.missing);
-        assert!(!removed_dep.outdated);
-        assert!(removed_dep.install_action);
-    }
-
-    #[test]
     fn installed_addon_view_filters_search_and_kind() {
         let mut addons = vec![
             addon_entry(
@@ -20811,7 +21132,11 @@ mod tests {
 
     #[test]
     fn saved_variable_profile_parser_ignores_accountwide_and_nested_keys() {
-        let profiles = extract_saved_variable_profiles(
+        let root = test_temp_dir("sv-profile-parser");
+        fs::create_dir_all(&root).expect("create root");
+        let path = root.join("CombatMetrics.lua");
+        fs::write(
+            &path,
             r#"
 CombatMetrics_SavedVariables = {
     ["Default"] = {
@@ -20829,12 +21154,38 @@ CombatMetrics_SavedVariables = {
     },
 }
 "#,
-        );
+        )
+        .expect("write saved variable");
 
         assert_eq!(
-            profiles,
+            extract_saved_variable_profiles_from_path(&path),
             BTreeSet::from(["Alt".to_string(), "Main".to_string()])
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_variable_profiles_are_found_past_the_first_256kb() {
+        let root = test_temp_dir("sv-profile-past-prefix");
+        fs::create_dir_all(&root).expect("create root");
+        let path = root.join("Huge.lua");
+        let padding = "            -- pad\n".repeat(20_000);
+        fs::write(
+            &path,
+            format!(
+                "Huge_SavedVariables = {{\n    [\"Default\"] = {{\n        [\"@Account\"] = {{\n            [\"Main\"] = {{\n{padding}            }},\n            [\"Late\"] = {{\n            }},\n        }},\n    }},\n}}\n"
+            ),
+        )
+        .expect("write saved variable");
+
+        let profiles = extract_saved_variable_profiles_from_path(&path);
+        assert!(
+            profiles.contains("Late"),
+            "a character past the first 256KB must still be listed"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -21361,9 +21712,11 @@ CombatMetrics_SavedVariables = {
         )
         .expect("write saved variable");
 
-        let copied = create_character_settings_backup(&addons_root, "Bob", "NA Megaserver", "")
-            .expect("create character backup");
+        let (copied, worlds_spanned) =
+            create_character_settings_backup(&addons_root, "Bob", "NA Megaserver", "")
+                .expect("create character backup");
         assert_eq!(copied, 1);
+        assert_eq!(worlds_spanned, 1, "a known-server backup takes one world");
 
         let backup_dir = settings_backups_dir(&addons_root).join("char-Bob-NA-backup");
         assert!(backup_dir.is_dir());
@@ -21376,9 +21729,54 @@ CombatMetrics_SavedVariables = {
         .expect("parse metadata");
         assert_eq!(meta.character, "Bob");
         assert_eq!(meta.server, "NA Megaserver");
+        assert_eq!(meta.worlds_spanned, 1);
         let backup = fs::read_to_string(backup_dir.join("TestAddon.lua")).expect("read backup");
         assert!(backup.contains("[\"hp\"] = 1"));
         assert!(!backup.contains("[\"hp\"] = 2"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_character_backup_reports_worlds_spanned_for_unknown_server() {
+        let root = test_temp_dir("native-character-backup-twin");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(
+            sv_dir.join("TestAddon.lua"),
+            concat!(
+                "TestAddon =\n{\n",
+                "\t[\"Default\"] =\n\t{\n",
+                "\t\t[\"NA Megaserver\"] =\n\t\t{\n",
+                "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"hp\"] = 1, [\"loc\"] = \"NA\" },\n",
+                "\t\t\t},\n",
+                "\t\t},\n",
+                "\t\t[\"EU Megaserver\"] =\n\t\t{\n",
+                "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"hp\"] = 2, [\"loc\"] = \"EU\" },\n",
+                "\t\t\t},\n",
+                "\t\t},\n",
+                "\t},\n}\n"
+            ),
+        )
+        .expect("write saved variable");
+
+        let (_, worlds_spanned) =
+            create_character_settings_backup(&addons_root, "Bob", UNKNOWN_SERVER, "")
+                .expect("create character backup");
+        assert_eq!(worlds_spanned, 2, "NA + EU twin both bundled in");
+
+        let backup_dir = settings_backups_dir(&addons_root).join("char-Bob-backup");
+        let meta = serde_json::from_slice::<CharBackupMeta>(
+            &fs::read(backup_dir.join(CHAR_BACKUP_META)).expect("read metadata"),
+        )
+        .expect("parse metadata");
+        assert_eq!(meta.worlds_spanned, 2);
+        assert!(character_backup_status_message("Bob", 1, worlds_spanned)
+            .contains("2 megaservers were bundled in"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -21453,6 +21851,7 @@ CombatMetrics_SavedVariables = {
                 version: CHAR_BACKUP_VERSION,
                 character: "Bob".to_string(),
                 server: "NA Megaserver".to_string(),
+                worlds_spanned: 1,
             })
             .expect("serialize meta"),
         )

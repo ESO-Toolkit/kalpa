@@ -131,6 +131,29 @@ function dedupeDependencies(pending: PendingDependency[]): PendingDependency[] {
  * repeated arrivals that merge into one batch during a long Update All. */
 const MAX_QUEUED_DEPENDENCIES = 200;
 
+/** The folders scheduled by one removal action. A batch removal shares a single
+ * timer and one `batch_remove_addons` call, so cancelling one member must drop
+ * only that member from the set — clearing the shared timer outright would
+ * strand every other folder in the batch with a dead timer. */
+interface PendingRemovalGroup {
+  timer: ReturnType<typeof setTimeout>;
+  folderNames: Set<string>;
+}
+
+/** One optimistically-hidden addon awaiting its undo window. The AddOns folder
+ * travels WITH the entry: the timer (or the close-time flush) can fire after the
+ * user switched game instances, and the backend authorizes exactly one folder at
+ * a time, so a removal must name the folder it was queued against rather than
+ * whichever is live when it runs — otherwise it deletes a same-named addon in the
+ * instance the user moved to. The update row rides along so undo and
+ * failure-restore put the "Update available" state back too. */
+interface PendingRemoval {
+  addon: AddonManifest;
+  updateResult: UpdateCheckResult | null;
+  addonsPath: string;
+  group: PendingRemovalGroup;
+}
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -447,8 +470,9 @@ function App() {
   const checkForUpdates = useCallback(
     async (path: string, autoUpdate = false, notifyOnError = false) => {
       const seq = ++checkSeqRef.current;
-      setUpdatingAll(false);
-      setUpdateProgress(null);
+      // Deliberately does NOT clear updatingAll/updateProgress: those belong to
+      // the batch path that set them, and a refresh landing mid-Update-All would
+      // otherwise hide the progress UI and unlatch the batch re-entry guard.
       setCheckingUpdates(true);
       try {
         const results = await invokeOrThrow<UpdateCheckResult[]>("check_for_updates", {
@@ -483,8 +507,6 @@ function App() {
         }
 
         const updates = results.filter((result) => result.hasUpdate);
-
-        void invokeResult("update_tray_tooltip", { updateCount: updates.length });
 
         if (updates.length > 0) {
           srAnnounce(`${updates.length} update${updates.length !== 1 ? "s" : ""} available`);
@@ -629,7 +651,11 @@ function App() {
       try {
         instances = await invokeOrThrow<GameInstance[]>("detect_game_instances");
       } catch (detectError) {
-        setError(`Could not detect game folders: ${getTauriErrorMessage(detectError)}`);
+        const message = `Could not detect game folders: ${getTauriErrorMessage(detectError)}`;
+        setError(message);
+        // The wizard tree does not mount StatusBanners, so `error` alone is
+        // invisible during first-run onboarding — toast it as well.
+        toast.error(message);
         setSetupInstances([]);
         setLoading(false);
         return;
@@ -674,6 +700,10 @@ function App() {
     const handler = (event: KeyboardEvent) => {
       if (event.isComposing) return;
 
+      // `event.key` reflects Caps Lock and Shift, so a latched Caps Lock would
+      // deliver "R" and silently disable every letter shortcut.
+      const key = event.key.toLowerCase();
+
       if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey) {
         const active = document.activeElement;
         if (
@@ -688,20 +718,20 @@ function App() {
         setActiveDialog("shortcuts");
       }
 
-      if (isModKey(event) && event.key === "r") {
+      if (isModKey(event) && key === "r") {
         event.preventDefault();
         if (addonsPathRef.current && !updatingAllRef.current) {
           void scanAndCheck(addonsPathRef.current, true);
         }
       }
 
-      if (isModKey(event) && event.key === "i") {
+      if (isModKey(event) && key === "i") {
         event.preventDefault();
         setViewMode("discover");
         setDiscoverTab("url");
       }
 
-      if (isModKey(event) && event.key === "b") {
+      if (isModKey(event) && key === "b") {
         event.preventDefault();
         setViewMode("discover");
         setDiscoverTab("search");
@@ -768,10 +798,13 @@ function App() {
         await invokeOrThrow("set_addons_path", { addonsPath: path });
         // Critical setting: don't commit the UI to a path that didn't persist.
         if (!(await setSetting("addonsPath", path))) {
-          setError(
-            "Could not save the AddOns folder location — free up disk space or check antivirus, then try again."
-          );
+          const message =
+            "Could not save the AddOns folder location — free up disk space or check antivirus, then try again.";
+          setError(message);
           setErrorShowSettings(true);
+          // StatusBanners is not mounted while the wizard is up, so a toast is
+          // the only feedback the user gets here.
+          toast.error(message);
           return;
         }
         setAddonsPath(path);
@@ -784,16 +817,20 @@ function App() {
         await checkForUpdates(path, autoUpdate, false);
         void runAutoLink(path);
       } catch (pathError) {
-        const message = getTauriErrorMessage(pathError);
-        setError(`Could not set addons folder: ${message}`);
+        const message = `Could not set addons folder: ${getTauriErrorMessage(pathError)}`;
+        setError(message);
         setErrorShowSettings(true);
+        toast.error(message);
       }
     },
     [checkForUpdates, refreshUploaderIntroDetection, runAutoLink, scanAddons]
   );
 
   const handleRefresh = useCallback(() => {
-    if (addonsPathRef.current) {
+    // Same guard the Ctrl+R path already has: a rescan mid-Update-All reads the
+    // folder while the batch is still extracting into it, and replaces `addons`
+    // wholesale — resurrecting rows the batch or an undo window had hidden.
+    if (addonsPathRef.current && !updatingAllRef.current) {
       void scanAndCheck(addonsPathRef.current, true);
     }
   }, [scanAndCheck]);
@@ -1008,6 +1045,10 @@ function App() {
         const result = await invokeOrThrow<InstallResult>("update_addon", {
           addonsPath,
           esouiId: ur.esouiId,
+          // Record the version the update CHECK compared against (the filelist
+          // string), not the one the filedetails endpoint reports. When the two
+          // sources disagree the addon otherwise stays permanently "outdated".
+          apiVersion: ur.remoteVersion,
           dependencyPolicy: await getDependencyPolicy(),
         });
         toast.success(`Updated ${folderName}`);
@@ -1031,20 +1072,62 @@ function App() {
     ]
   );
 
-  const pendingRemovalsRef = useRef<
-    Map<string, { timer: ReturnType<typeof setTimeout>; addon: AddonManifest }>
-  >(new Map());
+  const pendingRemovalsRef = useRef<Map<string, PendingRemoval>>(new Map());
 
-  const flushPendingRemovals = useCallback(() => {
-    for (const [folderName, { timer }] of pendingRemovalsRef.current) {
-      clearTimeout(timer);
-      void invokeOrThrow("remove_addon", { addonsPath, folderName }).catch(console.error);
+  // Take one folder out of the removal queue, cancelling its group's timer only
+  // once the last member has left. Clearing the timer per-entry would kill a
+  // shared batch timer and strand the batch's other folders — queued forever
+  // with a dead timer, then silently deleted by the close-time flush.
+  const dropPendingRemoval = useCallback((folderName: string): PendingRemoval | null => {
+    const entry = pendingRemovalsRef.current.get(folderName);
+    if (!entry) return null;
+    pendingRemovalsRef.current.delete(folderName);
+    entry.group.folderNames.delete(folderName);
+    if (entry.group.folderNames.size === 0) clearTimeout(entry.group.timer);
+    return entry;
+  }, []);
+
+  // Put an optimistically-hidden addon back, update row included, so a restored
+  // addon keeps its Update badge, banner count and "Outdated" filter membership.
+  const restorePendingRemoval = useCallback((entry: PendingRemoval) => {
+    const { addon, updateResult } = entry;
+    setAddons((prev) =>
+      prev.some((a) => a.folderName === addon.folderName) ? prev : [...prev, addon]
+    );
+    if (updateResult) {
+      setUpdateResults((prev) =>
+        prev.some((r) => r.folderName === addon.folderName) ? prev : [...prev, updateResult]
+      );
     }
-    pendingRemovalsRef.current.clear();
-  }, [addonsPath]);
+  }, []);
+
+  // Commit everything still inside its undo window. Each entry names the folder
+  // it was queued against, so a removal queued before an instance switch runs
+  // against the old folder (where the backend rejects it) instead of deleting
+  // the same-named addon in the instance the user moved to.
+  const flushPendingRemovals = useCallback(async () => {
+    const entries = [...pendingRemovalsRef.current.keys()]
+      .map((folderName) => dropPendingRemoval(folderName))
+      .filter((entry): entry is PendingRemoval => entry !== null);
+    await Promise.all(
+      entries.map(async (entry) => {
+        const result = await invokeResult("remove_addon", {
+          addonsPath: entry.addonsPath,
+          folderName: entry.addon.folderName,
+        });
+        if (result.ok) return;
+        toast.error(`Remove failed: ${result.error}`);
+        // Only restore into the view the addon belongs to — after an instance
+        // switch the row would reappear in a folder that never had it.
+        if (sameAddonsFolder(entry.addonsPath, addonsPathRef.current)) {
+          restorePendingRemoval(entry);
+        }
+      })
+    );
+  }, [dropPendingRemoval, restorePendingRemoval, sameAddonsFolder]);
 
   useEffect(() => {
-    const handler = () => flushPendingRemovals();
+    const handler = () => void flushPendingRemovals();
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [flushPendingRemovals]);
@@ -1053,6 +1136,8 @@ function App() {
     (folderName: string) => {
       const addon = addons.find((a) => a.folderName === folderName);
       if (!addon) return;
+      const updateResult = updateResults.find((r) => r.folderName === folderName) ?? null;
+      const queuedPath = addonsPath;
 
       // Optimistically hide from UI
       setAddons((prev) => prev.filter((a) => a.folderName !== folderName));
@@ -1067,29 +1152,36 @@ function App() {
         setSelectedAddon(null);
       }
 
-      // Cancel any existing pending removal for this addon
-      const existing = pendingRemovalsRef.current.get(folderName);
-      if (existing) clearTimeout(existing.timer);
+      // Cancel any existing pending removal for this addon. Dropping the entry
+      // rather than clearing its timer keeps a shared batch timer alive for the
+      // folders still queued behind it.
+      dropPendingRemoval(folderName);
 
+      const groupFolders = new Set([folderName]);
       const timer = setTimeout(() => {
-        pendingRemovalsRef.current.delete(folderName);
-        void invokeOrThrow("remove_addon", { addonsPath, folderName }).catch((e) => {
+        const entry = dropPendingRemoval(folderName);
+        void invokeOrThrow("remove_addon", { addonsPath: queuedPath, folderName }).catch((e) => {
           toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
-          setAddons((prev) => [...prev, addon]);
+          if (entry && sameAddonsFolder(queuedPath, addonsPathRef.current)) {
+            restorePendingRemoval(entry);
+          }
         });
       }, 3000);
 
-      pendingRemovalsRef.current.set(folderName, { timer, addon });
+      pendingRemovalsRef.current.set(folderName, {
+        addon,
+        updateResult,
+        addonsPath: queuedPath,
+        group: { timer, folderNames: groupFolders },
+      });
 
       toast(`Removed ${addon.title}`, {
         action: {
           label: "Undo",
           onClick: () => {
-            const pending = pendingRemovalsRef.current.get(folderName);
-            if (pending) {
-              clearTimeout(pending.timer);
-              pendingRemovalsRef.current.delete(folderName);
-              setAddons((prev) => [...prev, addon]);
+            const entry = dropPendingRemoval(folderName);
+            if (entry) {
+              restorePendingRemoval(entry);
               toast.success(`Restored ${addon.title}`);
             }
           },
@@ -1098,7 +1190,15 @@ function App() {
       });
       srAnnounce(`Removed ${addon.title}. Press undo to restore.`);
     },
-    [addons, addonsPath, srAnnounce]
+    [
+      addons,
+      addonsPath,
+      updateResults,
+      srAnnounce,
+      dropPendingRemoval,
+      restorePendingRemoval,
+      sameAddonsFolder,
+    ]
   );
 
   const handleRemoveByEsouiId = useCallback(
@@ -1116,6 +1216,13 @@ function App() {
       if (!nextPath) return;
 
       const switchingFolder = !sameAddonsFolder(nextPath, addonsPathRef.current);
+
+      // Settle queued removals while the backend still authorizes the folder
+      // they were queued against. Left running, their timers would fire against
+      // a folder the backend no longer accepts — the removal never happens and
+      // the failure handler re-inserts the old folder's addon into the new
+      // instance's freshly scanned list.
+      if (switchingFolder) await flushPendingRemovals();
 
       try {
         await invokeOrThrow("set_addons_path", { addonsPath: nextPath });
@@ -1175,7 +1282,7 @@ function App() {
         setErrorShowSettings(true);
       }
     },
-    [refreshUploaderIntroDetection, scanAndCheck, sameAddonsFolder]
+    [flushPendingRemovals, refreshUploaderIntroDetection, scanAndCheck, sameAddonsFolder]
   );
 
   const handleSortChange = useCallback((mode: SortMode) => {
@@ -1195,6 +1302,14 @@ function App() {
       updatesSet: new Set(available.map((result) => result.folderName)),
     };
   }, [updateResults]);
+
+  // The single place the tray tooltip is written. Every path that changes the
+  // update set — full check, batch, single update, removal, undo, conflict
+  // resolution — lands in `updateResults`, so deriving the count here is the
+  // only way the tray and the banner cannot disagree.
+  useEffect(() => {
+    void invokeResult("update_tray_tooltip", { updateCount: updatesAvailable.length });
+  }, [updatesAvailable.length]);
 
   const installedEsouiIds = useMemo(() => {
     const ids = new Set<number>();
@@ -1424,14 +1539,7 @@ function App() {
 
       if (completed.length > 0) {
         const succeededNames = new Set(completed);
-        setUpdateResults((prev) => {
-          const remaining = prev.filter((result) => !succeededNames.has(result.folderName));
-          const remainingUpdates = remaining.filter((r) => r.hasUpdate).length;
-          void invokeResult("update_tray_tooltip", {
-            updateCount: remainingUpdates,
-          });
-          return remaining;
-        });
+        setUpdateResults((prev) => prev.filter((result) => !succeededNames.has(result.folderName)));
 
         void (async () => {
           try {
@@ -1500,10 +1608,16 @@ function App() {
     if (selectedFolders.size === 0) return;
 
     const removedAddons = addons.filter((a) => selectedFolders.has(a.folderName));
-    const folderNames = Array.from(selectedFolders);
+    const folderNames = removedAddons.map((a) => a.folderName);
     const count = removedAddons.length;
+    const queuedPath = addonsPath;
 
     const removedSet = new Set(folderNames);
+    const removedUpdates = new Map(
+      updateResults
+        .filter((r) => removedSet.has(r.folderName))
+        .map((r) => [r.folderName, r] as const)
+    );
 
     // Optimistically hide from all relevant state
     setAddons((prev) => prev.filter((a) => !removedSet.has(a.folderName)));
@@ -1513,53 +1627,76 @@ function App() {
     }
     setSelectedFolders(new Set());
 
-    for (const addon of removedAddons) {
-      const existing = pendingRemovalsRef.current.get(addon.folderName);
-      if (existing) clearTimeout(existing.timer);
-    }
+    for (const folderName of folderNames) dropPendingRemoval(folderName);
 
+    const groupFolders = new Set(folderNames);
     const timer = setTimeout(() => {
-      for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
+      // Only the members still queued: a folder re-removed or undone in the
+      // meantime has already left the group and must not be removed twice.
+      const entries = [...groupFolders]
+        .map((folderName) => dropPendingRemoval(folderName))
+        .filter((entry): entry is PendingRemoval => entry !== null);
+      if (entries.length === 0) return;
       void invokeOrThrow<BatchRemoveResult>("batch_remove_addons", {
-        addonsPath,
-        folderNames,
+        addonsPath: queuedPath,
+        folderNames: entries.map((entry) => entry.addon.folderName),
       })
         .then((result) => {
           if (result.failed.length > 0) {
             // Restore only the addons that failed to remove
             const failedSet = new Set(result.failed);
-            const failedAddons = removedAddons.filter((a) => failedSet.has(a.folderName));
-            setAddons((prev) => [...prev, ...failedAddons]);
             const details = result.failed
               .map((name) => `${name}: ${result.errors[name] ?? "unknown error"}`)
               .join("; ");
             toast.error(`Failed to remove ${result.failed.length} addon(s): ${details}`);
+            if (!sameAddonsFolder(queuedPath, addonsPathRef.current)) return;
+            for (const entry of entries) {
+              if (failedSet.has(entry.addon.folderName)) restorePendingRemoval(entry);
+            }
           }
         })
         .catch((e) => {
           toast.error(`Batch remove failed: ${getTauriErrorMessage(e)}`);
-          setAddons((prev) => [...prev, ...removedAddons]);
+          if (!sameAddonsFolder(queuedPath, addonsPathRef.current)) return;
+          for (const entry of entries) restorePendingRemoval(entry);
         });
     }, 3000);
 
+    const group: PendingRemovalGroup = { timer, folderNames: groupFolders };
     for (const addon of removedAddons) {
-      pendingRemovalsRef.current.set(addon.folderName, { timer, addon });
+      pendingRemovalsRef.current.set(addon.folderName, {
+        addon,
+        updateResult: removedUpdates.get(addon.folderName) ?? null,
+        addonsPath: queuedPath,
+        group,
+      });
     }
 
     toast(`Removed ${count} addon${count !== 1 ? "s" : ""}`, {
       action: {
         label: "Undo",
         onClick: () => {
-          clearTimeout(timer);
-          for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
-          setAddons((prev) => [...prev, ...removedAddons]);
-          toast.success(`Restored ${count} addon${count !== 1 ? "s" : ""}`);
+          const restored = folderNames
+            .map((folderName) => dropPendingRemoval(folderName))
+            .filter((entry): entry is PendingRemoval => entry !== null);
+          if (restored.length === 0) return;
+          for (const entry of restored) restorePendingRemoval(entry);
+          toast.success(`Restored ${restored.length} addon${restored.length !== 1 ? "s" : ""}`);
         },
       },
       duration: 3000,
     });
     srAnnounce(`Removed ${count} addon${count !== 1 ? "s" : ""}. Press undo to restore.`);
-  }, [addons, addonsPath, selectedFolders, srAnnounce]);
+  }, [
+    addons,
+    addonsPath,
+    selectedFolders,
+    updateResults,
+    srAnnounce,
+    dropPendingRemoval,
+    restorePendingRemoval,
+    sameAddonsFolder,
+  ]);
 
   const handleBatchUpdate = useCallback(async () => {
     const toUpdate = updatesAvailable.filter((update) => selectedFolders.has(update.folderName));
@@ -1780,10 +1917,6 @@ function App() {
     (folderName: string) => void handleOpenFolder(folderName),
     [handleOpenFolder]
   );
-  const handleDetailRemove = useCallback(() => {
-    setSelectedAddon(null);
-    handleRefresh();
-  }, [handleRefresh]);
   const handleConflictResolved = useCallback(
     (folderName: string) => {
       setPendingConflicts((prev) => {
@@ -2129,7 +2262,7 @@ function App() {
                   addon={selectedAddon}
                   installedAddons={addons}
                   addonsPath={addonsPath}
-                  onRemove={handleDetailRemove}
+                  onRefresh={handleRefresh}
                   onRemoveAddon={handleSingleRemove}
                   onToggleDisable={handleToggleDisable}
                   updateResult={selectedUpdateResult}

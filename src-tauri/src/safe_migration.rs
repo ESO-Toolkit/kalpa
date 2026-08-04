@@ -19,7 +19,21 @@ pub struct SnapshotManifest {
     pub file_count: u32,
     pub total_size: u64,
     pub archive_sha256: String,
+    /// How many files could not be opened (locked by the game, an AV scan, or a
+    /// cloud-sync client) and are therefore ABSENT from the archive. `file_count`
+    /// only counts what was included, so without this a rollback silently misses
+    /// files while reporting full success.
+    #[serde(default)]
+    pub skipped_count: u32,
+    /// Up to [`MAX_RECORDED_SKIPS`] of the skipped paths. Bounded because a
+    /// tree-wide read failure would otherwise bloat the snapshot store, which is
+    /// rewritten in full on every snapshot.
+    #[serde(default)]
+    pub skipped_files: Vec<String>,
 }
+
+/// Cap on the number of skipped paths recorded per snapshot manifest.
+const MAX_RECORDED_SKIPS: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,10 +231,16 @@ impl KnownProcess {
 
 #[cfg(target_os = "windows")]
 fn is_process_running(process: KnownProcess) -> bool {
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    // Release builds are GUI-subsystem, so a console child spawned without
+    // CREATE_NO_WINDOW pops a visible console window — here up to four times in a
+    // row when the migration wizard checks its preconditions.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let name = process.name();
     Command::new("tasklist")
         .args(["/FI", &format!("IMAGENAME eq {name}"), "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map(|o| {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -263,7 +283,7 @@ fn create_zip_snapshot(
         .map_err(|e| format!("Failed to create snapshot archive: {e}"))?;
 
     // Use a closure so we can clean up tmp_path on any failure
-    let build_zip = || -> Result<(Vec<String>, u32, u64), String> {
+    let build_zip = || -> Result<(Vec<String>, u32, u64, Vec<String>), String> {
         let mut zip = zip::ZipWriter::new(file);
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -273,11 +293,12 @@ fn create_zip_snapshot(
         let mut file_count: u32 = 0;
         let mut total_size: u64 = 0;
         let mut source_paths: Vec<String> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
 
         // AddOns folder
         if include_addons {
             source_paths.push("AddOns".to_string());
-            let result = add_dir_to_zip(&mut zip, addons_dir, "AddOns", &options)?;
+            let result = add_dir_to_zip(&mut zip, addons_dir, "AddOns", &options, &mut skipped)?;
             file_count += result.0;
             total_size += result.1;
         }
@@ -287,7 +308,8 @@ fn create_zip_snapshot(
             let sv_dir = parent.join("SavedVariables");
             if sv_dir.is_dir() {
                 source_paths.push("SavedVariables".to_string());
-                let result = add_dir_to_zip(&mut zip, &sv_dir, "SavedVariables", &options)?;
+                let result =
+                    add_dir_to_zip(&mut zip, &sv_dir, "SavedVariables", &options, &mut skipped)?;
                 file_count += result.0;
                 total_size += result.1;
             }
@@ -311,13 +333,21 @@ fn create_zip_snapshot(
             }
         }
 
-        zip.finish()
+        // Take the archive file back from the writer and fsync it. These snapshots
+        // guard destructive operations that start immediately afterwards, so the
+        // rename must not be able to land ahead of the archive's data blocks — a
+        // power loss would otherwise leave a zero-length "safety net" whose
+        // recorded SHA-256 was computed from page cache.
+        let out = zip
+            .finish()
             .map_err(|e| format!("Failed to finalize snapshot archive: {e}"))?;
+        out.sync_all()
+            .map_err(|e| format!("Failed to flush snapshot archive to disk: {e}"))?;
 
-        Ok((source_paths, file_count, total_size))
+        Ok((source_paths, file_count, total_size, skipped))
     };
 
-    let (source_paths, file_count, total_size) = match build_zip() {
+    let (source_paths, file_count, total_size, skipped) = match build_zip() {
         Ok(result) => result,
         Err(e) => {
             // Clean up the .tmp file on failure
@@ -340,6 +370,9 @@ fn create_zip_snapshot(
         .map_err(|e| format!("Failed to finalize snapshot: {e}"))?;
 
     // Record in snapshot store
+    let skipped_count = skipped.len() as u32;
+    let mut skipped_files = skipped;
+    skipped_files.truncate(MAX_RECORDED_SKIPS);
     let manifest = SnapshotManifest {
         id,
         label: label.to_string(),
@@ -348,6 +381,8 @@ fn create_zip_snapshot(
         file_count,
         total_size,
         archive_sha256: sha256,
+        skipped_count,
+        skipped_files,
     };
     {
         let _guard = SNAPSHOT_STORE_LOCK
@@ -362,11 +397,16 @@ fn create_zip_snapshot(
 }
 
 /// Recursively add a directory to a ZIP archive.
+///
+/// Files that cannot be opened are skipped and their archive-relative paths are
+/// pushed onto `skipped`; the caller records them so a snapshot whose contents
+/// are incomplete never presents itself as a complete rollback point.
 fn add_dir_to_zip(
     zip: &mut zip::ZipWriter<fs::File>,
     dir: &Path,
     prefix: &str,
     options: &SimpleFileOptions,
+    skipped: &mut Vec<String>,
 ) -> Result<(u32, u64), String> {
     let mut file_count: u32 = 0;
     let mut total_size: u64 = 0;
@@ -400,7 +440,13 @@ fn add_dir_to_zip(
                 // into memory — SavedVariables can be hundreds of MB per file.
                 let mut reader = match fs::File::open(&path) {
                     Ok(f) => f,
-                    Err(_) => continue, // Skip unreadable files (e.g. locked by another process)
+                    Err(_) => {
+                        // Unreadable (locked by another process, permission denied).
+                        // Record it — an unrecorded omission makes a partial
+                        // snapshot indistinguishable from a complete one.
+                        skipped.push(zip_path);
+                        continue;
+                    }
                 };
                 zip.start_file(&zip_path, *options)
                     .map_err(|e| format!("Failed to add '{zip_path}' to archive: {e}"))?;
@@ -413,6 +459,19 @@ fn add_dir_to_zip(
     }
 
     Ok((file_count, total_size))
+}
+
+/// Op-log suffix naming the files a snapshot could not include. Empty when the
+/// snapshot is complete, so the common case reads exactly as before.
+fn skipped_detail(manifest: &SnapshotManifest) -> String {
+    if manifest.skipped_count == 0 {
+        return String::new();
+    }
+    format!(
+        ", {} unreadable file(s) SKIPPED and absent from the archive: {}",
+        manifest.skipped_count,
+        manifest.skipped_files.join(", ")
+    )
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -491,8 +550,11 @@ pub fn create_pre_migration_snapshot(
             files_created: vec![format!("{}.zip", manifest.id)],
             files_modified: vec![],
             details: format!(
-                "Snapshot {} files, {} bytes, SHA-256: {}",
-                manifest.file_count, manifest.total_size, manifest.archive_sha256
+                "Snapshot {} files, {} bytes, SHA-256: {}{}",
+                manifest.file_count,
+                manifest.total_size,
+                manifest.archive_sha256,
+                skipped_detail(&manifest)
             ),
         },
     );
@@ -683,8 +745,11 @@ pub fn create_pre_operation_snapshot(
             files_created: vec![format!("{}.zip", manifest.id)],
             files_modified: vec![],
             details: format!(
-                "Pre-operation snapshot: {} files, {} bytes, SHA-256: {}",
-                manifest.file_count, manifest.total_size, manifest.archive_sha256
+                "Pre-operation snapshot: {} files, {} bytes, SHA-256: {}{}",
+                manifest.file_count,
+                manifest.total_size,
+                manifest.archive_sha256,
+                skipped_detail(&manifest)
             ),
         },
     );
@@ -905,17 +970,31 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
                     files_modified: vec![],
                     details: format!(
                         "Restore from snapshot {snapshot_id} failed: {e}. Automatic rollback to \
-                         Pre-restore snapshot {}: {}",
+                         Pre-restore snapshot {}: {}{}",
                         pre_restore_manifest.id,
                         match &rollback_result {
                             Ok(n) => format!("succeeded ({n} files restored)"),
                             Err(rollback_err) => format!("failed ({rollback_err})"),
-                        }
+                        },
+                        skipped_detail(&pre_restore_manifest)
                     ),
                 },
             );
 
             return if rollback_ok {
+                // A Pre-restore snapshot that skipped files cannot roll everything
+                // back, so never report unqualified success for one.
+                if pre_restore_manifest.skipped_count > 0 {
+                    return Err(format!(
+                        "Restore failed ({e}). Rollback ran from snapshot {} (\"{}\"), but that \
+                         safety snapshot could not read {} file(s), so they were NOT rolled back: \
+                         {}.",
+                        pre_restore_manifest.id,
+                        pre_restore_manifest.label,
+                        pre_restore_manifest.skipped_count,
+                        pre_restore_manifest.skipped_files.join(", ")
+                    ));
+                }
                 Err(format!(
                     "Restore failed ({e}). Your pre-restore state was automatically restored \
                      from snapshot {} (\"{}\").",
@@ -942,7 +1021,11 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             snapshot_id: Some(snapshot_id.to_string()),
             files_created: vec![],
             files_modified: vec![format!("{} files restored", restored)],
-            details: format!("Restored {restored} files from snapshot {snapshot_id}"),
+            details: format!(
+                "Restored {restored} files from snapshot {snapshot_id}. Pre-restore snapshot {}{}",
+                pre_restore_manifest.id,
+                skipped_detail(&pre_restore_manifest)
+            ),
         },
     );
 
@@ -1076,6 +1159,8 @@ mod tests {
             file_count: 5,
             total_size: 1024,
             archive_sha256: "abc123".to_string(),
+            skipped_count: 0,
+            skipped_files: Vec::new(),
         });
 
         save_snapshot_store(&addons_dir, &store).unwrap();

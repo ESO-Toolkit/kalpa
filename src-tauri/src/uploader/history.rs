@@ -4,13 +4,14 @@
 //! the same atomic-write-with-backup helper the metadata store uses
 //! (`metadata::save_json_with_backup`) so a crash mid-write can't corrupt it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use super::native::orphans::LiveOrphan;
 use super::types::{KalpaBuildEvidence, ReportRef, UploadRecord, UploadStatus};
 use crate::metadata::{load_json_with_backup, save_json_with_backup};
 
@@ -33,9 +34,30 @@ pub fn next_record_id(now_ms: u64, label: &str) -> String {
     format!("{now_ms}-{n}-{label}")
 }
 
+/// The on-disk shape, deserialized ELEMENT-BY-ELEMENT as raw JSON.
+///
+/// Typing this as `Vec<UploadRecord>` made the load all-or-nothing: serde fails a whole
+/// array on one bad element, so a single record carrying an enum variant a NEWER build
+/// wrote (a realistic beta-channel downgrade) made every source — primary, `.tmp`, `.bak`
+/// — parse as "no history", and the next mutation persisted that emptiness permanently.
 #[derive(Debug, Default, Serialize, Deserialize)]
+struct RawHistoryFile {
+    #[serde(default)]
+    records: Vec<serde_json::Value>,
+}
+
+/// The loaded history: the records this build understands, plus any element it does not.
 struct HistoryFile {
     records: Vec<UploadRecord>,
+    /// Elements that failed to deserialize into [`UploadRecord`]. Carried through every
+    /// save VERBATIM so a build that cannot read a record never destroys it.
+    unparsed: Vec<serde_json::Value>,
+    /// True when the file on disk exists and holds content this build could not parse as
+    /// a history document at all (malformed JSON, not merely unknown fields) and nothing
+    /// was recovered from `.tmp`/`.bak`. Every mutation then REFUSES to persist: writing
+    /// would replace the damaged-but-present file with an empty one, and the report links
+    /// it holds are the only record of those uploads.
+    degraded: bool,
 }
 
 fn history_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -47,12 +69,91 @@ fn history_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("upload-history.json"))
 }
 
+/// Read the history file, tolerating individual records this build cannot deserialize.
+fn load_file(path: &Path) -> HistoryFile {
+    let raw: RawHistoryFile = load_json_with_backup(path);
+    let mut file = split_records(raw);
+    if file.records.is_empty() && file.unparsed.is_empty() {
+        file.degraded = primary_is_unreadable(path);
+    }
+    file
+}
+
+/// The pure half of [`load_file`]: partition raw elements into typed records and
+/// pass-through values, preserving order within each group.
+fn split_records(raw: RawHistoryFile) -> HistoryFile {
+    let mut records = Vec::with_capacity(raw.records.len());
+    let mut unparsed = Vec::new();
+    for value in raw.records {
+        match UploadRecord::deserialize(&value) {
+            Ok(record) => records.push(record),
+            Err(_) => unparsed.push(value),
+        }
+    }
+    HistoryFile {
+        records,
+        unparsed,
+        degraded: false,
+    }
+}
+
+/// Whether the primary file has content that is not a readable history document. Used
+/// only to distinguish "genuinely no history yet" from "the file is damaged".
+fn primary_is_unreadable(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(content) if !content.trim().is_empty() => {
+            serde_json::from_str::<RawHistoryFile>(&content).is_err()
+        }
+        _ => false,
+    }
+}
+
+/// Persist the file, re-emitting unparseable elements untouched after the typed records.
+fn save_file(path: &Path, file: &HistoryFile) -> Result<(), String> {
+    if file.degraded {
+        return Err("Upload history is unreadable; refusing to overwrite it.".into());
+    }
+    let mut records = Vec::with_capacity(file.records.len() + file.unparsed.len());
+    for record in &file.records {
+        records.push(
+            serde_json::to_value(persistable(record).as_ref())
+                .map_err(|e| format!("Failed to serialize history: {e}"))?,
+        );
+    }
+    records.extend(file.unparsed.iter().cloned());
+    save_json_with_backup(path, &RawHistoryFile { records })
+}
+
+/// The record as it is STORED: the same row minus the heavy raw companion snapshots.
+///
+/// `MAX_RECORDS` caps the record COUNT but not the bytes, and a native record's build
+/// evidence embeds up to `companion::MAX_SNAPSHOTS` raw Lua tables (several KB each).
+/// Every one of the nine mutation entry points rewrites the WHOLE file, and a native live
+/// session performs several per session, so keeping them would grow a "within cap" history
+/// into tens of MB rewritten per pause/resume. The snapshots are only ever consumed by the
+/// analysis link built right after the upload (which reads the live `UploadDispatch`), so
+/// the persisted row keeps the player evidence and drops the snapshots.
+fn persistable(record: &UploadRecord) -> std::borrow::Cow<'_, UploadRecord> {
+    if record
+        .build_evidence
+        .as_ref()
+        .is_none_or(|e| e.companion.is_none())
+    {
+        return std::borrow::Cow::Borrowed(record);
+    }
+    let mut trimmed = record.clone();
+    if let Some(evidence) = trimmed.build_evidence.as_mut() {
+        evidence.companion = None;
+    }
+    std::borrow::Cow::Owned(trimmed)
+}
+
 /// Load all records, newest first.
 pub fn load(app: &tauri::AppHandle) -> Vec<UploadRecord> {
     let Ok(path) = history_path(app) else {
         return Vec::new();
     };
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     file.records
         .sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
     file.records
@@ -86,16 +187,34 @@ pub fn reconcile_stale(app: &tauri::AppHandle) {
     let Ok(path) = history_path(app) else {
         return;
     };
+    // The crash-recovery breadcrumbs are the ONLY place a killed native upload's report
+    // code survives (orphan recovery terminates the draft and clears the breadcrumb
+    // without ever touching history), so read them before settling.
+    let orphans = super::native::orphans::load(app);
     let Ok(_guard) = MUTATION_LOCK.lock() else {
         return;
     };
-    let mut file: HistoryFile = load_json_with_backup(&path);
-    if apply_reconcile_stale(&mut file.records) {
-        let _ = save_json_with_backup(&path, &file);
+    let mut file = load_file(&path);
+    if apply_reconcile_stale(&mut file.records, &orphans) {
+        let _ = save_file(&path, &file);
     }
 }
 
-fn apply_reconcile_stale(records: &mut [UploadRecord]) -> bool {
+/// The report a stale NATIVE record can adopt: the newest breadcrumb recorded for the
+/// same source log. Matching on the path (not the code, which history never saw) is what
+/// lets a crashed direct upload keep the link to the partial report it really created.
+fn orphan_report_for(orphans: &[LiveOrphan], record: &UploadRecord) -> Option<ReportRef> {
+    orphans
+        .iter()
+        .filter(|o| o.source_path == record.source_path)
+        .max_by_key(|o| o.created_at_ms)
+        .map(|o| ReportRef {
+            code: o.code.clone(),
+            url: super::watcher::report_url(&o.code),
+        })
+}
+
+fn apply_reconcile_stale(records: &mut [UploadRecord], orphans: &[LiveOrphan]) -> bool {
     let mut changed = false;
     for r in records {
         match r.status {
@@ -117,6 +236,24 @@ fn apply_reconcile_stale(records: &mut [UploadRecord]) -> bool {
                 r.status = UploadStatus::Failed;
                 r.error.get_or_insert_with(|| {
                     "Kalpa closed before this native live report finished; the report may be \
+                     incomplete."
+                        .to_string()
+                });
+                changed = true;
+            }
+            // A leftover NATIVE record (live before create-report returned, or a manual
+            // direct upload) was never handed to the official uploader and nothing is
+            // still streaming it — `HandedOff` would claim a handoff that never happened
+            // and offer a paste-link affordance for an upload Kalpa itself owned. Settle
+            // it `Failed`, adopting the crash breadcrumb's report code when one exists so
+            // a real (partial) report on the user's account isn't left untraceable.
+            UploadStatus::Live | UploadStatus::Uploading if r.native => {
+                r.status = UploadStatus::Failed;
+                if r.report.is_none() {
+                    r.report = orphan_report_for(orphans, r);
+                }
+                r.error.get_or_insert_with(|| {
+                    "Kalpa closed before this direct upload finished; the report may be \
                      incomplete."
                         .to_string()
                 });
@@ -148,7 +285,7 @@ fn apply_reconcile_stale(records: &mut [UploadRecord]) -> bool {
 pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
 
     if let Some(existing) = file.records.iter_mut().find(|r| r.id == record.id) {
         *existing = record;
@@ -161,7 +298,7 @@ pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String
         .sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
     file.records.truncate(MAX_RECORDS);
 
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 /// Settle the live record for a session when the user stops live mode.
@@ -180,11 +317,11 @@ pub fn settle_live(
 ) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_settle_live(&mut file.records, session_id, fight_count) {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 /// The pure settling rule [`settle_live`] applies, factored out so it can be
@@ -222,11 +359,11 @@ fn apply_settle_live(records: &mut [UploadRecord], session_id: &str, fight_count
 pub fn settle_started(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_settle_started(&mut file.records, id) {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 fn apply_settle_started(records: &mut [UploadRecord], id: &str) -> bool {
@@ -240,7 +377,37 @@ fn apply_settle_started(records: &mut [UploadRecord], id: &str) -> bool {
     changed
 }
 
-/// Persist the native live report code as soon as create-report returns. This closes
+/// Settle a still-transient MANUAL upload record as failed, by exact id, PRESERVING the
+/// report link the upload may already have attached.
+///
+/// The caller holds only the pre-upload snapshot of the record, so settling through
+/// [`upsert`] would write that stale copy back and erase the code
+/// [`attach_live_report`] persisted the instant `create-report` returned — leaving a real
+/// (partial) report on the user's account with no trace anywhere, and inviting a
+/// duplicate retry. Mirrors [`settle_native_live`]'s "keep the link, mark it failed" rule.
+pub fn settle_failed(app: &tauri::AppHandle, id: &str, error: &str) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file = load_file(&path);
+    if !apply_settle_failed(&mut file.records, id, error) {
+        return Ok(());
+    }
+    save_file(&path, &file)
+}
+
+fn apply_settle_failed(records: &mut [UploadRecord], id: &str, error: &str) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id && matches!(r.status, UploadStatus::Queued | UploadStatus::Uploading) {
+            r.status = UploadStatus::Failed;
+            r.error = Some(error.to_string());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Persist the native report code as soon as create-report returns. This closes
 /// the crash window between report creation and normal driver settlement: on next
 /// launch, history reconciliation can preserve the link and mark the native report
 /// incomplete instead of losing the code and showing a generic handoff.
@@ -251,17 +418,25 @@ pub fn attach_live_report(
 ) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_attach_live_report(&mut file.records, id, report) {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
+/// `Uploading` is accepted alongside the live states so a MANUAL native upload can record
+/// its code the moment the report exists: without it, any failure after create-report
+/// discards the code and the user can never find the report that was really created.
 fn apply_attach_live_report(records: &mut [UploadRecord], id: &str, report: ReportRef) -> bool {
     let mut changed = false;
     for r in records {
-        if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Paused) {
+        if r.id == id
+            && matches!(
+                r.status,
+                UploadStatus::Live | UploadStatus::Paused | UploadStatus::Uploading
+            )
+        {
             r.report = Some(report.clone());
             changed = true;
         }
@@ -280,11 +455,11 @@ pub fn attach_build_evidence(
 ) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_attach_build_evidence(&mut file.records, id, build_evidence) {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 fn apply_attach_build_evidence(
@@ -314,11 +489,11 @@ fn apply_attach_build_evidence(
 pub fn attach_report(app: &tauri::AppHandle, id: &str, report: ReportRef) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_attach_report(&mut file.records, id, report) {
         return Err("Upload record not found.".into());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 /// The pure attach rule [`attach_report`] applies, factored out for unit testing.
@@ -350,11 +525,11 @@ fn apply_attach_report(records: &mut [UploadRecord], id: &str, report: ReportRef
 pub fn pause_native_live(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_pause_native_live(&mut file.records, id) {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 fn apply_pause_native_live(records: &mut [UploadRecord], id: &str) -> bool {
@@ -372,11 +547,11 @@ fn apply_pause_native_live(records: &mut [UploadRecord], id: &str) -> bool {
 pub fn resume_native_live(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     if !apply_resume_native_live(&mut file.records, id) {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 fn apply_resume_native_live(records: &mut [UploadRecord], id: &str) -> bool {
@@ -410,7 +585,7 @@ pub fn settle_native_live(
 ) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     let changed = apply_settle_native_live(
         &mut file.records,
         id,
@@ -425,7 +600,7 @@ pub fn settle_native_live(
     if !changed {
         return Ok(());
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 fn apply_settle_native_live(
@@ -461,13 +636,13 @@ fn apply_settle_native_live(
 pub fn remove(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
-    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut file = load_file(&path);
     let before = file.records.len();
     file.records.retain(|r| r.id != id);
     if file.records.len() == before {
         return Ok(()); // nothing to do
     }
-    save_json_with_backup(&path, &file)
+    save_file(&path, &file)
 }
 
 #[cfg(test)]
@@ -490,6 +665,24 @@ mod tests {
             title: None,
             zone: None,
             build_evidence: None,
+            native: false,
+        }
+    }
+
+    /// A record on Kalpa's direct (native) path — the route marker reconciliation reads.
+    fn native_rec(id: &str, status: UploadStatus) -> UploadRecord {
+        UploadRecord {
+            native: true,
+            ..rec(id, status)
+        }
+    }
+
+    fn orphan(source_path: &str, code: &str, created_at_ms: u64) -> LiveOrphan {
+        LiveOrphan {
+            code: code.into(),
+            last_segment_id: 1,
+            source_path: source_path.into(),
+            created_at_ms,
         }
     }
 
@@ -652,7 +845,7 @@ mod tests {
             manual,
         ];
 
-        assert!(apply_reconcile_stale(&mut recs));
+        assert!(apply_reconcile_stale(&mut recs, &[]));
 
         assert_eq!(recs[0].status, UploadStatus::Failed);
         assert_eq!(
@@ -682,6 +875,133 @@ mod tests {
             UploadStatus::HandedOff,
             "stale manual handoffs need the paste-link affordance"
         );
+    }
+
+    // A crashed NATIVE upload was never handed off — nothing is still streaming it — so
+    // reconciliation must settle it Failed and adopt the crash breadcrumb's report code,
+    // which is the only surviving trace of the report the upload really created.
+    #[test]
+    fn reconcile_stale_settles_native_records_as_failed_with_the_breadcrumb_code() {
+        let mut manual = native_rec("native-manual", UploadStatus::Uploading);
+        manual.mode = UploadMode::Manual;
+        manual.source_path = "C:/Logs/Encounter.log".into();
+        let mut live_pre_create = native_rec("native-live-early", UploadStatus::Live);
+        live_pre_create.source_path = "C:/Logs/other.log".into();
+        let mut official = rec("official-manual", UploadStatus::Uploading);
+        official.mode = UploadMode::Manual;
+        official.source_path = "C:/Logs/Encounter.log".into();
+        let mut recs = vec![manual, live_pre_create, official];
+
+        let orphans = vec![
+            orphan("C:/Logs/Encounter.log", "OLD", 100),
+            orphan("C:/Logs/Encounter.log", "PARTIAL", 900),
+        ];
+        assert!(apply_reconcile_stale(&mut recs, &orphans));
+
+        assert_eq!(recs[0].status, UploadStatus::Failed);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("PARTIAL"),
+            "the newest breadcrumb for this log wins"
+        );
+        assert!(recs[0]
+            .error
+            .as_deref()
+            .is_some_and(|m| m.contains("direct upload")));
+        // A native live record that crashed before create-report returned has no
+        // breadcrumb of its own — still Failed, never a claimed handoff.
+        assert_eq!(recs[1].status, UploadStatus::Failed);
+        assert!(recs[1].report.is_none());
+        // An OFFICIAL-route record on the same log keeps the handoff semantics and must
+        // never adopt a native breadcrumb.
+        assert_eq!(recs[2].status, UploadStatus::HandedOff);
+        assert!(recs[2].report.is_none());
+    }
+
+    // A failure after create-report must not erase the code the sink already attached:
+    // the report exists on the user's account, and the row is its only trace.
+    #[test]
+    fn settle_failed_keeps_the_attached_report_link() {
+        let mut recs = vec![
+            native_rec("manual", UploadStatus::Uploading),
+            rec("done", UploadStatus::Completed),
+        ];
+        assert!(apply_attach_live_report(
+            &mut recs,
+            "manual",
+            ReportRef {
+                url: "https://www.esologs.com/reports/CREATED".into(),
+                code: "CREATED".into(),
+            },
+        ));
+
+        assert!(apply_settle_failed(
+            &mut recs,
+            "manual",
+            "segment upload failed"
+        ));
+        assert_eq!(recs[0].status, UploadStatus::Failed);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("CREATED")
+        );
+        assert_eq!(recs[0].error.as_deref(), Some("segment upload failed"));
+        // Terminal records are owned by whoever settled them.
+        assert!(!apply_settle_failed(&mut recs, "done", "late"));
+        assert_eq!(recs[1].status, UploadStatus::Completed);
+    }
+
+    // One record this build cannot deserialize must not take the other 199 with it, and
+    // it must survive the next save — a downgrade that meets a newer enum variant used to
+    // wipe the whole file permanently on the very next mutation.
+    #[test]
+    fn unreadable_records_are_preserved_and_never_wipe_the_readable_ones() {
+        let raw = RawHistoryFile {
+            records: vec![
+                serde_json::to_value(rec("good", UploadStatus::Completed)).unwrap(),
+                serde_json::json!({ "id": "future", "status": "somethingNewer" }),
+            ],
+        };
+
+        let file = split_records(raw);
+
+        assert_eq!(file.records.len(), 1, "the readable record survives");
+        assert_eq!(file.records[0].id, "good");
+        assert_eq!(file.unparsed.len(), 1, "the unreadable record is kept");
+        assert_eq!(file.unparsed[0]["id"], "future");
+    }
+
+    // The heavy raw companion snapshots are dropped from the STORED row (the file is
+    // rewritten whole on every mutation), while the player evidence the analysis link
+    // needs stays.
+    #[test]
+    fn persisted_records_drop_companion_snapshots_but_keep_player_evidence() {
+        let mut record = rec("native", UploadStatus::Completed);
+        record.build_evidence = Some(KalpaBuildEvidence {
+            schema_version: 1,
+            extractor_version: Some(1),
+            source: "kalpa-native-raw-log".into(),
+            report_code: Some("ABC".into()),
+            players: vec![],
+            companion: Some(crate::uploader::types::KalpaCompanionEvidence {
+                snapshots: vec![serde_json::json!({ "ts": 1, "char": "Zed" })],
+            }),
+        });
+
+        let stored = persistable(&record);
+        assert!(stored
+            .build_evidence
+            .as_ref()
+            .is_some_and(|e| e.companion.is_none()));
+        assert_eq!(
+            stored.build_evidence.as_ref().map(|e| e.source.as_str()),
+            Some("kalpa-native-raw-log")
+        );
+        // The in-memory record is untouched (the live dispatch still carries snapshots).
+        assert!(record
+            .build_evidence
+            .as_ref()
+            .is_some_and(|e| e.companion.is_some()));
     }
 
     #[test]

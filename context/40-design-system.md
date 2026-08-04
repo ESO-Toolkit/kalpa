@@ -1,5 +1,7 @@
 # Design System — ESO Log Aggregator Visual Language
 
+> **Partly superseded:** the design DNA below still holds, but this document predates the light-theme token migration. Kalpa is **dark-first with light themes in scope** — 54 built-in themes including three light and two high-contrast accessibility themes — not "always-dark". Every literal `rgba(…)` / `rgb(255,255,255,…)` value quoted here now lives behind a theme-aware token (`structure-*`, `scrim-*`, `status-*`, `glass-*`), because a hardcoded white-alpha border is invisible on a light theme. Treat the hex/rgba tables here as the *dark* resolution of tokens, never as values to type into a component. `src/index.css`, `src/lib/theme-apply.ts`, and `context/42-theme-tokens.md` are the authority.
+
 This document defines the design language ported from the ESO Log Aggregator (ESO-LOG-AG) project. All new UI work in this repo should follow these patterns, adapted for **shadcn (base-nova) + Tailwind CSS v4 + Base UI React**.
 
 ## Design DNA
@@ -46,7 +48,7 @@ Add to `@theme inline`:
 
 ## Color Palette
 
-### Dark Mode (Primary — this project is always-dark)
+### Dark Mode (the default theme's resolution of the base tokens)
 
 | Token | Value | Usage |
 |-------|-------|-------|
@@ -77,49 +79,37 @@ Add to `@theme inline`:
 
 ## Glass Morphism
 
-Three tiers of glass panels, from most prominent to most subtle:
+Three tiers of glass panels, from most prominent to most subtle. Use the `GlassPanel` primitive (`src/components/ui/glass-panel.tsx`) rather than re-rolling the effect; the classes below are what it applies today.
 
 ### Primary Glass (feature panels, main content areas)
-```css
-background: rgba(15, 23, 42, 0.84);
-backdrop-filter: blur(16px);
--webkit-backdrop-filter: blur(16px);
-border: 1px solid rgba(255, 255, 255, 0.09);
-border-radius: 0.75rem; /* rounded-xl */
-box-shadow: 0 8px 32px rgba(0, 0, 0, 0.32),
-            0 1px 0 rgba(255, 255, 255, 0.05) inset;
+```
+bg-glass-bg border border-structure-09
+shadow-[0_8px_32px_var(--scrim-32),inset_0_1px_0_var(--structure-05)]
+rounded-xl backdrop-blur-lg
 ```
 
 ### Default Glass (secondary panels, sidebars)
-```css
-background: rgba(15, 23, 42, 0.66);
-backdrop-filter: blur(12px);
-border: 1px solid rgba(255, 255, 255, 0.06);
-border-radius: 0.75rem;
-box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+```
+bg-glass-bg-light border border-structure-06
+shadow-[0_4px_16px_var(--scrim-20)]
+rounded-xl backdrop-blur-lg
 ```
 
 ### Subtle Glass (nested sections, input containers)
-```css
-background: rgba(255, 255, 255, 0.02);
-border: 1px solid rgba(255, 255, 255, 0.04);
-border-radius: 0.625rem; /* 10px */
-padding: 0.625rem; /* 10px */
+```
+bg-structure-02 border border-structure-04
+shadow-[inset_0_1px_0_var(--structure-03)]
+hover:border-structure-07 transition-colors duration-200
 ```
 
 ### Glass Input Fields
-```css
-background: rgba(255, 255, 255, 0.03);
-border: 1px solid rgba(255, 255, 255, 0.08);
-border-radius: 0.625rem;
-transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 
-/* hover */
-border-color: rgba(255, 255, 255, 0.15);
-
-/* focus */
-border-color: rgba(56, 189, 248, 0.4);
-box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+Use the overridden `Input` (`src/components/ui/input.tsx`), which already carries:
+```
+rounded-[10px] border border-structure-08 bg-structure-04
+shadow-[inset_0_1px_2px_var(--scrim-20),0_1px_0_var(--structure-02)]
+hover:border-structure-15 hover:bg-structure-05
+focus-visible:border-accent-sky/50 focus-visible:bg-structure-06
 ```
 
 ## Card Patterns

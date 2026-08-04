@@ -11,6 +11,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "dialog:allow-open",
+    "dialog:allow-save",
     "store:allow-load",
     "store:allow-get",
     "store:allow-set",
@@ -38,6 +39,23 @@
         },
         {
           "url": "https://github.com/ESO-Toolkit/kalpa/releases/*"
+        },
+        {
+          "url": "https://github.com/ESO-Toolkit/kalpa/issues/*"
+        },
+        {
+          "url": "https://discord.gg/*"
+        }
+      ]
+    },
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$DOCUMENT/Elder Scrolls Online/**"
+        },
+        {
+          "path": "$HOME/**/Elder Scrolls Online/**"
         }
       ]
     },

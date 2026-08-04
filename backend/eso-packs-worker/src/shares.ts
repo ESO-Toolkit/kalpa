@@ -1,5 +1,6 @@
-import type { Env, SharePackData, ShareRecord, ShareCodeResponse, ValidationError } from "./types";
+import type { Env, PackType, SharePackData, ShareRecord, ShareCodeResponse, ValidationError } from "./types";
 import { corsHeaders } from "./cors";
+import { readJsonBody, sanitizeAddons } from "./validate";
 
 // Unambiguous alphabet: no 0/O, 1/I/L
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -13,6 +14,9 @@ const MAX_DESCRIPTION_LENGTH = 1000;
 const VALID_TYPES = ["addon-pack", "build-pack", "roster-pack"];
 
 const ESO_LOGS_API = "https://www.esologs.com/api/v2/user";
+/** Workers' fetch has no default timeout, so a hung esologs.com connection
+ *  would otherwise hold the whole invocation until the client gives up. */
+const ESO_LOGS_TIMEOUT_MS = 10_000;
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -66,11 +70,42 @@ export interface EsoLogsUser {
   name: string;
 }
 
+/**
+ * Isolate-local memo of resolved tokens, keyed by a SHA-256 of the token so the
+ * secret itself never sits in memory as a map key.
+ *
+ * Every authenticated operation used to hit esologs.com, so a single client
+ * action (create → publish → list) cost three upstream round trips. Only
+ * successful resolutions are memoized — a failure is never remembered, keeping
+ * the fail-closed behaviour — and the TTL is short enough that a revoked token
+ * stops working almost immediately.
+ */
+const TOKEN_CACHE_TTL_MS = 30_000;
+const TOKEN_CACHE_LIMIT = 500;
+const tokenCache = new Map<string, { user: EsoLogsUser; at: number }>();
+
+/** Forget every memoized token identity. Tests resolve one token to several
+ *  different identities, so they reset between cases. */
+export function resetTokenCache(): void {
+  tokenCache.clear();
+}
+
+async function tokenFingerprint(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export async function validateBearerToken(request: Request): Promise<EsoLogsUser | null> {
   const authHeader = request.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return null;
 
   const token = authHeader.slice(7);
+  const fingerprint = await tokenFingerprint(token);
+  const cached = tokenCache.get(fingerprint);
+  if (cached && Date.now() - cached.at < TOKEN_CACHE_TTL_MS) {
+    return cached.user;
+  }
+
   try {
     const res = await fetch(ESO_LOGS_API, {
       method: "POST",
@@ -81,6 +116,7 @@ export async function validateBearerToken(request: Request): Promise<EsoLogsUser
       body: JSON.stringify({
         query: "{ userData { currentUser { id name } } }",
       }),
+      signal: AbortSignal.timeout(ESO_LOGS_TIMEOUT_MS),
     });
 
     if (!res.ok) return null;
@@ -88,7 +124,12 @@ export async function validateBearerToken(request: Request): Promise<EsoLogsUser
     const body = (await res.json()) as {
       data?: { userData?: { currentUser?: EsoLogsUser } };
     };
-    return body.data?.userData?.currentUser ?? null;
+    const user = body.data?.userData?.currentUser ?? null;
+    if (user) {
+      if (tokenCache.size >= TOKEN_CACHE_LIMIT) tokenCache.clear();
+      tokenCache.set(fingerprint, { user, at: Date.now() });
+    }
+    return user;
   } catch {
     return null;
   }
@@ -178,19 +219,30 @@ export async function handleCreateShare(request: Request, env: Env): Promise<Res
   }
 
   // Parse and validate body
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return json(request, { error: "Invalid JSON" }, 400);
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    return parsed.reason === "too-large"
+      ? json(request, { error: "Request body is too large" }, 413)
+      : json(request, { error: "Invalid JSON" }, 400);
   }
 
-  const errors = validateSharePayload(body);
+  const errors = validateSharePayload(parsed.body);
   if (errors.length > 0) {
     return json(request, { error: "Validation failed", details: errors }, 400);
   }
 
-  const packData = body as SharePackData;
+  // Rebuild the payload from validated fields only. The record is served back
+  // verbatim to anyone holding the code, so storing the raw body turned this
+  // endpoint into an anonymously-readable blob host for whatever extra
+  // properties the caller attached.
+  const input = parsed.body as Record<string, unknown>;
+  const packData: SharePackData = {
+    title: input.title as string,
+    description: input.description as string,
+    packType: input.packType as PackType,
+    tags: [...(input.tags as string[])],
+    addons: sanitizeAddons(input.addons),
+  };
 
   // Generate unique code (retry on collision)
   let code = "";
@@ -249,11 +301,14 @@ export async function handleResolveShare(request: Request, env: Env, code: strin
     return json(request, { error: "Share code not found or expired" }, 404);
   }
 
-  // Share data is immutable — cache at CDN edge for 5 minutes
+  // Share data is immutable and identical for every caller (the code is the
+  // only access control), so it is cacheable at the CDN edge for 5 minutes.
+  // json() defaults to "private" in this module, which would forbid exactly
+  // that — pass the scope explicitly.
   return json(request, {
     pack: record.pack,
     sharedBy: record.createdByName,
     sharedAt: record.createdAt,
     expiresAt: record.expiresAt,
-  }, 200, 300);
+  }, 200, 300, "public");
 }

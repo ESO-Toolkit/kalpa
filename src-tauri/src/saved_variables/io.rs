@@ -10,6 +10,12 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+/// Largest SavedVariables file the editor will read into a parse tree. The tree
+/// costs several times the source text, so this bounds every path that parses a
+/// whole file — the initial load and `preview_save`'s re-read after the file
+/// changed on disk (ESO can have rewritten it much larger meanwhile).
+const MAX_READ_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
+
 /// Return the SavedVariables directory relative to the AddOns dir.
 pub fn saved_variables_dir(addons_dir: &Path) -> std::path::PathBuf {
     addons_dir
@@ -306,7 +312,6 @@ pub fn read_saved_variable_blocking(
         return Err(format!("File not found: {file_name}"));
     }
 
-    const MAX_READ_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
     let meta =
         fs::metadata(&file_path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
     if meta.len() > MAX_READ_SIZE {
@@ -536,6 +541,16 @@ pub fn preview_save(
     );
 
     if !hit {
+        // A miss means the file changed since the last preview, so re-apply the
+        // load path's bound: the rewritten file can be far larger than the one
+        // that was admitted into the editor.
+        if stamp.size > MAX_READ_SIZE {
+            return Err(format!(
+                "{} is too large to preview ({:.1} MB). Maximum is 20 MB.",
+                file_name,
+                stamp.size as f64 / (1024.0 * 1024.0)
+            ));
+        }
         let original_content =
             fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
         let original_tree = parser::parse_sv_file(&original_content, file_name)?;
@@ -563,18 +578,32 @@ pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Resul
 /// the per-character backup/restore path, whose merged content may contain
 /// non-UTF8 SavedVariables bytes (caret keys, addon binary blobs).
 ///
-/// The new content is written to `<file>.tmp` and then `rename`d into place.
-/// `std::fs::rename` replaces the destination ATOMICALLY on both Unix
+/// The new content is written to `<file>.tmp`, fsynced, and then `rename`d into
+/// place. `std::fs::rename` replaces the destination ATOMICALLY on both Unix
 /// (`rename(2)`) and Windows (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`), so
 /// the live file is never momentarily absent — there is no remove-then-rename
-/// crash window, and a failed write leaves the original file untouched. No
+/// crash window, and a failed write leaves the original file untouched. The
+/// `sync_all` before the rename is what makes that true across a power loss too:
+/// without it the rename can be journaled while the data blocks are still in
+/// page cache, leaving a zero-length SavedVariables file that ESO discards in
+/// favour of defaults (same reasoning as `settings_store`'s atomic write). No
 /// `.bak`/`.old` is left behind: the per-character restore already takes a full
 /// safety snapshot, so a lingering sidecar in the live folder (which later
 /// backups/snapshots would sweep up) is avoided.
 pub fn write_raw_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
     let file_path = sv_dir.join(file_name);
     let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {e}"))?;
+    let write_tmp = || -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp_path)?;
+        f.write_all(content)?;
+        f.sync_all()
+    };
+    write_tmp().map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("Failed to write temp file: {e}")
+    })?;
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!("Failed to finalize write: {e}")
@@ -767,6 +796,29 @@ mod tests {
         let disk_stamp = file_stamp(&file_path).unwrap();
         assert_eq!(new_stamp.size, disk_stamp.size);
         assert_eq!(new_stamp.modified_epoch_ms, disk_stamp.modified_epoch_ms);
+    }
+
+    #[test]
+    fn write_saved_variable_preserves_non_ascii_bytes() {
+        // A save that changes nothing must not change a single byte. Non-ASCII
+        // values and character keys are routine (EU names, localized strings),
+        // and re-encoding them here corrupted the file a little more per save.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("live").join("AddOns");
+        let sv_dir = tmp.path().join("live").join("SavedVariables");
+        fs::create_dir_all(&addons_dir).unwrap();
+        fs::create_dir_all(&sv_dir).unwrap();
+
+        let file_name = "Accented.lua";
+        let file_path = sv_dir.join(file_name);
+        let source = "Accented_SV =\n{\n\t[\"L\u{e9}a^EU Megaserver\"] = {\n\t\t[\"note\"] = \"Caf\u{e9} cr\u{e8}me\",\n\t},\n}\n";
+        fs::write(&file_path, source).unwrap();
+        let stamp = file_stamp(&file_path).unwrap();
+
+        let tree = parser::parse_sv_file(source, file_name).unwrap();
+        write_saved_variable_blocking(&addons_dir, file_name, &tree, &stamp).unwrap();
+
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), source);
     }
 
     #[test]

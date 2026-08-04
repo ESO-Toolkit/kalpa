@@ -57,6 +57,16 @@ interface AppHeaderProps {
   onSwitchInstance: (path: string) => void;
 }
 
+/** Compare AddOns folders the way App does. The active path comes from settings
+ * as a bare trim, so the same physical folder can arrive with different casing,
+ * a '/' instead of '\', or a trailing separator; raw equality would demote a
+ * detected instance to "Custom folder" and drop the switcher's checkmark. */
+function sameAddonsFolder(a: string, b: string) {
+  const normalize = (value: string) =>
+    value.trim().replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  return normalize(a) === normalize(b);
+}
+
 /** Header badge showing which ESO install is being managed, with a
  * quick-switch menu when more than one instance exists. A user running
  * live + PTS can otherwise silently install into the wrong game. */
@@ -85,7 +95,7 @@ function InstanceBadge({
 
   if (instances.length === 0 || !activeAddonsPath) return null;
 
-  const active = instances.find((inst) => inst.addonsPath === activeAddonsPath);
+  const active = instances.find((inst) => sameAddonsFolder(inst.addonsPath, activeAddonsPath));
   // A manually-browsed folder won't match any detected instance; still show
   // where installs are going rather than guessing a region label.
   const label = active?.displayLabel ?? "Custom folder";
@@ -116,7 +126,7 @@ function InstanceBadge({
       {open && (
         <div className="absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-xl border border-structure-06 bg-surface-overlay p-1 shadow-lg backdrop-blur-xl">
           {instances.map((inst) => {
-            const isActive = inst.addonsPath === activeAddonsPath;
+            const isActive = sameAddonsFolder(inst.addonsPath, activeAddonsPath);
             return (
               <button
                 key={inst.id}

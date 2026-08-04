@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import worker from "../src/index";
+import { resetTokenCache } from "../src/shares";
 import type { Env } from "../src/types";
 import {
   TEST_USER,
@@ -25,6 +26,9 @@ beforeEach(() => {
     return originalFetch(input);
   });
   globalThis.fetch = fetchSpy as typeof fetch;
+  // Token identities are memoized per isolate; these cases resolve the same
+  // token to different identities.
+  resetTokenCache();
 });
 
 afterEach(() => {
@@ -90,6 +94,48 @@ describe("POST /shares", () => {
     );
     expect(res.status).toBe(400);
   });
+
+  it("rejects an oversized body before parsing it", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/shares`, {
+        method: "POST",
+        body: JSON.stringify(sharePayload({ blob: "x".repeat(300_000) })),
+      }),
+    );
+    expect(res.status).toBe(413);
+  });
+
+  it("stores only the validated fields, not the raw body", async () => {
+    const createRes = await call(
+      authedRequest(`${BASE}/shares`, {
+        method: "POST",
+        body: JSON.stringify(
+          sharePayload({
+            blob: "x".repeat(2000),
+            addons: [{ esouiId: 1, name: "Addon", required: true, junk: "y" }],
+          }),
+        ),
+      }),
+    );
+    const { code } = await createRes.json<{ code: string }>();
+
+    // The record is served verbatim to anyone holding the code, so extras must
+    // never reach storage.
+    const stored = await e.ESO_PACKS.get<{ pack: Record<string, unknown> }>(
+      `share:${code}`,
+      "json",
+    );
+    expect(Object.keys(stored!.pack).sort()).toEqual([
+      "addons",
+      "description",
+      "packType",
+      "tags",
+      "title",
+    ]);
+    expect(stored!.pack.addons).toEqual([
+      { esouiId: 1, name: "Addon", required: true },
+    ]);
+  });
 });
 
 describe("GET /shares/:code", () => {
@@ -104,6 +150,9 @@ describe("GET /shares/:code", () => {
 
     const resolveRes = await call(new Request(`${BASE}/shares/${code}`));
     expect(resolveRes.status).toBe(200);
+    // Identical for every caller, so it must be shared-cacheable — "private"
+    // would forbid the edge caching the handler documents.
+    expect(resolveRes.headers.get("Cache-Control")).toBe("public, max-age=300");
     const body = await resolveRes.json<{
       pack: { title: string };
       sharedBy: string;

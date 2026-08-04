@@ -242,7 +242,10 @@ export function Profiles({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    // Closing mid-activation lets the user reopen with a fresh (busy=false)
+    // dialog and mutate profiles.json while apply_profile is still renaming
+    // folders — the activation then saves its pre-mutation snapshot over them.
+    <Dialog open onOpenChange={(open) => !open && activating === null && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -565,7 +568,7 @@ export function Profiles({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={onClose} disabled={activating !== null}>
             Close
           </Button>
         </DialogFooter>

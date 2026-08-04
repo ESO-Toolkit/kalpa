@@ -19,38 +19,6 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
 import type { KalpaBuildEvidence, ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
 
-/** Whether an exit action — closing the dialog, or leaving Live for Manual — needs
- *  a confirm first. Only while a live session is running (or still starting): on the
- *  native path Stop ends the upload and closes its ESO Logs report, so an accidental
- *  Esc/backdrop/X/tab-switch must not tear it down silently. */
-export function shouldConfirmLiveExit(liveSessionActive: boolean): boolean {
-  return liveSessionActive;
-}
-
-/** Copy for the live-exit confirm, branched by which path the running session took.
- *  Native: Kalpa IS the uploader, so stopping ends the upload and closes the report
- *  on ESO Logs. Handoff: the separate official uploader keeps streaming; Kalpa only
- *  stops tracking. */
-export function liveExitConfirmCopy(handedOff: boolean): {
-  title: string;
-  description: string;
-  confirmLabel: string;
-} {
-  return handedOff
-    ? {
-        title: "Stop tracking in Kalpa?",
-        description:
-          "The official ESO Logs uploader keeps streaming in its own window — you'll need to stop it there to end the live report.",
-        confirmLabel: "Stop tracking",
-      }
-    : {
-        title: "Stop the live upload and close the report on ESO Logs?",
-        description:
-          "Kalpa is uploading directly, so stopping ends the upload and closes the report on ESO Logs. This can't be undone.",
-        confirmLabel: "Stop upload",
-      };
-}
-
 /** Subscribe to an async listener without leaking it when an unmount races the
  *  subscription's resolution. If the returned cleanup already ran by the time
  *  `subscribe` resolves, the listener is torn down immediately instead of leaking —
@@ -85,12 +53,21 @@ export function deriveNativeState(input: {
   live: { ok: boolean; value: boolean };
   session: boolean;
   tainted: boolean;
-}): { nativeOptIn: boolean; hasNativeSession: boolean; liveUseOfficial: boolean } {
+}): {
+  nativeOptIn: boolean;
+  hasNativeSession: boolean;
+  liveUseOfficial: boolean;
+  /** The store could not be trusted, so every flag above is the fail-closed
+   *  value rather than an observed one. Surfaced so an account readout can say
+   *  "couldn't check" instead of asserting the opt-out it never confirmed. */
+  readFailed: boolean;
+} {
   const readFailed = !input.manual.ok || !input.live.ok || input.tainted;
   return {
     nativeOptIn: !input.manual.value && !readFailed,
     hasNativeSession: input.session,
     liveUseOfficial: input.live.value || readFailed,
+    readFailed,
   };
 }
 

@@ -120,9 +120,17 @@ pub fn skip_long_bracket(chars: &[u8], pos: usize) -> Option<usize> {
     None
 }
 
-fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+/// Decode the body of a Lua quoted string. `*pos` must point at the opening
+/// quote; on success it lands just past the closing quote and the decoded bytes
+/// are returned (they may not be valid UTF-8, so the caller decides how to
+/// surface them).
+///
+/// Shared by string VALUES and bracketed string KEYS so that
+/// `parse(serialize(k)) == k` for a key containing escapes — the serializer
+/// re-escapes every key it writes, so a key copied verbatim here would grow an
+/// extra backslash on every save.
+fn decode_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<Vec<u8>, String> {
     let quote = chars[*pos];
-    let source_start = *pos; // remember start for fallback
     *pos += 1; // skip opening quote
     let mut out = Vec::new();
     while *pos < chars.len() && chars[*pos] != quote {
@@ -174,6 +182,12 @@ fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, 
         return Err("Unterminated string".to_string());
     }
     *pos += 1; // skip closing quote
+    Ok(out)
+}
+
+fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    let source_start = *pos; // remember start for fallback
+    let out = decode_lua_quoted_string(chars, pos)?;
 
     // If decoded bytes are valid UTF-8, use them directly (the common case).
     // Otherwise, preserve the original source text between the quotes as
@@ -211,6 +225,18 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
         return Err(format!("Invalid long bracket string at position {start}"));
     }
     *pos += 1; // skip second [
+
+    // Lua 5.1: a newline immediately after the opening long bracket is not part
+    // of the string (`\r\n` and `\n\r` count as one). Keeping it would silently
+    // add a leading newline to the value once the serializer rewrites the
+    // string in quoted form.
+    if *pos < chars.len() && matches!(chars[*pos], b'\n' | b'\r') {
+        let first = chars[*pos];
+        *pos += 1;
+        if *pos < chars.len() && matches!(chars[*pos], b'\n' | b'\r') && chars[*pos] != first {
+            *pos += 1;
+        }
+    }
 
     // Build the closing pattern: `]` + `=` * level + `]`
     let mut close_pattern = vec![b']'];
@@ -303,9 +329,13 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
             .map_err(|_| format!("Invalid hex number: {num_str}"))?;
         serde_json::Value::Number(serde_json::Number::from(n))
     } else if let Ok(n) = num_str.parse::<f64>() {
+        // `parse::<f64>` saturates an out-of-range literal (e.g. `1e999`) to
+        // infinity, which `Number::from_f64` rejects. Fail here — like the hex
+        // overflow above — instead of storing a null-valued Number that no
+        // longer denotes the file's value and cannot be serialized back.
         serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null)
+            .ok_or_else(|| format!("Number out of range: {num_str}"))?
     } else {
         return Err(format!("Invalid number: {num_str}"));
     };
@@ -384,21 +414,16 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
         }
 
         let key = if chars[*pos] == b'"' {
-            *pos += 1;
-            let start = *pos;
-            while *pos < chars.len() && chars[*pos] != b'"' {
-                if chars[*pos] == b'\\' {
-                    *pos += 1;
+            // Decode escapes with the same routine string values use: the
+            // serializer re-escapes keys on the way out, so copying the raw
+            // source text here would mutate the key on every save.
+            match decode_lua_quoted_string(chars, pos) {
+                Ok(decoded) => String::from_utf8_lossy(&decoded).into_owned(),
+                Err(_) => {
+                    *pos = saved;
+                    return Ok(None);
                 }
-                *pos += 1;
             }
-            if *pos >= chars.len() {
-                *pos = saved;
-                return Ok(None);
-            }
-            let k = String::from_utf8_lossy(&chars[start..*pos]).into_owned();
-            *pos += 1; // skip "
-            k
         } else if chars[*pos].is_ascii_digit() || chars[*pos] == b'-' {
             let start = *pos;
             if chars[*pos] == b'-' {
@@ -789,5 +814,56 @@ mod tests {
         let node = parse_value(r#""\a""#).unwrap();
         let s = node.value.unwrap();
         assert_eq!(s.as_str().unwrap().as_bytes()[0], 0x07);
+    }
+
+    #[test]
+    fn lua_parse_quoted_key_decodes_escapes() {
+        // Keys go through the same unescaping as values, so the key the addon
+        // wrote is the key kalpa holds — and the serializer's re-escaping is
+        // then the exact inverse.
+        let node = parse_value(r#"{ ["He said \"hi\"\\ok\n"] = 1 }"#).unwrap();
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children[0].key, "He said \"hi\"\\ok\n");
+    }
+
+    #[test]
+    fn quoted_key_with_escapes_round_trips() {
+        use super::super::serializer::serialize_to_lua;
+        let input = "Var =\n{\n\t[\"quote\\\"back\\\\line\\n\"] = 1,\n}\n";
+        let tree = parse_sv_file(input, "test.lua").unwrap();
+        let output = serialize_to_lua(&tree);
+        let tree2 = parse_sv_file(&output, "test.lua").unwrap();
+        assert_eq!(tree, tree2, "key mutated across a save");
+        assert_eq!(
+            serialize_to_lua(&tree2),
+            output,
+            "key grew on a second save"
+        );
+    }
+
+    #[test]
+    fn lua_parse_out_of_range_number_errors() {
+        // Better a clear parse failure than a null-valued Number that the
+        // serializer cannot write back, which would block every save.
+        assert!(parse_value("1e999").is_err());
+        assert!(parse_value("-1e999").is_err());
+    }
+
+    #[test]
+    fn lua_parse_long_string_drops_leading_newline() {
+        // Lua 5.1 discards a newline immediately after the opening bracket.
+        assert_eq!(
+            parse_value("[[\nfoo]]").unwrap().value,
+            Some(serde_json::json!("foo"))
+        );
+        assert_eq!(
+            parse_value("[[\r\nfoo\nbar]]").unwrap().value,
+            Some(serde_json::json!("foo\nbar"))
+        );
+        // Only the first one: a blank first line keeps the second newline.
+        assert_eq!(
+            parse_value("[[\n\nfoo]]").unwrap().value,
+            Some(serde_json::json!("\nfoo"))
+        );
     }
 }

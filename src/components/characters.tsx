@@ -83,6 +83,10 @@ export function Characters({
           restoredFiles !== 1 ? "s" : ""
         })`
       );
+      // The field is shared by the whole roster and the backend replaces a
+      // same-named marked backup wholesale, so a leftover custom name would
+      // overwrite this character's backup with the next character's data.
+      setBackupName("");
       if (worldsSpanned > 1) {
         toast.warning(
           `Heads up: ${char.name} exists on more than one server, so this backup captured data ` +

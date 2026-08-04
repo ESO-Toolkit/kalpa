@@ -26,6 +26,13 @@ const ESO_ENVS: &[&str] = &["live", "liveeu", "pts"];
 /// Cap the forwarded snapshots so the sidecar payload stays small; the consumer picks the
 /// right one per fight. The addon keeps a ~200-entry ring — we send only the newest few.
 const MAX_SNAPSHOTS: usize = 24;
+/// Cap on a single companion SavedVariables file. `ESOTKCompanion.lua` is an append-forever
+/// snapshot store, and a multi-environment setup (live + liveeu + pts, Proton prefixes) has
+/// one per environment — so an uncapped read scales with months of play times the number of
+/// environments. Every other SavedVariables reader in the repo bounds its read (20 MB for the
+/// SV editor, 1 MB per file for the LAM scan); a few MB is far more than the ring needs, so
+/// anything larger is corrupt or foreign and is skipped without being read.
+const MAX_COMPANION_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Read the ESOTK Companion snapshots for the players in `evidence` and return them for the
 /// sidecar, or `None` when there's no companion file, nothing usable, or anything fails.
@@ -37,21 +44,21 @@ const MAX_SNAPSHOTS: usize = 24;
 /// character + time, so an unfiltered forward is safe).
 pub(crate) fn read_for_upload(evidence: &KalpaBuildEvidence) -> Option<KalpaCompanionEvidence> {
     let logger_chars = logger_character_names(evidence);
-    pick_evidence(
-        read_companion_files().iter().map(String::as_str),
-        &logger_chars,
-    )
+    pick_evidence(companion_file_contents(), &logger_chars)
 }
 
 /// Rank candidate companion-file contents: the first file whose snapshots name-match this
 /// report's players wins; otherwise the first file with any snapshots at all.
-fn pick_evidence<'a>(
-    contents: impl Iterator<Item = &'a str>,
+///
+/// Takes an ITERATOR of owned contents so the caller can read each file lazily: at most one
+/// file's text is resident at a time, and a name-match short-circuits the rest entirely.
+fn pick_evidence(
+    contents: impl Iterator<Item = String>,
     logger_chars: &[String],
 ) -> Option<KalpaCompanionEvidence> {
     let mut fallback: Option<Vec<serde_json::Value>> = None;
     for content in contents {
-        let (snapshots, matched) = select_snapshots(content, logger_chars);
+        let (snapshots, matched) = select_snapshots(&content, logger_chars);
         if snapshots.is_empty() {
             continue;
         }
@@ -65,23 +72,32 @@ fn pick_evidence<'a>(
     fallback.map(|snapshots| KalpaCompanionEvidence { snapshots })
 }
 
-/// Locate + read every `SavedVariables/ESOTKCompanion.lua` across the standard ESO
-/// environments, in candidate order.
-fn read_companion_files() -> Vec<String> {
-    let mut contents = Vec::new();
+/// Locate every `SavedVariables/ESOTKCompanion.lua` across the standard ESO environments,
+/// in candidate order, and read them LAZILY — one file's contents at a time, skipping any
+/// file above [`MAX_COMPANION_BYTES`] without reading it.
+fn companion_file_contents() -> impl Iterator<Item = String> {
+    companion_file_paths().into_iter().filter_map(|path| {
+        let size = std::fs::metadata(&path).ok()?.len();
+        if size > MAX_COMPANION_BYTES {
+            return None;
+        }
+        std::fs::read_to_string(&path).ok()
+    })
+}
+
+fn companion_file_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
     for base in documents_candidates() {
         for env in ESO_ENVS {
-            let path: PathBuf = base
-                .join("Elder Scrolls Online")
-                .join(env)
-                .join("SavedVariables")
-                .join(COMPANION_FILE);
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                contents.push(content);
-            }
+            paths.push(
+                base.join("Elder Scrolls Online")
+                    .join(env)
+                    .join("SavedVariables")
+                    .join(COMPANION_FILE),
+            );
         }
     }
-    contents
+    paths
 }
 
 /// Lower-cased character names from the report's players — used to keep only the logger's
@@ -291,14 +307,18 @@ ESOTKCompanionSV = {
 }
 ";
         let chars = vec!["zed".to_string()];
-        let picked = pick_evidence([stale, matching].into_iter(), &chars).unwrap();
+        let picked = pick_evidence(
+            [stale.to_string(), matching.to_string()].into_iter(),
+            &chars,
+        )
+        .unwrap();
         assert_eq!(picked.snapshots.len(), 1);
         assert_eq!(
             picked.snapshots[0].get("char").and_then(|c| c.as_str()),
             Some("Zed")
         );
         // With no match anywhere, the first readable file still wins.
-        let picked = pick_evidence([stale].into_iter(), &chars).unwrap();
+        let picked = pick_evidence([stale.to_string()].into_iter(), &chars).unwrap();
         assert_eq!(
             picked.snapshots[0].get("char").and_then(|c| c.as_str()),
             Some("WrongRegionAlt")

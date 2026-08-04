@@ -157,6 +157,10 @@ export function Backups({
   const protection = computeProtection(latestManual);
 
   const handleCreate = async () => {
+    // The button disables itself, but the label input's Enter handler calls this
+    // directly — without the guard a second Enter (or an Enter during a backup
+    // op started on the Characters dialog) starts a concurrent create.
+    if (anyBackupOpInFlight) return;
     const name = newName.trim() || friendlyDefaultName();
     setCreating(true);
     onSharedOpInFlightChange(true);
@@ -277,7 +281,8 @@ export function Backups({
             <button
               type="button"
               onClick={() => setShowLabelField(true)}
-              className="text-xs text-muted-foreground hover:text-foreground transition-colors underline-offset-2 hover:underline"
+              disabled={anyBackupOpInFlight}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors underline-offset-2 hover:underline disabled:opacity-50"
             >
               Add a custom label (optional)
             </button>

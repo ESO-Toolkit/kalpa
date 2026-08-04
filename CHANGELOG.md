@@ -6,6 +6,23 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.15] — 2026-07-31
+
+Splitting a log now finishes the job. The output used to land outside the folder every upload path reads from, so the one reason to split — uploading part of a session — was unreachable without dragging the file back in by hand.
+
+### Features
+
+- **Split output lands in your ESO Logs folder, appears in Kalpa's own log list, and uploads straight from the picker.** Nothing is auto-deleted either; each new split used to silently remove an older one. ([#335](https://github.com/ESO-Toolkit/kalpa/pull/335), [#336](https://github.com/ESO-Toolkit/kalpa/pull/336))
+- **The picker is rebuilt around one rule: every session you tick fights in becomes one report.** The modal is gone — sessions and their fights are a single list, in place, with no mode toggle asking the same question twice. It opens on your latest raid night (the most recent session plus anything that ran within a few hours of it, so a mid-raid crash stays together), and "the boss kills, without the nine resets" is finally something you can express. Nine naming controls were removed; names were always derived anyway. ([#336](https://github.com/ESO-Toolkit/kalpa/pull/336))
+- **Fights show difficulty and kills**, read from data the scanner was already parsing and throwing away. A kill is only shown when it can be proven — an absent badge means unknown, never "failed", because a wiped run writes nothing to say so. ([#335](https://github.com/ESO-Toolkit/kalpa/pull/335))
+
+### Bug Fixes
+
+- **Flat addon archives install where ESO can load them.** An addon zipped without its containing folder extracted loose into the AddOns root, so the game never saw it. Those archives are now wrapped in the folder the manifest names. ([#335](https://github.com/ESO-Toolkit/kalpa/pull/335))
+- **A UTF-8 BOM in `settings.json` no longer resets every preference.** The file parsed as invalid and silently fell back to defaults. ([#336](https://github.com/ESO-Toolkit/kalpa/pull/336))
+- **An expired ESO Logs upload session says so.** It reported itself as "Off", sending you to look for a switch you never touched. ([#336](https://github.com/ESO-Toolkit/kalpa/pull/336))
+- **The text size setting applies before the window appears.** At 110%, 125% or 150% the interface painted once at 100% and then jumped, which is a poor first frame for the users the control was built for. ([#334](https://github.com/ESO-Toolkit/kalpa/pull/334))
+
 ## [0.1.0-beta.14] — 2026-07-28
 
 A player with low vision reported that Kalpa's text was too faint and too small ([#199](https://github.com/ESO-Toolkit/kalpa/issues/199)). The faintness turned out to be a bug affecting every theme, and the rest of this release follows from investigating it.
@@ -445,7 +462,9 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.13...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...HEAD
+[0.1.0-beta.15]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.14...v0.1.0-beta.15
+[0.1.0-beta.14]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.13...v0.1.0-beta.14
 [0.1.0-beta.13]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.12...v0.1.0-beta.13
 [0.1.0-beta.12]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.11...v0.1.0-beta.12
 [0.1.0-beta.11]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.10...v0.1.0-beta.11

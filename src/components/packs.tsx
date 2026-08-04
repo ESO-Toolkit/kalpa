@@ -359,7 +359,14 @@ export function Packs({
     }
   }, [initialPackId, handleSelectPack]);
 
+  // A batch is in flight somewhere in this dialog (detail install, or the
+  // imported-pack install/settings apply). `batch_install_pack_addons` keeps
+  // running regardless of navigation, and its `pack-install-progress` events
+  // carry no batch id — a second concurrent batch would feed both listeners.
+  const packOpInFlight = installing || applyingSettings;
+
   const handleBack = () => {
+    if (packOpInFlight) return;
     setSelectedPack(null);
     setConfirmInstall(false);
     setInstalling(false);
@@ -416,10 +423,18 @@ export function Packs({
       .replace(/[^a-zA-Z0-9-_ ]/g, "")
       .trim()
       .replace(/\s+/g, "-");
-    const path = await saveFileDialog({
-      defaultPath: `${safeName}.esopack`,
-      filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-    });
+    // Inside try/catch: a denied dialog permission rejects here, and an
+    // unhandled rejection from the click handler would look like a dead button.
+    let path: string | null;
+    try {
+      path = await saveFileDialog({
+        defaultPath: `${safeName}.esopack`,
+        filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
+      });
+    } catch (e) {
+      toast.error(`Couldn't open the save dialog: ${getTauriErrorMessage(e)}`);
+      return;
+    }
     if (!path) return;
 
     let settings: Record<string, AddonSettings> | undefined;
@@ -580,7 +595,9 @@ export function Packs({
 
     // Claim busy before the async ESO check so a double-click can't start two loops.
     setInstalling(true);
-    if (importedPackAddonsToInstall.length > 0 && !(await ensureEsoNotBlocking())) {
+    // The gate covers the settings-only path too: import_sv_settings rewrites
+    // SavedVariables, which a running game overwrites again at logout.
+    if (!(await ensureEsoNotBlocking())) {
       setInstalling(false);
       return;
     }
@@ -787,11 +804,14 @@ export function Packs({
         addonCount: selectedPack.addons.length,
         installedAt: new Date().toISOString(),
       };
-      setInstalledPackRefs((prev) => {
-        const updated = [ref, ...prev.filter((r) => r.packId !== ref.packId)];
-        setSetting("installed_packs", updated);
-        return updated;
-      });
+      // Build the next list outside the updater: setSetting is a side effect and
+      // the updater must stay pure, and its result decides whether the library
+      // entry actually survives a restart.
+      const updated = [ref, ...installedPackRefs.filter((r) => r.packId !== ref.packId)];
+      setInstalledPackRefs(updated);
+      if (!(await setSetting("installed_packs", updated))) {
+        toast.warning("Couldn't save this pack to your installed library.");
+      }
     }
 
     onRefresh();
@@ -882,12 +902,18 @@ export function Packs({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && !packOpInFlight && onClose()}>
       <DialogContent className="sm:max-w-2xl h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {selectedPack && (
-              <Button variant="ghost" size="icon-sm" onClick={handleBack} className="mr-1">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={handleBack}
+                disabled={packOpInFlight}
+                className="mr-1"
+              >
                 <ArrowLeftIcon className="size-4" />
               </Button>
             )}
@@ -1167,10 +1193,13 @@ export function Packs({
                     onLoadMore={() => loadMyPacks(myPacksPage + 1)}
                     installedPackRefs={installedPackRefs}
                     onRemoveInstalledRef={(packId) => {
-                      setInstalledPackRefs((prev) => {
-                        const updated = prev.filter((r) => r.packId !== packId);
-                        setSetting("installed_packs", updated);
-                        return updated;
+                      const updated = installedPackRefs.filter((r) => r.packId !== packId);
+                      setInstalledPackRefs(updated);
+                      void setSetting("installed_packs", updated).then((ok) => {
+                        if (!ok) {
+                          setInstalledPackRefs(installedPackRefs);
+                          toast.error("Couldn't update your installed pack library.");
+                        }
                       });
                     }}
                     onEdit={(pack) => {
@@ -1233,7 +1262,7 @@ export function Packs({
         <DialogFooter>
           {selectedPack ? (
             <>
-              <Button variant="outline" onClick={handleBack}>
+              <Button variant="outline" onClick={handleBack} disabled={packOpInFlight}>
                 Back
               </Button>
               {confirmInstall ? (
@@ -1271,7 +1300,7 @@ export function Packs({
               )}
             </>
           ) : (
-            <Button variant="outline" onClick={onClose}>
+            <Button variant="outline" onClick={onClose} disabled={packOpInFlight}>
               Close
             </Button>
           )}

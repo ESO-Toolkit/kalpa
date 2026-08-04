@@ -168,6 +168,7 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
                 loading={loading}
                 confirmed={phase === "confirm"}
                 onExecute={handleExecute}
+                onRetry={runDryRun}
               />
             </Fade>
           )}
@@ -272,7 +273,10 @@ function PreconditionsPhase({
         <CheckItem ok={preconditions.minionFound} label="Minion installation detected" />
         <CheckItem ok={preconditions.addonsPathValid} label="AddOns folder accessible" />
         <CheckItem ok={preconditions.savedVariablesExists} label="SavedVariables folder found" />
-        <CheckItem ok={!preconditions.esoRunning} label="ESO is not running" />
+        {/* Amber, not red: the migration only writes kalpa.json, so a running
+            game is a caution rather than the hard block a red ✗ implies —
+            Continue deliberately stays enabled. */}
+        <CheckItem ok={!preconditions.esoRunning} label="ESO is not running" warn />
         <CheckItem ok={!preconditions.minionRunning} label="Minion is not running" warn />
       </div>
 
@@ -374,15 +378,34 @@ function DryRunPhase({
   loading,
   confirmed,
   onExecute,
+  onRetry,
 }: {
   dryRun: DryRunResult | null;
   loading: boolean;
   confirmed: boolean;
   onExecute: () => void;
+  onRetry: () => void;
 }) {
-  if (loading || !dryRun) {
+  if (loading) {
     return (
       <div className="py-8 text-center text-sm text-muted-foreground">Analyzing Minion data...</div>
+    );
+  }
+
+  // Failed dry run: without this the phase would keep claiming it is analyzing
+  // forever, and the only way out would be Cancel — which re-runs the whole
+  // snapshot phase (another full ZIP) on the next attempt.
+  if (!dryRun) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-8 text-center">
+        <p className="text-sm text-muted-foreground">
+          The analysis didn&apos;t finish. Your snapshot is already saved, so retrying just re-runs
+          the preview — nothing has been changed.
+        </p>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          Retry analysis
+        </Button>
+      </div>
     );
   }
 

@@ -177,7 +177,7 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
                 Enlarges all Kalpa text and controls together.
               </p>
             </div>
-            <div className="grid min-w-[248px] grid-cols-4 rounded-lg border border-white/[0.06] bg-white/[0.03] p-1">
+            <div className="grid min-w-[248px] grid-cols-4 rounded-lg border border-structure-06 bg-structure-03 p-1">
               {TEXT_ZOOM_STOPS.map((factor) => {
                 const active = Math.abs(textZoom - factor) < 0.001;
                 return (
@@ -191,8 +191,8 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
                     }}
                     className={`rounded-md px-2 py-1.5 text-xs font-semibold transition-colors duration-150 ${
                       active
-                        ? "bg-[#c4a44a] text-[#0b1220] shadow-[0_1px_6px_rgba(196,164,74,0.24)]"
-                        : "text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+                        ? "bg-primary text-primary-foreground shadow-[0_1px_6px_var(--primary-glow)]"
+                        : "text-muted-foreground hover:bg-structure-04 hover:text-foreground"
                     }`}
                   >
                     {Math.round(factor * 100)}%

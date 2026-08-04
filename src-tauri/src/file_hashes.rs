@@ -321,6 +321,14 @@ pub fn hash_zip_entries(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
+    // A FLAT archive has no `<folder>/` prefix to strip — the folder only comes
+    // into existence when `extract_addon_zip` re-roots the entries under it. The
+    // strip therefore matched nothing and this returned an EMPTY map, so conflict
+    // detection reported zero conflicts for every flat-archive update and the
+    // user's edits were overwritten with no prompt and no backup.
+    let is_flat =
+        crate::installer::flat_archive_wrap_name(&archive).as_deref() == Some(folder_name);
+
     let prefix = format!("{folder_name}/");
     let mut hashes = HashMap::new();
 
@@ -349,9 +357,13 @@ pub fn hash_zip_entries(
             None => continue,
         };
 
-        let relative = match name.strip_prefix(&prefix) {
-            Some(r) if !r.is_empty() => r.to_string(),
-            _ => continue,
+        let relative = if is_flat {
+            name.clone()
+        } else {
+            match name.strip_prefix(&prefix) {
+                Some(r) if !r.is_empty() => r.to_string(),
+                _ => continue,
+            }
         };
 
         // Binary assets get a size signature without decompressing the entry —
@@ -913,6 +925,39 @@ mod tests {
         let hashes = hash_zip_entries(&zip_path, "AddonA").unwrap();
         assert_eq!(hashes.len(), 1);
         assert!(hashes.contains_key("init.lua"));
+    }
+
+    #[test]
+    fn hash_zip_entries_handles_flat_archives() {
+        // A flat archive is re-rooted under its manifest's name at extraction
+        // time, so its entries carry no `<folder>/` prefix. Stripping one anyway
+        // returned an EMPTY map, which made conflict detection report zero
+        // conflicts for every flat-archive update.
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("flat.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, content) in [
+            ("UL_LootLog.txt", "## Title: UL"),
+            ("UL_LootLog.lua", "local x = 1"),
+            ("bindings/Bindings.lua", "-- keys"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+
+        let hashes = hash_zip_entries(&zip_path, "UL_LootLog").unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes["UL_LootLog.lua"], sha256_hex("local x = 1"));
+        assert!(hashes.contains_key("bindings/Bindings.lua"));
+
+        // The flat shortcut applies only to the folder the archive wraps into;
+        // any other folder name still yields nothing.
+        assert!(hash_zip_entries(&zip_path, "SomethingElse")
+            .unwrap()
+            .is_empty());
     }
 
     // ── ZIP-baseline recording (the perf refactor) ──────────────────────

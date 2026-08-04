@@ -185,8 +185,15 @@ fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload 
 /// The NSIS updater replaces the binary and bundled frontend assets, but
 /// WebView2 keeps its own disk cache under `%LOCALAPPDATA%\{identifier}\EBWebView`.
 /// Stale cached JS/CSS causes the UI to look outdated after an update.
-/// We store the last-seen version in a marker file and nuke the cache dir
-/// whenever it differs from the current build version.
+/// We store the last-seen version in a marker file and clear the cache
+/// subdirectories whenever it differs from the current build version.
+///
+/// ONLY the cache subdirectories: `EBWebView` is WebView2's whole user-data
+/// folder, and removing it also wipes Local Storage / IndexedDB / cookies.
+/// Kalpa keeps real user state there — the uploader's options (region,
+/// visibility, guild) live only in localStorage — so nuking the folder silently
+/// reset an EU user's region to NA and a "private" upload back to "unlisted" on
+/// every single update.
 ///
 /// Windows/WebView2-specific: WKWebView (macOS) and WebKitGTK (Linux) don't
 /// exhibit the stale-cache-after-update bug this works around, and deleting
@@ -206,9 +213,20 @@ fn clear_webview_cache_on_upgrade() {
         return;
     }
 
-    let cache_dir = data_dir.join("EBWebView");
-    if cache_dir.exists() {
-        let _ = std::fs::remove_dir_all(&cache_dir);
+    let user_data_dir = data_dir.join("EBWebView");
+    for relative in [
+        "Default/Cache",
+        "Default/Code Cache",
+        "Default/GPUCache",
+        "Default/Service Worker/CacheStorage",
+        "Default/Service Worker/ScriptCache",
+        "GrShaderCache",
+        "ShaderCache",
+    ] {
+        let cache_dir = user_data_dir.join(relative);
+        if cache_dir.exists() {
+            let _ = std::fs::remove_dir_all(&cache_dir);
+        }
     }
 
     let _ = std::fs::create_dir_all(&data_dir);

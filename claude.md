@@ -6,7 +6,7 @@ You are Claude Code working in this repository. Optimize for **safety, clarity, 
 
 ## Mission & Current State
 
-Kalpa is a source-available desktop app for managing Elder Scrolls Online addons, licensed under BSL 1.1 (not open source in the OSI sense — it converts to Apache 2.0 four years after each release). It is currently in a **functional alpha** state with:
+Kalpa is a source-available desktop app for managing Elder Scrolls Online addons, licensed under BSL 1.1 (not open source in the OSI sense — it converts to Apache 2.0 four years after each release). It is in **public beta** (see `package.json` for the current version) with:
 
 - Addon scanning and installation
 - Updates and dependency resolution
@@ -22,7 +22,7 @@ Your job is to improve this app without breaking existing functionality or the b
 ## Tech Stack Snapshot
 
 - **Desktop client**: Tauri v2 + React 19 + TypeScript + Tailwind v4 + shadcn-ui
-- **Backend**: Cloudflare Workers + KV (Pack Hub)
+- **Backend**: Cloudflare Workers + KV, mirrored into the website's shared D1 (Pack Hub)
 - **CI/CD**: GitHub Actions with tag-triggered release builds (Windows NSIS, macOS universal dmg, Linux AppImage/deb/rpm)
 
 When in doubt, prefer solutions that fit naturally into this stack.
@@ -52,37 +52,56 @@ Follow these rules unless explicitly directed otherwise:
 Use the existing architecture; extend it instead of inventing new patterns:
 
 ```text
-src/                    # React frontend
-  components/           # Feature components (addon list, settings, etc.)
-  components/ui/        # shadcn-ui primitives
-  lib/                  # Utilities (store, helpers)
-  types.ts              # Shared TypeScript interfaces
+src/                        # React frontend
+  components/               # Feature components (addon list, packs, settings)
+  components/ui/            # shadcn-ui primitives
+  components/uploader/      # ESO Logs uploader workspace
+  hooks/                    # Shared React hooks
+  lib/                      # Utilities, Tauri bindings, store, theme presets
+  types.ts                  # Shared TypeScript interfaces
 
-src-tauri/src/          # Rust backend
-  commands.rs           # All Tauri command handlers
-  esoui.rs              # ESOUI HTTP client & HTML scraping
-  manifest.rs           # Addon manifest (.txt) parsing
-  installer.rs          # ZIP extraction & addon installation
-  metadata.rs           # Metadata caching & management
-  lib.rs                # Module defs & Tauri app setup
+src-tauri/src/              # Rust backend
+  commands.rs               # Tauri command handlers (except the uploader's)
+  esoui.rs                  # ESOUI API client and HTML scraping
+  manifest.rs               # ESO addon manifest parser
+  manifest_cache.rs         # SQLite-backed manifest cache
+  installer.rs              # ZIP extraction and addon installation
+  metadata.rs               # Metadata tracking and persistence
+  file_hashes.rs            # File hashing for update conflict detection
+  edit_backups.rs           # Backups for addon file edits
+  safe_migration.rs         # Minion migration with dry-run and snapshots
+  game_instances.rs         # Multi-instance detection (native/Steam)
+  platform.rs               # Cross-platform helpers (Steam/Proton discovery, open_url)
+  settings_store.rs         # Atomic app-settings persistence
+  saved_variables/          # SavedVariables parsing, scrubbing, per-character backups
+  uploader/                 # ESO Logs uploader (scan, split, encode, upload, live)
+    commands.rs             # The uploader's own Tauri commands
+  auth.rs                   # Authentication
+  token_store.rs            # Credential storage (Credential Manager / Keychain / Secret Service)
+  lib.rs                    # Module definitions, MetadataLock, Tauri app setup
 
-backend/eso-packs-worker/  # Pack Hub Cloudflare Worker (KV-based)
-  src/index.ts             # Router, handlers, scheduled backup
-  src/kv.ts                # KV read/write helpers
-  src/types.ts             # Pack types (snake_case, matches Rust HubPack)
-  src/validate.ts          # Input validation
-  src/shares.ts            # Share code create/resolve
-  src/cors.ts              # CORS config
-  wrangler.toml            # Worker config — name MUST be "kalpa-pack-hub"
+backend/eso-packs-worker/   # Pack Hub Cloudflare Worker
+  src/index.ts              # Router, handlers, scheduled backup
+  src/kv.ts                 # KV read/write helpers
+  src/pack-index-do.ts      # Durable Object for atomic index mutations
+  src/types.ts              # Pack types (snake_case, matches Rust HubPack)
+  src/validate.ts           # Input validation
+  src/shares.ts             # Share code create/resolve, bearer-token validation
+  src/redact.ts             # Anonymous-pack author redaction
+  src/seed.ts               # Seed data for a fresh namespace
+  src/cors.ts               # CORS config
+  wrangler.toml             # Worker config — name MUST be "kalpa-pack-hub"
+
+prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar, shipped on Windows
 ```
 
-When adding new logic, pick the closest existing file that matches the concern before creating new modules.
+Both `commands.rs` files register handlers into the single `generate_handler!` list in `lib.rs`. When adding new logic, pick the closest existing file that matches the concern before creating new modules — uploader and SavedVariables work belongs in `uploader/` and `saved_variables/`, not in the root `commands.rs`.
 
 ---
 
 ## Pack Hub Worker — Critical Rules
 
-The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`) that is completely separate from the ESO Toolkit website API (`roster-hub-api`).
+The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed separately from the ESO Toolkit website API (`roster-hub-api`) — but it is not isolated from it: the two share the `roster-hub-db` D1 database.
 
 ### NEVER do these:
 
@@ -94,7 +113,10 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`) that is com
 ### Architecture:
 
 - **Worker URL**: `https://kalpa-pack-hub.eso-toolkit.workers.dev`
-- **Storage**: Cloudflare KV (`ESO_PACKS` namespace)
+- **Primary store**: Cloudflare KV (`ESO_PACKS` namespace)
+- **Shared D1 mirror**: every pack mutation is dual-written inline into the `packs`/`pack_tags` tables of `roster-hub-db` (binding `ROSTER_HUB_DB`) so esotk.com reflects the latest pack data. **These tables are shared with `roster-hub-api` — any schema or SQL change has to be coordinated with the website.**
+- **Index serialization**: `PackIndexDO` (Durable Object binding `PACK_INDEX`) owns mutations of the `index:packs` value
+- **Rate limiting**: three built-in limiter bindings — `READ_LIMITER` (60/min), `WRITE_LIMITER` (10/min), `VOTE_LIMITER` (20/min)
 - **API format**: snake_case JSON matching Rust `HubPack` struct in `commands.rs`
 - **Auth**: ESO Logs Bearer token via `validateBearerToken()` in `shares.ts`
 - **Backup**: Daily cron at midnight UTC snapshots pack index to `backup:YYYY-MM-DD` keys (90-day TTL)
@@ -170,15 +192,21 @@ When preparing a new release:
    local crate's `Cargo.lock` entry. Run `npm run check:versions` to confirm —
    CI runs the same check, and `release.yml` also compares the result to the tag.
 
-2. Rewrite the per-release "Changed:" section of `releaseBody` in
+2. Add a `## [<version>] — YYYY-MM-DD` section to `CHANGELOG.md` and a matching
+   link-reference definition at the bottom of the file (a heading with no
+   definition renders as literal bracketed text). Every GitHub release body
+   opens with "See CHANGELOG.md for full details", so a missing entry sends
+   users to a file that does not mention the release they just installed —
+   which is how beta.15 shipped.
+3. Rewrite the per-release "Changed:" section of `releaseBody` in
    `.github/workflows/release.yml`. It is shared by every tag, so it otherwise
    ships the previous release's headline.
-3. Run the packaged build verification gate on Windows: `npm run test:packaged`.
+4. Run the packaged build verification gate on Windows: `npm run test:packaged`.
    It is deliberately local-only because it needs WebView2, launches the debug
    packaged binary itself, and fails if it connects to the Vite dev server instead
    of `http://tauri.localhost/`.
-4. Push a tag `v*` (for example `v0.3.0`).
-5. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
+5. Push a tag `v*` (for example `v0.3.0`).
+6. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
 
 ### Cross-Platform Notes
 
@@ -200,6 +228,8 @@ Review these before UI work:
 1. `context/40-design-system.md` — design principles, colors, glass morphism, typography, animations.
 2. `context/41-component-patterns.md` — concrete shadcn component recipes.
 3. `context/42-theme-tokens.md` — CSS variables, `@theme` inline mappings, Tailwind utilities.
+
+Docs 40 and 41 were written before the light-theme token migration, so the literal `rgba(…)` / white-alpha snippets in them are historical. The shipped components (`src/components/ui/*.tsx`) and `src/index.css` are the authority for actual class names; the Visual Rules below say which tokens to use.
 
 ### Implemented UI Primitives
 
@@ -229,15 +259,18 @@ Use these components instead of re-rolling new ones:
 - Addon list items:
   - 3px colored left border encoding status.
 - Borders and dividers:
-  - Surfaces: `border-white/[0.06]` (not `border-border`).
-  - Dividers: `<div className="border-t border-white/[0.06]" />` instead of `<Separator />`.
+  - Surfaces: `border-structure-06` (not `border-border`, and **never** `border-white/[0.06]`).
+  - Dividers: `<div className="border-t border-structure-06" />` instead of `<Separator />`.
+  - The `structure-*` ladder (`structure-01` … `structure-70`) and the `scrim-*` ladder are theme-aware: `--structure-rgb` flips from white to black on light themes, so a literal white-alpha class renders invisible on the three light and two high-contrast themes.
 - Spinners:
-  - Use `border-white/[0.1] border-t-[#c4a44a]` (ESO gold top border).
+  - Use `border-structure-10 border-t-primary` (accent-colored top border, follows the theme).
 - Motion:
   - Timing scale: fast 150ms, normal 250ms, slow 400ms.
 - Colors:
-  - ESO gold `#c4a44a` as primary accent.
-  - Sky-blue `#38bdf8` for interactive and focus states.
+  - `primary` is the brand accent (ESO gold `#c4a44a` on the default theme, but themes reseed it — use `text-primary` / `bg-primary/[0.04]`, never the hex).
+  - `accent-sky` for interactive and focus states.
+  - Status colors go through the `status-*` tokens (`status-success`, `status-warning`, `status-danger`, `status-info`, `status-library`), which are re-applied per theme by `theme-apply.ts` — they are not fixed palette values.
+  - Overlay depth goes through `scrim-*`, not `rgba(0,0,0,…)`.
 
 ---
 
@@ -272,7 +305,9 @@ Kalpa's Vite dev server uses **port 1430** (overriding Tauri's default 1420) so 
 Port configuration lives in two places that must stay in sync:
 
 - `.env.local` → `VITE_PORT=1430` (read by `vite.config.ts` via `loadEnv`)
-- `src-tauri/tauri.conf.json` → `"devUrl": "http://localhost:1430"`
+- `src-tauri/tauri.conf.json` → `"devUrl": "http://127.0.0.1:1430"`
+
+`VITE_PORT` lives only in `.env.local`, which is gitignored — copy `.env.example` to `.env.local` on a fresh clone, or `npm run tauri dev` waits forever for a dev server that never appears on 1430.
 
 If you need to change the port:
 
@@ -321,7 +356,7 @@ Use CDP-backed tools for visual debugging:
 
 1. The user starts `npm run tauri dev`.
 2. Claude connects via:
-   - `list_pages` -> `navigate_page` to `http://localhost:1420` -> `select_page`.
+   - `list_pages` -> `navigate_page` to `http://127.0.0.1:1430` -> `select_page`.
 3. Use `take_screenshot` to see the current state of the app.
 4. Use other CDP tools to inspect layout, state, network calls, and console messages.
 

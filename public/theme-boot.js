@@ -195,7 +195,15 @@
   // and its data-textured flag arrive together at hydration).
   if (mirror && applied >= FORCED_VERSION) {
     var textured = apply(mirror);
-    apply(statusVarsForTheme(mirror));
+    // The mirror already carries the status vars (themeColorsToVars bakes them
+    // in), and it is the authoritative copy. The tables above are only a
+    // fallback for mirrors written before those vars were mirrored, so fill in
+    // what is missing rather than painting over what is there.
+    var fallback = statusVarsForTheme(mirror);
+    for (var name in fallback) {
+      if (Object.prototype.hasOwnProperty.call(mirror, name)) delete fallback[name];
+    }
+    apply(fallback);
     if (textured) root.dataset.textured = "true";
   } else {
     apply(DEFAULT_VARS);

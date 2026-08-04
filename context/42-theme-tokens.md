@@ -272,7 +272,8 @@ Rules when editing derivations:
 ### Using theme colors in components
 
 - Use the Tailwind tokens so colors follow the theme: `text-primary`, `bg-primary/[0.04]`, `border-primary/30`, `ring-primary`, `text-accent-sky`, `bg-accent-sky/10`, `from-primary-hover to-primary`. Opacity modifiers work (Tailwind v4 compiles them to `color-mix`).
-- **Keep literal** the theme-independent overlays (`border-white/[0.06]`, `bg-white/[0.02]`) and **semantic status colors** (emerald/amber/red/violet = success/warning/error/library) — these must stay constant across themes.
+- **Nothing structural stays literal.** Overlays go through the `structure-*` ladder (`border-structure-06`, `bg-structure-02`, `border-structure-10`) and depth through the `scrim-*` ladder (`shadow-[0_4px_16px_var(--scrim-20)]`) — never `white/[0.06]` or `rgba(0,0,0,…)`. Both ladders are built from `--structure-rgb`, which `theme-apply.ts` sets from the seed background's luminance: `255 255 255` on dark themes (reproducing the old white-alpha values exactly) and black on light themes. A literal white-alpha class renders invisible on the three light and two high-contrast themes.
+- **Status colors are per-theme too.** Use the `status-*` tokens (`text-status-success`, `border-status-warning/20`, `bg-status-danger/[0.04]`, `status-info`, `status-library`); `theme-apply.ts` applies a light or dark status table depending on the active theme, so a light theme gets ink-dark warning text instead of pale amber. The old `emerald-*`/`amber-*`/`red-*`/`violet-*`/`sky-*` palette utilities are kept working only as compatibility aliases in `index.css`'s `@theme inline` block — do not reach for them in new code.
 
 ### Custom theme builder
 

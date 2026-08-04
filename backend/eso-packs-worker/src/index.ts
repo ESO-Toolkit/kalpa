@@ -1,18 +1,17 @@
-import type { Env, Pack, PackType, PackStatus, VoteRecord, VoteResponse } from "./types";
+import type { Env, Pack, PackType, PackStatus, PackView, VoteRecord, VoteResponse } from "./types";
 import {
   getPack,
   getPackIndex,
   putPack,
+  getVotedPackIds,
   getVote,
-  putVote,
-  deleteVote,
+  deleteVotesForPack,
   restoreVote,
-  listAllPackBodies,
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
 import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
-import { validatePack } from "./validate";
+import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 export { PackIndexDO } from "./pack-index-do";
@@ -36,7 +35,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
       await env.ROSTER_HUB_DB
         .prepare(
           `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
              title = excluded.title,
              description = excluded.description,
@@ -44,6 +43,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
              addons = excluded.addons,
              is_anonymous = excluded.is_anonymous,
              author_name = excluded.author_name,
+             vote_count = excluded.vote_count,
              updated_at = datetime('now')`,
         )
         .bind(
@@ -58,6 +58,10 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
           pack.description,
           pack.pack_type,
           addonsJson,
+          // Inserting a literal 0 here (and omitting vote_count from the
+          // upsert) froze the website's counters at zero and reset them on
+          // every author edit.
+          pack.vote_count ?? 0,
         )
         .run();
 
@@ -77,6 +81,23 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
     }
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
+  }
+}
+
+/**
+ * Mirror a counter bump into D1. The vote endpoint goes through the DO rather
+ * than d1UpsertPack, so without this the website's vote counts never move.
+ * Best-effort, like the other D1 writes.
+ */
+async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promise<void> {
+  if (!env.ROSTER_HUB_DB) return;
+  try {
+    await env.ROSTER_HUB_DB
+      .prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
+      .bind(voteCount, id)
+      .run();
+  } catch (err) {
+    console.error(`D1 vote_count sync failed [${id}]:`, err);
   }
 }
 
@@ -138,10 +159,23 @@ function requireAuth(request: Request, env: Env): boolean {
   return crypto.subtle.timingSafeEqual(keyBytes, expectedBytes);
 }
 
-/** Purge the CDN-cached pack list after a mutation. */
-async function invalidatePackListCache(url: URL): Promise<void> {
-  const cacheKey = new URL("/packs", url.origin);
-  await caches.default.delete(new Request(cacheKey));
+/**
+ * The single cache key the default landing view is stored under.
+ *
+ * The incoming URL for that view varies (`sort` and `page` may be omitted, or
+ * spelled in either order) but the Cache API matches on the full URL including
+ * the query string, so caching under the request URL and deleting a bare
+ * "/packs" never lined up — mutations silently failed to invalidate. Every
+ * match/put/delete goes through this one canonical key instead.
+ */
+function defaultViewCacheKey(url: URL): Request {
+  return new Request(new URL("/packs?default=1", url.origin));
+}
+
+/** Purge the CDN-cached pack list after a mutation. Exported so tests can
+ *  reset the shared cache between cases. */
+export async function invalidatePackListCache(url: URL): Promise<void> {
+  await caches.default.delete(defaultViewCacheKey(url));
 }
 
 /** Get the singleton PackIndexDO stub for atomic index mutations. */
@@ -170,10 +204,9 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const cache = caches.default;
 
   // Only the default landing view is cacheable: no filters, page 1, and the
-  // client's default sort. The client always sends sort=votes&page=1 for that
-  // view (pack-constants.ts), so match that exact request shape for both the
-  // read and the write below — otherwise the keys never align and we either
-  // never hit or cache a non-canonical response.
+  // client's default sort (pack-constants.ts sends sort=votes&page=1). Every
+  // spelling of that view shares one canonical cache key — see
+  // defaultViewCacheKey.
   const sortParam = url.searchParams.get("sort");
   const pageParam = url.searchParams.get("page");
   const isDefaultView =
@@ -181,8 +214,23 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     (pageParam === null || pageParam === "1") &&
     (sortParam === null || sortParam === "votes");
 
-  if (isDefaultView) {
-    const cached = await cache.match(request);
+  // Resolve the viewer up front: draft/all filtering, the author filter,
+  // anonymity redaction and user_voted all key off it, and whether the shared
+  // cache may be used depends on it. Free when no Authorization header is
+  // present (validateBearerToken returns null without an upstream call).
+  const viewer = await validateBearerToken(request);
+  const viewerId = viewer ? String(viewer.id) : undefined;
+
+  // Only an anonymous, origin-less request may read or populate the shared
+  // entry: an authed response carries that viewer's user_voted (and possibly
+  // their own anonymous packs), and corsHeaders echoes the caller's Origin, so
+  // either would be replayed to the wrong caller. The desktop client — the
+  // only consumer today — sends neither.
+  const isSharedCacheable =
+    isDefaultView && viewerId === undefined && request.headers.get("Origin") === null;
+
+  if (isSharedCacheable) {
+    const cached = await cache.match(defaultViewCacheKey(url));
     if (cached) return cached;
   }
 
@@ -193,15 +241,8 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
   let packs = index.packs;
 
-  // Resolve the viewer once: draft/all filtering, the author filter, and
-  // anonymity redaction all key off it. Free when no Authorization header is
-  // present (validateBearerToken returns null without an upstream call).
   const statusFilter = url.searchParams.get("status");
   const authorFilter = url.searchParams.get("author");
-  const needsViewer =
-    statusFilter === "all" || statusFilter === "draft" || authorFilter !== null;
-  const viewer = needsViewer ? await validateBearerToken(request) : null;
-  const viewerId = viewer ? String(viewer.id) : undefined;
 
   // Status filter — default to "published"; draft/all require auth + ownership
   if (statusFilter === "all" || statusFilter === "draft") {
@@ -267,17 +308,27 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const start = (page - 1) * PACKS_PER_PAGE;
   const paginated = packs.slice(start, start + PACKS_PER_PAGE);
 
-  // Enforce anonymity at the edge. The default view is cached and shared, so
-  // it is always fully redacted regardless of who populated the cache; the
-  // owner exception only applies to uncached (filtered) views.
-  const visible = paginated.map((p) =>
-    redactAnonymousPack(p, isDefaultView ? undefined : viewerId),
+  // Enforce anonymity at the edge. A shared-cacheable response is always fully
+  // redacted regardless of who populated the cache; the owner exception only
+  // applies to responses served to one identified viewer.
+  const redacted = paginated.map((p) =>
+    redactAnonymousPack(p, isSharedCacheable ? undefined : viewerId),
   );
+
+  // Tell the viewer which of these they have already voted on. Without it the
+  // client renders every pack as unvoted and its toggle deletes real votes.
+  const votedIds =
+    viewerId === undefined
+      ? null
+      : await getVotedPackIds(env, viewerId, paginated.map((p) => p.id));
+  const visible: PackView[] = votedIds
+    ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
+    : redacted;
 
   const response = json(request, { packs: visible, page, sort }, 200, 30);
 
-  if (isDefaultView && request.method === "GET") {
-    cache.put(request, response.clone()).catch(console.error);
+  if (isSharedCacheable && request.method === "GET") {
+    cache.put(defaultViewCacheKey(url), response.clone()).catch(console.error);
   }
 
   return response;
@@ -289,24 +340,26 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
   if (!pack) {
     return notFound(request);
   }
-  if (pack.status === "draft") {
-    const user = await validateBearerToken(request);
-    if (!user || String(user.id) !== pack.author_id) {
-      return notFound(request);
-    }
-    return json(request, { pack }, 200, 0);
+
+  const user = await validateBearerToken(request);
+  const viewerId = user ? String(user.id) : undefined;
+
+  if (pack.status === "draft" && viewerId !== pack.author_id) {
+    return notFound(request);
   }
-  if (pack.is_anonymous) {
-    // The author gets their real fields back (pack management needs them) but
-    // that response must never be cacheable; everyone else gets the redacted
-    // pack, which stays safe to cache.
-    const user = await validateBearerToken(request);
-    if (user && String(user.id) === pack.author_id) {
-      return json(request, { pack }, 200, 0);
-    }
-    return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
+
+  if (viewerId !== undefined) {
+    // A viewer-specific response: it carries their user_voted, and for the
+    // author it carries the real fields of their own anonymous pack. Never
+    // cacheable.
+    const voted = (await getVote(env, id, viewerId)) !== null;
+    const view: PackView = { ...redactAnonymousPack(pack, viewerId), user_voted: voted };
+    return json(request, { pack: view }, 200, 0);
   }
-  return json(request, { pack }, 200, 300, "public");
+
+  // Anonymous viewer: the redacted pack is identical for everyone, so it stays
+  // safe to cache.
+  return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
 }
 
 // ── POST /packs ────────────────────────────────────────────────────
@@ -316,37 +369,32 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     return unauthorized(request);
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    return parsed.reason === "too-large"
+      ? json(request, { error: "Request body is too large" }, 413)
+      : badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
 
-  const errors = validatePack(body);
+  const errors = validatePack(parsed.body);
   if (errors.length > 0) {
     return badRequest(request, errors);
   }
 
-  const input = body as Record<string, unknown>;
-
-  // Per-user pack limit
-  const MAX_PACKS_PER_USER = 25;
+  const input = parsed.body as Record<string, unknown>;
   const userId = String(user.id);
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const userPackCount = index.packs.filter((p) => p.author_id === userId).length;
-  if (userPackCount >= MAX_PACKS_PER_USER) {
-    return json(
-      request,
-      { error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.` },
-      429,
-    );
-  }
 
   // Generate ID from title if not provided
   let id = typeof input.id === "string" && input.id.length > 0
     ? input.id
     : slugify(input.title as string);
+
+  // A title with no ASCII alphanumerics (CJK, Cyrillic, emoji) slugifies to
+  // "", which every /packs/:id route rejects — the pack would be listed but
+  // unreachable, un-editable and un-deletable forever.
+  if (!id) {
+    id = `pack-${Date.now().toString(36)}`;
+  }
 
   // Ensure unique (fresh read so a recently-created id isn't missed)
   const existing = await getPack(env, id, { fresh: true });
@@ -363,17 +411,31 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     author_id: userId,
     author_name: user.name,
     is_anonymous: Boolean(input.is_anonymous),
-    addons: input.addons as Pack["addons"],
+    addons: sanitizeAddons(input.addons),
     tags: input.tags as string[],
     vote_count: 0,
     install_count: 0,
     created_at: now,
     updated_at: now,
-    status: "draft",
+    // Honour the requested status. Hardcoding "draft" made the client's
+    // Publish flow report success for a pack nobody — including the author's
+    // own browse view and the D1 mirror — could ever see.
+    status: (input.status as PackStatus) ?? "draft",
   };
 
+  // The index goes first: the per-user cap is enforced inside the DO, which is
+  // the only place that reads the index uncached and single-threaded, so a
+  // rejected create must not have written a pack body already.
+  const MAX_PACKS_PER_USER = 25;
+  const added = await getPackIndexDO(env).addPack(pack, MAX_PACKS_PER_USER);
+  if (!added.ok) {
+    return json(
+      request,
+      { error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.` },
+      429,
+    );
+  }
   await putPack(env, pack);
-  await getPackIndexDO(env).addPack(pack);
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -404,19 +466,19 @@ async function handleUpdatePack(
     return json(request, { error: "Only the pack creator can update it" }, 403);
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    return parsed.reason === "too-large"
+      ? json(request, { error: "Request body is too large" }, 413)
+      : badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
 
-  const errors = validatePack(body);
+  const errors = validatePack(parsed.body);
   if (errors.length > 0) {
     return badRequest(request, errors);
   }
 
-  const input = body as Record<string, unknown>;
+  const input = parsed.body as Record<string, unknown>;
 
   const pack: Pack = {
     id,
@@ -426,7 +488,7 @@ async function handleUpdatePack(
     author_id: existing.author_id,
     author_name: existing.author_name,
     is_anonymous: Boolean(input.is_anonymous),
-    addons: input.addons as Pack["addons"],
+    addons: sanitizeAddons(input.addons),
     tags: input.tags as string[],
     vote_count: existing.vote_count,
     install_count: existing.install_count,
@@ -469,6 +531,10 @@ async function handleDeletePack(
 
   await env.ESO_PACKS.delete(`pack:${id}`);
   await getPackIndexDO(env).removePack(id);
+  // Slugs become available again once a pack is deleted, so its vote records
+  // must go with it — otherwise a pack that reuses the id inherits them and a
+  // previous voter's first vote is treated as an unvote.
+  await deleteVotesForPack(env, id);
 
   await invalidatePackListCache(url);
   await d1DeletePack(env, id);
@@ -513,34 +579,32 @@ async function handleVotePack(
     return notFound(request);
   }
 
+  // Drafts are hidden from everyone but their author, so this endpoint must
+  // not answer for one either — the auth-distinguishable 401-vs-404 otherwise
+  // confirms a hidden slug exists. Checked before any auth work runs.
+  if ((pack.status ?? "published") !== "published") {
+    return notFound(request);
+  }
+
   const user = await validateBearerToken(request);
   if (!user) {
     return json(request, { error: "Sign in to vote" }, 401);
   }
   const userId = String(user.id);
 
-  const existingVote = await getVote(env, id, userId);
-  let voted: boolean;
-  let delta: number;
-
-  if (existingVote) {
-    await deleteVote(env, id, userId);
-    voted = false;
-    delta = -1;
-  } else {
-    await putVote(env, id, userId);
-    voted = true;
-    delta = 1;
-  }
-
-  // Mutate the counter inside the DO (fresh, single-threaded) so we neither
-  // lose concurrent votes nor revert a recent author edit by writing back a
-  // stale cached snapshot. The DO also syncs the per-pack KV detail.
-  const updated = await getPackIndexDO(env).bumpPackCounter(id, "vote_count", delta, pack);
+  // Toggle the record and apply the counter delta in one serialized step
+  // inside the DO. Deciding vote-vs-unvote out here read the record through
+  // KV's edge cache, so a rapid vote/unvote could see the same stale state
+  // twice and inflate vote_count permanently. The DO also syncs the per-pack
+  // KV detail from its own fresh copy.
+  const { voted, pack: updated } = await getPackIndexDO(env).toggleVote(id, userId, pack);
 
   await invalidatePackListCache(url);
 
-  const voteCount = updated?.vote_count ?? Math.max(0, (pack.vote_count ?? 0) + delta);
+  const voteCount =
+    updated?.vote_count ?? Math.max(0, (pack.vote_count ?? 0) + (voted ? 1 : -1));
+  await d1UpdateVoteCount(env, id, voteCount);
+
   const response: VoteResponse = { voted, voteCount };
   return json(request, response);
 }
@@ -554,6 +618,13 @@ async function handleInstallPack(
 ): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
+    return notFound(request);
+  }
+
+  // This endpoint needs no auth at all, so without a status gate anyone who
+  // guessed a draft's slug could bump its install_count and read the count
+  // back — mutating and disclosing a pack the API otherwise denies exists.
+  if ((pack.status ?? "published") !== "published") {
     return notFound(request);
   }
 
@@ -622,9 +693,9 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
  * Full-corpus snapshot shape written to `backup:YYYY-MM-DD` / `backup:latest`.
  * `packs` mirrors the legacy index-only backup shape (an array of full Pack
  * objects) for backward compatibility with anything that reads old daily
- * backups; `packBodies` and `votes` additionally capture the per-key
- * `pack:<id>` and `vote:<id>:<user>` records directly (via KV `list()`) so the
- * backup is restorable even if the index and per-key data were ever to drift.
+ * backups; `packBodies` keys the same objects by id so restore can replay the
+ * per-key `pack:<id>` records, and `votes` carries every `vote:<id>:<user>`
+ * record so votes survive a restore too.
  */
 interface PackBackupSnapshot {
   created_at: string;
@@ -666,13 +737,16 @@ async function handleScheduled(env: Env): Promise<void> {
     if (meta?.last_backup_key === backupKey) return;
   }
 
-  // Enumerate the full corpus — the index already carries full pack fields,
-  // but capture the per-key pack bodies and votes too so the backup is
-  // actually restorable rather than just an index-only snapshot.
-  const [packBodies, votes] = await Promise.all([
-    listAllPackBodies(env),
-    listAllVotes(env),
-  ]);
+  // Enumerate the full corpus so the backup is actually restorable rather
+  // than index-only. Neither half may fan out one KV get per record: Workers
+  // cap subrequests per invocation, and once packs + votes crossed that cap
+  // the cron threw every night and durable backups silently stopped. Pack
+  // bodies come straight from the index (which already carries full Pack
+  // objects) and votes come from their keys' list() metadata.
+  const packBodies: Record<string, Pack> = Object.fromEntries(
+    index.packs.map((p): [string, Pack] => [p.id, p]),
+  );
+  const votes = await listAllVotes(env);
 
   const snapshot: PackBackupSnapshot = {
     created_at: new Date().toISOString(),
@@ -785,8 +859,12 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   // to repair), then union in any pack from the CURRENT live index that isn't
   // part of this snapshot at all, so packs created after the backup was taken
   // aren't deleted by the restore.
+  // Fresh read: a pack created inside the 60s cache window would otherwise be
+  // absent from `preservedPacks` and dropped from the rebuilt index — which is
+  // exactly what the preservation above promises not to do, and restore runs
+  // at incident time when recent writes are most likely in flight.
   const restoredIds = new Set(Object.keys(packBodies));
-  const liveIndex = await getPackIndex(env);
+  const liveIndex = await getPackIndex(env, { fresh: true });
   const preservedPacks = (liveIndex?.packs ?? []).filter((p) => !restoredIds.has(p.id));
   await getPackIndexDO(env).replaceIndex({ packs: [...packs, ...preservedPacks] });
 
@@ -865,26 +943,29 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   const userId = String(user.id);
 
-  // 1. Find and delete all user's packs
-  const index = await getPackIndex(env);
-  const userPacks = index?.packs.filter((p) => p.author_id === userId) ?? [];
+  // 1. Find and delete all user's packs.
+  //
+  // The DO is the authority here, not our own index read: it runs unconditionally
+  // (it is cheap) and reports the ids it actually removed, so a pack created
+  // moments before the deletion request — invisible to even a fresh cached read —
+  // still has its body and D1 rows removed. Without that, the only pack of a
+  // brand-new account could survive deletion entirely.
+  const index = await getPackIndex(env, { fresh: true });
+  const snapshotIds = index?.packs.filter((p) => p.author_id === userId).map((p) => p.id) ?? [];
+  const removedIds = await getPackIndexDO(env).removePacksByAuthor(userId);
+  const packIds = [...new Set([...snapshotIds, ...removedIds])];
 
   // Delete individual pack KV entries
-  for (const pack of userPacks) {
-    await env.ESO_PACKS.delete(`pack:${pack.id}`);
-  }
-
-  // Batch-remove from DO index in a single read-write cycle
-  if (userPacks.length > 0) {
-    await getPackIndexDO(env).removePacksByAuthor(userId);
+  for (const packId of packIds) {
+    await env.ESO_PACKS.delete(`pack:${packId}`);
   }
 
   // Batch-delete from D1
-  if (userPacks.length > 0 && env.ROSTER_HUB_DB) {
+  if (packIds.length > 0 && env.ROSTER_HUB_DB) {
     try {
-      const stmts = userPacks.flatMap((p) => [
-        env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(p.id),
-        env.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id = ?").bind(p.id),
+      const stmts = packIds.flatMap((packId) => [
+        env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(packId),
+        env.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id = ?").bind(packId),
       ]);
       await env.ROSTER_HUB_DB.batch(stmts);
     } catch (err) {
@@ -927,7 +1008,7 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
     shareCursor = list.list_complete ? undefined : list.cursor;
   } while (shareCursor);
 
-  if (userPacks.length > 0) {
+  if (packIds.length > 0) {
     await invalidatePackListCache(url);
   }
 
@@ -937,7 +1018,7 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   return json(request, {
     deleted: {
-      packs: userPacks.length,
+      packs: packIds.length,
       votes: voteCount,
       shares: shareCount,
     },

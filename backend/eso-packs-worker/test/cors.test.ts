@@ -14,6 +14,7 @@ describe("corsHeaders", () => {
     "http://localhost:3000",
     "https://tauri.localhost",
     "http://tauri.localhost",
+    "tauri://localhost",
   ])("sets Access-Control-Allow-Origin for allowed origin %s", (origin) => {
     const headers = corsHeaders(requestWithOrigin(origin));
     expect(headers["Access-Control-Allow-Origin"]).toBe(origin);
@@ -46,6 +47,11 @@ describe("corsHeaders", () => {
   it("sets max-age to 86400", () => {
     const headers = corsHeaders(requestWithOrigin(null));
     expect(headers["Access-Control-Max-Age"]).toBe("86400");
+  });
+
+  it("always varies on Origin so shared caches can't replay one origin's ACAO", () => {
+    expect(corsHeaders(requestWithOrigin(null)).Vary).toBe("Origin");
+    expect(corsHeaders(requestWithOrigin("http://localhost:1430")).Vary).toBe("Origin");
   });
 });
 

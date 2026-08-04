@@ -210,11 +210,13 @@ impl super::native::live::OrphanSink for CommandOrphanSink {
 /// a kill/panic between `create-report` and `terminate-report` during a MANUAL upload
 /// leaves a recoverable code (the live-only L2 hazard, now covered for one-shot too).
 ///
-/// Unlike [`CommandOrphanSink`] it does NOT attach the report to a live history record —
-/// a manual upload's report is recorded by the `Completed` arm of `uploader_upload_log`,
-/// and the record is not a live session.
+/// Like [`CommandOrphanSink`] it ALSO attaches the code to the history record the instant
+/// the report exists. Waiting for the `Completed` arm of `uploader_upload_log` lost the
+/// code on every post-create failure: the report is real and sits on the user's account,
+/// but nothing anywhere records it, so the user retries and creates a duplicate.
 struct OneShotOrphanSink {
     app: tauri::AppHandle,
+    record_id: String,
     source_path: String,
     created_at_ms: u64,
 }
@@ -228,6 +230,14 @@ impl super::native::live::OrphanSink for OneShotOrphanSink {
                 last_segment_id: segment_id,
                 source_path: self.source_path.clone(),
                 created_at_ms: self.created_at_ms,
+            },
+        );
+        let _ = super::history::attach_live_report(
+            &self.app,
+            &self.record_id,
+            ReportRef {
+                code: code.to_string(),
+                url: super::watcher::report_url(code),
             },
         );
     }
@@ -1269,6 +1279,9 @@ pub async fn uploader_upload_log(
         title: None,
         zone,
         build_evidence: None,
+        // Stamped below once routing is decided; a record that never reaches the native
+        // branch stays `false` (the official-handoff route).
+        native: false,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1304,13 +1317,16 @@ pub async fn uploader_upload_log(
     let routing = {
         let scan_path = dispatch_path.clone();
         tokio::task::spawn_blocking(move || {
-            transport::assess_native_routing(&scan_path, native_opt_in, has_session)
+            transport::assess_native_routing_scanned(&scan_path, native_opt_in, has_session)
         })
         .await
         .map_err(|e| format!("Routing scan task failed: {e}"))?
     };
-    let use_native = matches!(routing, transport::NativeRouting::Native);
-    if let transport::NativeRouting::Fallback(reason) = &routing {
+    let use_native = matches!(routing.routing, transport::NativeRouting::Native);
+    // The EOF the verdict was computed at: the native encoder is held to exactly these
+    // bytes so an append to an ACTIVE log can't slip past the coverage/session gate.
+    let scanned_len = routing.scanned_len;
+    if let transport::NativeRouting::Fallback(reason) = &routing.routing {
         // Honest diagnostics: why native wasn't used. Logged only (not user-facing
         // noise).
         eprintln!("[uploader] native routing → official: {}", reason.explain());
@@ -1321,7 +1337,7 @@ pub async fn uploader_upload_log(
     // using the official uploader isn't a mystery. `NotOptedIn` (the user chose the
     // official path) and `FormatUnconfirmed` (a global flag, not a per-log trait) are
     // not surprises worth overriding the generic handoff copy.
-    let fallback_note = match &routing {
+    let fallback_note = match &routing.routing {
         transport::NativeRouting::Fallback(
             reason @ (transport::NativeFallbackReason::UnprovenEvents(_)
             | transport::NativeFallbackReason::InvalidEncoding
@@ -1342,6 +1358,11 @@ pub async fn uploader_upload_log(
         // is added, lift this flag into managed state keyed by `record_id`.
         let provider = std::sync::Arc::clone(&session);
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        // Mark the ROUTE on the record before any network work. After a crash the record
+        // is all reconciliation has, and a native upload settled as `HandedOff` claims a
+        // handoff that never happened.
+        record.native = true;
+        let _ = super::history::upsert(&app, record.clone());
         // C2: thread a one-shot crash-recovery breadcrumb sink through the lifecycle so a
         // kill/panic between create-report and terminate-report leaves a recoverable
         // {code} (the live-only L2 hazard, now covered for manual uploads too). The
@@ -1349,6 +1370,7 @@ pub async fn uploader_upload_log(
         // terminate — next-launch `recover_orphans_once` closes any leftover draft.
         let orphan_sink = OneShotOrphanSink {
             app: app.clone(),
+            record_id: record_id.clone(),
             source_path: safe.clone(),
             created_at_ms: now_ms(),
         };
@@ -1369,13 +1391,14 @@ pub async fn uploader_upload_log(
             let emit = move |ev: UploadProgressEvent| {
                 let _ = progress_sink.send(ev);
             };
-            transport::run_native_upload(
+            transport::run_native_upload_bounded(
                 &dispatch_path,
                 &opts,
                 provider.as_ref(),
                 cancel,
                 &orphan_sink,
                 &emit,
+                Some(scanned_len),
             )
         })
         .await
@@ -1511,9 +1534,10 @@ pub async fn uploader_upload_log(
             })
         }
         Err(e) => {
-            record.status = UploadStatus::Failed;
-            record.error = Some(e.clone());
-            let _ = super::history::upsert(&app, record);
+            // Settle in place rather than upserting this stale snapshot: on the native
+            // path the sink may already have attached the code of a report that WAS
+            // created, and writing `record` back would erase the only trace of it.
+            let _ = super::history::settle_failed(&app, &record_id, &e);
             Err(e)
         }
     }
@@ -1992,6 +2016,9 @@ pub async fn uploader_start_live(
         title: None,
         zone,
         build_evidence: None,
+        // The official-uploader handoff route — a stale record here really may still be
+        // streaming in the other app, so reconciliation's `HandedOff` is honest.
+        native: false,
     };
     let _ = super::history::upsert(&app, record);
 
@@ -2184,6 +2211,9 @@ async fn start_native_live_branch(
         title: options.description.clone(),
         zone,
         build_evidence: None,
+        // Kalpa's direct path: nothing is ever handed to the official uploader, so a
+        // record left transient by a crash must settle as failed, not as a handoff.
+        native: true,
     };
     let _ = super::history::upsert(app, record);
 

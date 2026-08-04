@@ -251,7 +251,20 @@ fn collect_zip_top_folders(archive: &zip::ZipArchive<fs::File>) -> HashSet<Strin
 /// folder's contents. Anything else — including an archive with a stray readme
 /// beside a proper addon folder — is left alone, because wrapping there would
 /// nest a correct addon one level too deep.
-fn flat_archive_wrap_name(archive: &zip::ZipArchive<fs::File>) -> Option<String> {
+///
+/// Exposed to `file_hashes` so conflict detection keys a flat archive's entries
+/// the same way extraction lays them out; a mismatch there silently reports zero
+/// conflicts and overwrites the user's edits.
+pub(crate) fn flat_archive_wrap_name(archive: &zip::ZipArchive<fs::File>) -> Option<String> {
+    // A top-level directory that is already a proper addon settles the question:
+    // the archive is foldered and its root files are ancillary. `readme.txt`,
+    // `Changelog.txt` and `LICENSE.txt` beside a real addon folder are common in
+    // author-made ESOUI zips, and treating one as the manifest would bury the
+    // addon at AddOns/readme/MyAddon/… and break update tracking permanently.
+    if contains_foldered_addon(archive) {
+        return None;
+    }
+
     let mut manifest_stems: Vec<String> = Vec::new();
     let mut root_stems: HashSet<String> = HashSet::new();
 
@@ -301,6 +314,23 @@ fn flat_archive_wrap_name(archive: &zip::ZipArchive<fs::File>) -> Option<String>
         }
     };
     sanitize_wrap_name(&chosen)
+}
+
+/// Whether any top-level directory in the archive is itself a proper addon —
+/// `<Dir>/<Dir>.txt` among the entries, the exact shape ESO loads.
+fn contains_foldered_addon(archive: &zip::ZipArchive<fs::File>) -> bool {
+    archive.file_names().any(|name| {
+        let Some(components) = enclosed_components(name) else {
+            return false;
+        };
+        let [dir, file] = components.as_slice() else {
+            return false;
+        };
+        matches!(
+            file.rsplit_once('.'),
+            Some((stem, ext)) if ext.eq_ignore_ascii_case("txt") && stem.eq_ignore_ascii_case(dir)
+        )
+    })
 }
 
 /// Whether a root-level file other than `<stem>.txt` also carries `stem` — the
@@ -387,10 +417,18 @@ fn extract_addon_zip_inner(
         };
 
         // Honor "keep mine" conflict decisions (no-op when skip_files is empty).
-        // Keyed on the ARCHIVE-relative path, which is what the conflict scan
-        // reported, so wrapping must not change the key.
+        // Callers key skip entries by `<folder>/<folder-relative path>`. For a
+        // foldered archive that IS the archive-relative path; for a wrapped flat
+        // archive the folder exists only after wrapping, so the caller's key
+        // carries a prefix the entry lacks — match the wrapped form too, or every
+        // kept file in a flat archive is silently overwritten.
         let key = enclosed.to_string_lossy().replace('\\', "/");
-        if skip_files.contains(&key) {
+        let wrapped_key = wrap_name.map(|name| format!("{name}/{key}"));
+        if skip_files.contains(&key)
+            || wrapped_key
+                .as_deref()
+                .is_some_and(|k| skip_files.contains(k))
+        {
             continue;
         }
 
@@ -653,6 +691,99 @@ mod tests {
 
         extract_addon_zip(&zip_path, &addons_dir).unwrap();
         assert!(addons_dir.join("MyAddon/MyAddon.txt").is_file());
+    }
+
+    /// A root `README.txt`/`Changelog.txt`/`LICENSE.txt` beside a proper addon
+    /// folder is a readme, not a manifest. Wrapping on it buried the real addon at
+    /// `AddOns/readme/MyAddon/…`, recorded the install under the readme's name, and
+    /// broke update tracking permanently.
+    #[test]
+    fn a_root_readme_txt_beside_a_folder_does_not_trigger_wrapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "Thing.zip",
+            &["README.txt", "MyAddon/MyAddon.txt", "MyAddon/core.lua"],
+        );
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+        assert!(addons_dir.join("MyAddon/MyAddon.txt").is_file());
+        assert!(!addons_dir.join("README").exists());
+    }
+
+    /// The same shape with corroboration for the readme stem (`Changelog.txt`
+    /// beside `Changelog.md`), which used to satisfy the wrap heuristic outright.
+    #[test]
+    fn a_changelog_pair_beside_a_folder_does_not_trigger_wrapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "Thing.zip",
+            &["Changelog.txt", "Changelog.md", "MyAddon/MyAddon.txt"],
+        );
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+        assert!(addons_dir.join("MyAddon/MyAddon.txt").is_file());
+        assert!(!addons_dir.join("Changelog").exists());
+    }
+
+    /// Several root `.txt` files beside a proper addon folder: the multi-manifest
+    /// branch must refuse too, not pick whichever readme has a same-stem sibling.
+    #[test]
+    fn multiple_root_txt_files_beside_a_folder_do_not_trigger_wrapping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "Thing.zip",
+            &[
+                "README.txt",
+                "LICENSE.txt",
+                "README.md",
+                "MyAddon/MyAddon.txt",
+            ],
+        );
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+        assert!(addons_dir.join("MyAddon/MyAddon.txt").is_file());
+        assert!(!addons_dir.join("README").exists());
+        assert!(!addons_dir.join("LICENSE").exists());
+    }
+
+    /// "Keep mine" decisions are keyed `<folder>/<path>`, but a flat archive's
+    /// entries have no folder component until they are wrapped. The extractor must
+    /// match the wrapped key or every kept file in a flat archive is overwritten.
+    #[test]
+    fn wrapped_flat_archive_honors_folder_prefixed_skip_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        fs::create_dir_all(addons_dir.join("UL_LootLog")).unwrap();
+        fs::write(addons_dir.join("UL_LootLog/UL_LootLog.lua"), "USER EDIT").unwrap();
+
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "UL_LootLog.zip",
+            &["UL_LootLog.txt", "UL_LootLog.lua"],
+        );
+
+        let mut skip = HashSet::new();
+        skip.insert("UL_LootLog/UL_LootLog.lua".to_string());
+        extract_addon_zip_selective(&zip_path, &addons_dir, &skip).unwrap();
+
+        assert!(addons_dir.join("UL_LootLog/UL_LootLog.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("UL_LootLog/UL_LootLog.lua")).unwrap(),
+            "USER EDIT"
+        );
     }
 
     #[test]

@@ -51,7 +51,6 @@ pub struct AuthUser {
 
 pub struct AuthState {
     pub tokens: Mutex<Option<AuthTokens>>,
-    #[allow(dead_code)]
     refresh_lock: Mutex<()>,
 }
 
@@ -63,10 +62,27 @@ impl AuthState {
         }
     }
 
-    /// Get the current access token, refreshing if expired.
-    /// Serializes concurrent refresh attempts so only one hits the server.
-    #[allow(dead_code)]
+    /// Get the current access token, refreshing if expired, without persisting a
+    /// refreshed pair. Callers that own a credential store should use
+    /// [`AuthState::get_valid_token_persisting`] instead.
     pub fn get_valid_token(&self) -> Result<Option<String>, String> {
+        self.get_valid_token_persisting(|_| {})
+    }
+
+    /// Get the current access token, refreshing if expired.
+    ///
+    /// Every step runs under `refresh_lock`, which is what makes concurrent
+    /// callers safe: the stored tokens are re-read AFTER the lock is taken, so a
+    /// waiter sees the winner's fresh pair and `ensure_valid_token` returns
+    /// `Ok(None)` instead of POSTing the same refresh_token a second time (ESO
+    /// Logs rotates it, so the loser would get a 4xx and spuriously sign the user
+    /// out). `persist` is called with a freshly refreshed pair while the lock is
+    /// still held, so two refreshes can never interleave their credential-store
+    /// writes; a persistence failure is the caller's to log, not a refresh error.
+    pub fn get_valid_token_persisting(
+        &self,
+        persist: impl FnOnce(&AuthTokens),
+    ) -> Result<Option<String>, String> {
         let _refresh_guard = self
             .refresh_lock
             .lock()
@@ -87,6 +103,7 @@ impl AuthState {
         match ensure_valid_token(&tokens)? {
             Some(new_tokens) => {
                 let token = new_tokens.access_token.clone();
+                persist(&new_tokens);
                 *self
                     .tokens
                     .lock()
@@ -104,6 +121,10 @@ pub(crate) struct CallbackTokens {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
+    /// Echo of the `state` nonce this attempt put in the auth URL. Absent while
+    /// esotk.com has not been updated to echo it — see [`state_matches`].
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +181,7 @@ mod urlencoding {
 ///
 /// Flow:
 /// 1. Bind localhost server on random port
-/// 2. Open browser to website's /app-auth?port={port}
+/// 2. Open browser to website's /app-auth?port={port}&state={nonce}
 /// 3. Website does PKCE OAuth with ESO Logs (using its registered redirect URI)
 /// 4. Website posts tokens to http://localhost:{port}/callback as JSON
 /// 5. We receive and decode the tokens
@@ -247,8 +268,13 @@ fn run_oauth_flow_attempt(cancel: &AtomicBool) -> Result<CallbackTokens, String>
         .map_err(|e| format!("Failed to get port: {e}"))?
         .port();
 
+    // Per-attempt secret binding the callback to THIS flow (RFC 8252 §8.9). The
+    // listener is otherwise a bare loopback port that accepts any request which
+    // happens to parse as tokens.
+    let state = generate_state_nonce();
+
     // Open browser to the website's app-auth page
-    let auth_url = format!("{APP_AUTH_URL}?port={port}");
+    let auth_url = format!("{APP_AUTH_URL}?port={port}&state={state}");
 
     crate::platform::open_url(&auth_url)?;
 
@@ -314,7 +340,7 @@ fn run_oauth_flow_attempt(cancel: &AtomicBool) -> Result<CallbackTokens, String>
 
                 if request.starts_with("OPTIONS ") {
                     write_preflight_response(&mut stream);
-                } else if let Some(tokens) = extract_tokens_from_request(&request, body) {
+                } else if let Some(tokens) = extract_tokens_from_request(&request, body, &state) {
                     // Send success page
                     let html = r#"<!DOCTYPE html><html><head><style>body{font-family:system-ui;background:#0b1220;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}div{text-align:center}h1{color:#c4a44a;font-size:1.5rem}p{opacity:0.6}</style></head><body><div><h1>Signed in!</h1><p>You can close this tab and return to Kalpa.</p></div></body></html>"#;
                     write_response(&mut stream, "200 OK", "text/html", html);
@@ -383,7 +409,73 @@ fn write_response(stream: &mut impl Write, status: &str, content_type: &str, bod
     let _ = stream.flush();
 }
 
-fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTokens> {
+/// A 128-bit value an outside observer cannot predict, for the callback `state`.
+///
+/// Built from `RandomState`, whose SipHash keys are seeded from the OS CSPRNG
+/// and never leave the process — so the digests below are unguessable to the
+/// local process or web page this nonce defends against. std-only on purpose:
+/// this module is also `#[path]`-included by the Slint sidecar crate, which
+/// carries its own (smaller) dependency list.
+fn generate_state_nonce() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::fmt::Write as _;
+    use std::hash::{BuildHasher, Hasher};
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let mut out = String::with_capacity(32);
+    for half in 0u64..2 {
+        // A fresh RandomState per half so the two digests use different keys.
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(half);
+        hasher.write_u128(nanos);
+        let _ = write!(out, "{:016x}", hasher.finish());
+    }
+    out
+}
+
+/// Whether a callback's `state` echo belongs to this attempt.
+///
+/// A supplied state MUST match. An ABSENT state is still accepted, because
+/// esotk.com does not echo the parameter yet and rejecting it would break every
+/// sign-in until the site ships that change. Meanwhile the browser vector stays
+/// closed by the `Content-Type: application/json` requirement below: it forces a
+/// CORS preflight, and the preflight only permits `https://esotk.com`. Once the
+/// site echoes `state`, make an absent value a rejection here.
+fn state_matches(supplied: Option<&str>, expected: &str) -> bool {
+    match supplied {
+        Some(s) => s == expected,
+        None => true,
+    }
+}
+
+/// Whether a request head declares a JSON body.
+///
+/// Required on the POST callback: a cross-origin page can send `text/plain` or
+/// form encodings with no preflight, but not `application/json` — so demanding
+/// it routes every browser-originated callback through the preflight, which
+/// [`write_cors_headers`] answers for `https://esotk.com` alone.
+fn is_json_content_type(request_head: &str) -> bool {
+    request_head.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("content-type")
+            && value
+                .split(';')
+                .next()
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+    })
+}
+
+fn extract_tokens_from_request(
+    request: &str,
+    body: &[u8],
+    expected_state: &str,
+) -> Option<CallbackTokens> {
     let first_line = request.lines().next()?;
     let mut parts = first_line.split_whitespace();
     let method = parts.next()?;
@@ -393,7 +485,14 @@ fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTok
     }
 
     if method.eq_ignore_ascii_case("POST") {
-        return serde_json::from_slice(body).ok();
+        if !is_json_content_type(request) {
+            return None;
+        }
+        let tokens: CallbackTokens = serde_json::from_slice(body).ok()?;
+        // The query string is the other place esotk.com could echo the nonce.
+        let echoed = path.split('?').nth(1).and_then(query_state);
+        let supplied = tokens.state.as_deref().or(echoed.as_deref());
+        return state_matches(supplied, expected_state).then_some(tokens);
     }
 
     if !method.eq_ignore_ascii_case("GET") {
@@ -401,15 +500,25 @@ fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTok
     }
 
     let query = path.split('?').nth(1)?;
+    let echoed = query_state(query);
     for param in query.split('&') {
         if let Some(value) = param.strip_prefix("tokens=") {
             let decoded_param = urlencoding::decode(value).ok()?;
             let json_bytes = STANDARD.decode(decoded_param.as_bytes()).ok()?;
             let tokens: CallbackTokens = serde_json::from_slice(&json_bytes).ok()?;
-            return Some(tokens);
+            let supplied = tokens.state.as_deref().or(echoed.as_deref());
+            return state_matches(supplied, expected_state).then_some(tokens);
         }
     }
     None
+}
+
+/// The decoded `state` query parameter, if present.
+fn query_state(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|param| param.strip_prefix("state="))
+        .and_then(|v| urlencoding::decode(v).ok())
 }
 
 // ── User Validation ──────────────────────────────────────────────────────
@@ -549,18 +658,19 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
 mod tests {
     use super::*;
 
+    const POST_HEAD: &str = concat!(
+        "POST /callback HTTP/1.1\r\n",
+        "Host: localhost:12345\r\n",
+        "Content-Type: application/json\r\n",
+        "Content-Length: 69\r\n",
+        "\r\n"
+    );
+
     #[test]
     fn extracts_tokens_from_post_json_callback() {
         let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
-        let request = concat!(
-            "POST /callback HTTP/1.1\r\n",
-            "Host: localhost:12345\r\n",
-            "Content-Type: application/json\r\n",
-            "Content-Length: 69\r\n",
-            "\r\n"
-        );
 
-        let tokens = extract_tokens_from_request(request, body).expect("tokens");
+        let tokens = extract_tokens_from_request(POST_HEAD, body, "nonce").expect("tokens");
 
         assert_eq!(tokens.access_token, "access");
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
@@ -573,11 +683,64 @@ mod tests {
             .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
         let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
 
-        let tokens = extract_tokens_from_request(&request, &[]).expect("tokens");
+        let tokens = extract_tokens_from_request(&request, &[], "nonce").expect("tokens");
 
         assert_eq!(tokens.access_token, "access");
         assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
         assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn rejects_a_callback_whose_state_belongs_to_another_attempt() {
+        let body = br#"{"access_token":"evil","state":"someone-elses-nonce"}"#;
+        assert!(extract_tokens_from_request(POST_HEAD, body, "nonce").is_none());
+
+        let encoded = STANDARD.encode(br#"{"access_token":"evil"}"#);
+        let request = format!("GET /callback?tokens={encoded}&state=wrong HTTP/1.1\r\n\r\n");
+        assert!(extract_tokens_from_request(&request, &[], "nonce").is_none());
+    }
+
+    #[test]
+    fn accepts_a_callback_echoing_this_attempts_state() {
+        let body = br#"{"access_token":"access","state":"nonce"}"#;
+        let tokens = extract_tokens_from_request(POST_HEAD, body, "nonce").expect("tokens");
+        assert_eq!(tokens.access_token, "access");
+
+        let encoded = STANDARD.encode(br#"{"access_token":"access"}"#);
+        let request = format!("GET /callback?tokens={encoded}&state=nonce HTTP/1.1\r\n\r\n");
+        assert!(extract_tokens_from_request(&request, &[], "nonce").is_some());
+    }
+
+    /// A cross-origin page can POST `text/plain` with no preflight; demanding
+    /// JSON forces the preflight, which only `https://esotk.com` passes.
+    #[test]
+    fn rejects_a_post_callback_that_is_not_json() {
+        let body = br#"{"access_token":"evil"}"#;
+        let request = concat!(
+            "POST /callback HTTP/1.1\r\n",
+            "Host: localhost:12345\r\n",
+            "Content-Type: text/plain\r\n",
+            "Content-Length: 23\r\n",
+            "\r\n"
+        );
+        assert!(extract_tokens_from_request(request, body, "nonce").is_none());
+    }
+
+    #[test]
+    fn json_content_type_accepts_a_charset_parameter() {
+        assert!(is_json_content_type(
+            "POST /callback HTTP/1.1\r\ncontent-type: application/json; charset=utf-8\r\n\r\n"
+        ));
+        assert!(!is_json_content_type("POST /callback HTTP/1.1\r\n\r\n"));
+    }
+
+    #[test]
+    fn state_nonces_are_unique_and_url_safe() {
+        let a = generate_state_nonce();
+        let b = generate_state_nonce();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

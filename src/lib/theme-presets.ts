@@ -427,11 +427,14 @@ const GENERATED_THEMES: Theme[] = [
       surface: "#073642",
       foreground: "#eee8d5",
       mutedForeground: "#93a1a1",
-      primary: "#b58900",
+      // Solarized's own yellow (#b58900) clears 4.5:1 against `background` but
+      // not against the lighter `surface` panels `text-primary` mostly renders
+      // on, so the hue is kept and only the lightness lifted.
+      primary: "#c59500",
       primaryForeground: "#002b36",
       accent: "#268bd2",
       border: "#0d4a58",
-      orb1: "#b58900",
+      orb1: "#c59500",
       orb2: "#268bd2",
       orb3: "#2aa198",
     },

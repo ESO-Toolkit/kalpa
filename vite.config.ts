@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => {
   const host = process.env.TAURI_DEV_HOST;
   // Port is read from .env.local (VITE_PORT). If changed here, also update
   // devUrl in src-tauri/tauri.conf.json to match.
-  const port = parseInt(env.VITE_PORT || "1420");
+  const port = parseInt(env.VITE_PORT || "1430");
 
   return {
     plugins: [react(), tailwindcss()],

@@ -214,8 +214,11 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
       const { join } = await import("@tauri-apps/api/path");
       const fullPath = await join(addonsPath, folderName, ...relativePath.split("/"));
       await openPath(fullPath);
-    } catch {
-      // best-effort
+    } catch (e) {
+      // Surfaced, not swallowed: openPath is denied outright without the
+      // opener:allow-open-path permission, and a silent catch turns that into a
+      // menu action that simply never does anything.
+      toast.error(`Couldn't open ${relativePath}: ${String(e)}`);
     }
   };
 

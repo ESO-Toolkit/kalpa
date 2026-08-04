@@ -26,8 +26,8 @@ pub fn serialized_len(root: &SvTreeNode) -> usize {
 /// A `fmt::Write` sink that discards its input and only tallies the byte length.
 /// `write_str` sums `s.len()`, and the default `write_char` routes a char
 /// through `write_str` after UTF-8 encoding, so the tally matches `String`'s
-/// own byte growth exactly (including `push(b as char)` for `0x80..=0xFF`,
-/// which `String` stores as two UTF-8 bytes).
+/// own byte growth exactly (including multi-byte characters, which `String`
+/// stores in their full UTF-8 encoding).
 #[derive(Default)]
 struct ByteCounter(usize);
 
@@ -85,7 +85,12 @@ fn serialize_value<W: Write>(out: &mut W, node: &SvTreeNode, depth: usize) {
                         let _ = write!(out, "{n}");
                     }
                 } else {
-                    let _ = write!(out, "{v}");
+                    // A Number node whose value is not an f64 — e.g. an edited
+                    // tree arriving from the webview with a null value. Writing
+                    // the JSON value verbatim emitted the literal `null`, which
+                    // is not valid Lua, so the pre-write validation then aborted
+                    // every save of that file.
+                    w(out, "0");
                 }
             }
         }
@@ -162,27 +167,28 @@ fn is_numeric_key(key: &str) -> bool {
 
 /// Escape a string for Lua double-quoted string literals.
 fn escape_lua_string<W: Write>(out: &mut W, s: &str) {
-    for b in s.bytes() {
-        match b {
-            b'\\' => w(out, "\\\\"),
-            b'"' => w(out, "\\\""),
-            b'\n' => w(out, "\\n"),
-            b'\r' => w(out, "\\r"),
-            b'\t' => w(out, "\\t"),
-            b'\x07' => w(out, "\\a"),
-            b'\x08' => w(out, "\\b"),
-            b'\x0B' => w(out, "\\v"),
-            b'\x0C' => w(out, "\\f"),
-            0x00..=0x1F => {
+    for c in s.chars() {
+        match c {
+            '\\' => w(out, "\\\\"),
+            '"' => w(out, "\\\""),
+            '\n' => w(out, "\\n"),
+            '\r' => w(out, "\\r"),
+            '\t' => w(out, "\\t"),
+            '\x07' => w(out, "\\a"),
+            '\x08' => w(out, "\\b"),
+            '\x0B' => w(out, "\\v"),
+            '\x0C' => w(out, "\\f"),
+            c if c < '\x20' => {
                 // Other control characters: use zero-padded decimal escape
                 // to avoid ambiguity when the next character is also a digit
-                let _ = write!(out, "\\{b:03}");
+                let _ = write!(out, "\\{:03}", c as u32);
             }
-            // Bytes >= 0x20: `b as char` matches the original `String::push`,
-            // which stores 0x80..=0xFF as two UTF-8 bytes — the counting sink
-            // tallies the same length via `write_char`.
+            // Everything else is written verbatim. Iterating chars (not bytes)
+            // is load-bearing: a byte-wise loop would re-encode each byte of a
+            // multi-byte character as its own code point, so every save would
+            // mangle non-ASCII values AND keys a little further.
             _ => {
-                let _ = out.write_char(b as char);
+                let _ = out.write_char(c);
             }
         }
     }
@@ -580,6 +586,67 @@ Var2 =
         let wrapped = "MyAddon_SV =\n{\n\t[\"Default\"] =\n\t{\n\t\t[\"@Acct\"] =\n\t\t{\n\t\t\t[\"Baelthor\"] =\n\t\t\t{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t},\n\t\t},\n\t},\n}\n";
         let keys = super::super::io::extract_character_keys(wrapped);
         assert!(keys.contains(&"Baelthor".to_string()));
+    }
+
+    /// The canonical serializer output for a small tree carrying accented text
+    /// in both a KEY and a VALUE. Written exactly as `serialize_to_lua` emits
+    /// it so the round-trip can be asserted byte-for-byte.
+    const ACCENTED_CANONICAL: &str = "Accented_SV =\n{\n\t[\"L\u{e9}a^EU Megaserver\"] = {\n\t\t[\"note\"] = \"Caf\u{e9} cr\u{e8}me\",\n\t\t[\"gru\u{df}\"] = \"\u{4e2d}\u{6587}\",\n\t},\n}\n";
+
+    #[test]
+    fn non_ascii_keys_and_values_round_trip_byte_identical() {
+        // An unedited tree must serialize back to the exact bytes it was parsed
+        // from. Byte-wise escaping used to rewrite every char >= 0x80 as two
+        // UTF-8 bytes, so each save mangled accented values further and turned
+        // an accented character key into a DIFFERENT key the addon never wrote.
+        let tree = parser::parse_sv_file(ACCENTED_CANONICAL, "Accented.lua").unwrap();
+        let output = serialize_to_lua(&tree);
+        assert_eq!(
+            output, ACCENTED_CANONICAL,
+            "non-ASCII content changed on save"
+        );
+
+        // And it must stay stable: repeated saves cannot compound.
+        let tree2 = parser::parse_sv_file(&output, "Accented.lua").unwrap();
+        let output2 = serialize_to_lua(&tree2);
+        assert_eq!(
+            output2, output,
+            "non-ASCII content drifted on a second save"
+        );
+        assert_eq!(tree, tree2);
+
+        // Spot-check the specific mojibake shape ("é" → "Ã©") is absent.
+        assert!(output.contains("L\u{e9}a^EU Megaserver"));
+        assert!(!output.contains("\u{c3}\u{a9}"));
+    }
+
+    #[test]
+    fn non_finite_number_serializes_as_zero_not_null() {
+        // A Number node whose value is JSON null must not emit the literal
+        // `null`: that fails the pre-write re-parse and blocks every save.
+        let root = SvTreeNode {
+            key: "test.lua".into(),
+            value_type: SvValueType::Table,
+            value: None,
+            raw_lua_value: None,
+            children: Some(vec![SvTreeNode {
+                key: "Var".into(),
+                value_type: SvValueType::Table,
+                value: None,
+                raw_lua_value: None,
+                children: Some(vec![SvTreeNode {
+                    key: "broken".into(),
+                    value_type: SvValueType::Number,
+                    value: Some(serde_json::Value::Null),
+                    children: None,
+                    raw_lua_value: None,
+                }]),
+            }]),
+        };
+        let lua = serialize_to_lua(&root);
+        assert!(lua.contains("[\"broken\"] = 0"), "{lua}");
+        assert!(!lua.contains("null"), "{lua}");
+        parser::parse_sv_file(&lua, "test.lua").expect("output must be valid Lua");
     }
 
     #[test]

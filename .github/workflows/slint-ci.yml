@@ -23,6 +23,9 @@ on:
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: slint-ci-${{ github.ref }}
   cancel-in-progress: true

@@ -30,7 +30,10 @@ use super::scanner;
 // The read primitive + loop tuning constants are shared with the native
 // live-streaming tail; both live in `tail_io` so the two tail loops can't drift
 // on the read bound, poll cadence, or failure-streak teardown threshold.
-use super::tail_io::{read_range, MAX_CONSECUTIVE_FAILURES, MAX_READ, POLL_INTERVAL};
+use super::tail_io::{
+    file_identity, file_was_replaced, read_range, FileIdentity, MAX_CONSECUTIVE_FAILURES, MAX_READ,
+    POLL_INTERVAL,
+};
 
 /// Events streamed to the frontend over the live-session [`Channel`].
 ///
@@ -211,6 +214,9 @@ fn tail_loop(
     // multi-hour raid does no per-pass heap churn (and the worst-case 64 MiB
     // catch-up window is allocated at most once).
     let mut read_buf: Vec<u8> = Vec::new();
+    // The tailed file's OS identity, carried across passes so a delete+recreate is
+    // caught even when the replacement already regrew past `consumed`.
+    let mut identity: Option<FileIdentity> = None;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -267,8 +273,8 @@ fn tail_loop(
         }
         last_poll = Instant::now();
 
-        let size = match std::fs::metadata(&path) {
-            Ok(m) => m.len(),
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
             Err(e) => {
                 consecutive_failures += 1;
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
@@ -281,6 +287,7 @@ fn tail_loop(
                 continue;
             }
         };
+        let size = meta.len();
         // NOTE: do NOT clear `consecutive_failures` here. A successful stat does
         // not prove the file is *readable* — `metadata` reads the directory entry
         // while `read_range` opens a handle, so a permanent open/read failure
@@ -294,7 +301,13 @@ fn tail_loop(
         // Truncation / new session detection. After a reset the file starts
         // fresh, so the next chunk's leading BEGIN_LOG is the session header,
         // not a mid-stream re-enable — flag it so we don't double-emit a reset.
-        if size < consumed {
+        // `size < consumed` alone misses a delete+recreate whose replacement already
+        // regrew past `consumed` within one poll window; the file's identity changes
+        // on a recreate regardless, so a changed identity is treated the same way.
+        let current_identity = file_identity(&meta);
+        let replaced = file_was_replaced(identity, current_identity);
+        identity = current_identity.or(identity);
+        if replaced || size < consumed {
             let _ = channel.send(LiveEvent::SessionReset);
             consumed = 0;
             next_index = 0;

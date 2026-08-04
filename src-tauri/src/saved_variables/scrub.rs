@@ -4,9 +4,10 @@
 //! SV tree plus the exporter's identities and returns a templated, scrubbed
 //! copy alongside a report listing every drop and substitution.
 //!
-//! Currently surfaced only via a debug-only Tauri command
-//! (`dev_scrub_saved_variable`); production export/import wiring lands in a
-//! later change. Remove the module-level `dead_code` allow then.
+//! Runs in production: `export_sv_settings` scrubs every addon's settings into
+//! the `.esopack` a user shares, and `substitute_placeholders` resolves the
+//! templates back to the importer's identities. The debug-only
+//! `dev_scrub_saved_variable` command exercises the same path.
 //!
 //! Current rules (intentionally conservative):
 //!
@@ -16,7 +17,10 @@
 //! * **Identity-keyed branches are templated.** Source account names,
 //!   character names, character IDs, and world names that appear as table
 //!   *keys* are replaced with placeholders (`${ACCOUNT}`, `${CHAR:N}`,
-//!   `${CHAR_ID:N}`, `${WORLD}`).
+//!   `${CHAR_ID:N}`, `${WORLD}`, `${WORLD:N}`).
+//! * **Handle-shaped keys that are not the exporter's are dropped.** Addons
+//!   key tables by other players' `@Handle` (notes, kill counters); those keys
+//!   never survive the export.
 //! * **Identity-bearing string values are dropped, not templated.** Some
 //!   addons store account/character names in string values as legitimate
 //!   config (allowlists). Substituting an importer's identity would silently
@@ -47,7 +51,14 @@ pub struct ScrubContext {
     /// Numeric character IDs as strings (ESO sometimes keys per-character
     /// tables by ID instead of name).
     pub character_ids: Vec<String>,
-    /// Additional world names to template beyond the well-known list.
+    /// Every world-layer name seen for this identity — the canonical
+    /// megaservers in `WELL_KNOWN_WORLDS` as well as any custom world key.
+    ///
+    /// On export it only adds custom worlds to the templating table (the
+    /// canonical ones are always templated). On import it is the *importer's*
+    /// megaserver list, which is what `${WORLD}` resolves to; without it the
+    /// substitution has no way to know whether the importer plays on NA, EU or
+    /// PTS.
     #[serde(default)]
     pub extra_worlds: Vec<String>,
 }
@@ -131,6 +142,9 @@ pub enum DropReason {
     /// String value matched the `@Handle` shape even though no specific
     /// identity was provided in `ScrubContext`.
     StringValueLooksLikeAccount,
+    /// Table KEY matched the `@Handle` shape and is not one of the exporter's
+    /// own accounts (so it belongs to a third party).
+    KeyLooksLikeAccount,
     /// Addon was disabled via an `AddonOverride`.
     OverrideDisabled,
     /// Path was in the `deny_paths` list of an `AddonOverride`.
@@ -318,12 +332,39 @@ pub fn scrub_with_overrides(
     (tree, report)
 }
 
+/// The ordered world list a `ScrubContext` describes: the canonical megaservers
+/// it contains in `world_names` order, then any custom world names in detection
+/// order. Both sides of the round trip index tokens from this ordering, so
+/// `${WORLD:N}` denotes the same megaserver slot regardless of the order each
+/// scan happened to discover them in.
+fn ordered_worlds(ctx: &ScrubContext, world_names: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for canonical in world_names {
+        if ctx.extra_worlds.iter().any(|w| w.as_str() == *canonical) {
+            out.push((*canonical).to_string());
+        }
+    }
+    for w in &ctx.extra_worlds {
+        if !out.iter().any(|kept| kept == w) {
+            out.push(w.clone());
+        }
+    }
+    out
+}
+
 /// Replace identity placeholders in a Lua string with the importer's real values.
 ///
 /// Substitution order: longer tokens first to avoid `${ACCOUNT}` matching as a
-/// prefix of `${ACCOUNT:1}`. Tokens with no mapping in `ctx` are left as-is.
-/// `world_names` should be `WELL_KNOWN_WORLDS`; `${WORLD}` maps to
-/// `ctx.extra_worlds[0]` if set, otherwise the first well-known world name.
+/// prefix of `${ACCOUNT:1}`. Tokens with no mapping in `ctx` are left as-is, so
+/// the caller can refuse an import it cannot resolve.
+///
+/// `world_names` should be `WELL_KNOWN_WORLDS`. Every canonical megaserver has a
+/// fixed token slot (see `PlaceholderTable`), so `${WORLD}`/`${WORLD:N}` map
+/// to the importer's own megaserver at that slot, falling back to their primary
+/// one for slots they don't play on — a layer for a server they never log into
+/// would simply never be read. When the importer's megaserver is unknown the
+/// world tokens are deliberately left unresolved: substituting a guess wrote
+/// EU/PTS players' settings under `NA Megaserver`, where ESO never looks.
 pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&str]) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
 
@@ -352,13 +393,14 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     for (i, id) in ctx.character_ids.iter().enumerate() {
         pairs.push((format!("${{CHAR_ID:{i}}}"), id.clone()));
     }
-    let world = ctx
-        .extra_worlds
-        .first()
-        .map(|s| s.as_str())
-        .or_else(|| world_names.first().copied())
-        .unwrap_or("NA Megaserver");
-    pairs.push(("${WORLD}".to_string(), world.to_string()));
+    let worlds = ordered_worlds(ctx, world_names);
+    if let Some(primary) = worlds.first() {
+        pairs.push(("${WORLD}".to_string(), primary.clone()));
+        for i in 1..world_names.len() {
+            let value = worlds.get(i).unwrap_or(primary);
+            pairs.push((format!("${{WORLD:{i}}}"), value.clone()));
+        }
+    }
 
     // Sort by token length descending so longer tokens match first.
     pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
@@ -444,6 +486,13 @@ struct PlaceholderTable {
     account_names: std::collections::HashMap<String, String>,
     characters: std::collections::HashMap<String, String>,
     character_ids: std::collections::HashMap<String, String>,
+    /// World-layer name → `${WORLD}` / `${WORLD:N}`. Distinct worlds MUST get
+    /// distinct tokens: a file holding both an NA and an EU layer used to emit
+    /// two sibling `["${WORLD}"]` keys, and Lua's last-one-wins made one
+    /// megaserver's settings silently clobber the other's on import. Canonical
+    /// megaservers keep fixed slots (`WELL_KNOWN_WORLDS` order) so an importer
+    /// can resolve them without knowing the exporter's world list.
+    worlds: std::collections::HashMap<String, String>,
 }
 
 impl PlaceholderTable {
@@ -477,15 +526,33 @@ impl PlaceholderTable {
         for (i, id) in ctx.character_ids.iter().enumerate() {
             character_ids.insert(id.clone(), format!("${{CHAR_ID:{i}}}"));
         }
+        // Canonical megaservers first (fixed slots), then any custom world the
+        // detector found, so every distinct world key gets its own token.
+        let mut worlds = std::collections::HashMap::new();
+        let mut world_order: Vec<&str> = WELL_KNOWN_WORLDS.to_vec();
+        for w in &ctx.extra_worlds {
+            if !world_order.contains(&w.as_str()) {
+                world_order.push(w.as_str());
+            }
+        }
+        for (i, w) in world_order.iter().enumerate() {
+            let label = if i == 0 {
+                "${WORLD}".to_string()
+            } else {
+                format!("${{WORLD:{i}}}")
+            };
+            worlds.insert((*w).to_string(), label);
+        }
         Self {
             accounts,
             account_names,
             characters,
             character_ids,
+            worlds,
         }
     }
 
-    fn template_for_key(&self, key: &str, ctx: &ScrubContext) -> Option<(String, TemplateKind)> {
+    fn template_for_key(&self, key: &str) -> Option<(String, TemplateKind)> {
         if let Some(p) = self.accounts.get(key) {
             return Some((p.clone(), TemplateKind::Account));
         }
@@ -503,8 +570,8 @@ impl PlaceholderTable {
         if let Some(p) = self.account_names.get(key) {
             return Some((p.clone(), TemplateKind::AccountName));
         }
-        if WELL_KNOWN_WORLDS.contains(&key) || ctx.extra_worlds.iter().any(|w| w == key) {
-            return Some(("${WORLD}".to_string(), TemplateKind::World));
+        if let Some(p) = self.worlds.get(key) {
+            return Some((p.clone(), TemplateKind::World));
         }
         None
     }
@@ -543,19 +610,44 @@ fn looks_like_account_handle(s: &str) -> bool {
     false
 }
 
+/// Heuristic detector for a table KEY that is itself an ESO account handle
+/// (`@` immediately followed by non-whitespace) — the shape addons use when they
+/// key a table by another player's handle.
+fn key_looks_like_account(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some('@'))
+        && matches!(chars.next(), Some(c) if !c.is_whitespace() && c != '@')
+}
+
+/// Does `s` contain `needle` as a whole token — i.e. not glued to an adjacent
+/// alphanumeric character?
+///
+/// Character names are ordinary words ("Data", "Version"), so a bare substring
+/// test drops unrelated config strings that merely embed one.
+fn contains_whole_token(s: &str, needle: &str) -> bool {
+    let bytes = s.as_bytes();
+    s.match_indices(needle).any(|(i, m)| {
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        let end = i + m.len();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        before_ok && after_ok
+    })
+}
+
 fn string_contains_identity(s: &str, ctx: &ScrubContext) -> bool {
+    // Account handles are distinctive enough to match anywhere in the string.
     for a in &ctx.accounts {
         if !a.is_empty() && s.contains(a) {
             return true;
         }
     }
     for c in &ctx.characters {
-        if !c.is_empty() && s.contains(c) {
+        if !c.is_empty() && contains_whole_token(s, c) {
             return true;
         }
     }
     for id in &ctx.character_ids {
-        if !id.is_empty() && s.contains(id) {
+        if !id.is_empty() && contains_whole_token(s, id) {
             return true;
         }
     }
@@ -699,9 +791,10 @@ fn classify_account_or_world(node: &SvTreeNode, acc: &mut DetectAcc) {
 
 /// `node` is a world-name layer; its children should be account handles.
 fn classify_world_layer(key: &str, node: &SvTreeNode, acc: &mut DetectAcc) {
-    if !WELL_KNOWN_WORLDS.contains(&key) {
-        acc.extra_worlds.insert(key.to_string());
-    }
+    // Canonical megaservers are recorded too, not just custom worlds: on import
+    // this list is the only evidence of which megaserver the importer plays on,
+    // and `${WORLD}` has to resolve to it.
+    acc.extra_worlds.insert(key.to_string());
     if let Some(children) = tree_children(node) {
         for child in children {
             if child.key.starts_with('@') {
@@ -731,7 +824,7 @@ fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
         }
         return;
     }
-    if !key.is_empty() {
+    if !key.is_empty() && !is_config_section_key(key) {
         acc.characters.insert(key.to_string());
     }
 }
@@ -873,6 +966,24 @@ const CONFIG_SECTION_KEYS: &[&str] = &[
     "servers",
 ];
 
+/// Is `key` one of the addon config-section names that commonly sit beside
+/// characters under an account handle? Compared case-insensitively against the
+/// whole key.
+///
+/// The identity detector otherwise over-collects on purpose — any non-marker key
+/// under an account is templated, so a character name it fails to recognise can
+/// never leak. These words are the exception: templating them renamed the
+/// addon's own config sections to `${CHAR:N}` (which `strip_per_character_data`
+/// then deleted from the export) and made every string value containing the word
+/// look like an identity. A character legitimately named "Settings" is the
+/// accepted cost, and the roster detector already rejects those keys for it.
+///
+/// Shared with the streaming detector (`identity_stream`) so both collect the
+/// same set.
+pub(crate) fn is_config_section_key(key: &str) -> bool {
+    CONFIG_SECTION_KEYS.contains(&key.to_ascii_lowercase().as_str())
+}
+
 /// Does `key` have the shape of an ESO character name? ESO names start with an
 /// uppercase letter and contain only letters, spaces, hyphens, and apostrophes.
 /// A raw `^Mx` caret suffix is allowed (the part before it is checked). Common
@@ -989,7 +1100,7 @@ fn scrub_node_in_place(
 
     // Apply identity templating to the key itself.
     if !path.is_empty() {
-        if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
+        if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key) {
             report.templated_keys.push(TemplateEntry {
                 path: path.clone(),
                 kind,
@@ -997,6 +1108,17 @@ fn scrub_node_in_place(
                 placeholder: placeholder.clone(),
             });
             node.key = placeholder;
+        } else if key_looks_like_account(&node.key) {
+            // Still handle-shaped after templating, so it is not one of the
+            // exporter's own accounts: a third party's handle used as a table
+            // key (note/kill-counter/vote addons). The value-side rule never
+            // sees these, so drop the subtree here.
+            report.drops.push(DropEntry {
+                path: path.clone(),
+                reason: DropReason::KeyLooksLikeAccount,
+                bytes_removed: serialized_len(node),
+            });
+            return false;
         }
     }
 
@@ -1077,7 +1199,7 @@ fn scrub_node_override_in_place(
     if explicitly_allowed {
         // Pass through with identity templating only (no heuristic drops).
         if !path.is_empty() {
-            if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
+            if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key) {
                 report.templated_keys.push(TemplateEntry {
                     path: path.clone(),
                     kind,
@@ -1124,7 +1246,7 @@ fn scrub_node_override_in_place(
     }
 
     if !path.is_empty() {
-        if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
+        if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key) {
             report.templated_keys.push(TemplateEntry {
                 path: path.clone(),
                 kind,
@@ -1132,6 +1254,15 @@ fn scrub_node_override_in_place(
                 placeholder: placeholder.clone(),
             });
             node.key = placeholder;
+        } else if key_looks_like_account(&node.key) {
+            // Third party's handle used as a table key — see the same check in
+            // `scrub_node_in_place`.
+            report.drops.push(DropEntry {
+                path: path.clone(),
+                reason: DropReason::KeyLooksLikeAccount,
+                bytes_removed: serialized_len(node),
+            });
+            return false;
         }
     }
 
@@ -1186,8 +1317,9 @@ fn scrub_node_override_in_place(
 /// etc. — is preserved.
 ///
 /// Must be called **after** [`scrub`] because account keys will already be
-/// templated to `${ACCOUNT}` / `${ACCOUNT:N}` and world keys to `${WORLD}`.
-/// The checks here recognise both raw (`@Author`) and templated forms.
+/// templated to `${ACCOUNT}` / `${ACCOUNT:N}` and world keys to `${WORLD}` /
+/// `${WORLD:N}`. The checks here recognise both raw (`@Author`) and templated
+/// forms.
 pub fn strip_per_character_data(mut tree: SvTreeNode) -> SvTreeNode {
     // Drop the per-character subtrees under an account handle, keeping
     // `$AccountWide`, addon root keys, scalars, etc.
@@ -1197,24 +1329,28 @@ pub fn strip_per_character_data(mut tree: SvTreeNode) -> SvTreeNode {
         });
     }
 
-    // A world layer sitting under `Default`: keep only its account children and
-    // strip per-character data from each.
+    // A world layer sitting under `Default`: strip per-character data from its
+    // account children and keep everything else as-is. Addons store config
+    // tables and scalars beside the accounts here, and dropping them would
+    // contradict this function's contract (only `${CHAR*}` goes) — the
+    // world-first branch in `filter_top_var` already keeps them.
     fn filter_world_under_default(node: &mut SvTreeNode) {
-        let accounts = node.children.get_or_insert_with(Vec::new);
-        accounts.retain(|a| a.key.starts_with('@') || a.key.starts_with("${ACCOUNT"));
-        for a in accounts.iter_mut() {
-            filter_account_node(a);
+        for child in node.children.get_or_insert_with(Vec::new).iter_mut() {
+            if child.key.starts_with('@') || child.key.starts_with("${ACCOUNT") {
+                filter_account_node(child);
+            }
         }
     }
 
     fn filter_top_var(node: &mut SvTreeNode) {
         for child in node.children.get_or_insert_with(Vec::new).iter_mut() {
-            if child.key == "Default" || child.key.contains(' ') || child.key == "${WORLD}" {
+            if child.key == "Default" || child.key.contains(' ') || child.key.starts_with("${WORLD")
+            {
                 // Default or world layer — recurse one more level.
                 for gchild in child.children.get_or_insert_with(Vec::new).iter_mut() {
                     if gchild.key.starts_with('@') || gchild.key.starts_with("${ACCOUNT") {
                         filter_account_node(gchild);
-                    } else if gchild.key.contains(' ') || gchild.key == "${WORLD}" {
+                    } else if gchild.key.contains(' ') || gchild.key.starts_with("${WORLD") {
                         // world under Default — recurse
                         filter_world_under_default(gchild);
                     } else {
@@ -1321,6 +1457,111 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(serialized.contains("${WORLD}"));
         assert!(!serialized.contains("NA Megaserver"));
+    }
+
+    #[test]
+    fn drops_third_party_handle_key() {
+        // Note/kill-counter addons key tables by another player's handle. The
+        // string-value rule never sees those, so the key rule has to catch them
+        // or the handle ships inside the shared .esopack.
+        let tree = parse(
+            r#"NotesAddon_SV = {
+                ["playerNotes"] = {
+                    ["@SomeStranger"] = "great tank",
+                    ["@AnotherOne"] = true,
+                },
+            }"#,
+        );
+        let (out, report) = scrub(tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            !serialized.contains("@SomeStranger"),
+            "third-party handle key leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("@AnotherOne"),
+            "third-party handle key leaked: {serialized}"
+        );
+        assert_eq!(
+            report
+                .drops
+                .iter()
+                .filter(|d| matches!(d.reason, DropReason::KeyLooksLikeAccount))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn exporter_own_handle_key_is_templated_not_dropped() {
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = { ["$AccountWide"] = { ["enabled"] = true } },
+                },
+            }"#,
+        );
+        let (out, report) = scrub(tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(serialized.contains("${ACCOUNT}"), "{serialized}");
+        assert!(serialized.contains("[\"enabled\"] = true"), "{serialized}");
+        assert!(!report
+            .drops
+            .iter()
+            .any(|d| matches!(d.reason, DropReason::KeyLooksLikeAccount)));
+    }
+
+    #[test]
+    fn templates_distinct_worlds_to_distinct_tokens() {
+        // Both megaservers used to collapse onto ["${WORLD}"], producing two
+        // sibling keys in one table — after import Lua's last-one-wins silently
+        // discarded one server's settings.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["NA Megaserver"] = { ["@Author"] = { ["x"] = 1 } },
+                    ["EU Megaserver"] = { ["@Author"] = { ["x"] = 2 } },
+                },
+            }"#,
+        );
+        let (out, _) = scrub(tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(serialized.contains("${WORLD}"), "{serialized}");
+        assert!(serialized.contains("${WORLD:1}"), "{serialized}");
+        assert!(!serialized.contains("Megaserver"), "{serialized}");
+    }
+
+    #[test]
+    fn substitute_world_uses_the_importers_megaserver() {
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["EU Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(
+            r#"["${WORLD}"] = { } ["${WORLD:1}"] = { }"#,
+            &ctx,
+            WELL_KNOWN_WORLDS,
+        );
+        assert!(
+            !result.contains("NA Megaserver"),
+            "EU importer got the NA layer: {result}"
+        );
+        // Both slots land on the only megaserver this importer plays on.
+        assert_eq!(result.matches("EU Megaserver").count(), 2, "{result}");
+    }
+
+    #[test]
+    fn substitute_world_left_unresolved_when_megaserver_unknown() {
+        // Guessing wrote EU/PTS players' settings under NA, where ESO never
+        // looks; leaving the token lets the caller reject the import instead.
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(r#"["${WORLD}"] = { }"#, &ctx, WELL_KNOWN_WORLDS);
+        assert!(result.contains("${WORLD}"), "{result}");
+        assert!(!result.contains("Megaserver"), "{result}");
     }
 
     #[test]
@@ -1732,6 +1973,59 @@ mod tests {
     }
 
     #[test]
+    fn config_sections_are_not_characters_and_survive_the_export() {
+        // Addons store config sections beside characters under the account.
+        // Collecting those keys as characters templated them to ${CHAR:N}, so
+        // strip_per_character_data deleted the addon's own settings from the
+        // export — and every string containing the word was dropped with them.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["note"] = "reset the settings" },
+                        ["settings"] = { ["volume"] = 5 },
+                        ["version"] = 3,
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert_eq!(detected.characters, vec!["Mainchar".to_string()]);
+
+        let (scrubbed, _) = scrub(tree, &detected);
+        let exported = serialize_to_lua(&strip_per_character_data(scrubbed));
+        assert!(exported.contains("[\"volume\"] = 5"), "{exported}");
+        assert!(exported.contains("[\"version\"] = 3"), "{exported}");
+        assert!(exported.contains("reset the settings"), "{exported}");
+        assert!(!exported.contains("Mainchar"), "{exported}");
+    }
+
+    #[test]
+    fn character_names_match_string_values_as_whole_tokens() {
+        let ctx = ScrubContext {
+            characters: vec!["Ash".to_string()],
+            ..ScrubContext::default()
+        };
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["a"] = "Ashlander crafting station",
+                ["b"] = "invite Ash, please",
+            }"#,
+        );
+        let (out, _) = scrub(tree, &ctx);
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("Ashlander"),
+            "unrelated config dropped: {serialized}"
+        );
+        assert!(
+            !serialized.contains("invite"),
+            "identity-bearing string kept: {serialized}"
+        );
+    }
+
+    #[test]
     fn detect_identities_finds_numeric_character_ids() {
         let tree = parse(
             r#"MyAddon_SV = {
@@ -2017,7 +2311,7 @@ mod tests {
             accounts: vec!["@Real".to_string(), "@Alt".to_string()],
             characters: vec!["MyChar".to_string(), "AltChar".to_string()],
             character_ids: vec!["123456789012345".to_string()],
-            extra_worlds: vec![],
+            extra_worlds: vec!["NA Megaserver".to_string()],
         };
         let lua = concat!(
             r#"["${ACCOUNT}"] = { "#,
@@ -2079,13 +2373,14 @@ mod tests {
         for (i, id) in ctx.character_ids.iter().enumerate() {
             pairs.push((format!("${{CHAR_ID:{i}}}"), id.clone()));
         }
-        let world = ctx
-            .extra_worlds
-            .first()
-            .map(|s| s.as_str())
-            .or_else(|| world_names.first().copied())
-            .unwrap_or("NA Megaserver");
-        pairs.push(("${WORLD}".to_string(), world.to_string()));
+        let worlds = ordered_worlds(ctx, world_names);
+        if let Some(primary) = worlds.first() {
+            pairs.push(("${WORLD}".to_string(), primary.clone()));
+            for i in 1..world_names.len() {
+                let value = worlds.get(i).unwrap_or(primary);
+                pairs.push((format!("${{WORLD:{i}}}"), value.clone()));
+            }
+        }
         pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
         let mut result = lua.to_string();
         for (token, replacement) in &pairs {
@@ -2100,7 +2395,7 @@ mod tests {
             accounts: vec!["@Real".to_string(), "@Alt".to_string()],
             characters: vec!["MyChar".to_string(), "AltChar".to_string()],
             character_ids: vec!["123456789012345".to_string()],
-            extra_worlds: vec![],
+            extra_worlds: vec!["EU Megaserver".to_string()],
         };
         let cases = [
             // Overlapping tokens: ${ACCOUNT} is a prefix of ${ACCOUNT:1} and
@@ -2414,6 +2709,43 @@ mod tests {
         assert_eq!(account.key, "${ACCOUNT}");
         let kept = child_keys(account);
         assert_eq!(kept, vec!["$AccountWide"], "got: {kept:?}");
+    }
+
+    /// A world layer under `Default` also carries addon config beside the
+    /// accounts. Only `${CHAR*}` may go — the world-first branch already keeps
+    /// such keys, and this branch used to discard them.
+    #[test]
+    fn strip_char_data_keeps_world_level_config_under_default() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("wide")]),
+                make_table("${CHAR:0}", vec![make_leaf("perChar")]),
+            ],
+        );
+        let world_node = make_table(
+            "${WORLD}",
+            vec![
+                account_node,
+                make_table("settings", vec![make_leaf("volume")]),
+                make_leaf("version"),
+            ],
+        );
+        let addon_var = make_table("SomeVar", vec![make_table("Default", vec![world_node])]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = strip_per_character_data(root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let default = &addon.children.as_ref().unwrap()[0];
+        let world = &default.children.as_ref().unwrap()[0];
+        assert_eq!(
+            child_keys(world),
+            vec!["${ACCOUNT}", "settings", "version"],
+            "world-level addon config was dropped"
+        );
+        let account = &world.children.as_ref().unwrap()[0];
+        assert_eq!(child_keys(account), vec!["$AccountWide"]);
     }
 
     // ── ${ACCOUNT_NAME} bare-handle templating (HarvestMap layout) ───────
@@ -2739,7 +3071,9 @@ mod tests {
             match d.reason {
                 DropReason::BlockedKeyHeuristic => by_block += d.bytes_removed,
                 DropReason::StringValueContainsIdentity => by_identity += d.bytes_removed,
-                DropReason::StringValueLooksLikeAccount => by_handle += d.bytes_removed,
+                DropReason::StringValueLooksLikeAccount | DropReason::KeyLooksLikeAccount => {
+                    by_handle += d.bytes_removed
+                }
                 DropReason::AlwaysDropped => by_always += d.bytes_removed,
                 DropReason::OverrideDisabled | DropReason::OverrideDenyPath => {}
             }
@@ -2764,7 +3098,7 @@ mod tests {
         println!("  drops:");
         println!("    blocked-key-heuristic            : {by_block:>10} bytes");
         println!("    string-value-contains-identity   : {by_identity:>10} bytes");
-        println!("    string-value-looks-like-account  : {by_handle:>10} bytes");
+        println!("    looks-like-account (value or key): {by_handle:>10} bytes");
         println!("    always-dropped                   : {by_always:>10} bytes");
         println!(
             "  templated keys                     : {:>10}",
@@ -2929,6 +3263,7 @@ mod tests {
                 DropReason::AlwaysDropped => "always-dropped",
                 DropReason::StringValueContainsIdentity => "string-value-contains-identity",
                 DropReason::StringValueLooksLikeAccount => "string-value-looks-like-account",
+                DropReason::KeyLooksLikeAccount => "key-looks-like-account",
                 DropReason::OverrideDisabled => "override-disabled",
                 DropReason::OverrideDenyPath => "override-deny-path",
             }

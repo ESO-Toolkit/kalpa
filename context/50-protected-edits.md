@@ -1,6 +1,7 @@
 # Protected Edits — Design Plan
 
-> **Status**: Proposed (May 2026)  
+> **Status**: Shipped. The feature is live — see `src-tauri/src/file_hashes.rs`, `src-tauri/src/edit_backups.rs`, the `scan_update_conflicts` / `write_addon_file` commands, and the Files tab (`addon-file-browser.tsx`, `addon-file-editor.tsx`, `update-conflict-panel.tsx`, `diff-viewer.tsx`). This document is the original design plan and some details differ from the implementation — read the code before relying on any specific here.
+>
 > **Goal**: Let users edit addon files and keep their changes across updates.
 
 ---

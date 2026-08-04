@@ -65,6 +65,10 @@ pub struct EsouiAddonInfo {
     pub version: String,
     pub download_url: String,
     pub updated: String,
+    /// MD5 the filedetails API reports for `download_url`. Pass it to
+    /// [`download_addon`] as `expected_md5` so the existing verification runs —
+    /// without it, a corrupt-but-structurally-valid ZIP installs silently.
+    pub checksum: String,
 }
 
 pub fn parse_esoui_input(input: &str) -> Result<u32, String> {
@@ -100,14 +104,45 @@ fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
-            .user_agent(format!(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Kalpa/{}",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(user_agent())
+            .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("failed to build HTTP client")
+    })
+}
+
+/// User-agent shared by every ESOUI client.
+fn user_agent() -> String {
+    format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Kalpa/{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Dedicated client for addon ZIP downloads.
+///
+/// [`http_client`]'s 30-second `timeout` is a TOTAL deadline that covers the
+/// whole body read, so a large addon aborts mid-download at exactly ~30s no
+/// matter how healthily it was progressing — a 100 MB map/voice pack needs a
+/// sustained ~27 Mbit/s just to finish in time, making those addons
+/// uninstallable on slow links. This client therefore sets no total deadline.
+///
+/// reqwest's blocking builder has no idle-read timeout, so a dropped connection
+/// is caught by TCP keepalive probes instead: after 30s of silence, probes every
+/// 10s, connection failed after 4 unanswered (~70s) rather than hanging forever.
+fn download_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(user_agent())
+            .connect_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(30))
+            .tcp_keepalive_interval(Duration::from_secs(10))
+            .tcp_keepalive_retries(4u32)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("failed to build download HTTP client")
     })
 }
 
@@ -177,6 +212,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         version: detail.version,
         download_url: detail.download_uri,
         updated: String::new(), // Not needed by callers — metadata uses last_update epoch
+        checksum: detail.checksum,
     })
 }
 
@@ -424,6 +460,21 @@ pub struct EsouiSearchResult {
     pub updated: String,
 }
 
+/// Body length above which an ESOUI listing page is a real, rendered page rather
+/// than an error stub — so parsing nothing out of it means the markup changed,
+/// not that the listing is empty.
+const MIN_SUBSTANTIAL_PAGE: usize = 2048;
+
+/// The error a listing parser returns when it recognises markup drift. Silently
+/// returning `Ok(vec![])` instead renders as "no results", so a scraper
+/// regression is indistinguishable from an empty listing and ships unnoticed.
+fn markup_drift_error(what: &str) -> String {
+    format!(
+        "ESOUI's page format changed and Kalpa could not read the {what}. \
+         This needs a Kalpa update — please report it."
+    )
+}
+
 /// Search ESOUI and return rich results with metadata.
 pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     let client = http_client();
@@ -466,7 +517,27 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
         return Ok(vec![result]);
     }
 
-    let document = Html::parse_document(&body);
+    let (results, addon_link_rows) = parse_search_rows(&body);
+
+    if results.is_empty() && addon_link_rows > 0 {
+        return Err(markup_drift_error("search results"));
+    }
+
+    Ok(results)
+}
+
+/// Parse ESOUI's search-results table out of a page body.
+///
+/// Returns the parsed rows plus the number of rows that LOOKED like results
+/// (multi-cell, carrying an addon link) whether or not the heuristics below
+/// accepted them — the caller uses that count to tell a genuinely empty search
+/// apart from markup drift.
+///
+/// Pure and body-only on purpose: the cell-count guard and the `title_idx + N`
+/// field offsets are the fragile part of this scrape, and welded to a network
+/// fetch they could only be regression-tested by hitting ESOUI.
+fn parse_search_rows(body: &str) -> (Vec<EsouiSearchResult>, usize) {
+    let document = Html::parse_document(body);
 
     static RE_SEARCH_ID: OnceLock<Regex> = OnceLock::new();
     let re_id = RE_SEARCH_ID.get_or_init(|| Regex::new(r"[?&]id=(\d+)").unwrap());
@@ -476,9 +547,21 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
 
     let mut results: Vec<EsouiSearchResult> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+    let mut addon_link_rows = 0usize;
 
     for row in document.select(&row_sel) {
         let cells: Vec<_> = row.select(&td_sel).collect();
+        if cells.len() >= 2
+            && cells.iter().any(|cell| {
+                cell.select(&a_sel).any(|a| {
+                    a.value()
+                        .attr("href")
+                        .is_some_and(|h| h.contains("fileinfo.php") && re_id.is_match(h))
+                })
+            })
+        {
+            addon_link_rows += 1;
+        }
         // Real result rows have 5-6 cells; skip the search summary header (~21 cells)
         if cells.len() < 5 || cells.len() > 10 {
             continue;
@@ -546,7 +629,7 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
         });
     }
 
-    Ok(results)
+    (results, addon_link_rows)
 }
 
 /// Minimal percent-decoding for URL slugs (e.g. `%20` → space). Any malformed
@@ -720,6 +803,12 @@ pub fn fetch_categories() -> Result<Vec<EsouiCategory>, String> {
         });
     }
 
+    // The search page always renders the category <select>; "no categories" is
+    // not a state ESOUI can legitimately be in.
+    if categories.is_empty() && body.len() >= MIN_SUBSTANTIAL_PAGE {
+        return Err(markup_drift_error("category list"));
+    }
+
     Ok(categories)
 }
 
@@ -831,6 +920,12 @@ pub fn browse_category(
         });
     }
 
+    // Only the FIRST page is guaranteed non-empty: later pages legitimately run
+    // past the end of a category, and erroring there would break infinite scroll.
+    if results.is_empty() && page == 0 && body.len() >= MIN_SUBSTANTIAL_PAGE {
+        return Err(markup_drift_error("category listing"));
+    }
+
     Ok(results)
 }
 
@@ -867,10 +962,12 @@ fn format_download_count(n: u64) -> String {
 /// Uses the ESOUI filelist JSON API for accurate sorting across all addons,
 /// with in-memory pagination. Libraries are excluded from results.
 pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, String> {
-    ensure_filelist_cache()?;
+    ensure_filelist_cache(false)?;
 
     let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let cache = guard.as_ref().unwrap();
+    let cache = guard
+        .as_ref()
+        .ok_or_else(|| "ESOUI addon list unavailable.".to_string())?;
 
     let mut entries: Vec<&ApiFileEntry> = cache.entries.iter().filter(|e| !e.library).collect();
 
@@ -904,7 +1001,7 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
 
-    let client = http_client();
+    let client = download_client();
 
     // Retry loop for transient HTTP errors (429, 502, 503, 504)
     const MAX_RETRIES: u32 = 2;
@@ -951,8 +1048,19 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
     let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     let mut response = response;
-    let written = io::copy(&mut response, &mut tmp)
-        .map_err(|e| format!("Failed to write download to temp file: {e}"))?;
+    let written = io::copy(&mut response, &mut tmp).map_err(|e| {
+        // A timeout here is the network giving up mid-body, not a disk problem —
+        // "Failed to write download to temp file" sent users looking at their
+        // drive instead of their connection.
+        if matches!(
+            e.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ) {
+            "Download stalled — the connection stopped sending data. Check your internet connection and try again.".to_string()
+        } else {
+            format!("Failed to write download to temp file: {e}")
+        }
+    })?;
 
     if let Some(expected) = expected_size {
         if written != expected {
@@ -1125,17 +1233,70 @@ fn filelist_cache() -> &'static Mutex<Option<FilelistCache>> {
 /// session for typical usage; the cache refreshes automatically after this.
 const FILELIST_TTL: Duration = Duration::from_secs(900); // 15 minutes
 
-fn ensure_filelist_cache() -> Result<(), String> {
-    {
-        let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cache) = guard.as_ref() {
-            if cache.fetched_at.elapsed() < FILELIST_TTL {
-                return Ok(());
-            }
-        }
+/// How recent a copy a FORCED refresh will still accept. Only wide enough to
+/// collapse a burst of Refresh clicks (or a Refresh landing on top of another
+/// thread's just-finished fetch) into one download.
+const FORCED_REFRESH_COALESCE: Duration = Duration::from_secs(5);
+
+/// Held across the fetch so only one thread downloads the multi-MB filelist.
+/// The TTL check releases the cache mutex before fetching, so without this two
+/// callers that both observe a stale cache — the on-open update check plus the
+/// Browse tab, a routine pairing at launch — each pull all ~4000 entries.
+static FILELIST_REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
+fn cache_is_fresh(within: Duration) -> bool {
+    filelist_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|cache| cache.fetched_at.elapsed() < within)
+}
+
+fn cache_exists() -> bool {
+    filelist_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
+/// Ensure the filelist cache holds usable data.
+///
+/// `force` bypasses [`FILELIST_TTL`] for the explicit Refresh action: without it
+/// a user who reads "addon X updated" on ESOUI and clicks Refresh can be told
+/// everything is current for up to 15 minutes with no recourse. The automatic
+/// on-open path must keep passing `false` (no background spam).
+fn ensure_filelist_cache(force: bool) -> Result<(), String> {
+    let acceptable = if force {
+        FORCED_REFRESH_COALESCE
+    } else {
+        FILELIST_TTL
+    };
+
+    if cache_is_fresh(acceptable) {
+        return Ok(());
     }
 
-    let entries = fetch_filelist_entries()?;
+    let _refresh_guard = FILELIST_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // A concurrent refresh may have finished while we waited for the lock.
+    if cache_is_fresh(acceptable) {
+        return Ok(());
+    }
+
+    let entries = match fetch_filelist_entries() {
+        Ok(entries) => entries,
+        // A transient ESOUI blip must not take a usable cache away from the
+        // automatic check — an error toast there is pure noise when the data to
+        // answer with is already in memory. An explicit Refresh still fails
+        // loudly: the user asked for fresh data and has to know it didn't arrive.
+        Err(e) if !force && cache_exists() => {
+            eprintln!("[esoui] filelist refresh failed, serving the cached copy: {e}");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     let lookup = build_filelist_lookup(&entries);
 
     let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -1148,15 +1309,29 @@ fn ensure_filelist_cache() -> Result<(), String> {
     Ok(())
 }
 
+/// Re-fetch the ESOUI filelist now, ignoring the TTL.
+///
+/// Wire this to the explicit Refresh action ONLY; every automatic path must stay
+/// TTL-cached. Returns the fetch error rather than silently serving stale data.
+// Not yet called: the Refresh command lives in commands.rs and still goes
+// through the TTL-cached path.
+#[allow(dead_code)]
+pub fn refresh_filelist_cache() -> Result<(), String> {
+    ensure_filelist_cache(true)
+}
+
 /// Fetch the full ESOUI filelist and build a lookup map keyed by addon folder path.
 ///
 /// Single HTTP request returns ~4000 addons with all their folder paths,
 /// versions, and last-updated timestamps. Result is cached in-memory for
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
 pub fn fetch_filelist_lookup() -> Result<Arc<HashMap<String, Arc<ApiAddonLookup>>>, String> {
-    ensure_filelist_cache()?;
+    ensure_filelist_cache(false)?;
     let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
-    Ok(Arc::clone(&guard.as_ref().unwrap().lookup))
+    let cache = guard
+        .as_ref()
+        .ok_or_else(|| "ESOUI addon list unavailable.".to_string())?;
+    Ok(Arc::clone(&cache.lookup))
 }
 
 fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
@@ -1298,6 +1473,63 @@ mod tests {
             ),
             Some(123)
         );
+    }
+
+    /// One ESOUI-shaped search row: the title cell carries the fileinfo link and
+    /// the next four cells are author/category/downloads/updated in that order.
+    fn search_page(rows: &str) -> String {
+        format!("<html><body><table><tr><td colspan=\"6\">Search results</td></tr>{rows}</table></body></html>")
+    }
+
+    const REAL_ROW: &str = concat!(
+        "<tr>",
+        "<td><a href=\"/downloads/fileinfo.php?id=1360\">LibAddonMenu</a></td>",
+        "<td>Seerah</td><td>Libraries</td><td>1,234,567</td><td>04/25/26 07:49 AM</td>",
+        "<td>&nbsp;</td>",
+        "</tr>"
+    );
+
+    #[test]
+    fn parses_search_row_fields_in_order() {
+        let (rows, candidates) = parse_search_rows(&search_page(REAL_ROW));
+
+        assert_eq!(candidates, 1);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.id, 1360);
+        assert_eq!(r.title, "LibAddonMenu");
+        assert_eq!(r.author, "Seerah");
+        assert_eq!(r.category, "Libraries");
+        assert_eq!(r.downloads, "1,234,567");
+        assert_eq!(r.updated, "04/25/26 07:49 AM");
+    }
+
+    #[test]
+    fn search_rows_are_deduplicated_by_id() {
+        let (rows, _) = parse_search_rows(&search_page(&format!("{REAL_ROW}{REAL_ROW}")));
+        assert_eq!(rows.len(), 1);
+    }
+
+    /// A genuinely empty search must stay empty (not be reported as drift), while
+    /// a result-shaped row the heuristics reject must be counted as a candidate so
+    /// `search_esoui` can raise the markup-drift error instead of showing nothing.
+    #[test]
+    fn distinguishes_no_results_from_markup_drift() {
+        let (rows, candidates) =
+            parse_search_rows("<html><body><p>No results found.</p></body></html>");
+        assert!(rows.is_empty());
+        assert_eq!(candidates, 0);
+
+        // Same row, but ESOUI dropped the trailing cells below the 5-cell floor.
+        let narrowed = concat!(
+            "<tr>",
+            "<td><a href=\"/downloads/fileinfo.php?id=1360\">LibAddonMenu</a></td>",
+            "<td>Seerah</td>",
+            "</tr>"
+        );
+        let (rows, candidates) = parse_search_rows(&search_page(narrowed));
+        assert!(rows.is_empty());
+        assert_eq!(candidates, 1, "a rejected result row must still be counted");
     }
 
     #[test]
