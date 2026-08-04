@@ -10,7 +10,9 @@ import {
   type Request,
 } from "@playwright/test";
 
-const CDP_ENDPOINT = process.env.KALPA_CDP_ENDPOINT ?? "http://localhost:9222";
+// 127.0.0.1, not `localhost`: WebView2's debug server binds IPv4 loopback only,
+// and a host that resolves `localhost` to ::1 first refuses every connection.
+const CDP_ENDPOINT = process.env.KALPA_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const PACKAGED_ORIGIN = "http://tauri.localhost/";
 
 /**

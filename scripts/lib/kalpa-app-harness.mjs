@@ -15,7 +15,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const CDP_ENDPOINT = "http://localhost:9222";
+/**
+ * 127.0.0.1, deliberately not `localhost`.
+ *
+ * WebView2's `--remote-debugging-port` server binds IPv4 loopback only. On a
+ * host where `localhost` resolves to `::1` first — GitHub's Windows runners do —
+ * every probe gets ECONNREFUSED against IPv6 while the port is wide open on
+ * IPv4, so the app looks dead when it is perfectly healthy.
+ */
+export const CDP_ENDPOINT = "http://127.0.0.1:9222";
 export const CDP_VERSION_URL = `${CDP_ENDPOINT}/json/version`;
 export const CDP_PAGES_URL = `${CDP_ENDPOINT}/json/list`;
 
@@ -119,14 +127,34 @@ export async function waitForCdp(child, timeoutMs = 30_000) {
   // that never started (no desktop, no runtime) from one that started but never
   // bound the debug port — and those want completely different fixes.
   const webviewCount = await countProcesses("msedgewebview2.exe");
+  const listeners = await describePortListeners(9222);
   throw new Error(
-    `Timed out waiting for ${CDP_ENDPOINT} after ${Math.round(timeoutMs / 1000)}s: ${lastError}. ` +
+    `Timed out waiting for ${CDP_ENDPOINT} after ${Math.round(timeoutMs / 1000)}s: ${lastError || "connection refused"}. ` +
       `Kalpa is ${child.exitCode === null ? "still running" : `gone (exit ${child.exitCode})`}; ` +
-      `msedgewebview2.exe processes: ${webviewCount}. ` +
+      `msedgewebview2.exe processes: ${webviewCount}; ` +
+      `listeners on 9222: ${listeners || "none"}. ` +
       (webviewCount === 0
-        ? "Zero means WebView2 never initialized — the host has no usable WebView2 runtime or desktop session."
-        : "Non-zero means WebView2 is up but the debug port is not listening.")
+        ? "Zero webview processes means WebView2 never initialized — no usable runtime or desktop session."
+        : listeners
+          ? "Something IS listening, so this is an address/protocol mismatch, not a dead app."
+          : "WebView2 is up but nothing bound the port — the debug argument never reached it.")
   );
+}
+
+/** `netstat` LISTENING lines for a port, so a bind-address mismatch is visible. */
+async function describePortListeners(port) {
+  try {
+    const { stdout } = await execFileAsync("netstat", ["-ano", "-p", "TCP"], {
+      windowsHide: true,
+    });
+    return stdout
+      .split(/\r?\n/)
+      .filter((line) => line.includes(`:${port}`) && /LISTENING/i.test(line))
+      .map((line) => line.trim())
+      .join(" | ");
+  } catch {
+    return "";
+  }
 }
 
 /** How many processes with this image name are running (0 on any error). */
