@@ -66,8 +66,11 @@ jobs:
       - name: ESLint
         run: npx eslint src/
 
+      # Wider than src/: public/theme-boot.js runs before first paint and
+      # scripts/ holds the release gates, and neither was covered by any
+      # formatting check — public/theme-boot.js had been dirty for some time.
       - name: Prettier
-        run: npx prettier --check "src/**/*.{ts,tsx,css}"
+        run: npm run format:check
 
       - name: Rust format check
         run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
@@ -78,7 +81,7 @@ jobs:
           Set-Content -NoNewline -Path src-tauri/binaries/kalpa-slint-x86_64-pc-windows-msvc.exe -Value ""
 
       - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       # RUSTSEC-2026-0194 / -0195 (quick-xml quadratic-runtime DoS on duplicate
       # attribute names, fixed in quick-xml >=0.41.0) are transitive advisories
@@ -108,8 +111,11 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
         working-directory: backend/eso-packs-worker
 
+      # `npm run check` rather than a bare tsc: it typechecks the test files too,
+      # via test/tsconfig.json. That config was stale and errored on every run,
+      # so nothing had ever compiled the worker's tests.
       - name: Worker TypeScript check
-        run: npx tsc --noEmit
+        run: npm run check
         working-directory: backend/eso-packs-worker
 
       - name: Worker unit tests
@@ -166,7 +172,7 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Frontend unit tests
         run: npx vitest run
@@ -210,7 +216,7 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Build frontend
         run: npm run build

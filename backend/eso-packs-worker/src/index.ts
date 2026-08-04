@@ -786,6 +786,47 @@ async function handleScheduled(env: Env): Promise<void> {
 }
 
 // ── POST /admin/restore ────────────────────────────────────────────
+
+/**
+ * Records restored per call, and how many of those writes run at once.
+ *
+ * A restore used to walk the whole snapshot in one request, awaiting each write
+ * on its own: two subrequests per pack (KV put + D1 upsert) plus one per vote,
+ * strictly serialized. A corpus of any size therefore ran into the per-request
+ * subrequest ceiling — and there was no way to resume, so the endpoint simply
+ * stopped working at exactly the scale where an incident recovery matters.
+ *
+ * The page size is deliberately well under the 1000-subrequest limit, since each
+ * pack costs two. `RESTORE_CONCURRENCY` only affects wall-clock; it does not
+ * change how many subrequests a page spends.
+ */
+const RESTORE_PAGE_SIZE = 200;
+const RESTORE_MAX_PAGE_SIZE = 400;
+const RESTORE_CONCURRENCY = 10;
+
+function clampCursor(value: unknown, total: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(Math.floor(value), total);
+}
+
+function clampLimit(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return RESTORE_PAGE_SIZE;
+  }
+  return Math.min(Math.floor(value), RESTORE_MAX_PAGE_SIZE);
+}
+
+/** Run `tasks` with at most `concurrency` in flight, preserving fail-fast. */
+async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+    while (next < tasks.length) {
+      const index = next++;
+      await tasks[index]!();
+    }
+  });
+  await Promise.all(workers);
+}
 /**
  * Restore the pack corpus from a `backup:YYYY-MM-DD` (or `backup:latest`)
  * snapshot written by the scheduled backup (handleScheduled). Unlike
@@ -794,14 +835,23 @@ async function handleScheduled(env: Env): Promise<void> {
  * exists specifically to disable seed-with-fake-data in production and
  * would defeat the purpose of a restore endpoint if reused here.
  *
- * Replays every pack body (+ D1 mirror) and vote record directly to KV,
- * then atomically replaces the index via the PackIndexDO — never via raw
+ * Replays pack bodies (+ D1 mirror) and vote records directly to KV, then
+ * atomically replaces the index via the PackIndexDO — never via raw
  * putPackIndex, which would race a concurrent mutation (see kv.ts's
  * getPackIndex comment on why counter/index writes go through the DO). The
  * replacement index is built from only the ids we actually restored a body
  * for (so drifted "ghost" ids in snapshot.packs don't reappear) unioned with
  * any pack in the current live index that predates or postdates the
  * snapshot entirely (so a pack created after the backup isn't deleted).
+ *
+ * Paged. A call restores at most `RESTORE_PAGE_SIZE` records and, if more
+ * remain, returns `{ done: false, cursor }` for the operator to pass straight
+ * back in the next request body — the endpoint is a manual incident tool, so a
+ * caller-driven cursor beats a background job that can fail unobserved. The
+ * index swap and cache invalidation happen only on the final page, so a restore
+ * abandoned half-way leaves the previous index in place rather than publishing a
+ * partial corpus. Pages are idempotent, so replaying one after a failure is
+ * safe. A snapshot that fits in a single page behaves exactly as before.
  */
 async function handleRestore(request: Request, env: Env, url: URL): Promise<Response> {
   if (!requireAuth(request, env)) {
@@ -809,9 +859,13 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   }
 
   let dateInput: unknown;
+  let cursorInput: unknown;
+  let limitInput: unknown;
   try {
     const body = (await request.json()) as Record<string, unknown> | null;
     dateInput = body?.date;
+    cursorInput = body?.cursor;
+    limitInput = body?.limit;
   } catch {
     // No/invalid JSON body — fall back to backup:latest below.
   }
@@ -841,16 +895,42 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
       : Object.fromEntries((snapshot.packs ?? []).map((p): [string, Pack] => [p.id, p]));
 
   const packs = Object.values(packBodies);
-  for (const pack of packs) {
-    await putPack(env, pack);
-    await d1UpsertPack(env, pack);
-  }
-
   const votes = snapshot.votes ?? {};
-  for (const record of Object.values(votes)) {
-    // Use the record's own packId/userId fields rather than parsing the
+  const voteRecords = Object.values(votes);
+
+  // One flat, deterministically ordered work list so a cursor means the same
+  // position on every call against the same snapshot.
+  const work: (() => Promise<void>)[] = [
+    ...packs.map((pack) => async () => {
+      await putPack(env, pack);
+      await d1UpsertPack(env, pack);
+    }),
+    // Use each record's own packId/userId fields rather than parsing the
     // "<packId>:<userId>" map key, since userId could itself contain ":".
-    await restoreVote(env, record.packId, record.userId, record);
+    ...voteRecords.map((record) => async () => {
+      await restoreVote(env, record.packId, record.userId, record);
+    }),
+  ];
+
+  const start = clampCursor(cursorInput, work.length);
+  const limit = clampLimit(limitInput);
+  const end = Math.min(start + limit, work.length);
+  await runBounded(work.slice(start, end), RESTORE_CONCURRENCY);
+
+  // Not done yet: hand back a cursor and stop BEFORE touching the index. A
+  // partially-restored corpus published under a rebuilt index would be worse
+  // than the drift the restore is repairing, so the index swap happens only on
+  // the final page. Every pack write is an idempotent put, so a page replayed
+  // after a network failure is harmless.
+  if (end < work.length) {
+    return json(request, {
+      ok: true,
+      done: false,
+      cursor: end,
+      total: work.length,
+      restored_packs: Math.min(end, packs.length) - Math.min(start, packs.length),
+      restored_votes: Math.max(0, end - Math.max(start, packs.length)),
+    });
   }
 
   // Rebuild the index from only the packs we actually have bodies for (drops
@@ -872,8 +952,11 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
 
   return json(request, {
     ok: true,
-    restored_packs: packs.length,
-    restored_votes: Object.keys(votes).length,
+    done: true,
+    cursor: null,
+    total: work.length,
+    restored_packs: packs.length - Math.min(start, packs.length),
+    restored_votes: voteRecords.length - Math.max(0, start - packs.length),
   });
 }
 
@@ -1027,7 +1110,11 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
 // ── Router ─────────────────────────────────────────────────────────
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  // `_ctx` is declared even though nothing uses it: the runtime always passes an
+  // ExecutionContext, and the tests call these handlers directly with one. Omit
+  // it and the object literal's own signature is 2-arity, so every test call is
+  // a type error — which is what the stale test/tsconfig.json was hiding.
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     try {
       return await handleRequest(request, env);
     } catch (err) {
@@ -1039,7 +1126,11 @@ export default {
     }
   },
 
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    _ctx: ExecutionContext,
+  ): Promise<void> {
     try {
       await handleScheduled(env);
     } catch (err) {

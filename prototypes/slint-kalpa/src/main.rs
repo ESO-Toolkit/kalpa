@@ -19430,7 +19430,7 @@ mod tests {
     fn active_theme_id_round_trips_through_production_settings_store() {
         let root = test_temp_dir("active-theme-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"autoUpdate":true}"#).expect("seed settings store");
 
         persist_active_theme_id_to_settings_path(&path, "apocrypha-ink")
@@ -19477,7 +19477,7 @@ mod tests {
     fn custom_theme_store_round_trips_production_settings_key() {
         let root = test_temp_dir("custom-theme-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"conflictPolicy":"ask"}"#).expect("seed settings store");
         let theme = sample_custom_theme("custom-one", "Custom One");
 
@@ -19511,7 +19511,7 @@ mod tests {
     fn addons_path_reads_production_settings_key() {
         let root = test_temp_dir("addons-path-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(
             &path,
             serde_json::json!({
@@ -19536,7 +19536,7 @@ mod tests {
     fn addons_path_persists_production_settings_key() {
         let root = test_temp_dir("addons-path-persist");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"autoUpdate":true,"conflictPolicy":"ask"}"#)
             .expect("seed settings store");
 
@@ -19570,7 +19570,7 @@ mod tests {
     fn installed_pack_refs_round_trip_through_production_settings_key() {
         let root = test_temp_dir("installed-packs-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"autoUpdate":true}"#).expect("seed settings store");
         let refs = vec![
             NativeInstalledPackRef {
@@ -19640,7 +19640,7 @@ mod tests {
     fn settings_store_reader_accepts_utf8_bom() {
         let root = test_temp_dir("settings-bom");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, "\u{feff}{\"addonsPath\":\"D:/ESO/live/AddOns\"}")
             .expect("seed bom settings store");
 
@@ -19996,7 +19996,7 @@ mod tests {
     #[test]
     fn native_uploader_preflight_counts_sessions_and_fights() {
         let root = test_temp_dir("uploader-preflight");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         fs::write(
             &path,
@@ -20025,7 +20025,7 @@ mod tests {
     #[test]
     fn native_uploader_preflight_captures_zone_and_titles_fights() {
         let root = test_temp_dir("uploader-zone");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         fs::write(
             &path,
@@ -20067,7 +20067,7 @@ mod tests {
     #[test]
     fn native_uploader_preflight_previews_up_to_six_fights() {
         let root = test_temp_dir("uploader-cap");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         let mut log = String::from("0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\"\n");
         for i in 0..8 {
@@ -20119,7 +20119,7 @@ mod tests {
     #[test]
     fn split_plan_writes_one_file_per_selected_fight() {
         let root = test_temp_dir("split-plan-fights");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         // Two fights inside one session, each with a preamble line before combat.
         fs::write(
@@ -20224,7 +20224,7 @@ mod tests {
     fn native_settings_round_trip_and_clamp_conflict_policy() {
         let root = test_temp_dir("native-settings");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create temp settings directory");
+        fs::create_dir_all(root).expect("create temp settings directory");
         fs::write(
             &path,
             serde_json::json!({
@@ -20326,7 +20326,7 @@ mod tests {
     fn native_settings_read_production_store_keys() {
         let root = test_temp_dir("native-settings-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create temp settings directory");
+        fs::create_dir_all(root).expect("create temp settings directory");
         fs::write(
             &path,
             serde_json::json!({
@@ -20962,16 +20962,16 @@ mod tests {
         )
         .expect("write addon lua");
 
-        let addons = real_addon_entries(&root).expect("load real addon entries");
+        let addons = real_addon_entries(root).expect("load real addon entries");
         assert_eq!(addons.len(), 1);
         assert_eq!(addons[0].folder_name.as_str(), "DisabledAddon");
         assert!(addons[0].disabled);
         assert_eq!(addons[0].badge3.as_str(), "Disabled");
 
         let resolved =
-            resolve_addon_disk_path(&root, "DisabledAddon").expect("resolve disabled folder");
+            resolve_addon_disk_path(root, "DisabledAddon").expect("resolve disabled folder");
         assert!(resolved.ends_with("DisabledAddon.disabled"));
-        assert!(addon_file_path(&root, "DisabledAddon", "DisabledAddon.lua")
+        assert!(addon_file_path(root, "DisabledAddon", "DisabledAddon.lua")
             .expect("resolve disabled addon file")
             .ends_with("DisabledAddon.lua"));
 
@@ -21133,7 +21133,7 @@ mod tests {
     #[test]
     fn saved_variable_profile_parser_ignores_accountwide_and_nested_keys() {
         let root = test_temp_dir("sv-profile-parser");
-        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(root).expect("create root");
         let path = root.join("CombatMetrics.lua");
         fs::write(
             &path,
@@ -21168,7 +21168,7 @@ CombatMetrics_SavedVariables = {
     #[test]
     fn saved_variable_profiles_are_found_past_the_first_256kb() {
         let root = test_temp_dir("sv-profile-past-prefix");
-        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(root).expect("create root");
         let path = root.join("Huge.lua");
         let padding = "            -- pad\n".repeat(20_000);
         fs::write(
@@ -21917,12 +21917,12 @@ CombatMetrics_SavedVariables = {
         )
         .expect("write backup manifest");
 
-        let backups = edit_backup_entries(&root, "BackupAddon");
+        let backups = edit_backup_entries(root, "BackupAddon");
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].relative_path.as_str(), "lang/en.lua");
         assert_eq!(backups[0].update_from.as_str(), "1.0");
 
-        restore_edit_backup_file(&root, "BackupAddon", &backups[0]).expect("restore backup");
+        restore_edit_backup_file(root, "BackupAddon", &backups[0]).expect("restore backup");
         assert_eq!(
             fs::read_to_string(addon_dir.join("lang/en.lua")).expect("read restored file"),
             "restored"
@@ -22712,7 +22712,7 @@ CombatMetrics_SavedVariables = {
             "Install 1 New Addon"
         );
         assert_eq!(
-            pack_hub_install_label(&[installed.clone()]),
+            pack_hub_install_label(std::slice::from_ref(&installed)),
             "All Addons Installed"
         );
 

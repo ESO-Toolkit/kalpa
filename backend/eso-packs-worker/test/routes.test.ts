@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import worker, { invalidatePackListCache } from "../src/index";
-import { putPack, putPackIndex, putVote } from "../src/kv";
+import { getPackIndex, putPack, putPackIndex, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
 import type { Env, PackIndex } from "../src/types";
 import {
@@ -841,6 +841,99 @@ describe("POST /admin/restore", () => {
       `vote:${pack.id}:${TEST_USER.id}`,
     );
     expect(restoredVote).toBeTruthy();
+  });
+
+  it("pages a snapshot larger than one call and resumes from the cursor", async () => {
+    // A restore used to walk the whole snapshot in one request, two subrequests
+    // per pack, strictly serialized — so it fell over at exactly the corpus size
+    // where an incident recovery matters, with no way to resume.
+    const packs = Array.from({ length: 5 }, (_, i) => makePack(`paged-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      }),
+    );
+
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2 }),
+      }),
+    );
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<{
+      done: boolean;
+      cursor: number;
+      total: number;
+      restored_packs: number;
+    }>();
+    expect(firstBody.done).toBe(false);
+    expect(firstBody.cursor).toBe(2);
+    expect(firstBody.total).toBe(5);
+    expect(firstBody.restored_packs).toBe(2);
+
+    // The index must NOT have been swapped yet: publishing a half-restored
+    // corpus would be worse than the drift the restore is repairing.
+    const midIndex = await getPackIndex(e, { fresh: true });
+    expect(midIndex?.packs ?? []).toHaveLength(0);
+    expect(await e.ESO_PACKS.get(`pack:${packs[0]!.id}`)).toBeTruthy();
+    expect(await e.ESO_PACKS.get(`pack:${packs[4]!.id}`)).toBeNull();
+
+    let cursor: number | null = firstBody.cursor;
+    let guard = 0;
+    while (cursor !== null && guard++ < 10) {
+      const res = await call(
+        apiKeyRequest(`${BASE}/admin/restore`, {
+          method: "POST",
+          body: JSON.stringify({ limit: 2, cursor }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json<{ done: boolean; cursor: number | null }>();
+      cursor = body.done ? null : body.cursor;
+    }
+
+    // Only now is the whole corpus live and indexed.
+    for (const pack of packs) {
+      expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
+    }
+    const finalIndex = await getPackIndex(e, { fresh: true });
+    expect((finalIndex?.packs ?? []).map((p) => p.id).sort()).toEqual(
+      packs.map((p) => p.id).sort(),
+    );
+  });
+
+  it("ignores a nonsense cursor rather than skipping records", async () => {
+    const pack = makePack("cursor-guard");
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs: [pack],
+        packBodies: { [pack.id]: pack },
+        votes: {},
+      }),
+    );
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: -5 }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json<{ done: boolean; restored_packs: number }>();
+    expect(body.done).toBe(true);
+    expect(body.restored_packs).toBe(1);
+    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
   });
 });
 

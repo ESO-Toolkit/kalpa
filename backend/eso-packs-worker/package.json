@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "tsc --noEmit && wrangler deploy",
-    "check": "tsc --noEmit",
+    "deploy": "npm run check && wrangler deploy",
+    "check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
     "test": "vitest run"
   },
   "devDependencies": {
