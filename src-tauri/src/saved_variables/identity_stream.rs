@@ -24,9 +24,10 @@
 //!
 //! * `detect_identities_from_tree` classifies a key by NAME regardless of its
 //!   value type (a scalar `["@Foo"] = true` still records the account, and any
-//!   non-marker key under an account is a character — it deliberately
-//!   over-collects so scrubbing never leaks an identity). So identities are
-//!   emitted at **key-commit** time (the `=`), not only when a `{` table opens.
+//!   non-marker key under an account other than a config-section word is a
+//!   character — it deliberately over-collects so scrubbing never leaks an
+//!   identity). So identities are emitted at **key-commit** time (the `=`), not
+//!   only when a `{` table opens.
 //! * The context stack mirrors which `classify_*` function the tree detector
 //!   would apply to a table's direct children:
 //!     - `Default → @account → Char/CharId`
@@ -39,7 +40,7 @@
 
 use std::io::{self, Read};
 
-use super::scrub::{ScrubContext, WELL_KNOWN_WORLDS};
+use super::scrub::{is_config_section_key, ScrubContext, WELL_KNOWN_WORLDS};
 
 /// Read buffer size. Chunking is irrelevant to correctness — the state machine
 /// fully persists across chunk boundaries.
@@ -197,11 +198,6 @@ fn continues_scalar(b: u8, is_number: bool) -> bool {
 #[inline]
 fn is_world_layer(key: &[u8]) -> bool {
     WELL_KNOWN_WORLDS.iter().any(|w| w.as_bytes() == key) || key.contains(&b' ')
-}
-
-#[inline]
-fn is_well_known_world(key: &[u8]) -> bool {
-    WELL_KNOWN_WORLDS.iter().any(|w| w.as_bytes() == key)
 }
 
 /// A non-empty, all-ASCII-digit key of at least 10 digits — the tree detector's
@@ -373,9 +369,10 @@ impl Scanner {
 
     #[inline]
     fn insert_extra_world(&mut self, key: &[u8]) {
-        // Only NON-canonical world names go into `extra_worlds`, matching
-        // `classify_world_layer` (which skips `WELL_KNOWN_WORLDS`).
-        if !is_well_known_world(key) && self.extra_worlds.len() < MAX_IDENTITIES_PER_KIND {
+        // Canonical megaservers are recorded alongside custom world names,
+        // matching `classify_world_layer`: on import this list is the only
+        // evidence of which megaserver the importer plays on.
+        if self.extra_worlds.len() < MAX_IDENTITIES_PER_KIND {
             self.extra_worlds.insert(decode(key));
         }
     }
@@ -383,7 +380,12 @@ impl Scanner {
     #[inline]
     fn insert_character(&mut self, key: &[u8]) {
         if self.characters.len() < MAX_IDENTITIES_PER_KIND {
-            self.characters.insert(decode(key));
+            let decoded = decode(key);
+            // Addon config sections stored beside characters are not identities
+            // — same exemption `classify_under_account` applies.
+            if !is_config_section_key(&decoded) {
+                self.characters.insert(decoded);
+            }
         }
     }
 
@@ -976,18 +978,55 @@ mod tests {
     #[test]
     fn parity_scalar_valued_identity_keys() {
         // The tree detector classifies by key NAME regardless of value type: a
-        // scalar '@'-key is still an account, and a scalar non-marker key under an
-        // account is still a (over-collected) character.
+        // scalar '@'-key is still an account, and a scalar non-marker key under
+        // an account is still a (over-collected) character — unless it is a
+        // config-section word like "version", which neither side collects.
         assert_parity(
             r#"Addon = {
                 ["Default"] = {
                     ["@Author"] = {
                         ["version"] = 3,
+                        ["settings"] = { ["x"] = 1 },
                         ["Mainchar"] = { ["x"] = 1 },
                     },
                 },
             }"#,
         );
+    }
+
+    #[test]
+    fn config_section_keys_are_not_characters() {
+        // Regression: collecting these as characters templated the addon's own
+        // config sections as ${CHAR:N} (which the export then stripped) and
+        // dropped every string value containing the word.
+        let ctx = stream_ctx(
+            r#"Addon = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["version"] = 3,
+                        ["profiles"] = { ["p"] = 1 },
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+        assert_eq!(ctx.characters, vec!["Mainchar".to_string()]);
+    }
+
+    #[test]
+    fn canonical_world_is_recorded() {
+        // The importer's megaserver has to reach `substitute_placeholders`, so
+        // canonical worlds are collected, not just custom ones.
+        let ctx = stream_ctx(
+            r#"Addon = {
+                ["Default"] = {
+                    ["EU Megaserver"] = {
+                        ["@Author"] = { ["Mainchar"] = { ["x"] = 1 } },
+                    },
+                },
+            }"#,
+        );
+        assert_eq!(ctx.extra_worlds, vec!["EU Megaserver".to_string()]);
     }
 
     #[test]
