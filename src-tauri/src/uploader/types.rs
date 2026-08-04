@@ -369,6 +369,14 @@ pub struct UploadRecord {
     /// player-card build extraction. `serde(default)` preserves old history rows.
     #[serde(default)]
     pub build_evidence: Option<KalpaBuildEvidence>,
+    /// Whether this upload ran on Kalpa's NATIVE direct path rather than handing the log
+    /// to the official uploader. Stamped when the transient (`Uploading`/`Live`) record is
+    /// written, because after a crash the two are otherwise indistinguishable — and
+    /// settling a native upload as `HandedOff` claims a handoff that never happened and
+    /// offers a paste-link affordance for a report Kalpa itself created.
+    /// `serde(default)` (false) for records written before this field existed.
+    #[serde(default)]
+    pub native: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

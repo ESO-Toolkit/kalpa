@@ -121,10 +121,10 @@ fn offsets_still_valid(src: &Path, first: &LogSession) -> bool {
 /// The offset of the first byte of the line containing `at` — i.e. one past the
 /// nearest `\n` at or before `at`, or 0 if there is none. Lets the appended-tail
 /// scan begin at a true line start even when `at` (a preflight `end_offset`)
-/// landed mid-line, which the full-file scanner can do: it feeds an unterminated
-/// trailing line and `finish()` sets the final session end to EOF, so `max_end`
-/// can sit inside a partially-flushed `0,BEGIN_LOG,…` header. Scanning from a
-/// real line start re-reads that line once it completes.
+/// landed mid-line, which the full-file scanner can do: it leaves an unterminated
+/// trailing line unclassified but `finish()` still sets the final session end to
+/// EOF, so `max_end` can sit inside a partially-flushed `0,BEGIN_LOG,…` header.
+/// Scanning from a real line start re-reads that line once it completes.
 fn line_start_at_or_before(src: &Path, at: u64) -> Option<u64> {
     use std::io::{Read, Seek, SeekFrom};
     if at == 0 {
@@ -538,6 +538,12 @@ pub fn split_selected(
                 .unwrap_or(s.index == sel.index)
         });
         let Some((pos, session)) = found else {
+            // A PINNED selection that resolves to nothing is the same "log changed"
+            // event as a fingerprint mismatch below — report it instead of returning a
+            // shorter list the user reads as a complete success.
+            if sel.start_offset.is_some() || sel.start_time_ms.is_some() {
+                return Err(LOG_CHANGED.into());
+            }
             continue;
         };
         // If the caller pinned the session's identity, verify it still matches the
@@ -546,10 +552,7 @@ pub fn split_selected(
         // different session under the user's chosen name.
         if let Some(expected) = sel.start_time_ms {
             if session.start_time_ms != expected {
-                return Err(
-                    "The log changed since it was scanned. Re-select it and try the split again."
-                        .into(),
-                );
+                return Err(LOG_CHANGED.into());
             }
         }
         let end = clamped_session_end(session, pos == last_index, snapshot_len);
@@ -562,8 +565,7 @@ pub fn split_selected(
         let base = sel
             .name
             .as_deref()
-            .and_then(sanitize_split_stem)
-            .map(|s| format!("{s}.log"))
+            .and_then(custom_split_file_name)
             .unwrap_or_else(|| session_file_name(stem, session));
         let name = unique_name(&mut used, base);
 
@@ -576,6 +578,30 @@ pub fn split_selected(
         return Err("None of the selected sessions could be written.".into());
     }
     Ok(written)
+}
+
+/// The error every "the caller's selection no longer describes this file" path returns.
+/// A pinned selection that resolves to nothing means the log was truncated/rotated
+/// between preflight and split — the SAME event the fingerprint-mismatch check treats as
+/// fatal — so it must not be skipped into a quietly-shorter result the user reads as
+/// success.
+const LOG_CHANGED: &str =
+    "The log changed since it was scanned. Re-select it and try the split again.";
+
+/// Turn a user-supplied split name into a file name, reserving the `Encounter` stem.
+///
+/// `Encounter.log` is the live file ESO writes, and `uploader_delete_log` fails closed on
+/// that NAME in any directory — so a split allowed to take it would be permanently
+/// undeletable from inside Kalpa, with a refusal message about in-game logging that
+/// doesn't apply. The import path reserves the same stem (`imported-`); splits get
+/// `split-`. Returns `None` (caller falls back to the stable auto name) when the name
+/// sanitizes away entirely.
+fn custom_split_file_name(raw: &str) -> Option<String> {
+    let stem = sanitize_split_stem(raw)?;
+    if stem.eq_ignore_ascii_case("Encounter") {
+        return Some(format!("split-{stem}.log"));
+    }
+    Some(format!("{stem}.log"))
 }
 
 /// Reserve a unique file name, appending `-2`, `-3`, … before the extension on
@@ -798,16 +824,18 @@ pub fn split_selected_fights(
                 .unwrap_or(f.index == sel.index)
         });
         let Some(fight) = found else {
+            // A pinned fight that resolves to nothing means the log changed under the
+            // selection — the same event the fingerprint check below rejects.
+            if sel.start_offset.is_some() || sel.start_ms.is_some() {
+                return Err(LOG_CHANGED.into());
+            }
             continue;
         };
         // If the caller pinned the fight identity, verify it still matches the
         // resolved fight; a mismatch means the log changed and indices shifted.
         if let Some(expected) = sel.start_ms {
             if fight.start_ms != expected {
-                return Err(
-                    "The log changed since it was scanned. Re-select it and try the split again."
-                        .into(),
-                );
+                return Err(LOG_CHANGED.into());
             }
         }
 
@@ -862,8 +890,7 @@ pub fn split_selected_fights(
         let base = sel
             .name
             .as_deref()
-            .and_then(sanitize_split_stem)
-            .map(|s| format!("{s}.log"))
+            .and_then(custom_split_file_name)
             .unwrap_or_else(|| fight_file_name(stem, fight));
         let name = unique_name(&mut used, base);
 
@@ -939,10 +966,7 @@ pub fn split_session_fights_selected(
     };
     if let Some(expected) = selection.start_time_ms {
         if session.start_time_ms != expected {
-            return Err(
-                "The log changed since it was scanned. Re-select it and try the split again."
-                    .into(),
-            );
+            return Err(LOG_CHANGED.into());
         }
     }
 
@@ -963,14 +987,15 @@ pub fn split_session_fights_selected(
                 .unwrap_or(f.index == sel.index)
         });
         let Some(fight) = found else {
+            // As above: a pinned fight that no longer resolves means the log changed.
+            if sel.start_offset.is_some() || sel.start_ms.is_some() {
+                return Err(LOG_CHANGED.into());
+            }
             continue;
         };
         if let Some(expected) = sel.start_ms {
             if fight.start_ms != expected {
-                return Err(
-                    "The log changed since it was scanned. Re-select it and try the split again."
-                        .into(),
-                );
+                return Err(LOG_CHANGED.into());
             }
         }
         if fight.start_offset < session.start_offset || fight.start_offset >= session_end {
@@ -1035,8 +1060,7 @@ pub fn split_session_fights_selected(
     let base = selection
         .name
         .as_deref()
-        .and_then(sanitize_split_stem)
-        .map(|s| format!("{s}.log"))
+        .and_then(custom_split_file_name)
         .unwrap_or_else(|| session_file_name(stem, session));
     let name = unique_name(&mut used, base);
     let dst = out.join(&name);
@@ -1445,6 +1469,28 @@ mod tests {
         assert!(sanitize_split_stem(&"x".repeat(500)).unwrap().len() <= 80);
     }
 
+    // A split named "Encounter" must not land as `Encounter.log`: uploader_delete_log
+    // refuses that NAME anywhere, so the file would be undeletable from inside Kalpa.
+    // The import path reserves the same stem; splitting has to as well.
+    #[test]
+    fn custom_split_name_reserves_the_encounter_stem() {
+        assert_eq!(
+            custom_split_file_name("Encounter").as_deref(),
+            Some("split-Encounter.log")
+        );
+        assert_eq!(
+            custom_split_file_name("  encounter ").as_deref(),
+            Some("split-encounter.log"),
+            "the reservation is case- and whitespace-insensitive"
+        );
+        // Names that merely CONTAIN it are untouched, and the empty fallback is intact.
+        assert_eq!(
+            custom_split_file_name("Encounter-hm").as_deref(),
+            Some("Encounter-hm.log")
+        );
+        assert_eq!(custom_split_file_name("   "), None);
+    }
+
     // split_selected writes only the chosen sessions, names them from the
     // sanitized custom name, and de-duplicates colliding names.
     #[test]
@@ -1603,6 +1649,68 @@ mod tests {
             }],
         );
         assert!(res.is_err(), "a mismatched session fingerprint must fail");
+    }
+
+    // A pinned selection that no longer resolves after the trust gate forced a rescan is
+    // the same "log changed" event as a fingerprint mismatch. Skipping it would return
+    // Ok with fewer files than the user chose and no signal that any were dropped.
+    #[test]
+    fn split_selected_rejects_a_pinned_selection_that_no_longer_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        let a = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        write(&log, a);
+
+        // The pinned offset belongs to a session that is no longer in the file, so the
+        // resolved (rescanned) list has nothing to match.
+        let res = split_selected(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            None,
+            vec![SplitSelection {
+                index: 7,
+                name: Some("raid".into()),
+                start_offset: Some(999_999),
+                start_time_ms: Some(2000),
+            }],
+        );
+        let err = res.expect_err("a vanished pinned session must fail loudly");
+        assert!(err.contains("log changed"), "unexpected error: {err}");
+    }
+
+    // Same rule for fights: a pinned fight that vanished must not be silently dropped
+    // from an otherwise-successful multi-selection split.
+    #[test]
+    fn split_fights_rejects_a_pinned_selection_that_no_longer_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(&log, &three_fight_session());
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+
+        let res = split_selected_fights(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(scan.sessions.clone()),
+            Some(scan.fights.clone()),
+            vec![
+                FightSelection {
+                    index: 0,
+                    name: Some("pull".into()),
+                    start_offset: Some(scan.fights[0].start_offset),
+                    start_ms: Some(scan.fights[0].start_ms),
+                },
+                FightSelection {
+                    index: 9,
+                    name: Some("gone".into()),
+                    start_offset: Some(888_888),
+                    start_ms: Some(777),
+                },
+            ],
+        );
+        let err = res.expect_err("a vanished pinned fight must fail loudly");
+        assert!(err.contains("log changed"), "unexpected error: {err}");
     }
 
     #[test]

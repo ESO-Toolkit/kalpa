@@ -694,6 +694,21 @@ pub fn assess_native_live_routing(opt_in: bool, has_session: bool) -> NativeRout
     NativeRouting::Native
 }
 
+/// A finished-log routing verdict together with the EOF it was computed at.
+///
+/// The verdict is only valid for the bytes the scan actually saw: manual upload of the
+/// ACTIVE `Encounter.log` is allowed, so ESO can append between the scan and the encode.
+/// [`run_native_upload_bounded`] reads exactly `scanned_len` bytes so the encoded payload
+/// is the vetted payload — otherwise an unproven event type, or a `/reloadui`'s second
+/// `BEGIN_LOG` (the very thing [`NativeFallbackReason::MultiSession`] exists to catch),
+/// could slip in behind the gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRoutingScan {
+    pub routing: NativeRouting,
+    /// Bytes the coverage/session scan read, i.e. the file's EOF when it finished.
+    pub scanned_len: u64,
+}
+
 /// Decide whether a prepared log may use the native uploader, applying the
 /// safety gate that guarantees native output is byte-correct or not used:
 ///
@@ -711,6 +726,31 @@ pub fn assess_native_live_routing(opt_in: bool, has_session: bool) -> NativeRout
 /// identical to the official uploader's. The actual line scan streams the file
 /// so it stays cheap on multi-GB logs.
 pub fn assess_native_routing(log_path: &str, opt_in: bool, has_session: bool) -> NativeRouting {
+    assess_native_routing_scanned(log_path, opt_in, has_session).routing
+}
+
+/// [`assess_native_routing`] plus the EOF the verdict covers. Every caller that goes on to
+/// ENCODE the log should use this and pass `scanned_len` to [`run_native_upload_bounded`],
+/// so an append to an active log can't slip past the gate that just approved the file.
+pub fn assess_native_routing_scanned(
+    log_path: &str,
+    opt_in: bool,
+    has_session: bool,
+) -> NativeRoutingScan {
+    let mut scanned_len = 0u64;
+    let routing = assess_native_routing_inner(log_path, opt_in, has_session, &mut scanned_len);
+    NativeRoutingScan {
+        routing,
+        scanned_len,
+    }
+}
+
+fn assess_native_routing_inner(
+    log_path: &str,
+    opt_in: bool,
+    has_session: bool,
+    scanned_len: &mut u64,
+) -> NativeRouting {
     use super::native::{coverage, format};
 
     if !opt_in {
@@ -763,7 +803,8 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool, has_session: bool) ->
         buf.clear();
         match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break, // EOF — full file scanned
-            Ok(_) => {}
+            // Track the exact EOF the verdict covers so the encoder can be held to it.
+            Ok(n) => *scanned_len += n as u64,
             // Read error: fail closed to the official uploader rather than risk a
             // partial-scan false "Native".
             Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
@@ -828,6 +869,9 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool, has_session: bool) ->
 /// a true progress bar. It fires ONLY on the native path: if this function falls back
 /// to the official uploader (no session / non-UTF-8 / a malformed payload), it emits
 /// nothing further and the handoff is reflected by the returned `HandedOff` outcome.
+///
+/// Reads the WHOLE file; see [`run_native_upload_bounded`] to hold the encoder to the
+/// range a routing scan actually vetted.
 pub fn run_native_upload(
     log_path: &str,
     opts: &UploadOptions,
@@ -835,6 +879,25 @@ pub fn run_native_upload(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     sink: &dyn super::native::live::OrphanSink,
     progress: &(dyn Fn(UploadProgressEvent) + Send + Sync),
+) -> Result<UploadOutcome, String> {
+    run_native_upload_bounded(log_path, opts, session, cancel, sink, progress, None)
+}
+
+/// [`run_native_upload`] bounded to the bytes a routing scan vetted.
+///
+/// `scanned_len` is [`NativeRoutingScan::scanned_len`]; only that prefix is encoded.
+/// `None` reads the whole file (for callers that ran no scan).
+// One extra parameter over the already-injected set (log, options, session, cancel, sink,
+// progress); they are distinct dependencies with nothing to group.
+#[allow(clippy::too_many_arguments)]
+pub fn run_native_upload_bounded(
+    log_path: &str,
+    opts: &UploadOptions,
+    session: &dyn super::native::session::SessionProvider,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    sink: &dyn super::native::live::OrphanSink,
+    progress: &(dyn Fn(UploadProgressEvent) + Send + Sync),
+    scanned_len: Option<u64>,
 ) -> Result<UploadOutcome, String> {
     use super::native::{client::NativeUpload, events};
 
@@ -854,18 +917,25 @@ pub fn run_native_upload(
     let size = std::fs::metadata(log_path)
         .map_err(|e| format!("Failed to read log: {e}"))?
         .len();
-    if size > MAX_NATIVE_BYTES {
+    // Only the vetted prefix is ever encoded, so the ceiling applies to that — a log that
+    // kept growing past the ceiling after the scan is still uploadable from what passed.
+    let read_len = scanned_len.map(|len| len.min(size)).unwrap_or(size);
+    if read_len > MAX_NATIVE_BYTES {
         return Err(format!(
             "This log is too large for direct upload ({} MiB > {} MiB). Split it first, \
              or it will be sent via the official uploader.",
-            size / (1024 * 1024),
+            read_len / (1024 * 1024),
             MAX_NATIVE_BYTES / (1024 * 1024)
         ));
     }
 
-    // Read the prepared log and split into lines for the encoder. Bounded by the
-    // size ceiling above.
-    let contents = match std::fs::read_to_string(log_path) {
+    // Read the prepared log and split into lines for the encoder. Bounded by the size
+    // ceiling above AND by the routing scan's EOF: the coverage / single-session verdict
+    // was computed over exactly those bytes, and ESO can append to an ACTIVE log between
+    // the scan and here. Encoding past the vetted range would ship events that never
+    // passed the gate — an unproven type, or a `/reloadui`'s second BEGIN_LOG that the
+    // MultiSession fallback exists to keep out of a single-segment payload.
+    let contents = match read_log_prefix(log_path, read_len) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
             eprintln!("[uploader] native: log is not valid UTF-8 -> official handoff");
@@ -936,6 +1006,17 @@ pub fn run_native_upload(
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Read the first `len` bytes of `log_path` as UTF-8 text. Mirrors
+/// `fs::read_to_string`'s contract — including [`std::io::ErrorKind::InvalidData`] for
+/// non-UTF-8 content, which routes to the official handoff — but never reads past `len`.
+fn read_log_prefix(log_path: &str, len: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(log_path)?;
+    let mut contents = String::new();
+    std::io::BufReader::new(file.take(len)).read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 #[cfg(test)]
@@ -1151,6 +1232,47 @@ mod routing_tests {
                 NativeRouting::Fallback(NativeFallbackReason::MultiSession)
             ),
             "multi-session log must route to the official uploader"
+        );
+    }
+
+    // The verdict covers only the bytes the scan read. On an ACTIVE log ESO keeps
+    // appending, so the scan must report its own EOF and the encoder must be held to it —
+    // otherwise a `/reloadui`'s second BEGIN_LOG (or an unproven event) lands in the
+    // payload behind the gate that just approved a single-session, all-proven file.
+    #[test]
+    fn scanned_len_bounds_the_encoded_bytes_to_the_vetted_range() {
+        if !super::super::native::format::FORMAT_VERSION_CONFIRMED {
+            return; // gate closed → the scan short-circuits before reading anything.
+        }
+        let vetted = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n\
+                      10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let (_d, path) = temp_log(vetted);
+        let scan = assess_native_routing_scanned(&path, true, true);
+        assert_eq!(
+            scan.scanned_len,
+            vetted.len() as u64,
+            "the scan reports the EOF it vetted"
+        );
+
+        // ESO appends a fresh session after the scan; only the vetted prefix may be read.
+        let appended = format!(
+            "{vetted}0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n30,BEGIN_COMBAT\n40,END_COMBAT\n"
+        );
+        std::fs::write(&path, &appended).unwrap();
+        let text = read_log_prefix(&path, scan.scanned_len).unwrap();
+        assert_eq!(text, vetted);
+        assert_eq!(
+            text.matches("BEGIN_LOG").count(),
+            1,
+            "the appended session must not reach the single-segment encoder"
+        );
+        // Without the bound the whole (now multi-session) file would be encoded.
+        assert_eq!(
+            read_log_prefix(&path, appended.len() as u64)
+                .unwrap()
+                .matches("BEGIN_LOG")
+                .count(),
+            2
         );
     }
 }

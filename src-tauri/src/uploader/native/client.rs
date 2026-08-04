@@ -411,7 +411,9 @@ impl<'a> NativeUpload<'a> {
     /// error). On a `401`/`419` it invalidates the session once and retries a
     /// single time with a freshly-fetched session, mirroring the official client's
     /// re-auth-then-retry behaviour; a second auth rejection is surfaced as
-    /// [`SessionError::Expired`] so the caller can prompt a re-login.
+    /// [`SessionError::Expired`] so the caller can prompt a re-login. A merely
+    /// SUSPECTED auth bounce (a redirect, see [`classify_status`]) retries with the
+    /// SAME session first — see [`AuthRejection`].
     ///
     /// Clean-room: the endpoint shapes (JSON create/terminate, multipart segment/
     /// master-table with these field names) are protocol facts; the request
@@ -423,16 +425,23 @@ impl<'a> NativeUpload<'a> {
             let resp = self.send_once(url, &kind, &session);
             match resp {
                 Ok(SendResult::Ok(body)) => return Ok(body),
-                Ok(SendResult::AuthRejected) if attempt == 0 => {
-                    // Stale session: drop it and try once more with a fresh one.
-                    self.session.invalidate();
-                    session = match self.session.session() {
-                        Ok(s) => s,
-                        Err(_) => return Err(UploadError::Session(SessionError::Expired)),
-                    };
+                Ok(SendResult::AuthRejected(rejection)) if attempt == 0 => {
+                    // Only a DIRECT 401/419 proves the cookie is dead, so only that
+                    // invalidates (which wipes the durable credential). A suspected
+                    // bounce retries with the SAME session — see [`AuthRejection`].
+                    if rejection.proves_session_dead() {
+                        self.session.invalidate();
+                        session = match self.session.session() {
+                            Ok(s) => s,
+                            Err(_) => return Err(UploadError::Session(SessionError::Expired)),
+                        };
+                    }
                     continue;
                 }
-                Ok(SendResult::AuthRejected) => {
+                Ok(SendResult::AuthRejected(_)) => {
+                    // Rejected twice: the session really is unusable, whichever way the
+                    // rejection was signalled. Drop it so the next upload prompts a login.
+                    self.session.invalidate();
                     return Err(UploadError::Session(SessionError::Expired));
                 }
                 Ok(SendResult::ServerError { status, detail }) => {
@@ -504,8 +513,8 @@ impl<'a> NativeUpload<'a> {
         // C3: classify by (status, headers) BEFORE reading the body so a 401/419 — or a
         // redirect to a login page (an expired session bounce) — engages the re-auth
         // retry instead of being read back as a fatal server error.
-        if let StatusClass::AuthRejected = classify_status(status, resp.headers()) {
-            return Ok(SendResult::AuthRejected);
+        if let StatusClass::AuthRejected(rejection) = classify_status(status, resp.headers()) {
+            return Ok(SendResult::AuthRejected(rejection));
         }
         let code = status.as_u16();
         let body = resp.bytes().map_err(|e| format!("read body failed: {e}"))?;
@@ -830,15 +839,20 @@ fn live_send_with_reauth(
     for attempt in 0..2 {
         match live_send_once(&sess, url, req) {
             Ok(SendResult::Ok(body)) => return Ok(body),
-            Ok(SendResult::AuthRejected) if attempt == 0 => {
-                session.invalidate();
-                sess = match session.session() {
-                    Ok(s) => s,
-                    Err(_) => return Err(UploadError::Session(SessionError::Expired)),
-                };
+            Ok(SendResult::AuthRejected(rejection)) if attempt == 0 => {
+                // Same rule as the one-shot `send`: only a direct 401/419 wipes the
+                // durable credential; a suspected redirect bounce retries as-is.
+                if rejection.proves_session_dead() {
+                    session.invalidate();
+                    sess = match session.session() {
+                        Ok(s) => s,
+                        Err(_) => return Err(UploadError::Session(SessionError::Expired)),
+                    };
+                }
                 continue;
             }
-            Ok(SendResult::AuthRejected) => {
+            Ok(SendResult::AuthRejected(_)) => {
+                session.invalidate();
                 return Err(UploadError::Session(SessionError::Expired));
             }
             Ok(SendResult::ServerError { status, detail }) => {
@@ -912,8 +926,8 @@ fn live_send_once(
     let resp = base.send().map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     // C3: same status+headers classification as the one-shot path.
-    if let StatusClass::AuthRejected = classify_status(status, resp.headers()) {
-        return Ok(SendResult::AuthRejected);
+    if let StatusClass::AuthRejected(rejection) = classify_status(status, resp.headers()) {
+        return Ok(SendResult::AuthRejected(rejection));
     }
     let code = status.as_u16();
     let body = resp.bytes().map_err(|e| format!("read body failed: {e}"))?;
@@ -936,10 +950,34 @@ fn live_send_once(
 enum SendResult {
     /// 2xx — the response body.
     Ok(Vec<u8>),
-    /// 401/419 — the session was rejected; caller may re-auth and retry.
-    AuthRejected,
+    /// The session was rejected; caller may re-auth and retry. See [`AuthRejection`].
+    AuthRejected(AuthRejection),
     /// Other non-2xx — a hard server error with a short detail.
     ServerError { status: u16, detail: String },
+}
+
+/// How strongly a response proves the session cookie is dead.
+///
+/// Both arms engage the single re-auth retry, but only [`AuthRejection::Rejected`]
+/// justifies `SessionProvider::invalidate`, which WIPES the durable credential from the
+/// OS credential store. A `Suspected` redirect is a guess (maintenance/status-page 302,
+/// a load-balancer bounce, a 3xx with no readable `Location`), and acting on a false
+/// positive destroys a still-valid session: a one-shot upload then fails "sign in
+/// again", and a live session enters a mid-raid reauth pause it cannot resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthRejection {
+    /// A direct `401`/`419` — the server itself rejected the cookie.
+    Rejected,
+    /// A redirect we only SUSPECT is an auth bounce.
+    Suspected,
+}
+
+impl AuthRejection {
+    /// Whether this rejection is proof the cookie is dead (so the stored credential may
+    /// be cleared) rather than a conservative guess.
+    fn proves_session_dead(self) -> bool {
+        matches!(self, AuthRejection::Rejected)
+    }
 }
 
 /// The status-only classification of a response, decided from `(status, headers)`
@@ -948,7 +986,7 @@ enum SendResult {
 enum StatusClass {
     /// Re-authenticate: a `401`/`419`, or a redirect whose target is a login page (an
     /// expired session bounce) — see [`classify_status`].
-    AuthRejected,
+    AuthRejected(AuthRejection),
     /// A normal 2xx/4xx/5xx: read the body and decide success vs. server error by status.
     ReadBody,
 }
@@ -965,16 +1003,20 @@ enum StatusClass {
 /// reported as [`StatusClass::AuthRejected`] to engage the single re-auth retry and the
 /// live pause-reauth. Everything else defers to a body read.
 ///
+/// The redirect arm is reported as [`AuthRejection::Suspected`], not `Rejected`: the
+/// conservative classification is deliberate, but only the server's own `401`/`419` may
+/// destroy the stored credential (see [`AuthRejection`]).
+///
 /// Pure over `(status, headers)` so the classification is unit-testable without a server.
 fn classify_status(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
 ) -> StatusClass {
     if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419 {
-        return StatusClass::AuthRejected;
+        return StatusClass::AuthRejected(AuthRejection::Rejected);
     }
     if status.is_redirection() && redirect_is_auth_related(headers) {
-        return StatusClass::AuthRejected;
+        return StatusClass::AuthRejected(AuthRejection::Suspected);
     }
     StatusClass::ReadBody
 }
@@ -1525,18 +1567,20 @@ mod tests {
         use reqwest::StatusCode;
 
         let empty = HeaderMap::new();
-        // 401 / 419 → AuthRejected (unchanged behavior).
+        // 401 / 419 → AuthRejected, and PROVEN dead (the only case allowed to wipe the
+        // stored credential).
         assert!(matches!(
             classify_status(StatusCode::UNAUTHORIZED, &empty),
-            StatusClass::AuthRejected
+            StatusClass::AuthRejected(AuthRejection::Rejected)
         ));
         assert!(matches!(
             classify_status(StatusCode::from_u16(419).unwrap(), &empty),
-            StatusClass::AuthRejected
+            StatusClass::AuthRejected(AuthRejection::Rejected)
         ));
 
         // THE C3 FIX: a 302 → /login (an expired-session bounce) is an auth rejection,
-        // not a fatal server error.
+        // not a fatal server error — but only a SUSPECTED one, so the retry reuses the
+        // same session instead of destroying a possibly-still-valid credential.
         let mut login = HeaderMap::new();
         login.insert(
             LOCATION,
@@ -1544,14 +1588,19 @@ mod tests {
         );
         assert!(matches!(
             classify_status(StatusCode::FOUND, &login),
-            StatusClass::AuthRejected
+            StatusClass::AuthRejected(AuthRejection::Suspected)
         ));
 
-        // A 3xx with no readable Location → conservatively AuthRejected.
+        // A 3xx with no readable Location → conservatively AuthRejected, still suspected.
         assert!(matches!(
             classify_status(StatusCode::FOUND, &empty),
-            StatusClass::AuthRejected
+            StatusClass::AuthRejected(AuthRejection::Suspected)
         ));
+        assert!(AuthRejection::Rejected.proves_session_dead());
+        assert!(
+            !AuthRejection::Suspected.proves_session_dead(),
+            "an ambiguous redirect must never wipe the persisted upload session"
+        );
 
         // 2xx / 5xx defer to a body read.
         assert!(matches!(

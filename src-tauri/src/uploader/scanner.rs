@@ -611,6 +611,17 @@ pub fn scan_file_with_fight_limit(
             break;
         }
         let next_offset = offset + n as u64;
+        // An UNTERMINATED final line is a partially-flushed append: ESO writes
+        // non-atomically, so a preflight of the active Encounter.log can land inside a
+        // forming `0,BEGIN_LOG,…`/`…,END_COMBAT` header, and classifying it would create
+        // a phantom session (bogus start_time_ms) that a split then writes to disk as a
+        // junk `.log`. Every other scan path already refuses it — `scan_range`, the
+        // chunk scanner, and the backward anchor scan. `offset` still advances to true
+        // EOF so `finish` closes the final session there.
+        if buf.last() != Some(&b'\n') {
+            offset = next_offset;
+            break;
+        }
         let content = line_content(&buf);
         if !content.is_empty() {
             // Lossy decode for field parsing only — offsets came from raw bytes.
@@ -1011,6 +1022,44 @@ mod tests {
         let (complete, _) = scan_latest_session(path.to_str().unwrap()).unwrap();
         assert_eq!(complete.total_fights, 1);
         assert_eq!(complete.fights.len(), 1);
+    }
+
+    // The whole-file scan must apply the SAME partial-line rule as the bounded scans:
+    // a preflight of the active Encounter.log can land inside a forming session header,
+    // and classifying it would invent a session with a truncated start_time_ms — which a
+    // split then writes to `Kalpa Splits` as a junk `.log` the log list happily offers
+    // for upload. The session must appear only once its header line is terminated.
+    #[test]
+    fn full_scan_ignores_partial_trailing_begin_log_and_end_combat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let first = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n\
+                     10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        // A classifiable-but-unterminated next header (past the `,BEGIN_LOG` token).
+        let partial_next = "0,BEGIN_LOG,17";
+        std::fs::write(&path, format!("{first}{partial_next}")).unwrap();
+
+        let scan = scan_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            scan.sessions.len(),
+            1,
+            "no phantom session from a torn header"
+        );
+        assert_eq!(scan.sessions[0].start_time_ms, 1000);
+        // The open session still ends at true EOF, so the appended-tail rescan that
+        // splitting relies on keeps its boundary.
+        assert_eq!(
+            scan.sessions[0].end_offset,
+            (first.len() + partial_next.len()) as u64
+        );
+
+        // The same rule for a torn fight terminator: no fight until END_COMBAT is whole.
+        let torn_fight = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n\
+                          10,BEGIN_COMBAT\n20,END_COMBAT";
+        std::fs::write(&path, torn_fight).unwrap();
+        assert_eq!(scan_file(path.to_str().unwrap()).unwrap().total_fights, 0);
+        std::fs::write(&path, format!("{torn_fight}\n")).unwrap();
+        assert_eq!(scan_file(path.to_str().unwrap()).unwrap().total_fights, 1);
     }
 
     #[test]

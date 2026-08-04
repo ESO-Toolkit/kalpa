@@ -60,6 +60,59 @@ pub fn read_range(path: &Path, start: u64, end: u64, buf: &mut Vec<u8>) -> Resul
     Ok(len)
 }
 
+/// An identity for a tailed file, so a delete-and-recreate is detected even when the
+/// replacement regrows past the consumed offset inside one poll window — a
+/// `size < consumed` check alone misses that, and the next read then resumes at a stale
+/// offset inside a DIFFERENT file (mid-line, past the new `BEGIN_LOG`).
+///
+/// Built from the `fs::metadata` result each poll already fetches, so it costs nothing.
+/// Compared only for equality; the fields are whatever discriminators the platform
+/// exposes on stable Rust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    /// Unix: `(dev, ino)`, which is exact. Windows: `(0, 0)` — `fs::metadata` exposes no
+    /// file index there on stable Rust, so `created` is the only discriminator.
+    ids: (u64, u64),
+    /// Creation time, when the filesystem reports one.
+    ///
+    /// On Windows this is the WEAK half of the check: NTFS file-system tunnelling replays
+    /// a deleted file's creation time onto a same-named file recreated in the same
+    /// directory within ~15s, so a fast delete+recreate there still reads as unchanged and
+    /// falls back to the size check. It is exact on Unix (where `ids` already decides) and
+    /// catches Windows replacements outside the tunnelling window.
+    created: Option<std::time::SystemTime>,
+}
+
+/// Build a [`FileIdentity`] from an already-fetched [`std::fs::Metadata`], or `None` when
+/// the platform reports nothing usable. `None` is fail-safe: [`file_was_replaced`] treats
+/// "unknown" as "unchanged", leaving the size check as the sole detector.
+pub fn file_identity(meta: &std::fs::Metadata) -> Option<FileIdentity> {
+    let ids = platform_ids(meta);
+    let created = meta.created().ok();
+    if ids == (0, 0) && created.is_none() {
+        return None;
+    }
+    Some(FileIdentity { ids, created })
+}
+
+#[cfg(unix)]
+fn platform_ids(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn platform_ids(_meta: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+/// Whether the tailed file was replaced since `previous` was captured. Only a pair of
+/// KNOWN, differing identities counts — an unreadable identity (a transient stat failure,
+/// or a platform that reports none) must never look like a replacement.
+pub fn file_was_replaced(previous: Option<FileIdentity>, current: Option<FileIdentity>) -> bool {
+    matches!((previous, current), (Some(prev), Some(now)) if prev != now)
+}
+
 /// The offset just AFTER the last newline at or before `eof` — i.e. the start of the
 /// line that straddles `eof` (or `eof` itself when the byte before `eof` is a newline,
 /// meaning `eof` is already a clean line boundary).
@@ -142,5 +195,43 @@ mod tests {
         let eof2 = std::fs::metadata(&path).unwrap().len();
         assert_eq!(last_line_boundary(&path, eof2), None);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // The identity a tail carries across polls must be STABLE for one unchanging file:
+    // if it drifted, every pass would look like a replacement and reset `consumed` to 0.
+    #[test]
+    fn file_identity_is_stable_across_polls_of_one_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("kalpa-tail-io-identity-test.log");
+        std::fs::write(&path, b"aaa\n").unwrap();
+        let first = file_identity(&std::fs::metadata(&path).unwrap());
+        assert!(
+            first.is_some(),
+            "identity must be readable on this platform"
+        );
+        // Appending (what ESO does) must not change it.
+        std::fs::write(&path, b"aaa\nbbb\n").unwrap();
+        assert_eq!(first, file_identity(&std::fs::metadata(&path).unwrap()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The replacement rule itself: only two KNOWN, differing identities count. An unknown
+    // identity (a transient stat failure, or a platform that reports none) must read as
+    // "unchanged" so the tail never resets a healthy session.
+    #[test]
+    fn file_was_replaced_only_on_two_known_differing_identities() {
+        let a = Some(FileIdentity {
+            ids: (1, 2),
+            created: None,
+        });
+        let b = Some(FileIdentity {
+            ids: (1, 3),
+            created: None,
+        });
+        assert!(file_was_replaced(a, b));
+        assert!(!file_was_replaced(a, a));
+        assert!(!file_was_replaced(a, None));
+        assert!(!file_was_replaced(None, b));
+        assert!(!file_was_replaced(None, None));
     }
 }
