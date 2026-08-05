@@ -618,7 +618,23 @@ function App() {
     // suite exercise install/remove/restore at all. Never persisted: the sandbox
     // must not survive into the developer's saved settings. Always Ok(null) in
     // release builds, where the command is compiled to return nothing.
-    const sandboxPath = sandbox.ok ? (sandbox.data ?? "") : "";
+    //
+    // Fail CLOSED. The command only errors when KALPA_ADDONS_DIR is set and the
+    // folder could not be created or canonicalized — so an error means a sandbox
+    // was asked for and could not be had. Falling back to the stored path there
+    // would boot the destructive e2e run against the developer's real AddOns
+    // folder and, with auto-update on, start mutating it before the spec's own
+    // guard ever runs.
+    if (!sandbox.ok) {
+      setError(
+        `Could not determine whether a sandbox AddOns folder was requested: ${sandbox.error}. ` +
+          "Refusing to fall back to the saved AddOns folder, in case this is a sandboxed run."
+      );
+      setErrorShowSettings(false);
+      setLoading(false);
+      return;
+    }
+    const sandboxPath = sandbox.data ?? "";
     const savedPath = sandboxPath || storedPath;
 
     const normalizedSort = isSortMode(savedSort) ? savedSort : "name";

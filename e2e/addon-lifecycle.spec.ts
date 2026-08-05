@@ -1,5 +1,11 @@
 import { test, expect, type Page } from "@playwright/test";
-import { addonList, connectToTauri, expectAddonListCount, resetAppState } from "./helpers";
+import {
+  addonFilterTab,
+  addonList,
+  connectToTauri,
+  expectAddonListCount,
+  resetAppState,
+} from "./helpers";
 
 /**
  * The first e2e spec that MUTATES an AddOns folder.
@@ -35,7 +41,30 @@ async function invoke<T>(page: Page, command: string, args: Record<string, unkno
   ) as Promise<T>;
 }
 
-const row = (page: Page) => addonList(page).locator(`[role="option"][aria-label^="${fixtureTitle}"]`);
+const row = (page: Page) =>
+  addonList(page).locator(`[role="option"][aria-label^="${fixtureTitle}"]`);
+
+/**
+ * Put the list on the unfiltered "All" tab.
+ *
+ * The sandbox overrides the AddOns folder but shares the app's settings.json,
+ * and `filterMode` is persisted — so a developer whose last session ended on
+ * Libs or Outdated would boot the sandbox with that filter live. The fixture is
+ * a plain, up-to-date addon, so it would be filtered out and every row-count
+ * assertion below would read 0 for a reason that has nothing to do with the
+ * lifecycle under test.
+ */
+async function showAllAddons(page: Page): Promise<void> {
+  await resetAppState(page);
+  const allTab = addonFilterTab(page, "All");
+  await expect(allTab, '"All" filter tab not found').toBeVisible({ timeout: 10_000 });
+  if ((await allTab.getAttribute("aria-selected")) !== "true") {
+    await allTab.click();
+  }
+  await expect(allTab, "could not select the All filter").toHaveAttribute("aria-selected", "true", {
+    timeout: 5_000,
+  });
+}
 
 test.describe.serial("Addon lifecycle @sandbox", () => {
   test.skip(
@@ -61,7 +90,7 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     const { browser, page } = await connectToTauri();
 
     try {
-      await resetAppState(page);
+      await showAllAddons(page);
 
       const before = await addonList(page).getAttribute("aria-label");
       expect(before, "sandbox should start with no addons").toBe("Installed addons, 0 items");
@@ -116,7 +145,7 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     const { browser, page } = await connectToTauri();
 
     try {
-      await resetAppState(page);
+      await showAllAddons(page);
       await expect(row(page), "fixture should still be installed").toBeVisible({ timeout: 5_000 });
 
       await row(page).click();
