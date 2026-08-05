@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { test, expect, type Page } from "@playwright/test";
 import {
   addonFilterTab,
@@ -54,6 +56,20 @@ const row = (page: Page) =>
  * assertion below would read 0 for a reason that has nothing to do with the
  * lifecycle under test.
  */
+/**
+ * Is the fixture's folder actually on disk?
+ *
+ * The load-bearing assertion for every "prove it really happened" claim below.
+ * Asserting the UI's row count instead does NOT work: `expectAddonListCount`
+ * polls until the count MATCHES, so when the list already shows the expected
+ * number it resolves immediately — before the rescan it is supposed to be
+ * waiting for. A deletion-despite-undo regression would leave the restored row
+ * on screen just long enough for that assertion to pass, and go green.
+ */
+function fixtureOnDisk(): boolean {
+  return existsSync(path.join(sandboxDir, fixtureFolder));
+}
+
 async function showAllAddons(page: Page): Promise<void> {
   await resetAppState(page);
   const allTab = addonFilterTab(page, "All");
@@ -129,11 +145,15 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
       await expect(row(page), "restored fixture row is missing").toBeVisible({ timeout: 5_000 });
 
       // And the undo must have cancelled the real deletion, not just re-rendered
-      // a row over a folder that is already gone. A rescan proves the folder is
-      // still on disk.
-      await page.waitForTimeout(3_500); // outlive the 3s removal timer
+      // a row over a folder that is already gone. Outlive the 3s removal timer,
+      // then read the FILESYSTEM — the UI already shows 1, so a row-count
+      // assertion here would resolve without waiting for anything.
+      await page.waitForTimeout(3_500);
+      expect(fixtureOnDisk(), "the addon folder was deleted despite undo").toBe(true);
+
+      // The rescan then confirms the app agrees with the disk.
       await page.keyboard.press("Control+r");
-      await expectAddonListCount(page, 1, "the addon folder was deleted despite undo");
+      await expectAddonListCount(page, 1, "rescan lost the restored addon");
 
       await page.screenshot({ path: "e2e/screenshots/addon-lifecycle-restored.png" });
     } finally {
@@ -147,13 +167,18 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     try {
       await showAllAddons(page);
       await expect(row(page), "fixture should still be installed").toBeVisible({ timeout: 5_000 });
+      expect(fixtureOnDisk(), "fixture folder missing before the removal").toBe(true);
 
       await row(page).click();
       await page.getByRole("button", { name: "Remove Addon" }).click();
       await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
 
-      // Let the undo window lapse so the removal commits, then prove it stuck.
+      // Let the undo window lapse so the removal commits, then prove it reached
+      // the disk. Again the filesystem, not the row count: the UI already shows
+      // 0 from the optimistic hide, so a count assertion proves nothing here.
       await page.waitForTimeout(4_000);
+      expect(fixtureOnDisk(), "the undo window lapsed but the folder is still there").toBe(false);
+
       await page.keyboard.press("Control+r");
       await expectAddonListCount(page, 0, "the addon came back after the undo window lapsed");
     } finally {

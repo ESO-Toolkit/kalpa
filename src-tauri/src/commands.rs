@@ -9512,10 +9512,19 @@ pub async fn dev_scrub_saved_variable(
 /// profile-apply: a destructive assertion would mutate the machine running it.
 /// Pointing the app at a throwaway folder makes those flows testable.
 ///
-/// Compiled out of release builds entirely — the same treatment
-/// `KALPA_FORCE_WEBVIEW` and the CDP debug port get. A shipped binary must have
-/// no way for a stray environment variable to aim a real user away from their
-/// real AddOns folder.
+/// The env var is read ONLY in debug builds: the `#[cfg(debug_assertions)]` arm
+/// below is the whole implementation, and a release build returns `Ok(None)`
+/// without ever looking at the environment. So no shipped binary can be aimed
+/// away from a user's real AddOns folder by a stray environment variable.
+///
+/// The COMMAND itself is registered in every build, deliberately, and must stay
+/// that way. `initializeApp` fails closed on an error from this call — an error
+/// means a sandbox was requested and could not be prepared, and booting onto the
+/// saved path there would let a destructive run loose on a real install. If the
+/// handler were `#[cfg]`-gated out of release, that invoke would fail for every
+/// release user and the fail-closed branch would replace their addon list with
+/// an error screen. Gating the body, not the registration, is what makes both
+/// properties hold at once.
 ///
 /// The folder is created if absent (an empty sandbox is the point, and a missing
 /// one would drop the app into the setup wizard instead) and returned in
