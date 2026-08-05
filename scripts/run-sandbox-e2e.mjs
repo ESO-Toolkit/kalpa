@@ -15,9 +15,32 @@
  * Windows-only, for the same reason the packaged gate is: the CDP endpoint comes
  * from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`.
  *
- * Note the sandbox covers the AddOns folder and its `.kalpa-metadata`, not the
- * app's settings.json — the specs here deliberately stay off flows that write
- * app-level settings.
+ * ## The isolation is PARTIAL. Know exactly where the line is.
+ *
+ * Isolated (throwaway, deleted afterwards):
+ *   - the AddOns folder and its `.kalpa-metadata`
+ *   - the WebView2 user-data folder
+ *
+ * NOT isolated — these are the developer's real, live files:
+ *   - `settings.json` (sortMode, filterMode, autoUpdate, addonsPath, …)
+ *   - the manifest-cache SQLite DB, uploader history, saved auth tokens
+ *   - anything else under the app-data dir
+ *
+ * Tauri resolves the app-data dir from the bundle identifier through the OS
+ * known-folder API, so no environment variable redirects it the way
+ * `KALPA_ADDONS_DIR` redirects the AddOns folder. Full isolation needs a fixture
+ * profile or a dedicated test binary — tracked as follow-up, not solved here.
+ *
+ * Two consequences, both of which have already bitten:
+ *   1. Persisted settings CHANGE test behaviour. A developer whose last session
+ *      ended on the Libs filter booted the sandbox with that filter live and the
+ *      row-count assertions read 0. Specs must normalise the state they depend
+ *      on — see `showAllAddons` in the lifecycle spec.
+ *   2. Specs can WRITE to those files. Keep `@sandbox` specs off flows that
+ *      persist app-level settings beyond what they normalise.
+ *
+ * Treat this as a strong local smoke test for destructive flows, not as a
+ * containment boundary.
  */
 
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";

@@ -102,7 +102,12 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     }
   });
 
-  test("installs a fixture, removes it, and undo restores it", async () => {
+  // NOT an install-path test. `debug_install_fixture_zip` runs the real
+  // extractor but deliberately skips `install_addon` — no download, no metadata
+  // record, no pre-operation snapshot, no dependency resolution. It is fixture
+  // SETUP so the removal flow has something real on disk to delete. The product
+  // install path remains uncovered here; see the follow-up on the PR.
+  test("removes an addon and restores it with undo", async () => {
     const { browser, page } = await connectToTauri();
 
     try {
@@ -111,8 +116,9 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
       const before = await addonList(page).getAttribute("aria-label");
       expect(before, "sandbox should start with no addons").toBe("Installed addons, 0 items");
 
-      // Install through the real extractor, from a local zip so the spec never
-      // depends on the network or on ESOUI's current release.
+      // Fixture setup, not the product install: the real extractor against a
+      // local zip, so the spec depends on neither the network nor ESOUI's
+      // current release. What is under test starts at the Remove click below.
       const extracted = await invoke<string[]>(page, "debug_install_fixture_zip", {
         addonsPath: sandboxDir,
         zipPath: fixtureZip,

@@ -57,15 +57,42 @@ async function connectToTauriAt(
     );
   }
 
-  const pages = contexts[0].pages();
+  // Every context, not just the first: WebView2 can surface more than one, and
+  // the app's page is not reliably in contexts[0].
+  const pages = contexts.flatMap((context) => context.pages());
   if (pages.length === 0) {
     throw new Error("No pages found in the Tauri webview.");
   }
 
-  const page = pages[0];
-  await page.waitForLoadState("domcontentloaded");
+  // Pick the page that actually IS the app, rather than trusting index 0.
+  // WebView2 exposes extra targets (about:blank, the sign-in webview, devtools),
+  // and taking the first one intermittently attached to a page with no Tauri IPC
+  // — a flake that reads like a product failure: "Tauri IPC is not exposed on
+  // this page".
+  let appPage: Page | null = null;
+  for (const candidate of pages) {
+    try {
+      await candidate.waitForLoadState("domcontentloaded");
+      const hasIpc = await candidate.evaluate(
+        () => "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
+      );
+      if (hasIpc) {
+        appPage = candidate;
+        break;
+      }
+    } catch {
+      // A target that vanished or refuses evaluation is not the app page.
+    }
+  }
 
-  return { browser, page };
+  if (!appPage) {
+    const seen = pages.map((p) => p.url()).join(", ") || "none";
+    throw new Error(
+      `No page exposing Tauri IPC found — is the app running via ${startCommand}? Saw: ${seen}`
+    );
+  }
+
+  return { browser, page: appPage };
 }
 
 export interface ChunkLoadRecorder {

@@ -157,9 +157,18 @@ not have). There are two flavours, and the difference matters:
 - `npm run test:e2e:sandbox` — builds the debug binary, launches it with
   `KALPA_ADDONS_DIR` pointed at a throwaway `AddOns` folder, and runs the
   `@sandbox` specs against it. This is where destructive coverage belongs. The
-  override is `debug_addons_dir_override` in `commands.rs`, compiled out of
-  release builds so no shipped binary can be aimed away from a user's real
-  folder. Pass `--no-build` when iterating on the specs themselves.
+  override is `debug_addons_dir_override` in `commands.rs`; the env var is read
+  only in debug builds, so no shipped binary can be aimed away from a user's
+  real folder. Pass `--no-build` when iterating on the specs themselves.
+
+  Two things it is **not**. It is not a CI gate — nothing runs it automatically
+  on any platform, so a destructive regression can merge; treat it as local
+  validation you run before a release, not a barrier. And its isolation is
+  **partial**: the AddOns folder and WebView2 profile are throwaway, but
+  `settings.json`, the manifest cache, uploader history and saved tokens are the
+  developer's real files, because Tauri resolves the app-data dir from the bundle
+  identifier rather than any environment variable. The runner's header documents
+  the exact line. Specs must normalise persisted state they depend on.
 
 **CI**
 
