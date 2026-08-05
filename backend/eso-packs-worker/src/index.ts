@@ -1047,11 +1047,24 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   const end = Math.min(start + limit, work.length);
   await runBounded(work.slice(start, end), RESTORE_CONCURRENCY);
 
-  // Not done yet: hand back a cursor and stop BEFORE touching the index. A
-  // partially-restored corpus published under a rebuilt index would be worse
-  // than the drift the restore is repairing, so the index swap happens only on
-  // the final page. Every pack write is an idempotent put, so a page replayed
-  // after a network failure is harmless.
+  // Not done yet: hand back a cursor and stop BEFORE touching the index. Every
+  // pack write is an idempotent put, so a page replayed after a network failure
+  // is harmless.
+  //
+  // Deferring the index swap is NOT a rollback, and this comment used to imply
+  // it was. Each page has already written pack bodies to KV and mirrored them
+  // into D1, and `/packs/:id` reads the KV body directly rather than going
+  // through the index — so an abandoned restore leaves a corpus that is
+  // genuinely part-old, part-new, with the website mirror updated too. Holding
+  // the index back only avoids ADDING entries for bodies that were never
+  // written; it cannot un-write the ones that were.
+  //
+  // That property predates the paging (the single-request version wrote every
+  // pack the same way before swapping the index) but paging makes abandonment
+  // far more likely, since stopping between pages is now a normal thing to do.
+  // Fixing it properly means a server-owned job with staged writes and an
+  // atomic promote — see the follow-up note on the PR. Until then an operator
+  // must finish a restore they start.
   if (end < work.length) {
     return json(request, {
       ok: true,
