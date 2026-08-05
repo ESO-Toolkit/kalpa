@@ -1305,7 +1305,15 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   // Rate limiting via built-in atomic binding (skipped when no IP, i.e., in tests)
   const ip = request.headers.get("CF-Connecting-IP");
-  if (ip) {
+  // An authenticated admin call is exempt. The limiters exist to bound anonymous
+  // abuse, and /admin/* already requires the shared admin key — but WRITE_LIMITER
+  // allows only 10 writes a minute, and a paged restore is now one POST per page.
+  // A corpus over ~10 pages would 429 partway through and never reach the final
+  // page that swaps the index, breaking the large-corpus recovery the paging was
+  // built for. Auth is checked here rather than assumed: a caller WITHOUT a valid
+  // key is still rate-limited, so this cannot be used to bypass the limiter.
+  const isAuthedAdmin = pathname.startsWith("/admin/") && requireAuth(request, env);
+  if (ip && !isAuthedAdmin) {
     const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
     const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
     const limiter = isVote ? env.VOTE_LIMITER : isWrite ? env.WRITE_LIMITER : env.READ_LIMITER;

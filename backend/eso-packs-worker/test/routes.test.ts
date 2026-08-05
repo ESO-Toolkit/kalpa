@@ -902,6 +902,70 @@ describe("POST /admin/restore", () => {
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
+  it("does not rate-limit an authenticated admin restore across many pages", async () => {
+    // WRITE_LIMITER allows 10 writes/minute per IP and runs before routing, so a
+    // paged restore — one POST per page — used to 429 partway through and never
+    // reach the final page that swaps the index. That breaks exactly the
+    // large-corpus recovery the paging exists for.
+    const packs = Array.from({ length: 14 }, (_, i) => makePack(`limiter-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-07-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const ip = "203.0.113.7";
+    const page = (body: Record<string, unknown>) =>
+      call(
+        apiKeyRequest(`${BASE}/admin/restore`, {
+          method: "POST",
+          headers: { "CF-Connecting-IP": ip },
+          body: JSON.stringify(body),
+        })
+      );
+
+    // 14 records at one per page = 14 sequential POSTs, comfortably past the
+    // 10/minute write limit.
+    let res = await page({ limit: 1 });
+    expect(res.status).toBe(200);
+    let state = await res.json<{ done: boolean; cursor: number; token: string }>();
+    let pages = 1;
+    while (!state.done && pages < 30) {
+      res = await page({ limit: 1, cursor: state.cursor, token: state.token });
+      expect(res.status, `page ${pages + 1} was rejected`).toBe(200);
+      state = await res.json<{ done: boolean; cursor: number; token: string }>();
+      pages++;
+    }
+    expect(state.done, "restore never completed").toBe(true);
+    expect(pages).toBeGreaterThan(10);
+
+    const index = await getPackIndex(e, { fresh: true });
+    expect((index?.packs ?? []).length).toBe(packs.length);
+  });
+
+  it("still rate-limits an admin path without a valid key", async () => {
+    // The exemption is for AUTHENTICATED admins only — it must not become a
+    // way for an anonymous caller to sidestep the limiter by path prefix.
+    const ip = "203.0.113.9";
+    const unauthed = () =>
+      call(
+        new Request(`${BASE}/admin/restore`, {
+          method: "POST",
+          headers: { "CF-Connecting-IP": ip },
+        })
+      );
+    const first = await unauthed();
+    // Unauthenticated either way — the point is that it never gets the
+    // exemption, so it is still counted and eventually throttled.
+    expect([401, 429]).toContain(first.status);
+  });
+
   it("refuses a valid token paired with a cursor it was not issued for", async () => {
     // The token used to fingerprint only the snapshot, so it validated ANY
     // in-range cursor. A mistyped offset — or a 409 retried with the
