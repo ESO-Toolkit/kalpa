@@ -164,9 +164,12 @@ not have). There are two flavours, and the difference matters:
 **CI**
 
 - GitHub Actions enforces Rust and frontend checks on every PR.
-- The `e2e-sandbox` job runs the destructive specs on Windows after `check`
-  passes. `test:packaged` stays local-only — it needs a real WebView2 desktop
-  session and the signing-free debug bundle.
+- Neither e2e flavour runs in CI, and `test:packaged` doesn't either. All three
+  drive a real WebView2 window over CDP, and on a GitHub Windows runner the app
+  launches and stays alive but **never binds the debug port** — verified three
+  times with `netstat` showing no listener on 9222. Run them locally before a
+  release. `ci.yml` records what was ruled out, so a future attempt starts from
+  evidence instead of repeating it.
 - Treat CI failures as blockers; update code until CI is green.
 
 ---

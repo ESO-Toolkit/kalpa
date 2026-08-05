@@ -128,60 +128,24 @@ jobs:
       - name: Build Tauri
         run: cargo build --manifest-path src-tauri/Cargo.toml
 
-  # The destructive e2e specs: install an addon, remove it, undo, and prove the
-  # folder on disk followed along. They run against a throwaway AddOns folder
-  # (the debug-only KALPA_ADDONS_DIR override), never a real install.
+  # NO e2e job here, and it is not an oversight — `npm run test:e2e:sandbox` is
+  # local-only, like `npm run test:packaged`.
   #
-  # Windows-only and in its own job on purpose. The CDP endpoint the specs drive
-  # comes from WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, which is WebView2-specific
-  # — WebKitGTK and WKWebView expose the WebKit inspector protocol instead, so
-  # there is no headless Linux equivalent to run this on. Gated behind `check` so
-  # it restores that job's Rust cache instead of compiling from scratch, and so a
-  # GUI-launch flake cannot mask an ordinary lint or unit-test failure.
-  e2e-sandbox:
-    runs-on: windows-latest
-    needs: check
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: ".nvmrc"
-          cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        with:
-          toolchain: "1.94.0"
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: src-tauri
-
-      - name: Install frontend dependencies
-        run: npm ci --legacy-peer-deps
-
-      # No `playwright install`: the specs use connectOverCDP against the running
-      # WebView2, so no browser binary is ever launched locally.
-
-      - name: Prepare native Slint sidecar placeholder
-        run: |
-          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
-          Set-Content -NoNewline -Path src-tauri/binaries/kalpa-slint-x86_64-pc-windows-msvc.exe -Value ""
-
-      - name: Sandboxed e2e
-        run: npm run test:e2e:sandbox
-
-      - name: Upload e2e screenshots
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: e2e-sandbox-screenshots
-          path: e2e/screenshots/
-          if-no-files-found: ignore
+  # It was tried on windows-latest three times and failed identically each time.
+  # The evidence, from the harness's own diagnostic: the Rust build succeeds, the
+  # app launches, our PID is the only kalpa.exe, the process stays alive for the
+  # full 120s wait — and `netstat` reports NOTHING listening on 9222. WebView2
+  # never binds the debug port on a GitHub runner even though lib.rs sets
+  # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS and `tauri build --debug` really does
+  # produce a debug_assertions binary.
+  #
+  # Ruled out along the way: IPv6-vs-IPv4 loopback (the probe now uses 127.0.0.1
+  # and still gets ECONNREFUSED), a too-short timeout (30s -> 120s), a
+  # non-writable WebView2 user-data folder (given its own directory), and a
+  # missing Playwright browser (connectOverCDP never launches one).
+  #
+  # Before trying again, prove WebView2 can bind a debug port at all on the
+  # runner with a minimal app — do not re-litigate the list above.
 
   # Compile + test the Linux port. Lint/format/audit run once in the Windows
   # job above; this job proves the Linux cfg arms build clean and pass tests.
