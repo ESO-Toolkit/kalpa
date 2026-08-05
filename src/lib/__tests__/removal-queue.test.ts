@@ -85,6 +85,24 @@ describe("RemovalQueue", () => {
     expect(queue.size).toBe(0);
   });
 
+  it("does not store the bare global clearTimeout as its default", () => {
+    // Regression, and the only shape a unit test can assert here. Storing the
+    // Window method itself means `drop()` invokes it as `this.clearTimer(h)`,
+    // whose receiver is a RemovalQueue rather than a Window — WebIDL brand-checks
+    // that and throws `TypeError: Illegal invocation` in Chromium/WebView2. The
+    // throw aborts drop() before it returns, so the removal never reaches the
+    // backend and an undo leaves the group timer alive to delete the addon anyway.
+    //
+    // This cannot be caught by exercising the default: jsdom does not
+    // brand-check, so it passes there either way. Asserting the wrapper exists
+    // is the closest a unit test can get; the real coverage is the @sandbox e2e
+    // running in an actual WebView2.
+    const queue = new RemovalQueue();
+    const stored = (queue as unknown as { clearTimer: unknown }).clearTimer;
+    expect(stored, "default must wrap clearTimeout, not be it").not.toBe(clearTimeout);
+    expect(typeof stored).toBe("function");
+  });
+
   it("returns null and touches nothing for a folder it does not hold", () => {
     const clearTimer = vi.fn();
     const queue = new RemovalQueue(clearTimer);

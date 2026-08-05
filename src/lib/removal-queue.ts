@@ -69,7 +69,24 @@ export class RemovalQueue {
   private readonly entries = new Map<string, PendingRemoval>();
   private readonly clearTimer: (handle: TimerHandle) => void;
 
-  constructor(clearTimer: (handle: TimerHandle) => void = clearTimeout) {
+  /**
+   * The default MUST wrap `clearTimeout` rather than being it.
+   *
+   * `clearTimeout` is a Window method, and storing it on an instance means it is
+   * later invoked as `this.clearTimer(handle)` — a call whose receiver is a
+   * RemovalQueue, not a Window. WebIDL brand-checks that receiver, so the call
+   * throws `TypeError: Illegal invocation` in Chromium/WebView2, which aborts
+   * `drop()` before it returns and takes the removal (or the undo) with it.
+   *
+   * Verified in the shipped engine (WebView2, Chrome 151): a bare
+   * `clearTimeout(h)` succeeds, `this.clearTimer(h)` with the raw global throws,
+   * and this wrapper succeeds.
+   *
+   * jsdom does NOT brand-check, and every test here injects a mock, so neither
+   * the unit suite nor the type checker can catch a regression to the bare
+   * global — only the real browser can. Do not "simplify" this back.
+   */
+  constructor(clearTimer: (handle: TimerHandle) => void = (handle) => clearTimeout(handle)) {
     this.clearTimer = clearTimer;
   }
 
