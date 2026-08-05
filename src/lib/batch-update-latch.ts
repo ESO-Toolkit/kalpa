@@ -18,11 +18,27 @@
  * `running` is re-synced from React state on every render, and a single enum
  * would let that sync clobber a preflight claim made in the same tick.
  *
- * The bug this file exists to prevent: a refresh landing mid-batch used to clear
+ * The bug this file exists around: a refresh landing mid-batch used to clear
  * `updatingAll`, which unlatched the guard and let a second batch start on top
- * of the first. Nothing on the refresh path may touch this latch — an update
- * *check* is not an update *run*, and only the batch that set `running` may
- * clear it.
+ * of the first.
+ *
+ * BE PRECISE ABOUT WHAT THIS CLASS ENFORCES. It does not enforce that. There is
+ * no ownership token: `syncRunning` is an unconditional public setter, driven by
+ * an unconditional per-render effect in App.tsx, so any future
+ * `setUpdatingAll(false)` re-opens the window and this class cannot refuse it.
+ * "Only the batch that set `running` clears it" is a convention App.tsx holds —
+ * see the comment in `checkForUpdates` — not an invariant enforced here.
+ *
+ * What this class DOES enforce is the preflight window that `main` had no
+ * protection for at all: re-entry is refused between the first trigger and the
+ * `updatingAll` state landing.
+ *
+ * Making the invariant structural — a run handle whose `end()` is the only way
+ * to clear `running` — is the obvious next step and is deliberately NOT done
+ * here. `runBatchUpdates` has no `try/finally`, so sole ownership would trade a
+ * self-healing mirror for a latch that wedges Update All for the whole session
+ * if any exit path forgets to release it. That is a worse user-visible outcome
+ * than the bug it would close, so it needs the error paths sorted out first.
  */
 
 export class BatchUpdateLatch {

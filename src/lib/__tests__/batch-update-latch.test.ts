@@ -35,24 +35,30 @@ describe("BatchUpdateLatch", () => {
     expect(latch.tryEnterPreflight()).toBe(false);
   });
 
-  it("keeps the guard latched when a refresh lands mid-batch", () => {
-    // THE regression. `checkForUpdates` used to clear `updatingAll`, which
-    // unlatched this guard while the batch was still extracting — a second
-    // Update All could then start on top of the first. An update *check* is not
-    // an update *run*: nothing on the refresh path may touch the latch.
+  it("stays latched until syncRunning(false), and refuses re-entry until then", () => {
+    // NOTE ON WHAT THIS DOES *NOT* COVER. The regression behind this class is
+    // that `checkForUpdates` cleared `updatingAll` mid-batch, unlatching the
+    // guard so a second Update All could start on top of the first. No test at
+    // this boundary can catch that: the latch has no concept of a refresh, and
+    // `syncRunning` is an unconditional setter the refresh path is simply
+    // expected not to call. The property is held by `checkForUpdates` in
+    // App.tsx — see the comment there — and that is where a regression would
+    // have to be caught.
+    //
+    // An earlier version of this test was named after the regression and
+    // claimed to cover it. It did not: it asserted state was unchanged after
+    // calling nothing, and stayed green whether or not the refresh path cleared
+    // `updatingAll`. A test named after a bug it cannot catch is worse than no
+    // test, because it stops the next reader from looking.
     const latch = new BatchUpdateLatch();
     latch.tryEnterPreflight();
     latch.promoteToRunning();
 
-    // A refresh completing mid-batch: it sets `checkingUpdates` and replaces
-    // `updateResults`, and deliberately does not touch the batch latch.
-    expect(latch.isRunning).toBe(true);
-    expect(latch.tryEnterPreflight()).toBe(false);
+    expect(latch.tryEnterPreflight(), "re-entry while running must be refused").toBe(false);
 
-    // Only the batch that set `running` clears it, via the `updatingAll` sync.
     latch.syncRunning(false);
     expect(latch.isRunning).toBe(false);
-    expect(latch.tryEnterPreflight()).toBe(true);
+    expect(latch.tryEnterPreflight(), "a finished batch releases the guard").toBe(true);
   });
 
   it("mirrors the updatingAll state without clobbering a preflight claim", () => {
