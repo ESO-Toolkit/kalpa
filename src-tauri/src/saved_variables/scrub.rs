@@ -385,6 +385,12 @@ fn present_world_slots(lua: &str) -> Vec<usize> {
             let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
             let remainder = &tail[digits.len()..];
             match (digits.parse::<usize>(), remainder.strip_prefix('}')) {
+                // Slot 0 is spelled `${WORLD}` and never `${WORLD:0}` — see
+                // `world_token`. Reporting `${WORLD:0}` as slot 0 would emit a
+                // substitution pair for `${WORLD}`, which does not appear in the
+                // text, so the literal `${WORLD:0}` would survive AND consume an
+                // importer world that a real token needed.
+                (Ok(0), Some(closed)) => rest = closed,
                 (Ok(slot), Some(closed)) => {
                     if !slots.contains(&slot) {
                         slots.push(slot);
@@ -1698,6 +1704,36 @@ mod tests {
             Vec::<usize>::new()
         );
         assert_eq!(present_world_slots("no tokens here"), Vec::<usize>::new());
+        // `${WORLD:0}` is not a shape the exporter emits — slot 0 is `${WORLD}`
+        // (see `world_token`). Claiming it would generate a pair keyed on
+        // `${WORLD}`, which does not appear in the text, so the literal would
+        // survive while still spending an importer world on it.
+        assert_eq!(
+            present_world_slots(r#"["${WORLD:0}"]"#),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            present_world_slots(r#"["${WORLD:0}"] ["${WORLD:2}"]"#),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn substitute_world_ignores_the_never_emitted_zero_slot() {
+        // A hand-edited pack carrying `${WORLD:0}` alongside a real token must
+        // not have the real one starved of the importer's only world.
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["EU Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(
+            r#"["${WORLD:0}"] = { } ["${WORLD:1}"] = { }"#,
+            &ctx,
+            WELL_KNOWN_WORLDS,
+        );
+        assert!(result.contains(r#"["EU Megaserver"]"#), "{result}");
+        assert!(result.contains(r#"["${WORLD:0}"]"#), "{result}");
     }
 
     #[test]
