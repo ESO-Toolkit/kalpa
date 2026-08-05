@@ -902,6 +902,105 @@ describe("POST /admin/restore", () => {
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
+  it("resumes a DATED snapshot from cursor and token alone", async () => {
+    // The paged response carries cursor and token but not `date`, and the docs
+    // say to pass the response straight back — so a dated restore used to fall
+    // through to backup:latest on page 2 and 409 against its own token. A dated
+    // multi-page restore is exactly the incident-recovery case.
+    const packs = Array.from({ length: 4 }, (_, i) => makePack(`dated-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:2026-02-14",
+      JSON.stringify({
+        created_at: "2026-02-14T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    // A DIFFERENT latest snapshot, so falling through to it is unmistakable.
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-06-01T00:00:00.000Z",
+        packs: [makePack("wrong-snapshot")],
+        packBodies: { "wrong-snapshot": makePack("wrong-snapshot") },
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await e.ESO_PACKS.delete("pack:wrong-snapshot");
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ date: "2026-02-14", limit: 2 }),
+      })
+    );
+    expect(first.status).toBe(200);
+    let { cursor, token, done } = await first.json<{
+      cursor: number;
+      token: string;
+      done: boolean;
+    }>();
+    expect(done).toBe(false);
+
+    // Only cursor + token, exactly what the response hands back.
+    let guard = 0;
+    while (!done && guard++ < 10) {
+      const res = await call(
+        apiKeyRequest(`${BASE}/admin/restore`, {
+          method: "POST",
+          body: JSON.stringify({ cursor, token, limit: 2 }),
+        })
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json<{ done: boolean; cursor: number; token: string }>();
+      done = body.done;
+      if (!done) {
+        cursor = body.cursor;
+        token = body.token;
+      }
+    }
+    expect(done).toBe(true);
+
+    // The dated snapshot restored, and the unrelated latest one did not leak in.
+    for (const pack of packs) {
+      expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
+    }
+    expect(await e.ESO_PACKS.get("pack:wrong-snapshot")).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect((index?.packs ?? []).map((p) => p.id).sort()).toEqual(packs.map((p) => p.id).sort());
+  });
+
+  it("advances even when given a fractional limit", async () => {
+    // 0 < limit < 1 floored to 0, so end === start: the page wrote nothing and
+    // returned the same cursor with done:false — a caller looping until done
+    // would spin forever.
+    const packs = Array.from({ length: 2 }, (_, i) => makePack(`frac-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-04-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 0.5 }),
+      })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json<{ done: boolean; cursor: number; restored_packs: number }>();
+    expect(body.restored_packs, "a fractional limit restored nothing").toBeGreaterThan(0);
+    expect(body.done ? Infinity : body.cursor, "cursor did not advance").toBeGreaterThan(0);
+  });
+
   it("refuses a cursor equal to the total, which writes nothing but republishes", async () => {
     // `total` and `cursor` sit next to each other in the response, and copying
     // the wrong one produced an empty page that fell straight into the

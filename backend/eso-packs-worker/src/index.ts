@@ -857,7 +857,32 @@ function clampLimit(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return RESTORE_PAGE_SIZE;
   }
-  return Math.min(Math.floor(value), RESTORE_MAX_PAGE_SIZE);
+  // At least 1. A fractional limit (0 < limit < 1) floored to 0, which made
+  // `end === start`: the page wrote nothing and returned the same cursor with
+  // done:false, so a caller looping until done never advanced.
+  return Math.min(Math.max(1, Math.floor(value)), RESTORE_MAX_PAGE_SIZE);
+}
+
+/** `backup:latest` or `backup:YYYY-MM-DD` — the only keys a restore may read. */
+const BACKUP_KEY_SHAPE = /^backup:(latest|\d{4}-\d{2}-\d{2})$/;
+
+/**
+ * The snapshot a continuation refers to, read back out of its own token.
+ *
+ * A paged restore of a DATED snapshot was impossible without this. The response
+ * carried `cursor` and `token` but not `date`, and the docs said to pass the
+ * response straight back — so the next call fell through to `backup:latest`,
+ * compared it against a token minted for `backup:YYYY-MM-DD`, and 409'd. Making
+ * the token carry the snapshot identity means one field round-trips instead of
+ * three, and a resume cannot silently retarget a different backup.
+ *
+ * Shape-checked rather than trusted: the token picks which KV key gets read, and
+ * even behind the admin key that should not be arbitrary.
+ */
+function backupKeyFromToken(token: unknown): string | null {
+  if (typeof token !== "string") return null;
+  const key = token.split("|")[0] ?? "";
+  return BACKUP_KEY_SHAPE.test(key) ? key : null;
 }
 
 /** Run `tasks` with at most `concurrency` in flight, preserving fail-fast. */
@@ -892,8 +917,10 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
  * remain, returns `{ done: false, cursor, token }` for the operator to pass
  * straight back in the next request body — the endpoint is a manual incident
  * tool, so a caller-driven cursor beats a background job that can fail
- * unobserved. The token binds the cursor to its snapshot; resuming against a
- * snapshot that changed underneath is a 409, never a partial restore. The
+ * unobserved. The token both names the snapshot and binds the cursor to it, so
+ * a continuation needs only `{ cursor, token }` even for a dated backup, and
+ * resuming against a snapshot that changed underneath is a 409, never a partial
+ * restore. The
  * index swap and cache invalidation happen only on the final page, so a restore
  * abandoned half-way leaves the previous index in place rather than publishing a
  * partial corpus. Pages are idempotent, so replaying one after a failure is
@@ -918,10 +945,15 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     // No/invalid JSON body — fall back to backup:latest below.
   }
 
+  // A continuation names its snapshot through the token it was issued with, so
+  // resuming a dated restore does not depend on the caller also re-sending
+  // `date`. `date` selects the snapshot for the FIRST page only.
+  const resumeKey = readCursor(cursorInput) > 0 ? backupKeyFromToken(tokenInput) : null;
   const backupKey =
-    typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
+    resumeKey ??
+    (typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
       ? `backup:${dateInput}`
-      : "backup:latest";
+      : "backup:latest");
 
   const raw = await env.ESO_PACKS.get(backupKey);
   if (!raw) {
