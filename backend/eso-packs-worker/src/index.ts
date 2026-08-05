@@ -804,9 +804,29 @@ const RESTORE_PAGE_SIZE = 200;
 const RESTORE_MAX_PAGE_SIZE = 400;
 const RESTORE_CONCURRENCY = 10;
 
-function clampCursor(value: unknown, total: number): number {
+/**
+ * A cursor's position, or 0 for "start from the beginning".
+ *
+ * Deliberately does NOT clamp to the work length. Clamping a too-large cursor
+ * down to the end made `start === end`, so the call wrote nothing yet still took
+ * the final-page branch and republished the index — advertising pack bodies it
+ * had never written. Out-of-range is now an error, not a silent no-op.
+ */
+function readCursor(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
-  return Math.min(Math.floor(value), total);
+  return Math.floor(value);
+}
+
+/**
+ * Fingerprint of the snapshot a cursor was issued against.
+ *
+ * Not a security token — it is an incident-recovery consistency check, behind
+ * the admin API key. `created_at` catches a snapshot rewritten in place (the
+ * midnight cron overwriting `backup:latest`) and the record count catches a
+ * different snapshot with the same timestamp.
+ */
+function restoreToken(backupKey: string, snapshot: PackBackupSnapshot, total: number): string {
+  return `${backupKey}|${snapshot.created_at ?? "unknown"}|${total}`;
 }
 
 function clampLimit(value: unknown): number {
@@ -845,9 +865,11 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
  * snapshot entirely (so a pack created after the backup isn't deleted).
  *
  * Paged. A call restores at most `RESTORE_PAGE_SIZE` records and, if more
- * remain, returns `{ done: false, cursor }` for the operator to pass straight
- * back in the next request body — the endpoint is a manual incident tool, so a
- * caller-driven cursor beats a background job that can fail unobserved. The
+ * remain, returns `{ done: false, cursor, token }` for the operator to pass
+ * straight back in the next request body — the endpoint is a manual incident
+ * tool, so a caller-driven cursor beats a background job that can fail
+ * unobserved. The token binds the cursor to its snapshot; resuming against a
+ * snapshot that changed underneath is a 409, never a partial restore. The
  * index swap and cache invalidation happen only on the final page, so a restore
  * abandoned half-way leaves the previous index in place rather than publishing a
  * partial corpus. Pages are idempotent, so replaying one after a failure is
@@ -861,11 +883,13 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   let dateInput: unknown;
   let cursorInput: unknown;
   let limitInput: unknown;
+  let tokenInput: unknown;
   try {
     const body = (await request.json()) as Record<string, unknown> | null;
     dateInput = body?.date;
     cursorInput = body?.cursor;
     limitInput = body?.limit;
+    tokenInput = body?.token;
   } catch {
     // No/invalid JSON body — fall back to backup:latest below.
   }
@@ -912,7 +936,37 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     }),
   ];
 
-  const start = clampCursor(cursorInput, work.length);
+  // A cursor only means anything against the snapshot that issued it. Two ways
+  // it can go stale: the daily cron overwrites `backup:latest` at midnight UTC,
+  // so a paged restore straddling midnight would silently change snapshots
+  // mid-run; or an operator re-runs an old cursor by hand. Either way the
+  // numeric offset then points somewhere else in a different work list, the
+  // records before it are never replayed, and the final page still publishes an
+  // index listing every pack in the snapshot — so the corpus ends up advertising
+  // pack bodies that were never written. Bind the cursor to its snapshot and
+  // refuse a mismatch rather than resuming into the wrong list.
+  const token = restoreToken(backupKey, snapshot, work.length);
+  const start = readCursor(cursorInput);
+  if (start > 0 && tokenInput !== token) {
+    return json(
+      request,
+      {
+        error:
+          "Restore cursor does not match the current snapshot — it was issued against a different one " +
+          "(or the snapshot changed mid-restore). Start again with no cursor.",
+        expected_token: token,
+      },
+      409,
+    );
+  }
+  if (start > work.length) {
+    return json(
+      request,
+      { error: `Restore cursor ${start} is past the end of this snapshot (${work.length} records).` },
+      409,
+    );
+  }
+
   const limit = clampLimit(limitInput);
   const end = Math.min(start + limit, work.length);
   await runBounded(work.slice(start, end), RESTORE_CONCURRENCY);
@@ -927,6 +981,9 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
       ok: true,
       done: false,
       cursor: end,
+      // Pass this straight back with the cursor; the next call refuses to resume
+      // without it, so a snapshot that changed underneath cannot be half-restored.
+      token,
       total: work.length,
       restored_packs: Math.min(end, packs.length) - Math.min(start, packs.length),
       restored_votes: Math.max(0, end - Math.max(start, packs.length)),

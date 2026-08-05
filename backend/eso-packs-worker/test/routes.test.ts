@@ -871,6 +871,7 @@ describe("POST /admin/restore", () => {
     const firstBody = await first.json<{
       done: boolean;
       cursor: number;
+      token: string;
       total: number;
       restored_packs: number;
     }>();
@@ -878,6 +879,7 @@ describe("POST /admin/restore", () => {
     expect(firstBody.cursor).toBe(2);
     expect(firstBody.total).toBe(5);
     expect(firstBody.restored_packs).toBe(2);
+    expect(firstBody.token).toBeTruthy();
 
     // The index must NOT have been swapped yet: publishing a half-restored
     // corpus would be worse than the drift the restore is repairing.
@@ -887,17 +889,19 @@ describe("POST /admin/restore", () => {
     expect(await e.ESO_PACKS.get(`pack:${packs[4]!.id}`)).toBeNull();
 
     let cursor: number | null = firstBody.cursor;
+    let token = firstBody.token;
     let guard = 0;
     while (cursor !== null && guard++ < 10) {
       const res = await call(
         apiKeyRequest(`${BASE}/admin/restore`, {
           method: "POST",
-          body: JSON.stringify({ limit: 2, cursor }),
+          body: JSON.stringify({ limit: 2, cursor, token }),
         }),
       );
       expect(res.status).toBe(200);
-      const body = await res.json<{ done: boolean; cursor: number | null }>();
+      const body = await res.json<{ done: boolean; cursor: number | null; token: string }>();
       cursor = body.done ? null : body.cursor;
+      if (body.token) token = body.token;
     }
 
     // Only now is the whole corpus live and indexed.
@@ -908,6 +912,89 @@ describe("POST /admin/restore", () => {
     expect((finalIndex?.packs ?? []).map((p) => p.id).sort()).toEqual(
       packs.map((p) => p.id).sort(),
     );
+  });
+
+  it("refuses a cursor issued against a different snapshot", async () => {
+    // The daily cron overwrites backup:latest at midnight UTC, so a paged
+    // restore straddling midnight silently changes snapshots mid-run. Applying
+    // the old offset to the new work list skips every record before it — and
+    // the final page would still publish an index listing packs whose bodies
+    // were never written.
+    const packs = Array.from({ length: 4 }, (_, i) => makePack(`stale-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-01-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      }),
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2 }),
+      }),
+    );
+    const { cursor, token } = await first.json<{ cursor: number; token: string }>();
+
+    // The snapshot is replaced underneath, exactly as the cron would.
+    const replacement = Array.from({ length: 4 }, (_, i) => makePack(`fresh-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-01-02T00:00:00.000Z",
+        packs: replacement,
+        packBodies: Object.fromEntries(replacement.map((p) => [p.id, p])),
+        votes: {},
+      }),
+    );
+
+    const resumed = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2, cursor, token }),
+      }),
+    );
+    expect(resumed.status).toBe(409);
+
+    // Nothing from the replacement snapshot was written, and the index was not
+    // republished — a refused resume must leave the corpus exactly as it was.
+    expect(await e.ESO_PACKS.get(`pack:${replacement[0]!.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("refuses a cursor past the end instead of publishing an unwritten index", async () => {
+    // Clamping an out-of-range cursor to the end made start === end: the call
+    // wrote nothing, then took the final-page branch and replaced the index
+    // with the whole snapshot anyway.
+    const pack = makePack("past-end");
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs: [pack],
+        packBodies: { [pack.id]: pack },
+        votes: {},
+      }),
+    );
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: 9999, token: "anything" }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
   });
 
   it("ignores a nonsense cursor rather than skipping records", async () => {
