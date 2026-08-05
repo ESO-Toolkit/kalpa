@@ -46,6 +46,7 @@ import { BatchUpdateLatch } from "@/lib/batch-update-latch";
 import {
   RemovalQueue,
   hideAddon,
+  hidePendingRemovals,
   hideUpdateResult,
   removeFolderFromSelection,
   restoreAddon,
@@ -421,13 +422,19 @@ function App() {
       });
       if (seq !== scanSeqRef.current) return;
 
-      setAddons(result);
+      // A queued removal has hidden its row but has not deleted the folder yet,
+      // so a rescan inside the 3s undo window reads it straight back off disk.
+      // Left unmasked, the row returns and then STAYS after the delete
+      // succeeds — the list shows an addon that no longer exists.
+      const visible = hidePendingRemovals(result, pendingRemovalsRef.current);
+
+      setAddons(visible);
       if (selectedAddonRef.current) {
-        setSelectedAddon(reconcileSelectedAddon(selectedAddonRef.current, result));
+        setSelectedAddon(reconcileSelectedAddon(selectedAddonRef.current, visible));
       }
       // Prune, never reset: a dependency install rescans too, and clearing here
       // threw away a multi-select whose addons were all still installed.
-      setSelectedFolders((prev) => pruneSelection(prev, result));
+      setSelectedFolders((prev) => pruneSelection(prev, visible));
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
@@ -453,7 +460,10 @@ function App() {
         });
         if (seq !== checkSeqRef.current) return;
 
-        setUpdateResults(results);
+        // Same masking as the scan: an addon inside its undo window is still on
+        // disk, so the check still reports it. Its update row must not outlive
+        // the row it belongs to.
+        setUpdateResults(hidePendingRemovals(results, pendingRemovalsRef.current));
 
         // The check just wrote fresh esoui_last_update values to metadata, but the
         // live addon state still holds whatever was on disk at scan time (0 for a

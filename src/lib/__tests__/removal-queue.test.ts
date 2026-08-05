@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   RemovalQueue,
   hideAddon,
+  hidePendingRemovals,
   hideUpdateResult,
   removeFolderFromSelection,
   restoreAddon,
@@ -191,6 +192,42 @@ describe("restore reducers", () => {
   it("leaves update rows alone for an addon that had no update", () => {
     const rows = [updateRow("Other")];
     expect(restoreUpdateResult(rows, null)).toBe(rows);
+  });
+});
+
+describe("hidePendingRemovals", () => {
+  it("keeps a rescan inside the undo window from resurrecting the row", () => {
+    // The removal has hidden the row but NOT deleted the folder — the real
+    // delete is 3s away. A rescan in that window reads the addon straight back
+    // off disk, and once the timer fires and the delete succeeds nothing hides
+    // it again: the list shows an addon that no longer exists.
+    const queue = new RemovalQueue(vi.fn());
+    queue.add("Doomed", entry("Doomed"));
+
+    const scanned = [addon("Kept"), addon("Doomed")];
+    expect(hidePendingRemovals(scanned, queue).map((a) => a.folderName)).toEqual(["Kept"]);
+
+    // Update rows go through the same rule, so a badge cannot outlive its row.
+    const rows = [updateRow("Kept"), updateRow("Doomed")];
+    expect(hidePendingRemovals(rows, queue).map((r) => r.folderName)).toEqual(["Kept"]);
+  });
+
+  it("stops masking the moment the entry leaves the queue", () => {
+    // Undo and failure-restore both drop the entry first, so the row must come
+    // back on the next scan rather than staying invisible.
+    const queue = new RemovalQueue(vi.fn());
+    queue.add("Undone", entry("Undone"));
+    queue.drop("Undone");
+
+    const scanned = [addon("Undone")];
+    expect(hidePendingRemovals(scanned, queue)).toBe(scanned);
+  });
+
+  it("preserves identity when nothing is queued", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const scanned = [addon("A"), addon("B")];
+    expect(hidePendingRemovals(scanned, queue)).toBe(scanned);
+    expect(hidePendingRemovals([], queue)).toEqual([]);
   });
 });
 

@@ -133,6 +133,32 @@ export class RemovalQueue {
 }
 
 /**
+ * Drop anything still inside its undo window from a freshly scanned list.
+ *
+ * A queued removal has hidden its row but has NOT deleted the folder yet — the
+ * real `remove_addon` is 3 seconds away. So a rescan landing inside that window
+ * reads the addon straight back off disk and puts the row back, and when the
+ * timer then fires and the delete succeeds nothing hides it again: the list
+ * shows an addon that no longer exists until the next scan.
+ *
+ * Masking here rather than at each call site keeps "what the user can see" and
+ * "what the queue is about to delete" in one place. Undo and failure-restore
+ * both drop the entry from the queue first, so the row reappears the moment it
+ * is genuinely back.
+ *
+ * Generic over anything folder-keyed, so the addon list and its update rows
+ * filter through the same rule.
+ */
+export function hidePendingRemovals<T extends { folderName: string }>(
+  items: T[],
+  queue: Pick<RemovalQueue, "has">
+): T[] {
+  if (items.length === 0) return items;
+  const masked = items.filter((item) => !queue.has(item.folderName));
+  return masked.length === items.length ? items : masked;
+}
+
+/**
  * Should a failed removal put the row back?
  *
  * Only when the entry belongs to the folder currently on screen. After an
