@@ -842,15 +842,23 @@ function readCursor(value: unknown): number {
 }
 
 /**
- * Fingerprint of the snapshot a cursor was issued against.
+ * Fingerprint of the snapshot AND the exact cursor a page was issued for.
  *
  * Not a security token — it is an incident-recovery consistency check, behind
  * the admin API key. `created_at` catches a snapshot rewritten in place (the
- * midnight cron overwriting `backup:latest`) and the record count catches a
- * different snapshot with the same timestamp.
+ * midnight cron overwriting `backup:latest`), the record count catches a
+ * different snapshot with the same timestamp, and `cursor` stops a token from
+ * validating a position it was never issued for: a snapshot-wide token let any
+ * in-range cursor through, so a mistyped offset could skip whole pages and the
+ * final page would still publish an index for bodies that were never replayed.
  */
-function restoreToken(backupKey: string, snapshot: PackBackupSnapshot, total: number): string {
-  return `${backupKey}|${snapshot.created_at ?? "unknown"}|${total}`;
+function restoreToken(
+  backupKey: string,
+  snapshot: PackBackupSnapshot,
+  total: number,
+  cursor: number,
+): string {
+  return `${backupKey}|${snapshot.created_at ?? "unknown"}|${total}|${cursor}`;
 }
 
 function clampLimit(value: unknown): number {
@@ -1001,16 +1009,18 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   // index listing every pack in the snapshot — so the corpus ends up advertising
   // pack bodies that were never written. Bind the cursor to its snapshot and
   // refuse a mismatch rather than resuming into the wrong list.
-  const token = restoreToken(backupKey, snapshot, work.length);
   const start = readCursor(cursorInput);
-  if (start > 0 && tokenInput !== token) {
+  if (start > 0 && tokenInput !== restoreToken(backupKey, snapshot, work.length, start)) {
+    // Deliberately does NOT hand back the token it expected. A snapshot-wide
+    // token let any in-range cursor pass, so echoing the correct one invited an
+    // operator to retry their WRONG cursor with the RIGHT token — skipping every
+    // page in between while the final page still published the whole index.
     return json(
       request,
       {
         error:
-          "Restore cursor does not match the current snapshot — it was issued against a different one " +
-          "(or the snapshot changed mid-restore). Start again with no cursor.",
-        expected_token: token,
+          "Restore cursor and token do not match — the token was issued for a different cursor, " +
+          "or the snapshot changed mid-restore. Start again with no cursor.",
       },
       409,
     );
@@ -1047,9 +1057,11 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
       ok: true,
       done: false,
       cursor: end,
-      // Pass this straight back with the cursor; the next call refuses to resume
-      // without it, so a snapshot that changed underneath cannot be half-restored.
-      token,
+      // Minted for THIS cursor, not the snapshot at large. Pass the pair back
+      // together: a token only validates the offset it was issued for, so a
+      // mistyped cursor is refused instead of silently skipping the pages
+      // between.
+      token: restoreToken(backupKey, snapshot, work.length, end),
       total: work.length,
       restored_packs: Math.min(end, packs.length) - Math.min(start, packs.length),
       restored_votes: Math.max(0, end - Math.max(start, packs.length)),

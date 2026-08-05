@@ -902,6 +902,51 @@ describe("POST /admin/restore", () => {
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
+  it("refuses a valid token paired with a cursor it was not issued for", async () => {
+    // The token used to fingerprint only the snapshot, so it validated ANY
+    // in-range cursor. A mistyped offset — or a 409 retried with the
+    // expected_token the handler used to echo back — could jump the middle of
+    // the corpus and still publish an index for bodies never replayed.
+    const packs = Array.from({ length: 6 }, (_, i) => makePack(`skip-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-05-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2 }),
+      })
+    );
+    const { cursor, token } = await first.json<{ cursor: number; token: string }>();
+    expect(cursor).toBe(2);
+
+    // Same snapshot, genuine token, but jump to the last page.
+    const skipped = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: 4, token, limit: 2 }),
+      })
+    );
+    expect(skipped.status).toBe(409);
+    // And the 409 must not hand back a token that would make the retry work.
+    const body = await skipped.json<Record<string, unknown>>();
+    expect(body.expected_token).toBeUndefined();
+
+    // Records 2..3 were never written and the index was never published.
+    expect(await e.ESO_PACKS.get(`pack:${packs[3]!.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
   it("resumes a DATED snapshot from cursor and token alone", async () => {
     // The paged response carries cursor and token but not `date`, and the docs
     // say to pass the response straight back — so a dated restore used to fall

@@ -361,6 +361,48 @@ fn world_token(i: usize) -> String {
     }
 }
 
+/// The world-token slots that actually appear in `lua`, ascending and deduped.
+///
+/// Read out of the text rather than probed over a guessed range. Bounding the
+/// probe by the IMPORTER's world count missed any slot the exporter numbered
+/// higher — a file carrying only `${WORLD:4}` was never seen as containing a
+/// world token at all, so it stayed literal and those settings landed under a
+/// key ESO does not read, even when the importer had a free world to map it to.
+fn present_world_slots(lua: &str) -> Vec<usize> {
+    const PREFIX: &str = "${WORLD";
+    let mut slots: Vec<usize> = Vec::new();
+    let mut rest = lua;
+
+    while let Some(pos) = rest.find(PREFIX) {
+        let after = &rest[pos + PREFIX.len()..];
+        if let Some(tail) = after.strip_prefix('}') {
+            // Bare `${WORLD}` — slot 0.
+            if !slots.contains(&0) {
+                slots.push(0);
+            }
+            rest = tail;
+        } else if let Some(tail) = after.strip_prefix(':') {
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            let remainder = &tail[digits.len()..];
+            match (digits.parse::<usize>(), remainder.strip_prefix('}')) {
+                (Ok(slot), Some(closed)) => {
+                    if !slots.contains(&slot) {
+                        slots.push(slot);
+                    }
+                    rest = closed;
+                }
+                // `${WORLD:` with no closing brace or no digits: not a token.
+                _ => rest = tail,
+            }
+        } else {
+            rest = after;
+        }
+    }
+
+    slots.sort_unstable();
+    slots
+}
+
 /// Map the world tokens actually present in `lua` onto the importer's worlds,
 /// one-to-one. See `substitute_placeholders` for the three rules; the
 /// one-to-one part is the point — two tokens resolving to the same megaserver
@@ -375,12 +417,7 @@ fn world_substitutions(
         return Vec::new();
     }
 
-    // Slots run past the canonical megaservers to cover custom world names,
-    // which the exporter numbers after them.
-    let slot_count = world_names.len() + ctx.extra_worlds.len();
-    let present: Vec<usize> = (0..slot_count)
-        .filter(|i| lua.contains(&world_token(*i)))
-        .collect();
+    let present = present_world_slots(lua);
 
     let mut used = vec![false; importer.len()];
     let mut pairs: Vec<(String, String)> = Vec::new();
@@ -1626,6 +1663,41 @@ mod tests {
         // ...and the NA slot stays a literal token, which ESO simply never
         // reads. Dead weight beats clobbering a layer the importer does use.
         assert!(result.contains("${WORLD}"), "{result}");
+    }
+
+    #[test]
+    fn substitute_world_resolves_a_high_custom_slot() {
+        // Bounding the token probe by the IMPORTER's world count never spotted a
+        // slot the exporter had numbered higher, so a file carrying only
+        // `${WORLD:4}` kept the literal token and wrote its settings under a key
+        // ESO does not read — even with a free importer world to map onto.
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["NA Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(r#"["${WORLD:4}"] = { }"#, &ctx, WELL_KNOWN_WORLDS);
+        assert_eq!(result, r#"["NA Megaserver"] = { }"#, "{result}");
+    }
+
+    #[test]
+    fn present_world_slots_reads_the_text_not_a_guessed_range() {
+        assert_eq!(present_world_slots(r#"["${WORLD}"]"#), vec![0]);
+        assert_eq!(
+            present_world_slots(r#"["${WORLD}"] ["${WORLD:2}"] ["${WORLD:11}"]"#),
+            vec![0, 2, 11]
+        );
+        // Deduped and ordered regardless of the order they appear in.
+        assert_eq!(
+            present_world_slots(r#"["${WORLD:3}"] ["${WORLD:1}"] ["${WORLD:3}"]"#),
+            vec![1, 3]
+        );
+        // Malformed shapes are not tokens and must not be reported as slots.
+        assert_eq!(
+            present_world_slots("${WORLD:} ${WORLD:x} ${WORLD:7"),
+            Vec::<usize>::new()
+        );
+        assert_eq!(present_world_slots("no tokens here"), Vec::<usize>::new());
     }
 
     #[test]
