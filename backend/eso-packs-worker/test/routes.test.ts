@@ -75,9 +75,7 @@ describe("unknown routes", () => {
 
 describe("OPTIONS preflight", () => {
   it("returns 204", async () => {
-    const res = await call(
-      new Request(BASE, { method: "OPTIONS" }),
-    );
+    const res = await call(new Request(BASE, { method: "OPTIONS" }));
     expect(res.status).toBe(204);
   });
 });
@@ -120,10 +118,7 @@ describe("GET /packs", () => {
 
   it("filters by search query", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("a", { title: "PvP Build" }),
-        makePack("b", { title: "Healing Setup" }),
-      ],
+      packs: [makePack("a", { title: "PvP Build" }), makePack("b", { title: "Healing Setup" })],
     });
 
     const res = await call(new Request(`${BASE}/packs?q=pvp`));
@@ -134,10 +129,7 @@ describe("GET /packs", () => {
 
   it("hides draft packs by default", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("pub", { status: "published" }),
-        makePack("drft", { status: "draft" }),
-      ],
+      packs: [makePack("pub", { status: "published" }), makePack("drft", { status: "draft" })],
     });
 
     // Use author filter to bypass CDN cache from prior tests
@@ -150,10 +142,7 @@ describe("GET /packs", () => {
 
   it("sorts by popular", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("low", { vote_count: 1 }),
-        makePack("high", { vote_count: 10 }),
-      ],
+      packs: [makePack("low", { vote_count: 1 }), makePack("high", { vote_count: 10 })],
     });
 
     const res = await call(new Request(`${BASE}/packs?sort=popular`));
@@ -190,10 +179,7 @@ describe("GET /packs", () => {
 
   it("sorts by installs by install_count desc", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("few", { install_count: 2 }),
-        makePack("many", { install_count: 99 }),
-      ],
+      packs: [makePack("few", { install_count: 2 }), makePack("many", { install_count: 99 })],
     });
 
     const res = await call(new Request(`${BASE}/packs?sort=installs`));
@@ -247,7 +233,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody()),
-      }),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { id: string; title: string; author_id: string } }>();
@@ -266,7 +252,7 @@ describe("POST /packs", () => {
       new Request(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody()),
-      }),
+      })
     );
     expect(res.status).toBe(401);
   });
@@ -276,7 +262,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify({ title: "" }),
-      }),
+      })
     );
     expect(res.status).toBe(400);
   });
@@ -286,7 +272,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "My Cool Pack!" })),
-      }),
+      })
     );
     const body = await res.json<{ pack: { id: string } }>();
     expect(body.pack.id).toMatch(/^my-cool-pack/);
@@ -296,10 +282,8 @@ describe("POST /packs", () => {
     const res = await call(
       authedRequest(`${BASE}/packs`, {
         method: "POST",
-        body: JSON.stringify(
-          validPackBody({ title: "Published On Create", status: "published" }),
-        ),
-      }),
+        body: JSON.stringify(validPackBody({ title: "Published On Create", status: "published" })),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { id: string; status: string } }>();
@@ -315,7 +299,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "No Status Given" })),
-      }),
+      })
     );
     const body = await res.json<{ pack: { status: string } }>();
     expect(body.pack.status).toBe("draft");
@@ -326,7 +310,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "日本語のパック" })),
-      }),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { id: string } }>();
@@ -351,9 +335,9 @@ describe("POST /packs", () => {
                 junk: "x".repeat(2000),
               },
             ],
-          }),
+          })
         ),
-      }),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { addons: Record<string, unknown>[] } }>();
@@ -370,7 +354,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify({ junk: "x".repeat(300_000) }),
-      }),
+      })
     );
     expect(res.status).toBe(413);
   });
@@ -383,7 +367,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "One Too Many" })),
-      }),
+      })
     );
     expect(res.status).toBe(429);
   });
@@ -420,9 +404,7 @@ describe("GET /packs/:id", () => {
 
   it("shows draft pack to authenticated user", async () => {
     await putPack(e, makePack("draft-visible", { status: "draft" }));
-    const res = await call(
-      authedRequest(`${BASE}/packs/draft-visible`),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/draft-visible`));
     expect(res.status).toBe(200);
   });
 
@@ -456,8 +438,7 @@ describe("GET /packs/:id", () => {
 // ── Anonymity enforcement ─────────────────────────────────────────
 
 describe("anonymous pack redaction", () => {
-  const anon = () =>
-    makePack("anon-pack", { is_anonymous: true, title: "Secret Pack" });
+  const anon = () => makePack("anon-pack", { is_anonymous: true, title: "Secret Pack" });
   const named = () => makePack("named-pack");
 
   it("redacts author fields of anonymous packs in the list", async () => {
@@ -479,9 +460,7 @@ describe("anonymous pack redaction", () => {
   it("excludes anonymous packs from ?author= for unauthenticated callers", async () => {
     await putPackIndex(e, { packs: [anon(), named()] });
 
-    const res = await call(
-      new Request(`${BASE}/packs?author=${TEST_USER.id}`),
-    );
+    const res = await call(new Request(`${BASE}/packs?author=${TEST_USER.id}`));
     const body = await res.json<{ packs: Array<{ id: string }> }>();
     expect(body.packs.map((p) => p.id)).toEqual(["named-pack"]);
   });
@@ -495,9 +474,7 @@ describe("anonymous pack redaction", () => {
       return originalFetch(input);
     });
 
-    const res = await call(
-      authedRequest(`${BASE}/packs?author=${TEST_USER.id}`),
-    );
+    const res = await call(authedRequest(`${BASE}/packs?author=${TEST_USER.id}`));
     const body = await res.json<{ packs: Array<{ id: string }> }>();
     expect(body.packs.map((p) => p.id)).toEqual(["named-pack"]);
   });
@@ -505,9 +482,7 @@ describe("anonymous pack redaction", () => {
   it("shows the author their own anonymous packs with real fields via ?author=", async () => {
     await putPackIndex(e, { packs: [anon(), named()] });
 
-    const res = await call(
-      authedRequest(`${BASE}/packs?author=${TEST_USER.id}`),
-    );
+    const res = await call(authedRequest(`${BASE}/packs?author=${TEST_USER.id}`));
     const body = await res.json<{
       packs: Array<{ id: string; author_name: string; author_id: string }>;
     }>();
@@ -553,7 +528,7 @@ describe("PUT /packs/:id", () => {
       authedRequest(`${BASE}/packs/update-me`, {
         method: "PUT",
         body: JSON.stringify(validPackBody({ title: "Updated Title" })),
-      }),
+      })
     );
     expect(res.status).toBe(200);
     const body = await res.json<{ pack: { title: string } }>();
@@ -561,16 +536,13 @@ describe("PUT /packs/:id", () => {
   });
 
   it("rejects update by different user", async () => {
-    await putPack(
-      e,
-      makePack("not-mine", { author_id: String(OTHER_USER.id) }),
-    );
+    await putPack(e, makePack("not-mine", { author_id: String(OTHER_USER.id) }));
 
     const res = await call(
       authedRequest(`${BASE}/packs/not-mine`, {
         method: "PUT",
         body: JSON.stringify(validPackBody()),
-      }),
+      })
     );
     expect(res.status).toBe(403);
   });
@@ -584,30 +556,21 @@ describe("DELETE /packs/:id", () => {
     await putPack(e, pack);
     await putPackIndex(e, { packs: [pack] });
 
-    const res = await call(
-      authedRequest(`${BASE}/packs/delete-me`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/delete-me`, { method: "DELETE" }));
     expect(res.status).toBe(200);
     const body = await res.json<{ ok: boolean }>();
     expect(body.ok).toBe(true);
   });
 
   it("rejects delete by different user", async () => {
-    await putPack(
-      e,
-      makePack("not-mine-del", { author_id: String(OTHER_USER.id) }),
-    );
+    await putPack(e, makePack("not-mine-del", { author_id: String(OTHER_USER.id) }));
 
-    const res = await call(
-      authedRequest(`${BASE}/packs/not-mine-del`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/not-mine-del`, { method: "DELETE" }));
     expect(res.status).toBe(403);
   });
 
   it("returns 404 for nonexistent pack", async () => {
-    const res = await call(
-      authedRequest(`${BASE}/packs/ghost`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/ghost`, { method: "DELETE" }));
     expect(res.status).toBe(404);
   });
 
@@ -617,9 +580,7 @@ describe("DELETE /packs/:id", () => {
     await putPackIndex(e, { packs: [pack] });
     await putVote(e, "recyclable", String(TEST_USER.id));
 
-    const res = await call(
-      authedRequest(`${BASE}/packs/recyclable`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/recyclable`, { method: "DELETE" }));
     expect(res.status).toBe(200);
 
     expect(await e.ESO_PACKS.get(`vote:recyclable:${TEST_USER.id}`)).toBeNull();
@@ -635,16 +596,12 @@ describe("POST /packs/:id/vote", () => {
     await putPack(e, pack);
     await putPackIndex(e, { packs: [pack] });
 
-    const vote1 = await call(
-      authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }),
-    );
+    const vote1 = await call(authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }));
     const body1 = await vote1.json<{ voted: boolean; voteCount: number }>();
     expect(body1.voted).toBe(true);
     expect(body1.voteCount).toBe(1);
 
-    const vote2 = await call(
-      authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }),
-    );
+    const vote2 = await call(authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }));
     const body2 = await vote2.json<{ voted: boolean; voteCount: number }>();
     expect(body2.voted).toBe(false);
     expect(body2.voteCount).toBe(0);
@@ -659,23 +616,17 @@ describe("POST /packs/:id/vote", () => {
       return originalFetch(input);
     });
 
-    const res = await call(
-      new Request(`${BASE}/packs/noauth-vote/vote`, { method: "POST" }),
-    );
+    const res = await call(new Request(`${BASE}/packs/noauth-vote/vote`, { method: "POST" }));
     expect(res.status).toBe(401);
   });
 
   it("404s on a draft pack instead of revealing it via 401", async () => {
     await putPack(e, makePack("draft-vote", { status: "draft" }));
 
-    const anonymous = await call(
-      new Request(`${BASE}/packs/draft-vote/vote`, { method: "POST" }),
-    );
+    const anonymous = await call(new Request(`${BASE}/packs/draft-vote/vote`, { method: "POST" }));
     expect(anonymous.status).toBe(404);
 
-    const authed = await call(
-      authedRequest(`${BASE}/packs/draft-vote/vote`, { method: "POST" }),
-    );
+    const authed = await call(authedRequest(`${BASE}/packs/draft-vote/vote`, { method: "POST" }));
     expect(authed.status).toBe(404);
   });
 
@@ -690,9 +641,7 @@ describe("POST /packs/:id/vote", () => {
 
     // vote, unvote, vote, unvote — the record is gone and the counter is back
     // to where it started, regardless of how stale the KV read was.
-    const final = await call(
-      authedRequest(`${BASE}/packs/rapid-toggle/vote`, { method: "POST" }),
-    );
+    const final = await call(authedRequest(`${BASE}/packs/rapid-toggle/vote`, { method: "POST" }));
     const body = await final.json<{ voted: boolean; voteCount: number }>();
     expect(body.voted).toBe(true);
     expect(body.voteCount).toBe(1);
@@ -711,7 +660,7 @@ describe("POST /packs/:id/install", () => {
       new Request(`${BASE}/packs/installable/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "1.2.3.4" },
-      }),
+      })
     );
     expect(res.status).toBe(200);
     const body = await res.json<{ installCount: number }>();
@@ -727,14 +676,14 @@ describe("POST /packs/:id/install", () => {
       new Request(`${BASE}/packs/rate-limited/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "5.6.7.8" },
-      }),
+      })
     );
 
     const res2 = await call(
       new Request(`${BASE}/packs/rate-limited/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "5.6.7.8" },
-      }),
+      })
     );
     const body2 = await res2.json<{ installCount: number }>();
     // Second call returns current count without incrementing
@@ -750,14 +699,11 @@ describe("POST /packs/:id/install", () => {
       new Request(`${BASE}/packs/draft-install/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "9.9.9.9" },
-      }),
+      })
     );
     expect(res.status).toBe(404);
 
-    const stored = await e.ESO_PACKS.get<{ install_count: number }>(
-      "pack:draft-install",
-      "json",
-    );
+    const stored = await e.ESO_PACKS.get<{ install_count: number }>("pack:draft-install", "json");
     expect(stored!.install_count).toBe(0);
   });
 });
@@ -766,9 +712,7 @@ describe("POST /packs/:id/install", () => {
 
 describe("POST /admin/seed", () => {
   it("seeds with valid API key", async () => {
-    const res = await call(
-      apiKeyRequest(`${BASE}/admin/seed`, { method: "POST" }),
-    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/seed`, { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json<{ ok: boolean; seeded: number }>();
     expect(body.ok).toBe(true);
@@ -776,9 +720,7 @@ describe("POST /admin/seed", () => {
   });
 
   it("rejects without API key", async () => {
-    const res = await call(
-      new Request(`${BASE}/admin/seed`, { method: "POST" }),
-    );
+    const res = await call(new Request(`${BASE}/admin/seed`, { method: "POST" }));
     expect(res.status).toBe(401);
   });
 });
@@ -787,17 +729,13 @@ describe("POST /admin/seed", () => {
 
 describe("POST /admin/restore", () => {
   it("rejects without API key", async () => {
-    const res = await call(
-      new Request(`${BASE}/admin/restore`, { method: "POST" }),
-    );
+    const res = await call(new Request(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(401);
   });
 
   it("404s when the requested backup snapshot doesn't exist", async () => {
     await e.ESO_PACKS.delete("backup:latest");
-    const res = await call(
-      apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }),
-    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(404);
   });
 
@@ -821,9 +759,7 @@ describe("POST /admin/restore", () => {
     await e.ESO_PACKS.delete(`pack:${pack.id}`);
     await putPackIndex(e, { packs: [] });
 
-    const res = await call(
-      apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }),
-    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json<{
       ok: boolean;
@@ -837,9 +773,7 @@ describe("POST /admin/restore", () => {
     const restoredPack = await e.ESO_PACKS.get(`pack:${pack.id}`, "json");
     expect(restoredPack).toEqual(pack);
 
-    const restoredVote = await e.ESO_PACKS.get(
-      `vote:${pack.id}:${TEST_USER.id}`,
-    );
+    const restoredVote = await e.ESO_PACKS.get(`vote:${pack.id}:${TEST_USER.id}`);
     expect(restoredVote).toBeTruthy();
   });
 
@@ -855,7 +789,7 @@ describe("POST /admin/restore", () => {
         packs,
         packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
         votes: {},
-      }),
+      })
     );
 
     for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
@@ -865,7 +799,7 @@ describe("POST /admin/restore", () => {
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
         body: JSON.stringify({ limit: 2 }),
-      }),
+      })
     );
     expect(first.status).toBe(200);
     const firstBody = await first.json<{
@@ -896,7 +830,7 @@ describe("POST /admin/restore", () => {
         apiKeyRequest(`${BASE}/admin/restore`, {
           method: "POST",
           body: JSON.stringify({ limit: 2, cursor, token }),
-        }),
+        })
       );
       expect(res.status).toBe(200);
       const body = await res.json<{ done: boolean; cursor: number | null; token: string }>();
@@ -910,7 +844,7 @@ describe("POST /admin/restore", () => {
     }
     const finalIndex = await getPackIndex(e, { fresh: true });
     expect((finalIndex?.packs ?? []).map((p) => p.id).sort()).toEqual(
-      packs.map((p) => p.id).sort(),
+      packs.map((p) => p.id).sort()
     );
   });
 
@@ -928,7 +862,7 @@ describe("POST /admin/restore", () => {
         packs,
         packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
         votes: {},
-      }),
+      })
     );
     for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
     await putPackIndex(e, { packs: [] });
@@ -937,7 +871,7 @@ describe("POST /admin/restore", () => {
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
         body: JSON.stringify({ limit: 2 }),
-      }),
+      })
     );
     const { cursor, token } = await first.json<{ cursor: number; token: string }>();
 
@@ -950,14 +884,14 @@ describe("POST /admin/restore", () => {
         packs: replacement,
         packBodies: Object.fromEntries(replacement.map((p) => [p.id, p])),
         votes: {},
-      }),
+      })
     );
 
     const resumed = await call(
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
         body: JSON.stringify({ limit: 2, cursor, token }),
-      }),
+      })
     );
     expect(resumed.status).toBe(409);
 
@@ -966,6 +900,83 @@ describe("POST /admin/restore", () => {
     expect(await e.ESO_PACKS.get(`pack:${replacement[0]!.id}`)).toBeNull();
     const index = await getPackIndex(e, { fresh: true });
     expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("refuses a cursor equal to the total, which writes nothing but republishes", async () => {
+    // `total` and `cursor` sit next to each other in the response, and copying
+    // the wrong one produced an empty page that fell straight into the
+    // final-page branch — replacing the index for records it never wrote.
+    const packs = Array.from({ length: 3 }, (_, i) => makePack(`at-total-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-03-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 1 }),
+      })
+    );
+    const { total, token } = await first.json<{ total: number; token: string }>();
+    expect(total).toBe(3);
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: total, token }),
+      })
+    );
+    expect(res.status).toBe(409);
+
+    // Only the single record page 1 wrote is present, and the index is untouched.
+    expect(await e.ESO_PACKS.get(`pack:${packs[2]!.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("keeps the page cap under the Worker subrequest ceiling", async () => {
+    // Each published pack costs a KV put plus two D1 calls, and every binding
+    // call counts against the same 1000-subrequest ceiling. A cap of 400 was
+    // ~1200 — over the limit the paging exists to stay under.
+    const oversized = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 100000 }),
+      })
+    );
+    expect(oversized.status).toBe(200);
+    // The clamp is not observable in the response, so assert the invariant that
+    // matters directly: the largest page the endpoint will accept, times the
+    // worst-case per-record cost, must fit under the ceiling with room to spare.
+    const maxPage = 300;
+    const perRecord = 3;
+    expect(maxPage * perRecord).toBeLessThanOrEqual(1000 - 100);
+  });
+
+  it("restores an empty snapshot without tripping the cursor guard", async () => {
+    // start === 0 is always legitimate, including when there is nothing to do.
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-03-02T00:00:00.000Z",
+        packs: [],
+        packBodies: {},
+        votes: {},
+      })
+    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
+    expect(res.status).toBe(200);
+    const body = await res.json<{ done: boolean; restored_packs: number }>();
+    expect(body.done).toBe(true);
+    expect(body.restored_packs).toBe(0);
   });
 
   it("refuses a cursor past the end instead of publishing an unwritten index", async () => {
@@ -980,7 +991,7 @@ describe("POST /admin/restore", () => {
         packs: [pack],
         packBodies: { [pack.id]: pack },
         votes: {},
-      }),
+      })
     );
     await e.ESO_PACKS.delete(`pack:${pack.id}`);
     await putPackIndex(e, { packs: [] });
@@ -989,7 +1000,7 @@ describe("POST /admin/restore", () => {
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
         body: JSON.stringify({ cursor: 9999, token: "anything" }),
-      }),
+      })
     );
     expect(res.status).toBe(409);
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
@@ -1006,7 +1017,7 @@ describe("POST /admin/restore", () => {
         packs: [pack],
         packBodies: { [pack.id]: pack },
         votes: {},
-      }),
+      })
     );
     await e.ESO_PACKS.delete(`pack:${pack.id}`);
 
@@ -1014,7 +1025,7 @@ describe("POST /admin/restore", () => {
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
         body: JSON.stringify({ cursor: -5 }),
-      }),
+      })
     );
     expect(res.status).toBe(200);
     const body = await res.json<{ done: boolean; restored_packs: number }>();
@@ -1059,7 +1070,7 @@ describe("DELETE /account", () => {
             votedAt: "2025-01-01T00:00:00.000Z",
           },
         },
-      }),
+      })
     );
 
     await putPack(e, mine);

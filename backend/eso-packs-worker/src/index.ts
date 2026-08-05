@@ -791,17 +791,41 @@ async function handleScheduled(env: Env): Promise<void> {
  * Records restored per call, and how many of those writes run at once.
  *
  * A restore used to walk the whole snapshot in one request, awaiting each write
- * on its own: two subrequests per pack (KV put + D1 upsert) plus one per vote,
- * strictly serialized. A corpus of any size therefore ran into the per-request
- * subrequest ceiling — and there was no way to resume, so the endpoint simply
- * stopped working at exactly the scale where an incident recovery matters.
+ * on its own and strictly serialized. A corpus of any size therefore ran into
+ * the per-request subrequest ceiling — and there was no way to resume, so the
+ * endpoint simply stopped working at exactly the scale where an incident
+ * recovery matters.
  *
- * The page size is deliberately well under the 1000-subrequest limit, since each
- * pack costs two. `RESTORE_CONCURRENCY` only affects wall-clock; it does not
- * change how many subrequests a page spends.
+ * `RESTORE_CONCURRENCY` only affects wall-clock; it does not change how many
+ * subrequests a page spends.
  */
-const RESTORE_PAGE_SIZE = 200;
-const RESTORE_MAX_PAGE_SIZE = 400;
+/**
+ * Worst-case binding calls one restored record costs. Cloudflare counts every
+ * KV/D1/DO binding call against the same per-request subrequest ceiling as
+ * `fetch`, so this is what actually bounds a page:
+ *
+ * - a published pack: `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
+ *   tag batch) = 3
+ * - a draft pack: `putPack` + one D1 batch = 2
+ * - a vote: `restoreVote` writes both `vote:` and the user index = 2
+ *
+ * Derive the caps from this rather than picking a round number: a page cap of
+ * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
+ * is the failure the paging was added to avoid in the first place.
+ */
+const SUBREQUESTS_PER_RECORD = 3;
+/** Per-request subrequest ceiling on Workers Paid. */
+const SUBREQUEST_CEILING = 1000;
+/** Held back for the backup read, the fresh index read, the DO index swap and
+ *  the cache purge — everything a page does outside the record loop. */
+const SUBREQUEST_RESERVE = 100;
+
+const RESTORE_MAX_PAGE_SIZE = Math.floor(
+  (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
+);
+/** Default page: half the cap, so an operator who passes no limit stays well
+ *  clear of the ceiling even if the per-record cost grows. */
+const RESTORE_PAGE_SIZE = Math.floor(RESTORE_MAX_PAGE_SIZE / 2);
 const RESTORE_CONCURRENCY = 10;
 
 /**
@@ -959,10 +983,20 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
       409,
     );
   }
-  if (start > work.length) {
+  // `>=`, not `>`. A cursor exactly equal to `total` slices to an empty page and
+  // then falls straight into the final-page branch, republishing the index for
+  // records this call never wrote — the same hazard as an over-long cursor, and
+  // easy to hit by copying `total` out of the response instead of `cursor`.
+  // `start === 0` is always legitimate: it is a fresh restore, including of an
+  // empty snapshot.
+  if (start > 0 && start >= work.length) {
     return json(
       request,
-      { error: `Restore cursor ${start} is past the end of this snapshot (${work.length} records).` },
+      {
+        error:
+          `Restore cursor ${start} is not inside this snapshot (${work.length} records). ` +
+          "A completed restore reports done:true — pass the returned cursor, not the total.",
+      },
       409,
     );
   }
