@@ -470,10 +470,6 @@ export interface SvImportResult {
   applied: string[];
   skipped: string[];
   errors: string[];
-  /** Addons written with one or more identity layers dropped — the importer has
-   *  no matching account or megaserver. These are in `applied` too: the import
-   *  succeeded, just not completely. */
-  partial?: string[];
 }
 
 export interface EsoPackFile {

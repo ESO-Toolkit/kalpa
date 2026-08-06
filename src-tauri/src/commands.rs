@@ -8685,88 +8685,6 @@ pub struct SvImportResult {
     pub skipped: Vec<String>,
     /// Addons where the import failed; contains error messages.
     pub errors: Vec<String>,
-    /// Addons that WERE written, but with one or more identity layers dropped
-    /// because the importer has no matching account or megaserver. These appear
-    /// in `applied` as well — the import succeeded, just not completely.
-    #[serde(default)]
-    pub partial: Vec<String>,
-}
-
-/// Does this tree still carry a real setting anywhere, at any depth?
-///
-/// Checking only whether a top-level variable has direct children is not enough,
-/// and getting that wrong overwrote users' settings with an empty shell. The
-/// normal ESO shape is `Var -> Default -> <identity> -> settings`, so pruning an
-/// unmappable identity layer leaves `Default` behind as an empty table — one
-/// level down from where a shallow check looks. That read as "has content", and
-/// the import happily replaced a real SavedVariables file with `Var = { Default
-/// = {} }` while reporting success.
-fn tree_has_values(node: &crate::saved_variables::types::SvTreeNode) -> bool {
-    if node.value.is_some() || node.raw_lua_value.is_some() {
-        return true;
-    }
-    node.children
-        .as_ref()
-        .is_some_and(|children| children.iter().any(tree_has_values))
-}
-
-/// Is this key EXACTLY a placeholder Kalpa emits, rather than merely containing
-/// one?
-///
-/// Pruning matched substrings, which is wrong in the dangerous direction: the
-/// exporter only ever writes whole-key placeholders, but the parser accepts
-/// arbitrary strings as keys, so a legitimate addon key that happens to embed
-/// `${WORLD:1}` — a template or pattern an addon stores — had its entire subtree
-/// deleted on import, silently, behind a success result.
-fn is_identity_placeholder_key(key: &str) -> bool {
-    let Some(inner) = key.strip_prefix("${").and_then(|k| k.strip_suffix('}')) else {
-        return false;
-    };
-    let (name, index) = match inner.split_once(':') {
-        Some((name, index)) => (name, Some(index)),
-        None => (inner, None),
-    };
-    // An indexed token's suffix is always a plain number.
-    if index.is_some_and(|i| i.is_empty() || !i.bytes().all(|b| b.is_ascii_digit())) {
-        return false;
-    }
-    matches!(
-        name,
-        "ACCOUNT" | "ACCOUNT_NAME" | "CHAR" | "CHAR_ID" | "WORLD"
-    )
-}
-
-/// Remove every subtree still keyed by an identity placeholder the importer
-/// could not resolve, returning the keys that were dropped.
-///
-/// Refusing the whole file was the first answer to unresolved tokens, and it is
-/// too blunt. World tokens map one-to-one, so a two-megaserver export imported
-/// by a one-megaserver player resolves the layer that matches and deliberately
-/// leaves the other alone — and refusing then threw away the layer that WAS
-/// safe to import, making cross-megaserver sharing look broken.
-///
-/// The placeholders only ever appear as table KEYS (the scrubber drops
-/// identity-bearing string values rather than templating them), so dropping the
-/// node that carries an unresolved key removes exactly the unmappable layer and
-/// nothing else.
-fn prune_unresolved_identity_subtrees(
-    node: &mut crate::saved_variables::types::SvTreeNode,
-) -> Vec<String> {
-    let mut dropped = Vec::new();
-    if let Some(children) = node.children.as_mut() {
-        children.retain(|child| {
-            if is_identity_placeholder_key(&child.key) {
-                dropped.push(child.key.clone());
-                false
-            } else {
-                true
-            }
-        });
-        for child in children.iter_mut() {
-            dropped.extend(prune_unresolved_identity_subtrees(child));
-        }
-    }
-    dropped
 }
 
 /// Does `lua` still carry an identity placeholder the importer could not resolve?
@@ -8830,7 +8748,6 @@ pub async fn import_sv_settings(
         let mut applied = Vec::new();
         let mut skipped = Vec::new();
         let mut errors = Vec::new();
-        let mut partial = Vec::new();
 
         for folder in &addon_folders {
             if let Err(e) = validate_name(folder) {
@@ -8860,58 +8777,34 @@ pub async fn import_sv_settings(
                 WELL_KNOWN_WORLDS,
             );
 
-            // Validate that the result is a well-formed SavedVariables file
-            let file_name = format!("{folder}.lua");
-            let mut tree = match parse_sv_file(&substituted, &file_name) {
-                Ok(tree) => tree,
-                Err(e) => {
-                    errors.push(format!("{folder}: settings file failed validation: {e}"));
-                    continue;
-                }
-            };
-
-            // Drop only what could not be mapped. A leftover placeholder must
-            // never reach disk — it keys settings ESO will not read while the UI
-            // reports success — but refusing the whole file threw away the
-            // layers that DID resolve, which is the common cross-megaserver
-            // case.
-            let dropped = prune_unresolved_identity_subtrees(&mut tree);
-            if !tree_has_values(&tree) {
-                errors.push(format!(
-                    "{folder}: settings could not be mapped to your account — this pack targets \
-                     an identity or megaserver you don't have. Launch ESO at least once on the \
-                     relevant megaserver so Kalpa knows who you are."
-                ));
-                continue;
-            }
-
-            let substituted = crate::saved_variables::serializer::serialize_to_lua(&tree);
-
-            // Belt and braces. Pruning matches whole KEYS, deliberately, so it
-            // cannot delete a legitimate table whose name merely embeds a
-            // placeholder-shaped substring. That leaves one gap: a placeholder
-            // surviving somewhere pruning does not look — inside a value, or
-            // under a key shape the exporter has never emitted. Writing that
-            // file would key settings ESO cannot read while reporting success,
-            // which is the failure this whole path exists to prevent, so refuse
-            // rather than guess.
+            // Refuse anything that still carries an unresolved identity
+            // placeholder. Writing it would key settings ESO never reads while
+            // the UI reported success.
+            //
+            // A partial import — pruning only the unmappable layers and writing
+            // the rest — was implemented here and REVERTED. Substitution runs on
+            // the raw Lua text before parsing, so a placeholder-shaped literal in
+            // an ordinary key or value is rewritten before any tree-level guard
+            // can see it, and world-slot allocation counts those literals too:
+            // a stray `${WORLD}` in a value could consume the importer's only
+            // world and cause the real identity layer to be dropped, while the
+            // file still had content and was written as a partial success. Three
+            // successive attempts to guard that at the tree level each missed a
+            // shape, one of them overwriting real settings with an empty shell.
+            // Doing it safely needs substitution to work on parsed identity KEYS
+            // rather than text — tracked as follow-up. Until then, refuse.
             if has_unresolved_identity_placeholders(&substituted) {
                 errors.push(format!(
-                    "{folder}: settings still contain an unresolved identity placeholder after \
-                     mapping, so they were not written. This pack may have been produced by a \
-                     newer version of Kalpa."
+                    "{folder}: settings could not be mapped to your account — this pack targets                      an identity or megaserver you don't have. Launch ESO at least once on the                      relevant megaserver so Kalpa knows who you are."
                 ));
                 continue;
             }
 
-            if !dropped.is_empty() {
-                partial.push(format!(
-                    "{folder}: imported without {} layer{} that could not be mapped to your \
-                     account ({})",
-                    dropped.len(),
-                    if dropped.len() == 1 { "" } else { "s" },
-                    dropped.join(", ")
-                ));
+            // Validate that the result is a well-formed SavedVariables file
+            let file_name = format!("{folder}.lua");
+            if let Err(e) = parse_sv_file(&substituted, &file_name) {
+                errors.push(format!("{folder}: settings file failed validation: {e}"));
+                continue;
             }
 
             let dest = sv_dir.join(format!("{folder}.lua"));
@@ -8947,7 +8840,6 @@ pub async fn import_sv_settings(
             applied,
             skipped,
             errors,
-            partial,
         })
     })
     .await
@@ -10377,103 +10269,6 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn nested_fully_unmappable_file_is_refused_not_written_as_a_shell() {
-        // The REAL ESO shape is Var -> Default -> <identity> -> settings. A
-        // shallow "does the top-level var have children" check saw the surviving
-        // empty `Default` table and called that content, so the import
-        // overwrote a user's real SavedVariables with `Var = { Default = {} }`
-        // and reported success. Erasing settings behind an `applied` result is
-        // strictly worse than refusing.
-        let lua = "Var =\n{\n\t[\"Default\"] =\n\t{\n\t\t[\"${WORLD:1}\"] = \
-                   {\n\t\t\t[\"@Me\"] = { [\"Alt\"] = 1, },\n\t\t},\n\t},\n}\n";
-        let mut tree = crate::saved_variables::parser::parse_sv_file(lua, "Var.lua").unwrap();
-
-        let dropped = prune_unresolved_identity_subtrees(&mut tree);
-        assert_eq!(dropped, vec!["${WORLD:1}".to_string()]);
-        assert!(
-            !tree_has_values(&tree),
-            "an emptied Default container must not count as content"
-        );
-    }
-
-    #[test]
-    fn pruning_matches_whole_placeholder_keys_only() {
-        // Substring matching deleted an entire subtree whose key merely EMBEDDED
-        // a placeholder shape — an addon storing a template or pattern as a key.
-        // Silent, and behind a success result.
-        assert!(is_identity_placeholder_key("${WORLD}"));
-        assert!(is_identity_placeholder_key("${WORLD:12}"));
-        assert!(is_identity_placeholder_key("${ACCOUNT}"));
-        assert!(is_identity_placeholder_key("${ACCOUNT_NAME:3}"));
-        assert!(is_identity_placeholder_key("${CHAR:0}"));
-        assert!(is_identity_placeholder_key("${CHAR_ID:9}"));
-
-        // Not tokens Kalpa emits — leave these subtrees alone.
-        assert!(!is_identity_placeholder_key("greeting ${WORLD} suffix"));
-        assert!(!is_identity_placeholder_key("${WORLD:1} and more"));
-        assert!(!is_identity_placeholder_key("prefix${ACCOUNT}"));
-        assert!(!is_identity_placeholder_key("${WORLD:}"));
-        assert!(!is_identity_placeholder_key("${WORLD:x}"));
-        assert!(!is_identity_placeholder_key("${UNKNOWN}"));
-        assert!(!is_identity_placeholder_key("EU Megaserver"));
-
-        // And the pruner honours it: an embedding key keeps its subtree.
-        let lua = "Var = { [\"tpl ${WORLD:1}\"] = { [\"keep\"] = 1, }, }";
-        let mut tree = crate::saved_variables::parser::parse_sv_file(lua, "Var.lua").unwrap();
-        assert!(prune_unresolved_identity_subtrees(&mut tree).is_empty());
-        assert!(tree_has_values(&tree));
-    }
-
-    #[test]
-    fn unmappable_world_layer_is_dropped_but_the_rest_imports() {
-        // A two-megaserver export imported by a one-megaserver player: the
-        // layer that maps is applied, the one that cannot is dropped, and the
-        // file is still written. Refusing outright — the first answer to
-        // unresolved tokens — threw away the layer that WAS safe and made
-        // cross-megaserver sharing look broken.
-        let lua = "Var =\n{\n\t[\"EU Megaserver\"] = \
-                   {\n\t\t[\"@Me\"] = { [\"Alt\"] = 1, },\n\t},\n\t[\"${WORLD:1}\"] = \
-                   {\n\t\t[\"@Me\"] = { [\"Other\"] = 2, },\n\t},\n}\n";
-        let mut tree = crate::saved_variables::parser::parse_sv_file(lua, "Var.lua").unwrap();
-
-        let dropped = prune_unresolved_identity_subtrees(&mut tree);
-
-        assert_eq!(dropped, vec!["${WORLD:1}".to_string()]);
-        let out = crate::saved_variables::serializer::serialize_to_lua(&tree);
-        assert!(out.contains("EU Megaserver"), "{out}");
-        assert!(
-            !out.contains("${WORLD"),
-            "a placeholder reached disk: {out}"
-        );
-        assert!(
-            out.contains("Alt"),
-            "the mappable layer's settings were lost: {out}"
-        );
-        assert!(
-            !out.contains("Other"),
-            "the unmappable layer survived: {out}"
-        );
-    }
-
-    #[test]
-    fn an_entirely_unmappable_file_is_refused_not_emptied() {
-        // Nothing resolvable left means there is nothing worth writing; the
-        // caller reports the addon as failed rather than truncating its file.
-        let lua = "Var =\n{\n\t[\"${WORLD:1}\"] = { [\"@Me\"] = { [\"Alt\"] = 1, }, },\n}\n";
-        let mut tree = crate::saved_variables::parser::parse_sv_file(lua, "Var.lua").unwrap();
-
-        let dropped = prune_unresolved_identity_subtrees(&mut tree);
-        assert_eq!(dropped.len(), 1);
-
-        let has_content = tree.children.as_ref().is_some_and(|roots| {
-            roots
-                .iter()
-                .any(|r| r.children.as_ref().is_some_and(|c| !c.is_empty()))
-        });
-        assert!(!has_content, "an emptied file must not count as importable");
-    }
 
     #[test]
     fn unresolved_world_tokens_block_an_import() {
