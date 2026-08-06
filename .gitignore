@@ -66,3 +66,4 @@ playwright-report/
 # Only the small `sample_*`/`chunk1_*` fixtures the tests `include_str!`; the
 # multi-MB decode-only fixtures stay untracked (added individually, never by glob).
 !src-tauri/src/uploader/native/testdata/*.log
+NEW_SESSION_PROMPT.md
