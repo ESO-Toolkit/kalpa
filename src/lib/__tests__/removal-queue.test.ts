@@ -15,6 +15,9 @@ import {
 } from "../removal-queue";
 import type { AddonManifest, UpdateCheckResult } from "../../types";
 
+const LIVE = "C:\\Games\\ESO\\live\\AddOns";
+const PTS = "C:\\Games\\ESO\\pts\\AddOns";
+
 function addon(folderName: string): AddonManifest {
   return {
     folderName,
@@ -202,14 +205,14 @@ describe("hidePendingRemovals", () => {
     // off disk, and once the timer fires and the delete succeeds nothing hides
     // it again: the list shows an addon that no longer exists.
     const queue = new RemovalQueue(vi.fn());
-    queue.add("Doomed", entry("Doomed"));
+    queue.add("Doomed", entry("Doomed", { addonsPath: LIVE }));
 
     const scanned = [addon("Kept"), addon("Doomed")];
-    expect(hidePendingRemovals(scanned, queue).map((a) => a.folderName)).toEqual(["Kept"]);
+    expect(hidePendingRemovals(scanned, queue, LIVE).map((a) => a.folderName)).toEqual(["Kept"]);
 
     // Update rows go through the same rule, so a badge cannot outlive its row.
     const rows = [updateRow("Kept"), updateRow("Doomed")];
-    expect(hidePendingRemovals(rows, queue).map((r) => r.folderName)).toEqual(["Kept"]);
+    expect(hidePendingRemovals(rows, queue, LIVE).map((r) => r.folderName)).toEqual(["Kept"]);
   });
 
   it("keeps masking across the delete itself, not just the undo window", () => {
@@ -218,18 +221,18 @@ describe("hidePendingRemovals", () => {
     // landing in that gap reads the folder off disk — and nothing hides the
     // restored row once the delete succeeds. Visibility has to outlast undo.
     const queue = new RemovalQueue(vi.fn());
-    queue.add("Doomed", entry("Doomed"));
+    queue.add("Doomed", entry("Doomed", { addonsPath: LIVE }));
     queue.drop("Doomed");
-    queue.beginCommit("Doomed");
+    queue.beginCommit("Doomed", LIVE);
 
     expect(queue.has("Doomed"), "undo no longer applies").toBe(false);
-    expect(queue.isHidden("Doomed"), "but it must stay hidden").toBe(true);
-    expect(hidePendingRemovals([addon("Doomed")], queue)).toEqual([]);
+    expect(queue.isHidden("Doomed", LIVE), "but it must stay hidden").toBe(true);
+    expect(hidePendingRemovals([addon("Doomed")], queue, LIVE)).toEqual([]);
 
     // Once the backend resolves — deleted, or failed and restored — masking ends.
-    queue.endCommit("Doomed");
+    queue.endCommit("Doomed", LIVE);
     const scanned = [addon("Doomed")];
-    expect(hidePendingRemovals(scanned, queue)).toBe(scanned);
+    expect(hidePendingRemovals(scanned, queue, LIVE)).toBe(scanned);
   });
 
   it("stops masking the moment the entry leaves the queue", () => {
@@ -240,14 +243,39 @@ describe("hidePendingRemovals", () => {
     queue.drop("Undone");
 
     const scanned = [addon("Undone")];
-    expect(hidePendingRemovals(scanned, queue)).toBe(scanned);
+    expect(hidePendingRemovals(scanned, queue, LIVE)).toBe(scanned);
   });
 
   it("preserves identity when nothing is queued", () => {
     const queue = new RemovalQueue(vi.fn());
     const scanned = [addon("A"), addon("B")];
-    expect(hidePendingRemovals(scanned, queue)).toBe(scanned);
-    expect(hidePendingRemovals([], queue)).toEqual([]);
+    expect(hidePendingRemovals(scanned, queue, LIVE)).toBe(scanned);
+    expect(hidePendingRemovals([], queue, LIVE)).toEqual([]);
+  });
+
+  it("never masks a same-named addon in a different game instance", () => {
+    // Folder names are not unique across instances — the same addon is
+    // installed under the same name in live, PTS and every Steam copy. A delete
+    // in flight against live must not hide the untouched PTS copy the user just
+    // switched to, because nothing would bring it back: endCommit lifts the mask
+    // but does not re-run the scan that was filtered while it was up.
+    const queue = new RemovalQueue(vi.fn());
+    queue.add("Shared", entry("Shared", { addonsPath: LIVE }));
+
+    // Queued against live: hidden there, visible in PTS.
+    expect(hidePendingRemovals([addon("Shared")], queue, LIVE)).toEqual([]);
+    expect(hidePendingRemovals([addon("Shared")], queue, PTS).map((a) => a.folderName)).toEqual([
+      "Shared",
+    ]);
+
+    // Same once the timer has fired and the delete is in flight against live.
+    queue.drop("Shared");
+    queue.beginCommit("Shared", LIVE);
+    expect(queue.isHidden("Shared", LIVE)).toBe(true);
+    expect(queue.isHidden("Shared", PTS), "PTS copy must stay visible").toBe(false);
+    expect(hidePendingRemovals([addon("Shared")], queue, PTS).map((a) => a.folderName)).toEqual([
+      "Shared",
+    ]);
   });
 });
 

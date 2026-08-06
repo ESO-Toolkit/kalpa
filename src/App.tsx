@@ -426,7 +426,7 @@ function App() {
       // so a rescan inside the 3s undo window reads it straight back off disk.
       // Left unmasked, the row returns and then STAYS after the delete
       // succeeds — the list shows an addon that no longer exists.
-      const visible = hidePendingRemovals(result, pendingRemovalsRef.current);
+      const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path);
 
       setAddons(visible);
       if (selectedAddonRef.current) {
@@ -469,7 +469,7 @@ function App() {
         // see, and — worse — let auto-update extract into a folder already
         // queued for deletion, racing the remover and surfacing dependency work
         // for an addon the user had removed.
-        const visibleResults = hidePendingRemovals(results, pendingRemovalsRef.current);
+        const visibleResults = hidePendingRemovals(results, pendingRemovalsRef.current, path);
         setUpdateResults(visibleResults);
 
         // The check just wrote fresh esoui_last_update values to metadata, but the
@@ -1081,7 +1081,7 @@ function App() {
     const entries = pendingRemovalsRef.current.drain();
     // Draining ends undo eligibility; keep them hidden until each delete lands.
     for (const entry of entries) {
-      pendingRemovalsRef.current.beginCommit(entry.addon.folderName);
+      pendingRemovalsRef.current.beginCommit(entry.addon.folderName, entry.addonsPath);
     }
     await Promise.all(
       entries.map(async (entry) => {
@@ -1098,7 +1098,7 @@ function App() {
             restorePendingRemoval(entry);
           }
         } finally {
-          pendingRemovalsRef.current.endCommit(entry.addon.folderName);
+          pendingRemovalsRef.current.endCommit(entry.addon.folderName, entry.addonsPath);
         }
       })
     );
@@ -1137,7 +1137,7 @@ function App() {
         // UNDO eligibility; the folder is still on disk until the backend
         // returns, and a scan landing in that gap would restore a row nothing
         // hides again once the delete succeeds.
-        pendingRemovalsRef.current.beginCommit(folderName);
+        pendingRemovalsRef.current.beginCommit(folderName, queuedPath);
         void invokeOrThrow("remove_addon", { addonsPath: queuedPath, folderName })
           .catch((e) => {
             toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
@@ -1145,7 +1145,7 @@ function App() {
               restorePendingRemoval(entry);
             }
           })
-          .finally(() => pendingRemovalsRef.current.endCommit(folderName));
+          .finally(() => pendingRemovalsRef.current.endCommit(folderName, queuedPath));
       }, 3000);
 
       pendingRemovalsRef.current.add(folderName, {
@@ -1610,7 +1610,7 @@ function App() {
       // Same handoff as the single-removal path: undo eligibility has ended,
       // but these folders are still on disk until the backend returns.
       for (const entry of entries) {
-        pendingRemovalsRef.current.beginCommit(entry.addon.folderName);
+        pendingRemovalsRef.current.beginCommit(entry.addon.folderName, entry.addonsPath);
       }
       void invokeOrThrow<BatchRemoveResult>("batch_remove_addons", {
         addonsPath: queuedPath,
@@ -1637,7 +1637,7 @@ function App() {
         })
         .finally(() => {
           for (const entry of entries) {
-            pendingRemovalsRef.current.endCommit(entry.addon.folderName);
+            pendingRemovalsRef.current.endCommit(entry.addon.folderName, entry.addonsPath);
           }
         });
     }, 3000);
