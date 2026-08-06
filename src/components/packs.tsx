@@ -652,6 +652,15 @@ export function Packs({
             `Applied settings for ${result.applied.length} addon${result.applied.length !== 1 ? "s" : ""}`
           );
         }
+        // A partial import is a success the user still needs to know about: the
+        // addon's settings applied, but a megaserver or account layer the pack
+        // carried could not be mapped and was dropped rather than written as an
+        // unreadable placeholder key.
+        if (result.partial && result.partial.length > 0) {
+          toast.warning("Some settings could not be mapped", {
+            description: result.partial.join("\n"),
+          });
+        }
         if (result.errors.length > 0) {
           toast.error(`Settings import errors: ${result.errors.join(", ")}`);
         }

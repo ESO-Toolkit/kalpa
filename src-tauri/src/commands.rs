@@ -8685,6 +8685,44 @@ pub struct SvImportResult {
     pub skipped: Vec<String>,
     /// Addons where the import failed; contains error messages.
     pub errors: Vec<String>,
+    /// Addons that WERE written, but with one or more identity layers dropped
+    /// because the importer has no matching account or megaserver. These appear
+    /// in `applied` as well — the import succeeded, just not completely.
+    #[serde(default)]
+    pub partial: Vec<String>,
+}
+
+/// Remove every subtree still keyed by an identity placeholder the importer
+/// could not resolve, returning the keys that were dropped.
+///
+/// Refusing the whole file was the first answer to unresolved tokens, and it is
+/// too blunt. World tokens map one-to-one, so a two-megaserver export imported
+/// by a one-megaserver player resolves the layer that matches and deliberately
+/// leaves the other alone — and refusing then threw away the layer that WAS
+/// safe to import, making cross-megaserver sharing look broken.
+///
+/// The placeholders only ever appear as table KEYS (the scrubber drops
+/// identity-bearing string values rather than templating them), so dropping the
+/// node that carries an unresolved key removes exactly the unmappable layer and
+/// nothing else.
+fn prune_unresolved_identity_subtrees(
+    node: &mut crate::saved_variables::types::SvTreeNode,
+) -> Vec<String> {
+    let mut dropped = Vec::new();
+    if let Some(children) = node.children.as_mut() {
+        children.retain(|child| {
+            if has_unresolved_identity_placeholders(&child.key) {
+                dropped.push(child.key.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for child in children.iter_mut() {
+            dropped.extend(prune_unresolved_identity_subtrees(child));
+        }
+    }
+    dropped
 }
 
 /// Does `lua` still carry an identity placeholder the importer could not resolve?
@@ -8748,6 +8786,7 @@ pub async fn import_sv_settings(
         let mut applied = Vec::new();
         let mut skipped = Vec::new();
         let mut errors = Vec::new();
+        let mut partial = Vec::new();
 
         for folder in &addon_folders {
             if let Err(e) = validate_name(folder) {
@@ -8777,8 +8816,28 @@ pub async fn import_sv_settings(
                 WELL_KNOWN_WORLDS,
             );
 
-            // Reject if identity placeholders could not be resolved
-            if has_unresolved_identity_placeholders(&substituted) {
+            // Validate that the result is a well-formed SavedVariables file
+            let file_name = format!("{folder}.lua");
+            let mut tree = match parse_sv_file(&substituted, &file_name) {
+                Ok(tree) => tree,
+                Err(e) => {
+                    errors.push(format!("{folder}: settings file failed validation: {e}"));
+                    continue;
+                }
+            };
+
+            // Drop only what could not be mapped. A leftover placeholder must
+            // never reach disk — it keys settings ESO will not read while the UI
+            // reports success — but refusing the whole file threw away the
+            // layers that DID resolve, which is the common cross-megaserver
+            // case.
+            let dropped = prune_unresolved_identity_subtrees(&mut tree);
+            let has_content = tree.children.as_ref().is_some_and(|roots| {
+                roots
+                    .iter()
+                    .any(|r| r.children.as_ref().is_some_and(|c| !c.is_empty()))
+            });
+            if !has_content {
                 errors.push(format!(
                     "{folder}: settings could not be mapped to your account — this pack targets \
                      an identity or megaserver you don't have. Launch ESO at least once on the \
@@ -8787,11 +8846,15 @@ pub async fn import_sv_settings(
                 continue;
             }
 
-            // Validate that the result is a well-formed SavedVariables file
-            let file_name = format!("{folder}.lua");
-            if let Err(e) = parse_sv_file(&substituted, &file_name) {
-                errors.push(format!("{folder}: settings file failed validation: {e}"));
-                continue;
+            let substituted = crate::saved_variables::serializer::serialize_to_lua(&tree);
+            if !dropped.is_empty() {
+                partial.push(format!(
+                    "{folder}: imported without {} layer{} that could not be mapped to your \
+                     account ({})",
+                    dropped.len(),
+                    if dropped.len() == 1 { "" } else { "s" },
+                    dropped.join(", ")
+                ));
             }
 
             let dest = sv_dir.join(format!("{folder}.lua"));
@@ -8827,6 +8890,7 @@ pub async fn import_sv_settings(
             applied,
             skipped,
             errors,
+            partial,
         })
     })
     .await
@@ -10256,6 +10320,55 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn unmappable_world_layer_is_dropped_but_the_rest_imports() {
+        // A two-megaserver export imported by a one-megaserver player: the
+        // layer that maps is applied, the one that cannot is dropped, and the
+        // file is still written. Refusing outright — the first answer to
+        // unresolved tokens — threw away the layer that WAS safe and made
+        // cross-megaserver sharing look broken.
+        let lua = "Var =\n{\n\t[\"EU Megaserver\"] = \
+                   {\n\t\t[\"@Me\"] = { [\"Alt\"] = 1, },\n\t},\n\t[\"${WORLD:1}\"] = \
+                   {\n\t\t[\"@Me\"] = { [\"Other\"] = 2, },\n\t},\n}\n";
+        let mut tree = crate::saved_variables::parser::parse_sv_file(lua, "Var.lua").unwrap();
+
+        let dropped = prune_unresolved_identity_subtrees(&mut tree);
+
+        assert_eq!(dropped, vec!["${WORLD:1}".to_string()]);
+        let out = crate::saved_variables::serializer::serialize_to_lua(&tree);
+        assert!(out.contains("EU Megaserver"), "{out}");
+        assert!(
+            !out.contains("${WORLD"),
+            "a placeholder reached disk: {out}"
+        );
+        assert!(
+            out.contains("Alt"),
+            "the mappable layer's settings were lost: {out}"
+        );
+        assert!(
+            !out.contains("Other"),
+            "the unmappable layer survived: {out}"
+        );
+    }
+
+    #[test]
+    fn an_entirely_unmappable_file_is_refused_not_emptied() {
+        // Nothing resolvable left means there is nothing worth writing; the
+        // caller reports the addon as failed rather than truncating its file.
+        let lua = "Var =\n{\n\t[\"${WORLD:1}\"] = { [\"@Me\"] = { [\"Alt\"] = 1, }, },\n}\n";
+        let mut tree = crate::saved_variables::parser::parse_sv_file(lua, "Var.lua").unwrap();
+
+        let dropped = prune_unresolved_identity_subtrees(&mut tree);
+        assert_eq!(dropped.len(), 1);
+
+        let has_content = tree.children.as_ref().is_some_and(|roots| {
+            roots
+                .iter()
+                .any(|r| r.children.as_ref().is_some_and(|c| !c.is_empty()))
+        });
+        assert!(!has_content, "an emptied file must not count as importable");
+    }
 
     #[test]
     fn unresolved_world_tokens_block_an_import() {
