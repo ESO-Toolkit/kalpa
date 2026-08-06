@@ -67,6 +67,23 @@ export function sameAddonsFolder(a: string, b: string): boolean {
  */
 export class RemovalQueue {
   private readonly entries = new Map<string, PendingRemoval>();
+
+  /**
+   * Folders whose undo window has closed and whose `remove_addon` call is
+   * in flight.
+   *
+   * Leaving the queue is not the same as being gone from disk. The timer drops
+   * the entry (so undo can no longer apply) and only THEN starts the async
+   * delete, and during that gap the folder is still on disk while nothing marks
+   * it as going away — a scan landing there reads it back and restores the row,
+   * which nothing hides again once the delete succeeds. That is the same ghost
+   * row the scan mask exists to prevent, one layer down.
+   *
+   * So visibility is tracked separately from undo eligibility: an entry is
+   * hidden from scans from the moment it is queued until the backend either
+   * confirms the delete or fails and the row is restored.
+   */
+  private readonly committing = new Set<string>();
   private readonly clearTimer: (handle: TimerHandle) => void;
 
   /**
@@ -94,8 +111,29 @@ export class RemovalQueue {
     return this.entries.size;
   }
 
+  /** Is this folder still inside its undo window? Undo eligibility only. */
   has(folderName: string): boolean {
     return this.entries.has(folderName);
+  }
+
+  /**
+   * Should this folder stay hidden from a freshly scanned list — either queued
+   * for removal or with its delete already in flight? This, not `has`, is what
+   * the scan mask asks.
+   */
+  isHidden(folderName: string): boolean {
+    return this.entries.has(folderName) || this.committing.has(folderName);
+  }
+
+  /** The undo window has closed and the backend delete is starting. */
+  beginCommit(folderName: string): void {
+    this.committing.add(folderName);
+  }
+
+  /** The backend delete resolved — succeeded (folder gone) or failed (row
+   *  restored). Either way it no longer needs masking. */
+  endCommit(folderName: string): void {
+    this.committing.delete(folderName);
   }
 
   /** Queue (or re-queue) a folder. Callers drop an existing entry first. */
@@ -151,10 +189,10 @@ export class RemovalQueue {
  */
 export function hidePendingRemovals<T extends { folderName: string }>(
   items: T[],
-  queue: Pick<RemovalQueue, "has">
+  queue: Pick<RemovalQueue, "isHidden">
 ): T[] {
   if (items.length === 0) return items;
-  const masked = items.filter((item) => !queue.has(item.folderName));
+  const masked = items.filter((item) => !queue.isHidden(item.folderName));
   return masked.length === items.length ? items : masked;
 }
 

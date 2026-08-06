@@ -212,6 +212,26 @@ describe("hidePendingRemovals", () => {
     expect(hidePendingRemovals(rows, queue).map((r) => r.folderName)).toEqual(["Kept"]);
   });
 
+  it("keeps masking across the delete itself, not just the undo window", () => {
+    // Leaving the queue ends UNDO eligibility, not the folder's existence. The
+    // timer drops the entry and only then starts the async delete, so a scan
+    // landing in that gap reads the folder off disk — and nothing hides the
+    // restored row once the delete succeeds. Visibility has to outlast undo.
+    const queue = new RemovalQueue(vi.fn());
+    queue.add("Doomed", entry("Doomed"));
+    queue.drop("Doomed");
+    queue.beginCommit("Doomed");
+
+    expect(queue.has("Doomed"), "undo no longer applies").toBe(false);
+    expect(queue.isHidden("Doomed"), "but it must stay hidden").toBe(true);
+    expect(hidePendingRemovals([addon("Doomed")], queue)).toEqual([]);
+
+    // Once the backend resolves — deleted, or failed and restored — masking ends.
+    queue.endCommit("Doomed");
+    const scanned = [addon("Doomed")];
+    expect(hidePendingRemovals(scanned, queue)).toBe(scanned);
+  });
+
   it("stops masking the moment the entry leaves the queue", () => {
     // Undo and failure-restore both drop the entry first, so the row must come
     // back on the next scan rather than staying invisible.
