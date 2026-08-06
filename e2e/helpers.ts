@@ -69,30 +69,44 @@ async function connectToTauriAt(
   // and taking the first one intermittently attached to a page with no Tauri IPC
   // — a flake that reads like a product failure: "Tauri IPC is not exposed on
   // this page".
-  let appPage: Page | null = null;
-  for (const candidate of pages) {
-    try {
-      await candidate.waitForLoadState("domcontentloaded");
-      const hasIpc = await candidate.evaluate(
-        () => "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
-      );
-      if (hasIpc) {
-        appPage = candidate;
-        break;
+  //
+  // Polled, because CDP answering does not mean the app's page exists yet. When
+  // the runner owns the process it connects the instant the debug port opens,
+  // and for a moment the only target is about:blank. Searching once turned that
+  // startup race into a hard failure.
+  // IPC presence alone is not enough to identify the main window. Kalpa opens a
+  // second WebView2 for the ESO Logs sign-in, and that one carries Tauri
+  // internals too — attaching to it produced "Origin header is not a valid URL"
+  // from the first `evaluate` that passed arguments, which reads like a product
+  // bug rather than the harness holding the wrong window. Require the app's own
+  // origin as well.
+  const isAppUrl = (url: string) =>
+    url.startsWith(PACKAGED_ORIGIN) || /^https?:\/\/(127\.0\.0\.1|localhost):\d+\//.test(url);
+
+  const deadline = Date.now() + 20_000;
+  let seen: string[] = [];
+  while (Date.now() < deadline) {
+    const candidates = browser.contexts().flatMap((context) => context.pages());
+    seen = candidates.map((p) => p.url());
+    for (const candidate of candidates) {
+      if (!isAppUrl(candidate.url())) continue;
+      try {
+        await candidate.waitForLoadState("domcontentloaded");
+        const hasIpc = await candidate.evaluate(
+          () => "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
+        );
+        if (hasIpc) return { browser, page: candidate };
+      } catch {
+        // A target that vanished or refuses evaluation is not the app page.
       }
-    } catch {
-      // A target that vanished or refuses evaluation is not the app page.
     }
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  if (!appPage) {
-    const seen = pages.map((p) => p.url()).join(", ") || "none";
-    throw new Error(
-      `No page exposing Tauri IPC found — is the app running via ${startCommand}? Saw: ${seen}`
-    );
-  }
-
-  return { browser, page: appPage };
+  throw new Error(
+    `No page exposing Tauri IPC appeared within 20s — is the app running via ${startCommand}? ` +
+      `Last saw: ${seen.join(", ") || "no pages"}`
+  );
 }
 
 export interface ChunkLoadRecorder {

@@ -93,7 +93,16 @@ async function main() {
     throw new Error(`Expected debug binary at ${binaryPath}`);
   }
 
-  const root = path.join(os.tmpdir(), `kalpa-e2e-${process.pid}`);
+  // Unique per RUN, not per PID. Windows reuses PIDs, and teardown can fail to
+  // remove the tree (WebView2 holds its profile briefly, and a crashed run never
+  // cleans up at all) — so a pid-only name eventually collides with a leftover
+  // sandbox. That directory already carries the marker authorising destructive
+  // debug commands, and may still hold addons from the previous run, so the
+  // suite would silently start dirty against a folder this run did not create.
+  const root = path.join(
+    os.tmpdir(),
+    `kalpa-e2e-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  );
   // validate_addons_path requires the folder to be named exactly "AddOns".
   const sandboxDir = path.join(root, "AddOns");
   const fixturesDir = path.join(root, "fixtures");
@@ -103,17 +112,23 @@ async function main() {
   // without a webview — so no window, and no debug port to attach to.
   const webviewDataDir = path.join(root, "webview2");
 
-  mkdirSync(sandboxDir, { recursive: true });
-  mkdirSync(fixturesDir, { recursive: true });
-  mkdirSync(webviewDataDir, { recursive: true });
+  // Non-recursive on purpose: if this root somehow already exists, that is a
+  // collision and must be a hard error, never a silent reuse.
+  mkdirSync(root);
+  mkdirSync(sandboxDir);
+  mkdirSync(fixturesDir);
+  mkdirSync(webviewDataDir);
 
-  // The marker is what authorises the destructive debug commands — not
+  // The marker authorises the destructive debug commands — not
   // KALPA_ADDONS_DIR, which can name any folder including a live ESO install.
-  // Must match SANDBOX_MARKER in src-tauri/src/commands.rs.
-  writeFileSync(
-    path.join(sandboxDir, ".kalpa-e2e-sandbox"),
-    "Created by scripts/run-sandbox-e2e.mjs. This folder is deleted when the run ends.\n"
-  );
+  // It carries a per-run token the app checks against KALPA_E2E_TOKEN, so it
+  // proves THIS run owns the folder: a bare marker would only prove some runner
+  // once did, and a crashed run leaves one behind.
+  // Filename must match SANDBOX_MARKER in src-tauri/src/commands.rs.
+  const runToken = `${process.pid}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  writeFileSync(path.join(sandboxDir, ".kalpa-e2e-sandbox"), runToken);
   writeFileSync(fixtureZip, makeAddonZip(FIXTURE_FOLDER, { title: "Kalpa E2E Fixture" }));
   console.log(`[${TAG}] sandbox ${sandboxDir}`);
 
@@ -123,6 +138,7 @@ async function main() {
       tag: TAG,
       env: {
         KALPA_ADDONS_DIR: sandboxDir,
+        KALPA_E2E_TOKEN: runToken,
         WEBVIEW2_USER_DATA_FOLDER: webviewDataDir,
       },
     });

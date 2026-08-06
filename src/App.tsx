@@ -586,7 +586,23 @@ function App() {
     // is a test run meant `npm run test:e2e:sandbox` could alter saved sign-in
     // state before a single spec executed.
     const sandbox = await invokeResult<string | null>("debug_addons_dir_override");
-    const sandboxActive = sandbox.ok && Boolean(sandbox.data);
+
+    // Bail BEFORE any auth work. An error here means a sandbox was requested and
+    // could not be prepared — exactly the case where touching real credentials
+    // is least acceptable. Treating it as "not a sandbox run" and falling
+    // through to the auth chain defeated the point of resolving this first.
+    if (!sandbox.ok) {
+      setError(
+        `Could not determine whether a sandbox AddOns folder was requested: ${sandbox.error}. ` +
+          "Refusing to fall back to the saved AddOns folder, in case this is a sandboxed run."
+      );
+      setErrorShowSettings(false);
+      setAuthVerifying(false);
+      setLoading(false);
+      return;
+    }
+
+    const sandboxActive = Boolean(sandbox.data);
 
     if (sandboxActive) {
       // Nothing in the @sandbox suite exercises auth, and a test harness has no
@@ -638,15 +654,8 @@ function App() {
     // would boot the destructive e2e run against the developer's real AddOns
     // folder and, with auto-update on, start mutating it before the spec's own
     // guard ever runs.
-    if (!sandbox.ok) {
-      setError(
-        `Could not determine whether a sandbox AddOns folder was requested: ${sandbox.error}. ` +
-          "Refusing to fall back to the saved AddOns folder, in case this is a sandboxed run."
-      );
-      setErrorShowSettings(false);
-      setLoading(false);
-      return;
-    }
+    // The `!sandbox.ok` bail happens at the top of this function, before any
+    // auth work — see there for why.
     const sandboxPath = sandbox.data ?? "";
     const savedPath = sandboxPath || storedPath;
 

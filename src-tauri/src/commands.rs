@@ -9603,11 +9603,21 @@ pub async fn debug_install_fixture_zip(
             "Fixture installs are only allowed into the sandbox AddOns folder.".to_string(),
         );
     }
-    if !resolved.join(SANDBOX_MARKER).is_file() {
+    // The marker must prove THIS run owns the folder, not merely that some
+    // runner once did. A crashed run can leave a marked directory behind, so a
+    // static marker would authorise a stale sandbox — and the folder it names
+    // is where destructive commands are allowed to write.
+    let expected_token = std::env::var("KALPA_E2E_TOKEN").unwrap_or_default();
+    if expected_token.is_empty() {
+        return Err("Fixture installs require KALPA_E2E_TOKEN to be set.".to_string());
+    }
+    let marker = resolved.join(SANDBOX_MARKER);
+    let found_token = fs::read_to_string(&marker).unwrap_or_default();
+    if found_token.trim() != expected_token {
         return Err(format!(
-            "Refusing to install a fixture into {}: it carries no {SANDBOX_MARKER} marker, so it \
-             was not created by the e2e runner. Pointing KALPA_ADDONS_DIR at a real AddOns folder \
-             does not make it a sandbox.",
+            "Refusing to install a fixture into {}: its {SANDBOX_MARKER} marker does not match \
+             this run's token, so the folder was not created by this e2e run. Pointing \
+             KALPA_ADDONS_DIR at a real AddOns folder does not make it a sandbox.",
             resolved.display()
         ));
     }
