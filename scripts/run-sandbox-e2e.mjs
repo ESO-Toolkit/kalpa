@@ -106,6 +106,14 @@ async function main() {
   mkdirSync(sandboxDir, { recursive: true });
   mkdirSync(fixturesDir, { recursive: true });
   mkdirSync(webviewDataDir, { recursive: true });
+
+  // The marker is what authorises the destructive debug commands — not
+  // KALPA_ADDONS_DIR, which can name any folder including a live ESO install.
+  // Must match SANDBOX_MARKER in src-tauri/src/commands.rs.
+  writeFileSync(
+    path.join(sandboxDir, ".kalpa-e2e-sandbox"),
+    "Created by scripts/run-sandbox-e2e.mjs. This folder is deleted when the run ends.\n"
+  );
   writeFileSync(fixtureZip, makeAddonZip(FIXTURE_FOLDER, { title: "Kalpa E2E Fixture" }));
   console.log(`[${TAG}] sandbox ${sandboxDir}`);
 

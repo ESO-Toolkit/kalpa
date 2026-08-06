@@ -9505,6 +9505,15 @@ pub async fn dev_scrub_saved_variable(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Filename the e2e runner drops into a sandbox AddOns folder it created.
+///
+/// The marker, not the env var, is what makes a folder eligible for destructive
+/// debug commands: an environment variable can name any directory, including a
+/// live ESO install, but only the runner writes this file — and it deletes the
+/// tree containing it when the run ends.
+#[cfg(debug_assertions)]
+pub const SANDBOX_MARKER: &str = ".kalpa-e2e-sandbox";
+
 /// The sandbox AddOns folder named by `KALPA_ADDONS_DIR`, if one is set.
 ///
 /// The e2e suite otherwise drives the developer's REAL ESO install, which is why
@@ -9561,8 +9570,21 @@ pub fn debug_addons_dir_override() -> Result<Option<String>, String> {
 /// spec still exercises the real extraction, flat-archive wrap and rollback
 /// paths rather than a stub.
 ///
-/// Refuses unless the sandbox override is active AND the target is that sandbox,
-/// so even in a debug build it cannot be pointed at a real AddOns folder.
+/// Refuses unless the target is a folder the e2e runner itself created and
+/// marked.
+///
+/// Matching the target against `KALPA_ADDONS_DIR` is NOT sufficient, and an
+/// earlier version of this comment wrongly claimed it was. That check only says
+/// "the caller named the folder the env var names" — it says nothing about
+/// whether that folder is disposable. A debug build launched with
+/// `KALPA_ADDONS_DIR` pointed at a real ESO AddOns directory, by accident or
+/// otherwise, would have satisfied it and let this command extract an arbitrary
+/// local zip into a live install while skipping every safeguard the real install
+/// path applies.
+///
+/// So the boundary is a marker file the runner writes into the sandbox it just
+/// created (see `SANDBOX_MARKER`). A real AddOns folder does not have one, and
+/// the runner deletes the whole tree afterwards.
 #[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn debug_install_fixture_zip(
@@ -9580,6 +9602,14 @@ pub async fn debug_install_fixture_zip(
         return Err(
             "Fixture installs are only allowed into the sandbox AddOns folder.".to_string(),
         );
+    }
+    if !resolved.join(SANDBOX_MARKER).is_file() {
+        return Err(format!(
+            "Refusing to install a fixture into {}: it carries no {SANDBOX_MARKER} marker, so it \
+             was not created by the e2e runner. Pointing KALPA_ADDONS_DIR at a real AddOns folder \
+             does not make it a sandbox.",
+            resolved.display()
+        ));
     }
 
     let zip = PathBuf::from(zip_path);

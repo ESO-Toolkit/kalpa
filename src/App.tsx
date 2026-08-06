@@ -579,39 +579,52 @@ function App() {
   }, []);
 
   const initializeApp = useCallback(async () => {
-    // Restore cached account identity first so an already-signed-in user never
-    // sees a signed-out flash while the network verification runs.
-    void invokeResult<AuthUser | null>("auth_cached_user")
-      .then((cachedResult) => {
-        if (cachedResult.ok) {
-          setAuthUser(cachedResult.data ?? null);
-        } else {
-          console.error(`[tauri:auth_cached_user] ${cachedResult.error}`);
-        }
-        return invokeResult<AuthUser | null>("auth_get_user");
-      })
-      .then((authResult) => {
-        if (authResult.ok) {
-          setAuthUser(authResult.data ?? null);
-          warnIfSessionNotPersisted(authResult.data);
-        } else {
-          setAuthUser(null);
-          toast.error(`Could not restore sign-in: ${authResult.error}`);
-        }
-      })
-      .finally(() => setAuthVerifying(false));
+    // Resolve the sandbox override BEFORE anything with side effects. Credentials
+    // are not sandboxed — Tauri resolves app-data from the bundle identifier —
+    // so `auth_get_user` refreshing or clearing a session would touch the
+    // developer's real ESO Logs state. Firing that before knowing whether this
+    // is a test run meant `npm run test:e2e:sandbox` could alter saved sign-in
+    // state before a single spec executed.
+    const sandbox = await invokeResult<string | null>("debug_addons_dir_override");
+    const sandboxActive = sandbox.ok && Boolean(sandbox.data);
+
+    if (sandboxActive) {
+      // Nothing in the @sandbox suite exercises auth, and a test harness has no
+      // business refreshing real tokens.
+      setAuthVerifying(false);
+    } else {
+      // Restore cached account identity first so an already-signed-in user never
+      // sees a signed-out flash while the network verification runs.
+      void invokeResult<AuthUser | null>("auth_cached_user")
+        .then((cachedResult) => {
+          if (cachedResult.ok) {
+            setAuthUser(cachedResult.data ?? null);
+          } else {
+            console.error(`[tauri:auth_cached_user] ${cachedResult.error}`);
+          }
+          return invokeResult<AuthUser | null>("auth_get_user");
+        })
+        .then((authResult) => {
+          if (authResult.ok) {
+            setAuthUser(authResult.data ?? null);
+            warnIfSessionNotPersisted(authResult.data);
+          } else {
+            setAuthUser(null);
+            toast.error(`Could not restore sign-in: ${authResult.error}`);
+          }
+        })
+        .finally(() => setAuthVerifying(false));
+    }
 
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
-    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed, sandbox] =
-      await Promise.all([
-        getSetting<string>("sortMode", "name"),
-        getSetting<string>("filterMode", "all"),
-        getSetting<string>("addonsPath", ""),
-        getSetting<boolean>("autoUpdate", false),
-        getSetting<boolean>("uploaderIntroDismissed", false),
-        invokeResult<string | null>("debug_addons_dir_override"),
-      ]);
+    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed] = await Promise.all([
+      getSetting<string>("sortMode", "name"),
+      getSetting<string>("filterMode", "all"),
+      getSetting<string>("addonsPath", ""),
+      getSetting<boolean>("autoUpdate", false),
+      getSetting<boolean>("uploaderIntroDismissed", false),
+    ]);
 
     // A debug build started with KALPA_ADDONS_DIR runs against a throwaway
     // AddOns folder instead of the real ESO install, which is what lets the e2e

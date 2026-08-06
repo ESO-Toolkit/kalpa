@@ -231,6 +231,22 @@ function parseCsvLine(line) {
   return values;
 }
 
+/**
+ * Force-kill the app and its children.
+ *
+ * This is a CRASH, not a shutdown. `taskkill /T /F` gives the app no chance to
+ * run `beforeunload`, which is where pending removals are flushed — so a spec
+ * that exercises close-or-restart behaviour during an undo window observes
+ * crash semantics, and the runner then deletes the sandbox before anyone can
+ * inspect what survived. That is a realistic misdiagnosis trap: the harness can
+ * hide whether the product's shutdown path actually commits or restores pending
+ * destructive work.
+ *
+ * No current spec covers shutdown, so a graceful-close path is not implemented
+ * rather than implemented badly. Before writing one that does, teach this
+ * function to request a real window close and wait for exit, falling back to
+ * force-kill — and have the spec assert which path it got.
+ */
 export async function killProcessTree(pid, tag = "kalpa") {
   console.log(`[${tag}] teardown PID ${pid}`);
   try {
