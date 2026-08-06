@@ -657,8 +657,14 @@ export function Packs({
         // carried could not be mapped and was dropped rather than written as an
         // unreadable placeholder key.
         if (result.partial && result.partial.length > 0) {
+          // Must be dismissed, not merely waited out. Kalpa has already
+          // rewritten the user's SavedVariables at this point, and a toast that
+          // fades leaves no way to learn which identity layers were dropped —
+          // the loss would be silent after a few seconds.
           toast.warning("Some settings could not be mapped", {
             description: result.partial.join("\n"),
+            duration: Infinity,
+            closeButton: true,
           });
         }
         if (result.errors.length > 0) {
