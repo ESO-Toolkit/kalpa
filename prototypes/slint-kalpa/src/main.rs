@@ -6677,6 +6677,11 @@ fn apply_imported_pack_settings_blocking(
     let ctx = collect_import_saved_variable_identities(addons_dir);
 
     let mut result = NativeSvImportResult::default();
+    // Collected rather than pushed per addon: `pack_hub_settings_summary` joins
+    // every error into one status line with no cap, so a thirty-addon pack that
+    // meets a running client after the fifth would have emitted twenty-five
+    // copies of the same sentence into a single message.
+    let mut refused_while_eso_running: Vec<String> = Vec::new();
     let mut folders = settings.keys().cloned().collect::<Vec<_>>();
     folders.sort();
 
@@ -6739,9 +6744,7 @@ fn apply_imported_pack_settings_blocking(
         // reported as applied; the rest are reported by name, so the user knows
         // exactly what did and did not land.
         if settings_write_eso_running() {
-            result
-                .errors
-                .push(format!("{folder}: {ESO_RUNNING_SETTINGS_REFUSAL}"));
+            refused_while_eso_running.push(folder);
             continue;
         }
 
@@ -6776,6 +6779,13 @@ fn apply_imported_pack_settings_blocking(
         }
 
         result.applied.push(folder);
+    }
+
+    if !refused_while_eso_running.is_empty() {
+        result.errors.push(format!(
+            "{ESO_RUNNING_SETTINGS_REFUSAL} Not applied: {}.",
+            refused_while_eso_running.join(", ")
+        ));
     }
 
     result
