@@ -22862,7 +22862,10 @@ CombatMetrics_SavedVariables = {
             summary.contains("3 failed"),
             "three refused addons must count as three: {summary}"
         );
-        assert!(summary.contains("A, B, C"), "refused addons must be named: {summary}");
+        assert!(
+            summary.contains("A, B, C"),
+            "refused addons must be named: {summary}"
+        );
 
         // The case the previous shape got wrong even after the count was added:
         // a genuine per-addon error alongside the aggregate.
@@ -22878,7 +22881,10 @@ CombatMetrics_SavedVariables = {
             summary.contains("3 failed"),
             "one error plus two refusals is three addons: {summary}"
         );
-        assert!(summary.contains("Broken"), "the real error must survive: {summary}");
+        assert!(
+            summary.contains("Broken"),
+            "the real error must survive: {summary}"
+        );
 
         // And one refusal still reads correctly.
         let single = NativeSvImportResult {
