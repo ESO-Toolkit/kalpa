@@ -1609,14 +1609,18 @@ function App() {
       // scan, and the later result wins `scanSeq`, so the list can end up
       // showing the OLD instance's addons under the new path. The new folder
       // has already scanned itself; this batch's rescan has nothing to add.
-      if (
-        pathSwitchGenRef.current !== switchGen ||
-        !sameAddonsFolder(path, addonsPathRef.current)
-      ) {
-        return;
+      //
+      // Only the RESCAN is conditional. Returning here instead also skipped the
+      // dependency handoff below, which is the one place `pendingDeps` is ever
+      // read — so a batch that succeeded while a switch was attempted and then
+      // reverted left required libraries uninstalled with no prompt and no
+      // warning, which is the silent drop this whole feature exists to avoid.
+      // `presentDependencyBatch` already refuses a batch whose folder is no
+      // longer active and says so specifically, so it is safe to hand these
+      // over unconditionally and let it make that call.
+      if (pathSwitchGenRef.current === switchGen && sameAddonsFolder(path, addonsPathRef.current)) {
+        await scanAddons(path);
       }
-
-      await scanAddons(path);
 
       // One prompt for the whole run: the backend returns a single list for the
       // batch, raised after the re-scan so the picker isn't competing with it.
