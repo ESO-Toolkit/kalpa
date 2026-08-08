@@ -58,12 +58,46 @@ fn require_allowed_path(
 /// Called by the frontend to register the approved addons directory.
 /// Stores both the configured and canonicalized paths so commands can validate
 /// symlink/junction targets without losing the configured ESO live directory.
+///
+/// While a sandbox override is active this is also the enforcement point for it:
+/// see the `#[cfg(debug_assertions)]` block below. Every destructive command
+/// authorizes against what this function registers, so refusing here is what
+/// actually keeps a sandboxed e2e run off a real install — a spec asserting the
+/// same thing afterwards runs far too late to prevent anything.
 #[tauri::command]
 pub fn set_addons_path(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<(), String> {
     let (configured, canonical) = validate_addons_path(&addons_path)?;
+
+    // A sandbox run may register the sandbox and nothing else.
+    //
+    // The frontend chooses the boot folder on ONE unguarded line
+    // (`sandboxPath || storedPath` in `initializeApp`). Lose that line to a
+    // refactor and a destructive e2e run boots onto the developer's real
+    // install — and by the time any spec could notice, `scanAddons`,
+    // `runAutoLink` and, with `autoUpdate` on in the developer's real
+    // settings.json, a whole batch update have already run against it. The
+    // damage lands before Playwright even connects, so no spec can be the
+    // guard. This can: it fails the boot instead.
+    //
+    // `dunce::canonicalize` on both sides deliberately — `validate_addons_path`
+    // returns a `std` canonicalization, which carries a `\\?\` prefix on
+    // Windows that would never compare equal to the override.
+    #[cfg(debug_assertions)]
+    if let Some(sandbox) = debug_addons_dir_override()? {
+        let resolved = dunce::canonicalize(&configured)
+            .map_err(|e| format!("Could not resolve the AddOns folder: {e}"))?;
+        if resolved != Path::new(&sandbox) {
+            return Err(format!(
+                "KALPA_ADDONS_DIR is set, so this build may only use the sandbox AddOns \
+                 folder ({sandbox}). Refusing to register {}.",
+                resolved.display()
+            ));
+        }
+    }
+
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
     *guard = Some(crate::ApprovedAddonsPath {
         configured,
@@ -9509,8 +9543,13 @@ pub async fn dev_scrub_saved_variable(
 ///
 /// The marker, not the env var, is what makes a folder eligible for destructive
 /// debug commands: an environment variable can name any directory, including a
-/// live ESO install, but only the runner writes this file — and it deletes the
-/// tree containing it when the run ends.
+/// live ESO install, but only the runner writes this file.
+///
+/// Necessary, not sufficient. The file must also carry THIS run's
+/// `KALPA_E2E_TOKEN` (see the comparison in `debug_install_fixture_zip`), because
+/// a marked tree can outlive the run that made it: teardown gives up after ten
+/// attempts and only warns, and a crashed run never cleans up at all. Presence
+/// alone would authorise a stale sandbox.
 #[cfg(debug_assertions)]
 pub const SANDBOX_MARKER: &str = ".kalpa-e2e-sandbox";
 
@@ -9566,9 +9605,18 @@ pub fn debug_addons_dir_override() -> Result<Option<String>, String> {
 ///
 /// The production install path downloads from ESOUI. An e2e spec must not depend
 /// on the network or on whatever a third party happens to be shipping today, so
-/// this runs the same extractor against a fixture zip already on disk — the
-/// spec still exercises the real extraction, flat-archive wrap and rollback
-/// paths rather than a stub.
+/// this runs the same extractor against a fixture zip already on disk rather
+/// than a stub.
+///
+/// What that covers today is the HAPPY PATH ONLY. The one fixture the runner
+/// builds is a foldered archive that extracts cleanly, so `contains_foldered_addon`
+/// matches, `flat_archive_wrap_name` returns `None`, and the rollback branch —
+/// `if let Err(..) = result` — never runs. This comment used to claim the wrap
+/// and rollback paths were exercised; they are not, and the flat-archive wrap is
+/// the path a prior audit found defeating Protected Edits, so the false claim
+/// was worse than no claim. Covering them needs two more fixtures: a flat
+/// archive asserting the wrap folder appears, and a corrupt one asserting no new
+/// top-level folder survives.
 ///
 /// Refuses unless the target is a folder the e2e runner itself created and
 /// marked.

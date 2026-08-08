@@ -18,8 +18,17 @@ import {
  * a throwaway folder via the debug-only `KALPA_ADDONS_DIR` override.
  *
  * It refuses to run otherwise. A destructive spec that silently fell back to the
- * live install would delete a real addon, so the guard below is the most
- * important assertion in the file.
+ * live install would delete a real addon.
+ *
+ * The real guard is NOT in this file. It is the `#[cfg(debug_assertions)]` block
+ * in `set_addons_path`, which refuses to register any folder but the override
+ * while `KALPA_ADDONS_DIR` is set. That distinction is load-bearing: by the time
+ * a spec can assert anything the app has already booted, scanned, auto-linked
+ * and — with `autoUpdate` on in the developer's real `settings.json` — run a
+ * whole batch update. A spec cannot prevent that; failing the boot can.
+ *
+ * What the check below adds is proof that the guard is doing its job in THIS
+ * run, asserted through the app's registered path rather than the environment.
  */
 
 const sandboxDir = process.env.KALPA_E2E_SANDBOX_DIR ?? "";
@@ -47,16 +56,6 @@ const row = (page: Page) =>
   addonList(page).locator(`[role="option"][aria-label^="${fixtureTitle}"]`);
 
 /**
- * Put the list on the unfiltered "All" tab.
- *
- * The sandbox overrides the AddOns folder but shares the app's settings.json,
- * and `filterMode` is persisted — so a developer whose last session ended on
- * Libs or Outdated would boot the sandbox with that filter live. The fixture is
- * a plain, up-to-date addon, so it would be filtered out and every row-count
- * assertion below would read 0 for a reason that has nothing to do with the
- * lifecycle under test.
- */
-/**
  * Is the fixture's folder actually on disk?
  *
  * The load-bearing assertion for every "prove it really happened" claim below.
@@ -70,6 +69,16 @@ function fixtureOnDisk(): boolean {
   return existsSync(path.join(sandboxDir, fixtureFolder));
 }
 
+/**
+ * Put the list on the unfiltered "All" tab.
+ *
+ * The sandbox overrides the AddOns folder but shares the app's settings.json,
+ * and `filterMode` is persisted — so a developer whose last session ended on
+ * Libs or Outdated would boot the sandbox with that filter live. The fixture is
+ * a plain, up-to-date addon, so it would be filtered out and every row-count
+ * assertion below would read 0 for a reason that has nothing to do with the
+ * lifecycle under test.
+ */
 async function showAllAddons(page: Page): Promise<void> {
   await resetAppState(page);
   const allTab = addonFilterTab(page, "All");
@@ -91,12 +100,25 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
   test("refuses to run against anything but the sandbox folder", async () => {
     const { browser, page } = await connectToTauri();
     try {
-      // The app must have booted onto the override, not the developer's install.
-      // If this ever passes against a real folder, every assertion below is
-      // deleting someone's addons.
-      const active = await invoke<string | null>(page, "debug_addons_dir_override", {});
-      expect(active, "app is not running under KALPA_ADDONS_DIR").toBeTruthy();
-      expect(active?.toLowerCase()).toBe(sandboxDir.toLowerCase());
+      // Ask the app what folder it REGISTERED, not what the environment says.
+      //
+      // Reading `debug_addons_dir_override` back proved nothing: it is a pure
+      // function of the env var this runner set moments earlier, so it returned
+      // the sandbox whether or not the app had booted onto it. Deleting the
+      // `sandboxPath || storedPath` line in `initializeApp` left it green.
+      //
+      // `scan_installed_addons` goes through `require_allowed_path`, which
+      // compares against what `set_addons_path` actually stored — so it can only
+      // succeed if the live registration IS the sandbox.
+      // One assertion is enough, and a second would be worse than none.
+      // `require_allowed_path` compares canonical equality against the single
+      // registered folder, so this call succeeding means the registration IS the
+      // sandbox — had the app booted onto the real install, it would be refused.
+      // Asserting that some OTHER path is rejected proves nothing: a path that
+      // does not exist fails in `validate_addons_path` long before the
+      // allowed-path comparison, so it would pass against a totally broken
+      // guard.
+      await invoke<unknown[]>(page, "scan_installed_addons", { addonsPath: sandboxDir });
     } finally {
       await browser.close();
     }
@@ -141,8 +163,13 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
 
       await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
 
-      // Undo inside the 3s window must put the row back — including its update
-      // state, which is what the removal queue carries per entry.
+      // Undo inside the 3s window must put the row back.
+      //
+      // The row only, not its update state. Nothing below reads the badge, and
+      // with this fixture it could not: `debug_install_fixture_zip` writes no
+      // metadata record, so the addon has no ESOUI id and never produces an
+      // UpdateResult for the queue to carry. The update-row half of the restore
+      // is covered by the unit tests on `restoreUpdateResult`, not here.
       const undo = page.getByRole("button", { name: "Undo" });
       await expect(undo, "no Undo affordance on the removal toast").toBeVisible({ timeout: 2_000 });
       await undo.click();
