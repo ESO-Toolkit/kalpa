@@ -49,20 +49,12 @@ async function connectToTauriAt(
   startCommand: string
 ): Promise<{ browser: Browser; page: Page }> {
   const browser = await chromium.connectOverCDP(endpoint);
-  const contexts = browser.contexts();
 
-  if (contexts.length === 0) {
-    throw new Error(
-      `No browser contexts found. Make sure the Tauri app is running with ${startCommand}.`
-    );
-  }
-
-  // Every context, not just the first: WebView2 can surface more than one, and
-  // the app's page is not reliably in contexts[0].
-  const pages = contexts.flatMap((context) => context.pages());
-  if (pages.length === 0) {
-    throw new Error("No pages found in the Tauri webview.");
-  }
+  // No single-shot pre-checks for "are there contexts / pages yet". They used to
+  // sit here and they defeated the poll below: both threw before the loop was
+  // ever entered, on exactly the startup race the loop exists to survive. The
+  // deadline path already reports the URLs it saw and names the start command,
+  // which is strictly more useful than "No pages found".
 
   // Pick the page that actually IS the app, rather than trusting index 0.
   // WebView2 exposes extra targets (about:blank, the sign-in webview, devtools),
