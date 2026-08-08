@@ -1287,10 +1287,11 @@ describe("POST /admin/restore", () => {
     // wrote nothing, then took the final-page branch and replaced the index
     // with the whole snapshot anyway.
     const pack = makePack("past-end");
+    const created = new Date().toISOString();
     await e.ESO_PACKS.put(
       "backup:latest",
       JSON.stringify({
-        created_at: new Date().toISOString(),
+        created_at: created,
         packs: [pack],
         packBodies: { [pack.id]: pack },
         votes: {},
@@ -1299,14 +1300,31 @@ describe("POST /admin/restore", () => {
     await e.ESO_PACKS.delete(`pack:${pack.id}`);
     await putPackIndex(e, { packs: [] });
 
+    // Mint the token this cursor WOULD have been issued with, exactly as the
+    // equal-to-total case does. `token: "anything"` was answered by the
+    // cursor/token mismatch branch above the range check, so the range guard was
+    // never reached and deleting it broke nothing. The dangerous input is a
+    // MATCHING token for an out-of-range cursor — a one-character edit on a
+    // plaintext token, and the natural move for an operator who hit the
+    // deliberately uninformative 409.
+    // Built by hand, NOT from a real continuation. Calling the endpoint first to
+    // obtain a token would restore this one-record snapshot outright and publish
+    // the index, destroying the very thing the assertions below check. The token
+    // is plaintext `backupKey|created_at|total|cursor`, which is the whole point
+    // — an operator can produce this with a text editor.
+    const forged = `backup:latest|${created}|1|9999`;
+
     const res = await call(
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
-        body: JSON.stringify({ cursor: 9999, token: "anything" }),
+        body: JSON.stringify({ cursor: 9999, token: forged }),
       })
     );
     expect(res.status).toBe(409);
-    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
+    // The distinguishing text, so a 409 from the token branch can never be
+    // mistaken for one from the range branch again.
+    const body = await res.json<{ error: string }>();
+    expect(body.error).toMatch(/is not inside this snapshot/);
     const index = await getPackIndex(e, { fresh: true });
     expect(index?.packs ?? []).toHaveLength(0);
   });
