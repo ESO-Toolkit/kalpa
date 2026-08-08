@@ -556,14 +556,18 @@ struct NativeSvImportResult {
     /// How many addons the import covered.
     ///
     /// The not-applied count is DERIVED from this — `total - applied - skipped`
-    /// — rather than accumulated from error entries, and that is the whole
-    /// point. Counting `errors.len()` treats every entry as one addon, which
-    /// breaks the moment any entry covers several: it undercounted the ESO
-    /// refusals, then still undercounted them when mixed with a real error, and
-    /// then undercounted the SavedVariables-directory failure. Three producers,
-    /// three separate fixes, same bug. Subtraction cannot drift, because every
-    /// addon is applied, skipped, or not applied — including in paths nobody
-    /// has written yet.
+    /// — rather than accumulated from error entries. Counting `errors.len()`
+    /// treats every entry as one addon, which breaks the moment any entry covers
+    /// several: it undercounted the ESO refusals, then still undercounted them
+    /// when mixed with a real error, and then undercounted the
+    /// SavedVariables-directory failure. Three producers, three separate fixes,
+    /// one bug.
+    ///
+    /// This does not make a future producer safe, and nothing enforces that one
+    /// sets `total` — leave it zero and the summary under-reports exactly as
+    /// before. What changed is how many places have to be right: one field at
+    /// construction, instead of every error path remembering to contribute to a
+    /// running count.
     total: usize,
 }
 
