@@ -6782,8 +6782,22 @@ fn apply_imported_pack_settings_blocking(
     }
 
     if !refused_while_eso_running.is_empty() {
+        // One entry, but it carries its own count and names.
+        //
+        // The summary renders `errors.len()` as a number of addons, so a bare
+        // aggregate reported "1 failed" for twenty-five refusals — swapping the
+        // duplicate-sentence problem for an undercount of the same size. Stating
+        // the count inside the message keeps the real number in front of the
+        // user regardless of how the summary counts entries.
+        //
+        // `skipped` would give an honest count for free, but it already means
+        // "this addon had no settings in the pack"; putting refusals there makes
+        // twenty-five deliberate refusals indistinguishable from twenty-five
+        // absent entries.
+        let count = refused_while_eso_running.len();
         result.errors.push(format!(
-            "{ESO_RUNNING_SETTINGS_REFUSAL} Not applied: {}.",
+            "{ESO_RUNNING_SETTINGS_REFUSAL} {count} addon{} not applied: {}.",
+            if count == 1 { "" } else { "s" },
             refused_while_eso_running.join(", ")
         ));
     }
