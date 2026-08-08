@@ -208,6 +208,30 @@ export class RemovalQueue {
  *
  * Generic over anything folder-keyed, so the addon list and its update rows
  * filter through the same rule.
+ *
+ * KNOWN LIMIT — the mask is read when the request RESOLVES, not when it is
+ * issued, and it only knows about removals that are still queued or still
+ * committing. A request issued BEFORE a removal and resolving AFTER that
+ * removal has finished sees an empty queue and republishes the deleted addon.
+ * `check_for_updates` is a per-addon network round trip, so on a large folder
+ * it routinely outlives the 3s undo window plus the delete:
+ *
+ *     t=0.0  Refresh issues check_for_updates (backend reads Foo off disk)
+ *     t=0.2  user removes Foo — row hidden, entry queued
+ *     t=3.2  timer fires, remove_addon starts (beginCommit masks Foo)
+ *     t=3.3  delete succeeds, endCommit lifts the mask
+ *     t=4.2  the check resolves — nothing is queued, nothing is committing,
+ *            so Foo's update row goes back into `updateResults`
+ *
+ * The result is a phantom row and an inflated banner count until the next
+ * scan. Closing it needs the queue to remember removals that COMPLETED after a
+ * given request was issued — a generation stamped on each request and an
+ * expiring log of finished removals — which is materially more machinery than
+ * the mask itself, on a path where the wrong answer is a stale row rather than
+ * a lost file. Deliberately not built here; tracked as a follow-up.
+ *
+ * On `main` this window was not narrower, it was total: nothing masked these
+ * lists at all, so every scan inside the undo window resurrected the row.
  */
 export function hidePendingRemovals<T extends { folderName: string }>(
   items: T[],
