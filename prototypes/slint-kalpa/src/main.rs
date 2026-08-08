@@ -4206,15 +4206,23 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let pack = ui.get_pack_hub_import_pack();
-        // Settings count too. Gating on `pending > 0` meant a pack with nothing
-        // to install but settings to apply went straight to the SavedVariables
-        // write with no warning — and SavedVariables is the write that most
-        // needs one, because ESO rewrites those files from memory on logout and
-        // will discard anything changed underneath a running client. The main
-        // app warns for settings-only imports; this path silently reported them
-        // applied.
-        let eso_running =
-            (pending > 0 || !settings.is_empty()) && addon_write_eso_running_warning_active(&ui);
+        // Addon writes and SavedVariables writes need OPPOSITE handling here,
+        // which is why one flag cannot serve both.
+        //
+        // For addon files the notice is true and the write is fine: the game
+        // picks them up after /reloadui or relog. For SavedVariables it is
+        // neither. ESO holds those in memory and rewrites them at logout, so a
+        // write underneath a running client is discarded — and telling that user
+        // "changes will load after /reloadui" is a reassurance that is simply
+        // false. Applying and reporting success is the worst of the options.
+        //
+        // So settings are REFUSED while ESO runs rather than warned about. The
+        // main app reaches the same place through a cancelable confirm that says
+        // the same thing (see the comment on the gate in packs.tsx); the sidecar
+        // has no confirm affordance, so it declines and explains. Honouring
+        // `settings_warn_eso_running` keeps the user's own opt-out working.
+        let eso_running = pending > 0 && addon_write_eso_running_warning_active(&ui);
+        let block_settings = !settings.is_empty() && addon_write_eso_running_warning_active(&ui);
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_install_label(
             if pending == 0 {
@@ -4244,8 +4252,20 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 install_pack_hub_addons_blocking(&addons_dir, rows)
             };
-            let settings_result = (!settings.is_empty())
-                .then(|| apply_imported_pack_settings_blocking(&addons_dir, settings));
+            let settings_result = if settings.is_empty() {
+                None
+            } else if block_settings {
+                Some(NativeSvImportResult {
+                    errors: vec![
+                        "Close ESO before applying pack settings — the game rewrites \
+                         SavedVariables from memory when you log out, which would discard them."
+                            .to_string(),
+                    ],
+                    ..Default::default()
+                })
+            } else {
+                Some(apply_imported_pack_settings_blocking(&addons_dir, settings))
+            };
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
