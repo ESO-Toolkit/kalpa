@@ -1187,17 +1187,31 @@ describe("POST /admin/restore", () => {
     // call counts against the same 1000-subrequest ceiling. A cap of 400 was
     // ~1200 — over the limit the paging exists to stay under.
     //
-    // Seed our own snapshot. This case used to inherit whatever `backup:latest`
-    // the preceding test happened to leave behind, so running it alone, or
-    // inserting any test before it that clears that key, turned the 200 below
-    // into a 404 that has nothing to do with the page cap.
+    // Seed a snapshot LARGER than the cap, out of vote records. An earlier
+    // version of this test seeded an empty one, which proved nothing: with
+    // `work.length === 0` the page ends at 0 whether `clampLimit` is honoured or
+    // deleted outright, so a regression that stopped clamping real pages passed
+    // here and would have failed only during a production restore.
+    //
+    // Votes rather than packs because they are the cheapest record the work list
+    // accepts — one `restoreVote` each, no pack body, no D1 tag batch — which
+    // keeps a 301-record snapshot fast enough for a unit suite.
+    const overCap = RESTORE_MAX_PAGE_SIZE + 1;
+    const votes: Record<string, unknown> = {};
+    for (let i = 0; i < overCap; i++) {
+      votes[`cap-pack-${i}:cap-user-${i}`] = {
+        packId: `cap-pack-${i}`,
+        userId: `cap-user-${i}`,
+        created_at: "2026-06-01T00:00:00.000Z",
+      };
+    }
     await e.ESO_PACKS.put(
       "backup:latest",
       JSON.stringify({
         created_at: "2026-06-01T00:00:00.000Z",
         packs: [],
         packBodies: {},
-        votes: {},
+        votes,
       })
     );
 
@@ -1208,26 +1222,25 @@ describe("POST /admin/restore", () => {
       })
     );
     expect(oversized.status).toBe(200);
-    // Assert against the MODULE's constants, not local copies. Writing
-    // `300 * 3 <= 900` here re-declared the very numbers under test, so the
-    // arithmetic could never disagree with the implementation.
-    //
-    // The load-bearing assertion is the first one: the cap must still be
-    // DERIVED from the budget. `derived * perRecord <= budget` alone is true by
-    // construction for any derived cap, so on its own it would catch nothing —
-    // what it cannot survive is someone replacing the derivation with a literal,
-    // which is exactly the "cap of 400 was ~1200 subrequests" bug this block
-    // exists for.
+
+    // The clamp, observed through the endpoint: an absurd limit must come back
+    // having advanced exactly one capped page, with work still outstanding.
+    const body = await oversized.json<{ done: boolean; cursor: number; total: number }>();
+    expect(body.total).toBe(overCap);
+    expect(body.done).toBe(false);
+    expect(body.cursor).toBe(RESTORE_MAX_PAGE_SIZE);
+
+    // And the budget the cap is derived from still holds. Note this pair is
+    // weaker than it looks on its own — `derived * perRecord <= budget` is true
+    // by construction — so the load-bearing half is that the cap is still
+    // DERIVED rather than a literal, which is the "cap of 400 was ~1200
+    // subrequests" bug this block exists for.
     expect(RESTORE_MAX_PAGE_SIZE).toBe(
       Math.floor((SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD)
     );
     expect(RESTORE_MAX_PAGE_SIZE * SUBREQUESTS_PER_RECORD).toBeLessThanOrEqual(
       SUBREQUEST_CEILING - SUBREQUEST_RESERVE
     );
-    // Not covered here: that the endpoint enforces the clamp end-to-end. Proving
-    // that needs a snapshot larger than the cap — 300+ records, each costing
-    // real binding calls — which is too slow for this suite. The 200 above only
-    // shows an oversized limit is accepted, not what it was reduced to.
   });
 
   it("restores an empty snapshot without tripping the cursor guard", async () => {

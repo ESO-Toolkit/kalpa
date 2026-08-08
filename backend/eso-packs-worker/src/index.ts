@@ -851,6 +851,20 @@ function readCursor(value: unknown): number {
  * validating a position it was never issued for: a snapshot-wide token let any
  * in-range cursor through, so a mistyped offset could skip whole pages and the
  * final page would still publish an index for bodies that were never replayed.
+ *
+ * It catches ACCIDENTS, not reconstruction. The value is plaintext and its
+ * derivation is right here, so a caller who decides to skip pages can recompute
+ * a matching token for any in-range cursor and the corpus ends up advertising
+ * bodies that were never written.
+ *
+ * HMAC does not fix that, which is why it is not used: the only secret this
+ * worker holds is `ADMIN_API_KEY`, and every caller who can reach this endpoint
+ * already presents it. Signing with a secret the forger holds buys nothing.
+ * Real tamper-evidence needs continuation state the CALLER does not own —
+ * server-side issued cursors — which is the server-owned restore job already
+ * recorded as the follow-up on this PR, together with staged writes and an
+ * atomic promote. Until that exists, an operator must finish a restore they
+ * start, and the 409 says so rather than inviting a token edit.
  */
 function restoreToken(
   backupKey: string,
