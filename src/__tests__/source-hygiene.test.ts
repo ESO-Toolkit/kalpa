@@ -90,6 +90,46 @@ function trackedTextFiles(): string[] {
     });
 }
 
+/**
+ * Read every tracked text file, returning what was actually READ alongside what
+ * offended.
+ *
+ * The distinction matters: an earlier version asserted coverage against the
+ * `git ls-files` listing while the scan itself skipped unreadable entries, so a
+ * tracked file missing from the working tree could satisfy "we look at
+ * src-tauri" without a single byte of it being examined. Coverage is asserted
+ * against `scanned` for that reason.
+ */
+function scanRepo(): { scanned: string[]; offenders: string[] } {
+  const scanned: string[] = [];
+  const offenders: string[] = [];
+
+  for (const file of trackedTextFiles()) {
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(path.join(REPO_ROOT, file));
+    } catch (error) {
+      // An unstaged deletion is still listed by `git ls-files` but is not in
+      // the tree under review, so it cannot hide anything from a reviewer.
+      // Anything else is a real failure and must not be swallowed.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    scanned.push(file);
+
+    const at = firstOffendingByte(bytes);
+    if (at === -1) continue;
+
+    const line = bytes.subarray(0, at).toString("utf8").split("\n").length;
+    offenders.push(
+      `${file}:${line} contains raw 0x${bytes[at]!.toString(16).padStart(2, "0")} — ` +
+        `use an escape such as \\u0000 instead`
+    );
+  }
+
+  return { scanned, offenders };
+}
+
 describe("source hygiene", () => {
   it("detects the byte it exists to detect", () => {
     // Proves the scan below is capable of failing. The alternative — writing a
@@ -105,45 +145,23 @@ describe("source hygiene", () => {
     expect(firstOffendingByte(Buffer.from([0x78, 0x1b, 0x79]))).toBe(1);
   });
 
-  it("looks past the frontend", () => {
+  it("actually reads files well past the frontend", () => {
     // Without this the scan below passes vacuously whenever the file list comes
     // back empty or collapses to `src/` — the two ways this guard has already
-    // been weaker than it read. Naming real files from four different roots
-    // makes that failure loud instead of silent.
-    const files = new Set(trackedTextFiles());
+    // been weaker than it read. These four are asserted against the files whose
+    // bytes were READ, so neither a shrunken listing nor a skipped read can
+    // satisfy it.
+    const read = new Set(scanRepo().scanned);
 
-    expect(files).toContain("src/lib/removal-queue.ts");
-    expect(files).toContain("src-tauri/src/commands.rs");
-    expect(files).toContain("backend/eso-packs-worker/src/index.ts");
-    expect(files).toContain("scripts/check-versions.js");
-    expect(files.size).toBeGreaterThan(100);
+    expect(read).toContain("src/lib/removal-queue.ts");
+    expect(read).toContain("src-tauri/src/commands.rs");
+    expect(read).toContain("backend/eso-packs-worker/src/index.ts");
+    expect(read).toContain("scripts/check-versions.js");
+    expect(read.size).toBeGreaterThan(100);
   });
 
   it("has no raw control bytes that would make a file read as binary", () => {
-    const offenders: string[] = [];
-
-    for (const file of trackedTextFiles()) {
-      let bytes: Buffer;
-      try {
-        bytes = readFileSync(path.join(REPO_ROOT, file));
-      } catch (error) {
-        // A staged deletion is listed but absent from the working tree, and a
-        // file that is not on disk cannot hide anything from a reviewer. Any
-        // other read failure is a real problem and must not be swallowed.
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-
-      const at = firstOffendingByte(bytes);
-      if (at === -1) continue;
-
-      const line = bytes.subarray(0, at).toString("utf8").split("\n").length;
-      offenders.push(
-        `${file}:${line} contains raw 0x${bytes[at]!.toString(16).padStart(2, "0")} — ` +
-          `use an escape such as \\u0000 instead`
-      );
-    }
-
+    const { offenders } = scanRepo();
     expect(offenders, offenders.join("\n")).toEqual([]);
   });
 });
