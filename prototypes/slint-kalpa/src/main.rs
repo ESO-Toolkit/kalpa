@@ -4206,7 +4206,15 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let pack = ui.get_pack_hub_import_pack();
-        let eso_running = pending > 0 && addon_write_eso_running_warning_active(&ui);
+        // Settings count too. Gating on `pending > 0` meant a pack with nothing
+        // to install but settings to apply went straight to the SavedVariables
+        // write with no warning — and SavedVariables is the write that most
+        // needs one, because ESO rewrites those files from memory on logout and
+        // will discard anything changed underneath a running client. The main
+        // app warns for settings-only imports; this path silently reported them
+        // applied.
+        let eso_running =
+            (pending > 0 || !settings.is_empty()) && addon_write_eso_running_warning_active(&ui);
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_install_label(
             if pending == 0 {
@@ -6634,8 +6642,12 @@ fn apply_imported_pack_settings_blocking(
             saved_variables::scrub::WELL_KNOWN_WORLDS,
         );
         if has_unresolved_identity_placeholders(&substituted) {
+            // Same wording as the main app, from the same helper. This used to
+            // be a private string telling everyone to launch ESO, which is no
+            // help to a user who has identities but lacks the pack's megaserver.
+            let advice = saved_variables::scrub::unresolved_identity_advice(&ctx);
             result.errors.push(format!(
-                "{folder}: unresolved identity placeholders - launch ESO at least once to establish your identity"
+                "{folder}: settings could not be mapped to your account. {advice}"
             ));
             continue;
         }

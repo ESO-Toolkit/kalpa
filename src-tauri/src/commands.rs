@@ -8798,24 +8798,9 @@ pub async fn import_sv_settings(
             // Doing it safely needs substitution to work on parsed identity KEYS
             // rather than text — tracked as follow-up. Until then, refuse.
             if has_unresolved_identity_placeholders(&substituted) {
-                // Two audiences, and the advice only helps one of them. If Kalpa
-                // found no identities at all, launching ESO once is the fix. If
-                // it found some, this is a pack carrying a megaserver or account
-                // the importer simply does not have — telling that user to log
-                // into a server they do not own is advice they cannot act on,
-                // and since world tokens became one-to-one that is now the
-                // COMMON case rather than the rare one.
-                //
-                // The line continuations matter: a wrapped Rust literal without
-                // them carries its own indentation into the string, and this
-                // text is rendered verbatim in a toast.
-                let advice = if ctx.accounts.is_empty() && ctx.characters.is_empty() {
-                    "Launch ESO at least once on this machine so Kalpa can detect your \
-                     account and characters."
-                } else {
-                    "This pack's settings are stored under a megaserver or account you \
-                     don't have, so there is nowhere to put them."
-                };
+                // Shared with the sidecar, which refuses the same files through
+                // the same guard — see `unresolved_identity_advice`.
+                let advice = crate::saved_variables::scrub::unresolved_identity_advice(&ctx);
                 errors.push(format!(
                     "{folder}: settings could not be mapped to your account. {advice}"
                 ));

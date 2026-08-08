@@ -574,6 +574,25 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
 /// wrote them straight over users' real SavedVariables and called it a success,
 /// while the main app refused the identical import. One substituter needs one
 /// guard beside it, not a copy per caller.
+/// Why an import was refused, phrased for the reader who caused it.
+///
+/// Shipped next to the guard for the same reason the guard is shared: the
+/// sidecar and the main app both refuse, and while the wording lived on each
+/// side separately only one of them was ever updated. The sidecar kept telling
+/// every user to "launch ESO at least once" — advice that cannot help someone
+/// who has identities but simply lacks the pack's megaserver, which is now the
+/// COMMON case rather than the rare one.
+///
+/// Detected-nothing is the only branch where launching ESO is the remedy.
+pub fn unresolved_identity_advice(ctx: &ScrubContext) -> &'static str {
+    if ctx.accounts.is_empty() && ctx.characters.is_empty() {
+        "Launch ESO at least once on this machine so Kalpa can detect your account and characters."
+    } else {
+        "This pack's settings are stored under a megaserver or account you don't have, so there is \
+         nowhere to put them."
+    }
+}
+
 pub fn has_unresolved_identity_placeholders(lua: &str) -> bool {
     lua.contains("${ACCOUNT}")
         || lua.contains("${ACCOUNT:")
