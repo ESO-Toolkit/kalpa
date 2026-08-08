@@ -845,12 +845,24 @@ function readCursor(value: unknown): number {
  * Fingerprint of the snapshot AND the exact cursor a page was issued for.
  *
  * Not a security token — it is an incident-recovery consistency check, behind
- * the admin API key. `created_at` catches a snapshot rewritten in place (the
- * midnight cron overwriting `backup:latest`), the record count catches a
- * different snapshot with the same timestamp, and `cursor` stops a token from
- * validating a position it was never issued for: a snapshot-wide token let any
- * in-range cursor through, so a mistyped offset could skip whole pages and the
- * final page would still publish an index for bodies that were never replayed.
+ * the admin API key. `cursor` stops a token from validating a position it was
+ * never issued for: a snapshot-wide token let any in-range cursor through, so a
+ * mistyped offset could skip whole pages and the final page would still publish
+ * an index for bodies that were never replayed.
+ *
+ * `created_at` and the record count cover the snapshot changing mid-restore, and
+ * they are enough only because of WHICH rewriters exist. This worker has exactly
+ * two. The midnight cron writes a fresh `created_at`, so it is caught by the
+ * timestamp. `purgeUserFromLatestBackup` deliberately preserves `created_at`
+ * (pinning to the dated twin would resurrect GDPR-deleted data) but returns
+ * early unless `removed > 0`, so any write it performs has dropped at least one
+ * record and is caught by the count.
+ *
+ * That is a narrower guarantee than a content hash: two snapshots with the same
+ * timestamp AND the same record count but different records would collide. No
+ * path here produces that, and this pair is not a general-purpose fingerprint —
+ * a third rewriter that swaps records without changing the count would need a
+ * digest of the ordered work list added here.
  *
  * It catches ACCIDENTS, not reconstruction. The value is plaintext and its
  * derivation is right here, so a caller who decides to skip pages can recompute

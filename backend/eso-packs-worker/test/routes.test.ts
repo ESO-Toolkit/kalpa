@@ -1202,7 +1202,7 @@ describe("POST /admin/restore", () => {
       votes[`cap-pack-${i}:cap-user-${i}`] = {
         packId: `cap-pack-${i}`,
         userId: `cap-user-${i}`,
-        created_at: "2026-06-01T00:00:00.000Z",
+        votedAt: "2026-06-01T00:00:00.000Z",
       };
     }
     await e.ESO_PACKS.put(
@@ -1241,7 +1241,28 @@ describe("POST /admin/restore", () => {
     expect(RESTORE_MAX_PAGE_SIZE * SUBREQUESTS_PER_RECORD).toBeLessThanOrEqual(
       SUBREQUEST_CEILING - SUBREQUEST_RESERVE
     );
-  });
+
+    // Clean up after ourselves. This case really does restore 300 votes, and
+    // `restoreVote` writes TWO keys each — `vote:` and the `user-votes:` index —
+    // so leaving them behind would seed 600 keys that any later case listing
+    // votes or snapshotting the corpus would silently inherit. This file has no
+    // per-test storage isolation; the previous version of this test inherited
+    // another case's snapshot, which is the same class of problem pointing the
+    // other way.
+    await Promise.all(
+      Array.from({ length: RESTORE_MAX_PAGE_SIZE }, (_, i) =>
+        Promise.all([
+          e.ESO_PACKS.delete(`vote:cap-pack-${i}:cap-user-${i}`),
+          e.ESO_PACKS.delete(`user-votes:cap-user-${i}:cap-pack-${i}`),
+        ])
+      )
+    );
+    await e.ESO_PACKS.delete("backup:latest");
+    // 30s, not the 5s default: this case restores 300 vote records for real and
+    // then deletes the 600 keys they wrote. That is the price of proving the
+    // clamp through the endpoint instead of asserting arithmetic, and the suite
+    // is already known to flake against a 5s budget on CI.
+  }, 30_000);
 
   it("restores an empty snapshot without tripping the cursor guard", async () => {
     // start === 0 is always legitimate, including when there is nothing to do.
