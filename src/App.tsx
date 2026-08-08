@@ -1369,6 +1369,25 @@ function App() {
       // pulls libraries prompts once at the end rather than once per addon.
       const dependencyPolicy = await getDependencyPolicy();
 
+      // `updates` was captured before the preamble above, and the preamble can
+      // await an ESO-running prompt that waits on the user indefinitely plus
+      // three IPC round trips. The list is masked against the removal queue
+      // where it is built (see `checkForUpdates`), but a removal queued DURING
+      // that window is not in it — and extracting into a folder that is seconds
+      // away from `remove_addon` races the remover, throws away the download,
+      // and raises dependency prompts for an addon the user just removed. So
+      // re-mask here, where nothing awaits between the check and the call.
+      const live = hidePendingRemovals(updates, pendingRemovalsRef.current, path);
+      if (live.length === 0) {
+        setUpdatingAll(false);
+        setUpdateProgress(null);
+        toast.info("Nothing left to update — those addons were removed.");
+        return;
+      }
+      if (live.length !== updates.length) {
+        setUpdateProgress({ completed: 0, failed: 0, total: live.length });
+      }
+
       // Single streaming call: parallel downloads, extract-as-each-finishes,
       // one kalpa.json load/save and one dependency-resolution pass for the
       // whole batch. Replaces the old scan-all → per-addon-decision loop, which
@@ -1378,7 +1397,7 @@ function App() {
         addonsPath: path,
         conflictPolicy: policy,
         dependencyPolicy,
-        updates: updates.map((u) => ({
+        updates: live.map((u) => ({
           esouiId: u.esouiId,
           folderName: u.folderName,
           apiVersion: u.remoteVersion,
