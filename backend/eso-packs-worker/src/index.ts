@@ -1159,8 +1159,19 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
  *
  * Best-effort. The live data is already gone by the time this runs, so a
  * failure here must not fail the deletion request — it is logged and swallowed.
- * A concurrent scheduled backup cannot reintroduce the user, because it
- * snapshots the live index, which no longer contains them.
+ *
+ * A concurrent scheduled backup CAN reintroduce the user, and an earlier version
+ * of this comment claimed otherwise. `handleScheduled` reads the live index and
+ * votes, then writes `backup:latest`, with no lock or ordering shared with this
+ * path. A cron that read before the deletion and writes after this purge
+ * restores the deleted records into `backup:latest` — which has no TTL, unlike
+ * the dated snapshots — and a later restore replays them.
+ *
+ * Narrow (it needs the daily cron to straddle an account deletion) but real, and
+ * it is a deletion guarantee rather than a convenience. Closing it means putting
+ * the backup write and this purge behind the same Durable Object, or a durable
+ * deleted-user tombstone that `handleScheduled` applies before publishing.
+ * Neither belongs in an audit-residue change; tracked as a follow-up on the PR.
  */
 async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void> {
   try {
