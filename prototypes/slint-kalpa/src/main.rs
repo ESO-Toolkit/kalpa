@@ -550,6 +550,15 @@ struct NativeSvImportResult {
     applied: Vec<String>,
     skipped: Vec<String>,
     errors: Vec<String>,
+    /// Addons deliberately not written because ESO was running.
+    ///
+    /// Structured rather than folded into `errors` because the summary counts
+    /// `errors.len()` as a number of ADDONS. Two attempts to report refusals
+    /// through that field both lied: one entry per addon produced twenty-five
+    /// copies of the same sentence, and one aggregate entry reported "1 failed"
+    /// for twenty-five addons. Keeping them separate lets the summary count
+    /// every addon that was not applied while still printing one sentence.
+    refused_eso_running: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4292,8 +4301,14 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             let settings_result = if settings.is_empty() {
                 None
             } else if settings_write_eso_running() {
+                // Same structured field the per-addon path uses. Returning a
+                // bare error here meant the ALREADY-running case — the common
+                // one — summarised as "1 failed" and named nothing, however
+                // many addons the pack carried.
+                let mut refused = settings.keys().cloned().collect::<Vec<_>>();
+                refused.sort();
                 Some(NativeSvImportResult {
-                    errors: vec![ESO_RUNNING_SETTINGS_REFUSAL.to_string()],
+                    refused_eso_running: refused,
                     ..Default::default()
                 })
             } else {
@@ -6634,12 +6649,20 @@ fn pack_hub_settings_summary(result: &NativeSvImportResult) -> String {
     if !result.skipped.is_empty() {
         summary.push_str(&format!(", {} skipped", result.skipped.len()));
     }
-    if !result.errors.is_empty() {
-        summary.push_str(&format!(
-            ", {} failed: {}",
-            result.errors.len(),
-            result.errors.join("; ")
-        ));
+    // Count ADDONS not applied, not error entries. The ESO refusal is one
+    // sentence covering many addons, so deriving the count from `errors.len()`
+    // undercounted by however many it represented — and did so exactly when
+    // genuine errors coexisted with it.
+    let not_applied = result.errors.len() + result.refused_eso_running.len();
+    if not_applied > 0 {
+        let mut details = result.errors.clone();
+        if !result.refused_eso_running.is_empty() {
+            details.push(format!(
+                "{ESO_RUNNING_SETTINGS_REFUSAL} Not applied: {}",
+                result.refused_eso_running.join(", ")
+            ));
+        }
+        summary.push_str(&format!(", {not_applied} failed: {}", details.join("; ")));
     }
     summary.push('.');
     summary
@@ -6781,26 +6804,7 @@ fn apply_imported_pack_settings_blocking(
         result.applied.push(folder);
     }
 
-    if !refused_while_eso_running.is_empty() {
-        // One entry, but it carries its own count and names.
-        //
-        // The summary renders `errors.len()` as a number of addons, so a bare
-        // aggregate reported "1 failed" for twenty-five refusals — swapping the
-        // duplicate-sentence problem for an undercount of the same size. Stating
-        // the count inside the message keeps the real number in front of the
-        // user regardless of how the summary counts entries.
-        //
-        // `skipped` would give an honest count for free, but it already means
-        // "this addon had no settings in the pack"; putting refusals there makes
-        // twenty-five deliberate refusals indistinguishable from twenty-five
-        // absent entries.
-        let count = refused_while_eso_running.len();
-        result.errors.push(format!(
-            "{ESO_RUNNING_SETTINGS_REFUSAL} {count} addon{} not applied: {}.",
-            if count == 1 { "" } else { "s" },
-            refused_while_eso_running.join(", ")
-        ));
-    }
+    result.refused_eso_running = refused_while_eso_running;
 
     result
 }
@@ -22820,6 +22824,49 @@ CombatMetrics_SavedVariables = {
             fs::read_to_string(written).expect("written settings"),
             "AddonSelector_SavedVariables = { }\n"
         );
+    }
+
+    #[test]
+    fn settings_summary_counts_addons_not_error_entries() {
+        // Two earlier shapes of this reporting both passed their gates while
+        // lying to the user: one error per refused addon printed the same
+        // sentence twenty-five times, and one aggregate entry reported
+        // "1 failed" for twenty-five addons. Both derived the count from
+        // `errors.len()`, which stops being an addon count the moment one entry
+        // covers many addons.
+        let refusals_only = NativeSvImportResult {
+            applied: vec!["Applied".to_string()],
+            refused_eso_running: vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            ..Default::default()
+        };
+        let summary = pack_hub_settings_summary(&refusals_only);
+        assert!(
+            summary.contains("3 failed"),
+            "three refused addons must count as three: {summary}"
+        );
+        assert!(summary.contains("A, B, C"), "refused addons must be named: {summary}");
+
+        // The case the previous shape got wrong even after the count was added:
+        // a genuine per-addon error alongside the aggregate.
+        let mixed = NativeSvImportResult {
+            applied: vec!["Applied".to_string()],
+            errors: vec!["Broken: settings file failed validation".to_string()],
+            refused_eso_running: vec!["A".to_string(), "B".to_string()],
+            ..Default::default()
+        };
+        let summary = pack_hub_settings_summary(&mixed);
+        assert!(
+            summary.contains("3 failed"),
+            "one error plus two refusals is three addons: {summary}"
+        );
+        assert!(summary.contains("Broken"), "the real error must survive: {summary}");
+
+        // And one refusal still reads correctly.
+        let single = NativeSvImportResult {
+            refused_eso_running: vec!["Only".to_string()],
+            ..Default::default()
+        };
+        assert!(pack_hub_settings_summary(&single).contains("1 failed"));
     }
 
     #[test]
