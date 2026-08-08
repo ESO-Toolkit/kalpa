@@ -1369,6 +1369,20 @@ function App() {
       // pulls libraries prompts once at the end rather than once per addon.
       const dependencyPolicy = await getDependencyPolicy();
 
+      // `path` was captured before the preamble too, and nothing disables the
+      // settings picker while a batch runs. The backend authorizes exactly one
+      // AddOns folder, so a switch during the preamble leaves this call about to
+      // extract into the instance the user just left — rejected outright if the
+      // switch already landed, and the closing `scanAddons(path)` would rescan a
+      // folder that is no longer on screen. Stop instead of guessing which
+      // folder they meant.
+      if (!sameAddonsFolder(path, addonsPathRef.current)) {
+        setUpdatingAll(false);
+        setUpdateProgress(null);
+        toast.info("AddOns folder changed — the update was not started.");
+        return;
+      }
+
       // `updates` was captured before the preamble above, and the preamble can
       // await an ESO-running prompt that waits on the user indefinitely plus
       // three IPC round trips. The list is masked against the removal queue
@@ -1377,6 +1391,15 @@ function App() {
       // away from `remove_addon` races the remover, throws away the download,
       // and raises dependency prompts for an addon the user just removed. So
       // re-mask here, where nothing awaits between the check and the call.
+      //
+      // This closes the window up to the invoke, NOT the batch itself: removal
+      // stays enabled while `updatingAll` is true, so an addon can still be
+      // queued for removal mid-batch and Undo will then restore its pre-update
+      // manifest and update row, showing a freshly-updated addon as outdated
+      // until the next scan. That behaviour predates this module (main restores
+      // the same update row on undo) and closing it properly means deciding
+      // whether removal should be refused or deferred while a batch runs, which
+      // is a UX call rather than a bug fix. Tracked as a follow-up on the PR.
       const live = hidePendingRemovals(updates, pendingRemovalsRef.current, path);
       if (live.length === 0) {
         setUpdatingAll(false);
