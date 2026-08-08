@@ -1066,6 +1066,13 @@ function App() {
   // rules live in `lib/removal-queue.ts` so they can be tested without the app.
   const pendingRemovalsRef = useRef(new RemovalQueue());
 
+  // Bumped the moment `handlePathChange` decides a switch is happening, which is
+  // BEFORE it awaits `flushPendingRemovals()` and long before it syncs
+  // `addonsPathRef`. Comparing paths alone cannot see a switch in that window —
+  // the ref still reads as the old folder — so anything long-running that must
+  // not straddle an instance change compares this generation instead.
+  const pathSwitchGenRef = useRef(0);
+
   // Put an optimistically-hidden addon back, update row included, so a restored
   // addon keeps its Update badge, banner count and "Outdated" filter membership.
   const restorePendingRemoval = useCallback((entry: PendingRemoval) => {
@@ -1189,6 +1196,14 @@ function App() {
 
       const switchingFolder = !sameAddonsFolder(nextPath, addonsPathRef.current);
 
+      // Announce the switch synchronously, before the first await. Everything
+      // below — the removal flush, `set_addons_path`, the settings write — takes
+      // time during which `addonsPathRef` still reads as the OLD folder, so a
+      // path comparison cannot tell "no switch" from "switch in progress". A
+      // long-running batch that checked only the path would happily start
+      // against the folder the user is in the middle of leaving.
+      if (switchingFolder) pathSwitchGenRef.current += 1;
+
       // Settle queued removals while the backend still authorizes the folder
       // they were queued against. Left running, their timers would fire against
       // a folder the backend no longer accepts — the removal never happens and
@@ -1311,6 +1326,11 @@ function App() {
       const path = addonsPathRef.current;
       if (!path || updates.length === 0) return;
 
+      // Pin the instance generation alongside the path. See `pathSwitchGenRef`:
+      // a switch is announced here before it is visible in `addonsPathRef`, so
+      // the path alone cannot tell a stable folder from one being left.
+      const switchGen = pathSwitchGenRef.current;
+
       // Claim the preflight slot synchronously (before any await) so two rapid calls
       // can't both pass the game check / confirm dialog and start overlapping batches
       // against the same AddOns folder. Refused outright while a batch is already
@@ -1376,7 +1396,17 @@ function App() {
       // switch already landed, and the closing `scanAddons(path)` would rescan a
       // folder that is no longer on screen. Stop instead of guessing which
       // folder they meant.
-      if (!sameAddonsFolder(path, addonsPathRef.current)) {
+      //
+      // Both halves are needed. The generation catches a switch that has been
+      // REQUESTED but is still awaiting its removal flush, which the path
+      // comparison cannot see; the path comparison catches a switch that landed
+      // before this batch ever captured a generation. A switch that later fails
+      // and reverts still aborts the batch — conservative, and far cheaper than
+      // extracting into the wrong instance.
+      if (
+        pathSwitchGenRef.current !== switchGen ||
+        !sameAddonsFolder(path, addonsPathRef.current)
+      ) {
         setUpdatingAll(false);
         setUpdateProgress(null);
         toast.info("AddOns folder changed — the update was not started.");
@@ -1571,6 +1601,19 @@ function App() {
             // Notification is best-effort
           }
         })();
+      }
+
+      // A batch can outlast an instance switch even though it could not start
+      // across one — the user is free to switch while it runs. Rescanning the
+      // folder this batch ran against would then race the new folder's own
+      // scan, and the later result wins `scanSeq`, so the list can end up
+      // showing the OLD instance's addons under the new path. The new folder
+      // has already scanned itself; this batch's rescan has nothing to add.
+      if (
+        pathSwitchGenRef.current !== switchGen ||
+        !sameAddonsFolder(path, addonsPathRef.current)
+      ) {
+        return;
       }
 
       await scanAddons(path);
