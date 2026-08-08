@@ -124,13 +124,10 @@ fn addon_write_eso_running_warning_active(ui: &KalpaWindow) -> bool {
 /// and the main app's `ensureEsoNotBlocking`. Failing closed would make settings
 /// imports impossible on a machine where process detection is broken, and
 /// flipping that direction is a decision for every caller at once, not this one.
+/// Call this immediately before the write, never at click time. Settings are
+/// applied after the addon install, which can run for minutes.
 fn settings_write_eso_running() -> bool {
     is_eso_running_blocking().unwrap_or(false)
-}
-
-/// Should a settings import be refused right now?
-fn should_block_settings_write(has_settings: bool, eso_running: bool) -> bool {
-    has_settings && eso_running
 }
 
 fn addon_write_status_message(message: impl AsRef<str>, eso_running: bool) -> String {
@@ -4247,14 +4244,17 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         // the same thing (see the comment on the gate in packs.tsx); the sidecar
         // has no confirm affordance, so it declines and explains.
         //
-        // The two flags read DIFFERENT sources on purpose. The addon notice
-        // honours `settings_warn_eso_running`, because that preference is
-        // exactly about that reminder. The settings block does not: see
-        // `settings_write_eso_running`. Sharing one helper here quietly turned a
-        // notification preference into permission to lose the user's settings.
+        // The addon notice honours `settings_warn_eso_running`, because that
+        // preference is exactly about that reminder.
+        //
+        // The settings decision is NOT made here. It reads a different source
+        // (see `settings_write_eso_running`) and it is taken inside the worker
+        // below, immediately before the write: settings are applied only after
+        // the addon install finishes, which can run for minutes, and a flag
+        // sampled at click time says nothing about whether ESO is running by
+        // then. Deciding early let a client launched mid-install receive the
+        // write anyway — the same sample-then-await mistake one layer down.
         let eso_running = pending > 0 && addon_write_eso_running_warning_active(&ui);
-        let block_settings =
-            should_block_settings_write(!settings.is_empty(), settings_write_eso_running());
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_install_label(
             if pending == 0 {
@@ -4286,7 +4286,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             };
             let settings_result = if settings.is_empty() {
                 None
-            } else if block_settings {
+            } else if settings_write_eso_running() {
                 Some(NativeSvImportResult {
                     errors: vec![
                         "Close ESO before applying pack settings — the game rewrites \
@@ -5210,7 +5210,18 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         match result {
             Ok(()) => {
                 apply_svm_editor_state(&ui, &svm_editor_save_state.borrow());
-                let message = if addon_write_eso_running_warning_active(&ui) {
+                // `settings_write_eso_running`, not the addon helper: this
+                // caveat is about SavedVariables being overwritten, and gating
+                // it on the ADDON reminder preference meant a user who had
+                // dismissed that reminder saved an edit with no hint that ESO
+                // would discard it. The preference is about /reloadui noise for
+                // addon files; it is not a statement about this.
+                //
+                // Unlike the pack-settings import this is message-only — the
+                // write happens either way, because the user explicitly asked to
+                // save an edit they are looking at. Withholding the warning is
+                // the whole harm.
+                let message = if settings_write_eso_running() {
                     "Saved - but ESO is running and will overwrite SavedVariables when it exits. Use /reloadui or restart ESO to keep this change."
                 } else {
                     "Saved SavedVariables changes."
@@ -22763,25 +22774,6 @@ CombatMetrics_SavedVariables = {
             fs::read_to_string(written).expect("written settings"),
             "AddonSelector_SavedVariables = { }\n"
         );
-    }
-
-    #[test]
-    fn settings_write_block_ignores_the_addon_reminder_preference() {
-        // The bug this pins: `block_settings` was computed with
-        // `addon_write_eso_running_warning_active`, which ANDs in
-        // `settings_warn_eso_running`. A user who had dismissed the addon
-        // reminder therefore got SavedVariables written under a running client
-        // and reported as applied, then discarded at logout.
-        //
-        // The decision function takes ESO-running directly, so the preference
-        // cannot reach it. What this test cannot check is that the CALLER passes
-        // `settings_write_eso_running()` rather than the addon helper — that is
-        // held by the two functions having different names and doc-blocks, since
-        // the caller needs a live KalpaWindow.
-        assert!(should_block_settings_write(true, true));
-        assert!(!should_block_settings_write(true, false));
-        assert!(!should_block_settings_write(false, true));
-        assert!(!should_block_settings_write(false, false));
     }
 
     #[test]

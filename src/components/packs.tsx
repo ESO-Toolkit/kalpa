@@ -605,12 +605,19 @@ export function Packs({
     // SavedVariables under a running client, where the import is discarded when
     // ESO rewrites them from memory at logout. The user is told it applied.
     //
+    // And a second, independent hole: this check runs BEFORE the addon install
+    // below, while `import_sv_settings` runs after it. A user who closes ESO,
+    // clicks import, then launches the game while addons are downloading gets
+    // the settings write anyway, because the answer was sampled minutes
+    // earlier. The sidecar had the same shape and now re-checks immediately
+    // before its write.
+    //
     // The sidecar's equivalent path was split (see `settings_write_eso_running`)
     // so the preference no longer governs its settings write. Doing the same
     // here needs settings-specific dialog copy — reusing the addon wording,
     // which promises the change loads after /reloadui, is the misleading-message
     // bug that split was fixing — so it is a UX decision rather than a drive-by.
-    // Tracked as a follow-up on the PR.
+    // Both holes are tracked as one follow-up on the PR.
     if (!(await ensureEsoNotBlocking())) {
       setInstalling(false);
       return;
