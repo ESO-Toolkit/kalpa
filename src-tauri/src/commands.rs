@@ -59,11 +59,18 @@ fn require_allowed_path(
 /// Stores both the configured and canonicalized paths so commands can validate
 /// symlink/junction targets without losing the configured ESO live directory.
 ///
-/// While a sandbox override is active this is also the enforcement point for it:
-/// see the `#[cfg(debug_assertions)]` block below. Every destructive command
-/// authorizes against what this function registers, so refusing here is what
-/// actually keeps a sandboxed e2e run off a real install — a spec asserting the
-/// same thing afterwards runs far too late to prevent anything.
+/// While a sandbox override is active this is also an enforcement point for it:
+/// see the `#[cfg(debug_assertions)]` block below. Refusing here is what keeps a
+/// sandboxed e2e run off a real install, because a spec asserting the same thing
+/// afterwards runs far too late to prevent anything.
+///
+/// It is not the ONLY enforcement point, and an earlier version of this comment
+/// wrongly said every destructive command authorizes against what this function
+/// registers. `copy_addons_to_instance` takes a second AddOns root and validates
+/// it against detected game instances instead — the developer's real folders —
+/// so it carries its own sandbox refusal. Anything added later with a second
+/// write root needs one too; every other command routes its single path through
+/// `require_allowed_path`.
 #[tauri::command]
 pub fn set_addons_path(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -6381,6 +6388,28 @@ pub async fn copy_addons_to_instance(
     target_addons_path: String,
 ) -> Result<CopyAddonsResult, String> {
     let source = require_allowed_path(&state, &addons_path)?;
+
+    // The one command with a SECOND AddOns root, and therefore the one that can
+    // write outside the registered folder. `target_addons_path` is validated
+    // against detected game instances, which is the right check in production
+    // and exactly the wrong one under a sandbox: a detected instance is by
+    // definition the developer's real Live or PTS folder. A sandbox run could
+    // copy fixture addons straight into it, creating directories and rewriting
+    // that instance's kalpa.json, without the target ever being registered.
+    //
+    // While the override is active this build may not write outside the
+    // sandbox, and a cross-instance copy targets another folder by definition,
+    // so refuse the whole command. Testing it would need a second throwaway
+    // instance and both roots validated in the backend.
+    #[cfg(debug_assertions)]
+    if debug_addons_dir_override()?.is_some() {
+        return Err(
+            "KALPA_ADDONS_DIR is set: cross-instance copies are refused, because the target \
+             would be a real detected game instance rather than the sandbox."
+                .to_string(),
+        );
+    }
+
     let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {

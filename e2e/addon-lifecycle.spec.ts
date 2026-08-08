@@ -119,6 +119,28 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
       // allowed-path comparison, so it would pass against a totally broken
       // guard.
       await invoke<unknown[]>(page, "scan_installed_addons", { addonsPath: sandboxDir });
+
+      // `copy_addons_to_instance` is the one command with a SECOND AddOns root.
+      // Its target is validated against detected game instances — the real Live
+      // and PTS folders — so `require_allowed_path` on the source does not
+      // contain it, and a sandbox run could have written fixture addons into a
+      // real install.
+      //
+      // The target here is deliberately a path that does not exist. Passing a
+      // REAL instance would mean that the day this guard regresses, the test
+      // performs the copy it is meant to prevent before reporting it. Matching
+      // on the message is what makes this fail on regression: without the guard
+      // the command still errors, but on the target being inaccessible.
+      const copyError = await invoke<string>(page, "copy_addons_to_instance", {
+        addonsPath: sandboxDir,
+        targetAddonsPath: path.join(sandboxDir, "..", "NotAnInstance", "AddOns"),
+      }).then(
+        () => "resolved",
+        (error: Error) => error.message
+      );
+      expect(copyError, "cross-instance copy was not refused by the sandbox guard").toContain(
+        "KALPA_ADDONS_DIR"
+      );
     } finally {
       await browser.close();
     }
