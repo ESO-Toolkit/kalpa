@@ -558,6 +558,33 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     result
 }
 
+/// Did `substitute_placeholders` leave a token it could not resolve?
+///
+/// This lives next to `substitute_placeholders` because its rules are what
+/// decide the answer — in particular Rule 3, which deliberately leaves a world
+/// token as a literal `${WORLD:N}` rather than collapsing two exported layers
+/// onto one megaserver. A leftover token is a valid Lua string key, so nothing
+/// downstream rejects it: `parse_sv_file` accepts the file, and writing it lands
+/// settings under a key ESO never reads while reporting success.
+///
+/// EVERY caller that writes a substituted file must gate on this. It was
+/// previously duplicated as a private helper in both `commands.rs` and the Slint
+/// sidecar's `main.rs`; the sidecar's copy never learned about world tokens, so
+/// once Rule 3 made an unresolved world token an ordinary outcome the sidecar
+/// wrote them straight over users' real SavedVariables and called it a success,
+/// while the main app refused the identical import. One substituter needs one
+/// guard beside it, not a copy per caller.
+pub fn has_unresolved_identity_placeholders(lua: &str) -> bool {
+    lua.contains("${ACCOUNT}")
+        || lua.contains("${ACCOUNT:")
+        || lua.contains("${ACCOUNT_NAME}")
+        || lua.contains("${ACCOUNT_NAME:")
+        || lua.contains("${CHAR:")
+        || lua.contains("${CHAR_ID:")
+        || lua.contains("${WORLD}")
+        || lua.contains("${WORLD:")
+}
+
 /// Run the scrubber. Returns the cleaned tree alongside a report describing
 /// every drop and template substitution.
 ///

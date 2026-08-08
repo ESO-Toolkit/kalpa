@@ -6730,14 +6730,15 @@ fn merge_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
     }
 }
 
-fn has_unresolved_identity_placeholders(lua: &str) -> bool {
-    lua.contains("${ACCOUNT}")
-        || lua.contains("${ACCOUNT:")
-        || lua.contains("${ACCOUNT_NAME}")
-        || lua.contains("${ACCOUNT_NAME:")
-        || lua.contains("${CHAR:")
-        || lua.contains("${CHAR_ID:")
-}
+/// The import guard, taken from the same module as the substituter it guards.
+///
+/// This used to be a private copy here, and it silently fell behind: when world
+/// tokens became one-to-one, `substitute_placeholders` started leaving an
+/// unmappable `${WORLD:N}` in place as a normal outcome, and this copy — which
+/// only ever looked for ACCOUNT and CHAR tokens — waved those files through. The
+/// sidecar renamed them over the user's live SavedVariables and reported the
+/// addon as applied, while the main app refused the identical import.
+use saved_variables::scrub::has_unresolved_identity_placeholders;
 
 fn addon_count_label(count: usize) -> String {
     format!("{count} addon{}", if count == 1 { "" } else { "s" })
@@ -22697,6 +22698,83 @@ CombatMetrics_SavedVariables = {
         assert_eq!(
             fs::read_to_string(written).expect("written settings"),
             "AddonSelector_SavedVariables = { }\n"
+        );
+    }
+
+    #[test]
+    fn pack_hub_esopack_settings_apply_refuses_an_unmappable_megaserver() {
+        // The sidecar shares `substitute_placeholders` with the main app through
+        // the `#[path]`-included saved_variables module, but it used to keep its
+        // OWN copy of the import guard — and that copy never learned about world
+        // tokens. Once world tokens were mapped one-to-one, a leftover
+        // `${WORLD:N}` became an ordinary outcome for any two-megaserver export
+        // landing on a one-megaserver player, and this path renamed the file
+        // straight over their live SavedVariables and reported it applied, while
+        // the main app refused the identical import.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_root = temp.path().join("live").join("AddOns");
+        fs::create_dir_all(&addons_root).expect("addons root");
+        let sv_dir = settings_saved_variables_dir(&addons_root);
+        fs::create_dir_all(&sv_dir).expect("saved variables dir");
+
+        // This importer plays exactly one megaserver, so a two-layer export has
+        // one layer with nowhere to go.
+        fs::write(
+            sv_dir.join("Identity.lua"),
+            r#"Identity = {
+                ["Default"] = {
+                    ["NA Megaserver"] = {
+                        ["@Importer"] = { ["Mainchar"] = { ["x"] = 1 } },
+                    },
+                },
+            }"#,
+        )
+        .expect("seed importer identity");
+
+        let destination = sv_dir.join("TwoWorlds.lua");
+        let original = "TwoWorlds = { [\"untouched\"] = true }\n";
+        fs::write(&destination, original).expect("seed existing settings");
+
+        let mut settings = HashMap::new();
+        settings.insert(
+            "TwoWorlds".to_string(),
+            NativeAddonSettings {
+                encoding: "lua-text".to_string(),
+                lua: r#"TwoWorlds = {
+                    ["Default"] = {
+                        ["${WORLD}"] = { ["@Exporter"] = { ["a"] = 1 } },
+                        ["${WORLD:1}"] = { ["@Exporter"] = { ["b"] = 2 } },
+                    },
+                }"#
+                .to_string(),
+                _original_bytes: 0,
+                _scrubbed_bytes: 0,
+                _final_bytes: 0,
+            },
+        );
+
+        let result = apply_imported_pack_settings_blocking(&addons_root, settings);
+
+        assert!(
+            result.applied.is_empty(),
+            "an unmappable megaserver must not be reported as applied: {:?}",
+            result.applied
+        );
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "expected one refusal, got {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors[0].contains("TwoWorlds"),
+            "the refusal must name the addon: {}",
+            result.errors[0]
+        );
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read destination"),
+            original,
+            "the live SavedVariables file must be left exactly as it was"
         );
     }
 
