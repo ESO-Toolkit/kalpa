@@ -550,15 +550,21 @@ struct NativeSvImportResult {
     applied: Vec<String>,
     skipped: Vec<String>,
     errors: Vec<String>,
-    /// Addons deliberately not written because ESO was running.
-    ///
-    /// Structured rather than folded into `errors` because the summary counts
-    /// `errors.len()` as a number of ADDONS. Two attempts to report refusals
-    /// through that field both lied: one entry per addon produced twenty-five
-    /// copies of the same sentence, and one aggregate entry reported "1 failed"
-    /// for twenty-five addons. Keeping them separate lets the summary count
-    /// every addon that was not applied while still printing one sentence.
+    /// Addons deliberately not written because ESO was running. Used to NAME
+    /// them in one sentence; it is not the count source.
     refused_eso_running: Vec<String>,
+    /// How many addons the import covered.
+    ///
+    /// The not-applied count is DERIVED from this — `total - applied - skipped`
+    /// — rather than accumulated from error entries, and that is the whole
+    /// point. Counting `errors.len()` treats every entry as one addon, which
+    /// breaks the moment any entry covers several: it undercounted the ESO
+    /// refusals, then still undercounted them when mixed with a real error, and
+    /// then undercounted the SavedVariables-directory failure. Three producers,
+    /// three separate fixes, same bug. Subtraction cannot drift, because every
+    /// addon is applied, skipped, or not applied — including in paths nobody
+    /// has written yet.
+    total: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4308,6 +4314,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 let mut refused = settings.keys().cloned().collect::<Vec<_>>();
                 refused.sort();
                 Some(NativeSvImportResult {
+                    total: refused.len(),
                     refused_eso_running: refused,
                     ..Default::default()
                 })
@@ -6649,11 +6656,10 @@ fn pack_hub_settings_summary(result: &NativeSvImportResult) -> String {
     if !result.skipped.is_empty() {
         summary.push_str(&format!(", {} skipped", result.skipped.len()));
     }
-    // Count ADDONS not applied, not error entries. The ESO refusal is one
-    // sentence covering many addons, so deriving the count from `errors.len()`
-    // undercounted by however many it represented — and did so exactly when
-    // genuine errors coexisted with it.
-    let not_applied = result.errors.len() + result.refused_eso_running.len();
+    // Derived, never accumulated: every addon is applied, skipped, or not.
+    let not_applied = result
+        .total
+        .saturating_sub(result.applied.len() + result.skipped.len());
     if not_applied > 0 {
         let mut details = result.errors.clone();
         if !result.refused_eso_running.is_empty() {
@@ -6689,7 +6695,11 @@ fn apply_imported_pack_settings_blocking(
 
     let sv_dir = settings_saved_variables_dir(addons_dir);
     if let Err(error) = fs::create_dir_all(&sv_dir) {
+        // `total` matters here: nothing is applied, so the summary must report
+        // every addon as not applied. Returning a bare error made this path
+        // say "1 failed" no matter how many settings the pack carried.
         return NativeSvImportResult {
+            total: settings.len(),
             errors: vec![format!(
                 "Failed to create SavedVariables directory: {error}"
             )],
@@ -6699,7 +6709,10 @@ fn apply_imported_pack_settings_blocking(
 
     let ctx = collect_import_saved_variable_identities(addons_dir);
 
-    let mut result = NativeSvImportResult::default();
+    let mut result = NativeSvImportResult {
+        total: settings.len(),
+        ..Default::default()
+    };
     // Collected rather than pushed per addon: `pack_hub_settings_summary` joins
     // every error into one status line with no cap, so a thirty-addon pack that
     // meets a running client after the fifth would have emitted twenty-five
@@ -22835,6 +22848,7 @@ CombatMetrics_SavedVariables = {
         // `errors.len()`, which stops being an addon count the moment one entry
         // covers many addons.
         let refusals_only = NativeSvImportResult {
+            total: 4,
             applied: vec!["Applied".to_string()],
             refused_eso_running: vec!["A".to_string(), "B".to_string(), "C".to_string()],
             ..Default::default()
@@ -22849,6 +22863,7 @@ CombatMetrics_SavedVariables = {
         // The case the previous shape got wrong even after the count was added:
         // a genuine per-addon error alongside the aggregate.
         let mixed = NativeSvImportResult {
+            total: 4,
             applied: vec!["Applied".to_string()],
             errors: vec!["Broken: settings file failed validation".to_string()],
             refused_eso_running: vec!["A".to_string(), "B".to_string()],
@@ -22863,10 +22878,39 @@ CombatMetrics_SavedVariables = {
 
         // And one refusal still reads correctly.
         let single = NativeSvImportResult {
+            total: 1,
             refused_eso_running: vec!["Only".to_string()],
             ..Default::default()
         };
         assert!(pack_hub_settings_summary(&single).contains("1 failed"));
+
+        // A GLOBAL failure with no per-addon detail — the SavedVariables
+        // directory could not be created, so nothing was attempted. One error
+        // entry, five addons. Counting entries reported "1 failed" here even
+        // after the refusal accounting was fixed, which is why the count is
+        // derived from `total` rather than accumulated by each producer.
+        let global = NativeSvImportResult {
+            total: 5,
+            errors: vec!["Failed to create SavedVariables directory: denied".to_string()],
+            ..Default::default()
+        };
+        let summary = pack_hub_settings_summary(&global);
+        assert!(
+            summary.contains("5 failed"),
+            "a global failure means every addon was not applied: {summary}"
+        );
+
+        // Skipped addons are not failures.
+        let skipped = NativeSvImportResult {
+            total: 3,
+            applied: vec!["A".to_string()],
+            skipped: vec!["B".to_string(), "C".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            !pack_hub_settings_summary(&skipped).contains("failed"),
+            "skipped addons must not be counted as failures"
+        );
     }
 
     #[test]
