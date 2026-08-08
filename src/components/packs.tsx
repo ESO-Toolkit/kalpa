@@ -597,6 +597,20 @@ export function Packs({
     setInstalling(true);
     // The gate covers the settings-only path too: import_sv_settings rewrites
     // SavedVariables, which a running game overwrites again at logout.
+    //
+    // With ONE hole, deliberately left for now: `ensureEsoNotBlocking` returns
+    // true without prompting when `suppressEsoRunningWarning` is set. That
+    // preference is the user's opt-out from the ADDON reminder — the one about
+    // needing /reloadui — so dismissing it silently becomes permission to write
+    // SavedVariables under a running client, where the import is discarded when
+    // ESO rewrites them from memory at logout. The user is told it applied.
+    //
+    // The sidecar's equivalent path was split (see `settings_write_eso_running`)
+    // so the preference no longer governs its settings write. Doing the same
+    // here needs settings-specific dialog copy — reusing the addon wording,
+    // which promises the change loads after /reloadui, is the misleading-message
+    // bug that split was fixing — so it is a UX decision rather than a drive-by.
+    // Tracked as a follow-up on the PR.
     if (!(await ensureEsoNotBlocking())) {
       setInstalling(false);
       return;

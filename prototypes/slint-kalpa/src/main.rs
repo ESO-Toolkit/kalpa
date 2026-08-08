@@ -107,6 +107,32 @@ fn addon_write_eso_running_warning_active(ui: &KalpaWindow) -> bool {
     ui.get_settings_warn_eso_running() && is_eso_running_blocking().unwrap_or(false)
 }
 
+/// Is ESO running, for the purposes of a SavedVariables write?
+///
+/// Deliberately NOT `addon_write_eso_running_warning_active`, and the difference
+/// is the whole point: that one folds in `settings_warn_eso_running`, which is
+/// the user's opt-out from the ADDON reminder — the one whose copy is about
+/// needing `/reloadui` for changes to take effect. Turning that reminder off is
+/// a statement about notification noise, not consent to lose settings.
+///
+/// Reusing it here made the preference a silent data-loss switch: a user who had
+/// dismissed the addon reminder got SavedVariables written under a running
+/// client, reported as applied, and then discarded when ESO rewrote them from
+/// memory at logout.
+///
+/// Fails OPEN on a detection error, matching `addon_write_eso_running_warning_active`
+/// and the main app's `ensureEsoNotBlocking`. Failing closed would make settings
+/// imports impossible on a machine where process detection is broken, and
+/// flipping that direction is a decision for every caller at once, not this one.
+fn settings_write_eso_running() -> bool {
+    is_eso_running_blocking().unwrap_or(false)
+}
+
+/// Should a settings import be refused right now?
+fn should_block_settings_write(has_settings: bool, eso_running: bool) -> bool {
+    has_settings && eso_running
+}
+
 fn addon_write_status_message(message: impl AsRef<str>, eso_running: bool) -> String {
     let message = message.as_ref();
     if !eso_running {
@@ -4219,10 +4245,16 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         // So settings are REFUSED while ESO runs rather than warned about. The
         // main app reaches the same place through a cancelable confirm that says
         // the same thing (see the comment on the gate in packs.tsx); the sidecar
-        // has no confirm affordance, so it declines and explains. Honouring
-        // `settings_warn_eso_running` keeps the user's own opt-out working.
+        // has no confirm affordance, so it declines and explains.
+        //
+        // The two flags read DIFFERENT sources on purpose. The addon notice
+        // honours `settings_warn_eso_running`, because that preference is
+        // exactly about that reminder. The settings block does not: see
+        // `settings_write_eso_running`. Sharing one helper here quietly turned a
+        // notification preference into permission to lose the user's settings.
         let eso_running = pending > 0 && addon_write_eso_running_warning_active(&ui);
-        let block_settings = !settings.is_empty() && addon_write_eso_running_warning_active(&ui);
+        let block_settings =
+            should_block_settings_write(!settings.is_empty(), settings_write_eso_running());
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_install_label(
             if pending == 0 {
@@ -22731,6 +22763,25 @@ CombatMetrics_SavedVariables = {
             fs::read_to_string(written).expect("written settings"),
             "AddonSelector_SavedVariables = { }\n"
         );
+    }
+
+    #[test]
+    fn settings_write_block_ignores_the_addon_reminder_preference() {
+        // The bug this pins: `block_settings` was computed with
+        // `addon_write_eso_running_warning_active`, which ANDs in
+        // `settings_warn_eso_running`. A user who had dismissed the addon
+        // reminder therefore got SavedVariables written under a running client
+        // and reported as applied, then discarded at logout.
+        //
+        // The decision function takes ESO-running directly, so the preference
+        // cannot reach it. What this test cannot check is that the CALLER passes
+        // `settings_write_eso_running()` rather than the addon helper — that is
+        // held by the two functions having different names and doc-blocks, since
+        // the caller needs a live KalpaWindow.
+        assert!(should_block_settings_write(true, true));
+        assert!(!should_block_settings_write(true, false));
+        assert!(!should_block_settings_write(false, true));
+        assert!(!should_block_settings_write(false, false));
     }
 
     #[test]
