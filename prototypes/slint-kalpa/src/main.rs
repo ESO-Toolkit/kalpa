@@ -124,11 +124,16 @@ fn addon_write_eso_running_warning_active(ui: &KalpaWindow) -> bool {
 /// and the main app's `ensureEsoNotBlocking`. Failing closed would make settings
 /// imports impossible on a machine where process detection is broken, and
 /// flipping that direction is a decision for every caller at once, not this one.
-/// Call this immediately before the write, never at click time. Settings are
-/// applied after the addon install, which can run for minutes.
+/// Call this as late as you can, never at click time. Settings are applied after
+/// the addon install, which can run for minutes.
 fn settings_write_eso_running() -> bool {
     is_eso_running_blocking().unwrap_or(false)
 }
+
+/// Why a settings import stopped. Shared so the two checkpoints cannot drift.
+const ESO_RUNNING_SETTINGS_REFUSAL: &str =
+    "Close ESO before applying pack settings — the game rewrites SavedVariables from memory \
+     when you log out, which would discard them.";
 
 fn addon_write_status_message(message: impl AsRef<str>, eso_running: bool) -> String {
     let message = message.as_ref();
@@ -4288,11 +4293,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 None
             } else if settings_write_eso_running() {
                 Some(NativeSvImportResult {
-                    errors: vec![
-                        "Close ESO before applying pack settings — the game rewrites \
-                         SavedVariables from memory when you log out, which would discard them."
-                            .to_string(),
-                    ],
+                    errors: vec![ESO_RUNNING_SETTINGS_REFUSAL.to_string()],
                     ..Default::default()
                 })
             } else {
@@ -6674,6 +6675,29 @@ fn apply_imported_pack_settings_blocking(
     }
 
     let ctx = collect_import_saved_variable_identities(addons_dir);
+
+    // Second checkpoint: after the scan above, before any write below.
+    //
+    // Everything up to here runs before a single byte lands — creating the
+    // directory, then streaming every local `.lua` file to collect identities.
+    // On a large install that scan is not quick, and sampling only at the call
+    // site left all of it inside the window: launch ESO during the scan and the
+    // writes still went ahead.
+    //
+    // This does NOT close the race, and nothing can: ESO may start between any
+    // check and the rename that follows it. What it does is bound the exposure
+    // to the per-addon substitute/parse/backup work instead of including the
+    // scan. Stopping here is deliberate — checking before each individual
+    // rename would spawn a process lookup per addon to shrink a window that
+    // cannot reach zero, and the caller already checks first, so an
+    // already-running client costs no scan at all.
+    if settings_write_eso_running() {
+        return NativeSvImportResult {
+            errors: vec![ESO_RUNNING_SETTINGS_REFUSAL.to_string()],
+            ..Default::default()
+        };
+    }
+
     let mut result = NativeSvImportResult::default();
     let mut folders = settings.keys().cloned().collect::<Vec<_>>();
     folders.sort();

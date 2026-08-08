@@ -617,7 +617,16 @@ export function Packs({
     // here needs settings-specific dialog copy — reusing the addon wording,
     // which promises the change loads after /reloadui, is the misleading-message
     // bug that split was fixing — so it is a UX decision rather than a drive-by.
-    // Both holes are tracked as one follow-up on the PR.
+    // And it is a CLASS, not this site. Auditing all 14 `ensureEsoNotBlocking()`
+    // callers: eleven are genuine addon writes, where the preference belongs.
+    // Two touch SavedVariables and are silently ungated for a suppressed user —
+    // this one, and `handleRestore` in safety-center.tsx, whose comment says the
+    // gate "matters most here" while a suppressed user gets no gate at all. Both
+    // therefore assert a protection they do not have.
+    //
+    // That makes the shared hook the root, so the fix belongs there — an opt-in
+    // for SavedVariables-affecting callers — rather than patched per site. All
+    // of it is tracked as one follow-up on the PR.
     if (!(await ensureEsoNotBlocking())) {
       setInstalling(false);
       return;
