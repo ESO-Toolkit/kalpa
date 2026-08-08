@@ -19,11 +19,11 @@
  *
  * Isolated (throwaway, deleted afterwards):
  *   - the AddOns folder and its `.kalpa-metadata`
- *   - the WebView2 user-data folder
  *
  * NOT isolated — these are the developer's real, live files:
  *   - `settings.json` (sortMode, filterMode, autoUpdate, addonsPath, …)
  *   - the manifest-cache SQLite DB, uploader history, saved auth tokens
+ *   - the WebView2 profile (localStorage, IndexedDB, cookies)
  *   - anything else under the app-data dir
  *
  * Tauri resolves the app-data dir from the bundle identifier through the OS
@@ -31,13 +31,28 @@
  * `KALPA_ADDONS_DIR` redirects the AddOns folder. Full isolation needs a fixture
  * profile or a dedicated test binary — tracked as follow-up, not solved here.
  *
- * Two consequences, both of which have already bitten:
+ * The WebView2 profile belongs in that second list even though this runner sets
+ * `WEBVIEW2_USER_DATA_FOLDER`: that variable is only consulted when the
+ * `userDataFolder` passed to `CreateCoreWebView2EnvironmentWithOptions` is
+ * empty, and Tauri always fills it in from the bundle identifier. The directory
+ * this runner creates is therefore made, never used, and deleted. It is kept
+ * only so that wiring a real per-run profile later is a one-line change — but
+ * do not read it as a boundary that exists today.
+ *
+ * Three consequences, all of which have already bitten:
  *   1. Persisted settings CHANGE test behaviour. A developer whose last session
  *      ended on the Libs filter booted the sandbox with that filter live and the
  *      row-count assertions read 0. Specs must normalise the state they depend
  *      on — see `showAllAddons` in the lifecycle spec.
  *   2. Specs can WRITE to those files. Keep `@sandbox` specs off flows that
  *      persist app-level settings beyond what they normalise.
+ *   3. Every run EMPTIES the manifest-cache DB, with no spec doing anything to
+ *      cause it. The first scan of the sandbox resolves the cache from the real
+ *      app-data dir and calls `open_and_prune` with the folder names it found —
+ *      which at boot is none — and pruning against an empty list deletes every
+ *      row. This is a guaranteed side effect of pointing the app at an empty
+ *      folder, not something a spec opts into. The cache rebuilds on the next
+ *      real scan, so the cost is one slow scan, not lost data.
  *
  * Treat this as a strong local smoke test for destructive flows, not as a
  * containment boundary.

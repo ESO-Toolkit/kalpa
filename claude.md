@@ -164,11 +164,14 @@ not have). There are two flavours, and the difference matters:
   Two things it is **not**. It is not a CI gate — nothing runs it automatically
   on any platform, so a destructive regression can merge; treat it as local
   validation you run before a release, not a barrier. And its isolation is
-  **partial**: the AddOns folder and WebView2 profile are throwaway, but
-  `settings.json`, the manifest cache, uploader history and saved tokens are the
+  **partial**: only the AddOns folder is throwaway. `settings.json`, the manifest
+  cache, uploader history, saved tokens and the WebView2 profile are the
   developer's real files, because Tauri resolves the app-data dir from the bundle
-  identifier rather than any environment variable. The runner's header documents
-  the exact line. Specs must normalise persisted state they depend on.
+  identifier rather than any environment variable — including the WebView2
+  profile, which Tauri always passes explicitly, so `WEBVIEW2_USER_DATA_FOLDER`
+  is inert. Every run also empties the manifest-cache DB, because the first scan
+  of an empty sandbox prunes it against zero folder names. The runner's header
+  documents the exact line. Specs must normalise persisted state they depend on.
 
 **CI**
 

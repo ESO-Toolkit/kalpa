@@ -126,18 +126,26 @@ export async function waitForCdp(child, timeoutMs = 30_000) {
   // Say WHICH failure this was. "Timed out" alone cannot distinguish a WebView2
   // that never started (no desktop, no runtime) from one that started but never
   // bound the debug port — and those want completely different fixes.
+  // MACHINE-WIDE, not ours: `tasklist` has no parent filter here, so this counts
+  // WebView2 hosts belonging to the new Outlook, Teams, Widgets, any Electron or
+  // WebView2 app, and leftovers from earlier runs. Reported as a raw number and
+  // never branched on, because on any real dev box it is non-zero regardless of
+  // what Kalpa did — a "zero means WebView2 never initialized" branch was
+  // unreachable there, so the harness always asserted the other conclusion. That
+  // matters more than a log nit: ci.yml cites this diagnostic as the evidence for
+  // not retrying e2e in CI.
   const webviewCount = await countProcesses("msedgewebview2.exe");
   const listeners = await describePortListeners(9222);
   throw new Error(
     `Timed out waiting for ${CDP_ENDPOINT} after ${Math.round(timeoutMs / 1000)}s: ${lastError || "connection refused"}. ` +
       `Kalpa is ${child.exitCode === null ? "still running" : `gone (exit ${child.exitCode})`}; ` +
-      `msedgewebview2.exe processes: ${webviewCount}; ` +
+      `msedgewebview2.exe processes (machine-wide, not just Kalpa's): ${webviewCount}; ` +
       `listeners on 9222: ${listeners || "none"}. ` +
-      (webviewCount === 0
-        ? "Zero webview processes means WebView2 never initialized — no usable runtime or desktop session."
-        : listeners
-          ? "Something IS listening, so this is an address/protocol mismatch, not a dead app."
-          : "WebView2 is up but nothing bound the port — the debug argument never reached it.")
+      (listeners
+        ? "Something IS listening, so this is an address/protocol mismatch, not a dead app."
+        : "Nothing bound the port. Either the debug argument never reached WebView2, or " +
+          "WebView2 never initialized at all — the count above cannot tell these apart, " +
+          "since it includes every other app's webviews.")
   );
 }
 
