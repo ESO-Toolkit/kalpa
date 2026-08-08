@@ -6676,28 +6676,6 @@ fn apply_imported_pack_settings_blocking(
 
     let ctx = collect_import_saved_variable_identities(addons_dir);
 
-    // Second checkpoint: after the scan above, before any write below.
-    //
-    // Everything up to here runs before a single byte lands — creating the
-    // directory, then streaming every local `.lua` file to collect identities.
-    // On a large install that scan is not quick, and sampling only at the call
-    // site left all of it inside the window: launch ESO during the scan and the
-    // writes still went ahead.
-    //
-    // This does NOT close the race, and nothing can: ESO may start between any
-    // check and the rename that follows it. What it does is bound the exposure
-    // to the per-addon substitute/parse/backup work instead of including the
-    // scan. Stopping here is deliberate — checking before each individual
-    // rename would spawn a process lookup per addon to shrink a window that
-    // cannot reach zero, and the caller already checks first, so an
-    // already-running client costs no scan at all.
-    if settings_write_eso_running() {
-        return NativeSvImportResult {
-            errors: vec![ESO_RUNNING_SETTINGS_REFUSAL.to_string()],
-            ..Default::default()
-        };
-    }
-
     let mut result = NativeSvImportResult::default();
     let mut folders = settings.keys().cloned().collect::<Vec<_>>();
     folders.sort();
@@ -6744,6 +6722,26 @@ fn apply_imported_pack_settings_blocking(
             result.errors.push(format!(
                 "{folder}: settings file failed validation: {error}"
             ));
+            continue;
+        }
+
+        // Per addon, immediately before its first write.
+        //
+        // Checking once for the whole import left every addon after the first
+        // inside the window: a pack with twenty addons substitutes, parses and
+        // backs each one up in turn, and ESO can start part-way through. This is
+        // a `CreateToolhelp32Snapshot` process-table walk, not a spawned
+        // command, so paying it per addon costs single-digit milliseconds.
+        //
+        // It still cannot close the race — ESO may start between this line and
+        // the rename below — but the exposure is now one addon's work rather
+        // than a whole pack's. Addons already written stay written and are
+        // reported as applied; the rest are reported by name, so the user knows
+        // exactly what did and did not land.
+        if settings_write_eso_running() {
+            result
+                .errors
+                .push(format!("{folder}: {ESO_RUNNING_SETTINGS_REFUSAL}"));
             continue;
         }
 
