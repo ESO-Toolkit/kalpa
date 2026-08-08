@@ -1,7 +1,13 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import worker, { invalidatePackListCache } from "../src/index";
+import worker, {
+  invalidatePackListCache,
+  RESTORE_MAX_PAGE_SIZE,
+  SUBREQUESTS_PER_RECORD,
+  SUBREQUEST_CEILING,
+  SUBREQUEST_RESERVE,
+} from "../src/index";
 import { getPackIndex, putPack, putPackIndex, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
 import type { Env, PackIndex } from "../src/types";
@@ -960,10 +966,22 @@ describe("POST /admin/restore", () => {
           headers: { "CF-Connecting-IP": ip },
         })
       );
-    const first = await unauthed();
-    // Unauthenticated either way — the point is that it never gets the
-    // exemption, so it is still counted and eventually throttled.
-    expect([401, 429]).toContain(first.status);
+    // Accepting "401 or 429" proves nothing: handleRestore returns 401 as its
+    // first act, so an unauthenticated caller gets 401 whether or not the
+    // limiter counted it — the assertion passed identically with the auth check
+    // deleted from the exemption, which is the regression it exists to catch.
+    // WRITE_LIMITER allows 10 a minute, so drive past it and demand the 429.
+    // Only a request that was actually COUNTED can produce one.
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      statuses.push((await unauthed()).status);
+    }
+
+    expect(statuses[0]).toBe(401);
+    expect(
+      statuses,
+      `an unauthenticated /admin/ POST must still be rate-limited, got ${statuses.join(",")}`
+    ).toContain(429);
   });
 
   it("refuses a valid token paired with a cursor it was not issued for", async () => {
@@ -1136,13 +1154,27 @@ describe("POST /admin/restore", () => {
     const { total, token } = await first.json<{ total: number; token: string }>();
     expect(total).toBe(3);
 
+    // Mint the token this cursor WOULD have been issued with. Sending the
+    // page-1 token alongside `cursor: total` is refused by the token check
+    // first, so the range check below it never ran — deleting that check broke
+    // no test. The token is plaintext `key|created_at|total|cursor`, so an
+    // operator hitting the deliberately uninformative 409 can do this edit by
+    // hand; the range check is the only thing standing behind it.
+    const fields = token.split("|");
+    fields[fields.length - 1] = String(total);
+    const matchingToken = fields.join("|");
+
     const res = await call(
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
-        body: JSON.stringify({ cursor: total, token }),
+        body: JSON.stringify({ cursor: total, token: matchingToken }),
       })
     );
     expect(res.status).toBe(409);
+    // Assert on the distinguishing text, so a 409 from the token branch can
+    // never again be mistaken for one from the range branch.
+    const body = await res.json<{ error: string }>();
+    expect(body.error).toMatch(/is not inside this snapshot/);
 
     // Only the single record page 1 wrote is present, and the index is untouched.
     expect(await e.ESO_PACKS.get(`pack:${packs[2]!.id}`)).toBeNull();
@@ -1154,6 +1186,21 @@ describe("POST /admin/restore", () => {
     // Each published pack costs a KV put plus two D1 calls, and every binding
     // call counts against the same 1000-subrequest ceiling. A cap of 400 was
     // ~1200 — over the limit the paging exists to stay under.
+    //
+    // Seed our own snapshot. This case used to inherit whatever `backup:latest`
+    // the preceding test happened to leave behind, so running it alone, or
+    // inserting any test before it that clears that key, turned the 200 below
+    // into a 404 that has nothing to do with the page cap.
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-06-01T00:00:00.000Z",
+        packs: [],
+        packBodies: {},
+        votes: {},
+      })
+    );
+
     const oversized = await call(
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
@@ -1161,12 +1208,26 @@ describe("POST /admin/restore", () => {
       })
     );
     expect(oversized.status).toBe(200);
-    // The clamp is not observable in the response, so assert the invariant that
-    // matters directly: the largest page the endpoint will accept, times the
-    // worst-case per-record cost, must fit under the ceiling with room to spare.
-    const maxPage = 300;
-    const perRecord = 3;
-    expect(maxPage * perRecord).toBeLessThanOrEqual(1000 - 100);
+    // Assert against the MODULE's constants, not local copies. Writing
+    // `300 * 3 <= 900` here re-declared the very numbers under test, so the
+    // arithmetic could never disagree with the implementation.
+    //
+    // The load-bearing assertion is the first one: the cap must still be
+    // DERIVED from the budget. `derived * perRecord <= budget` alone is true by
+    // construction for any derived cap, so on its own it would catch nothing —
+    // what it cannot survive is someone replacing the derivation with a literal,
+    // which is exactly the "cap of 400 was ~1200 subrequests" bug this block
+    // exists for.
+    expect(RESTORE_MAX_PAGE_SIZE).toBe(
+      Math.floor((SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD)
+    );
+    expect(RESTORE_MAX_PAGE_SIZE * SUBREQUESTS_PER_RECORD).toBeLessThanOrEqual(
+      SUBREQUEST_CEILING - SUBREQUEST_RESERVE
+    );
+    // Not covered here: that the endpoint enforces the clamp end-to-end. Proving
+    // that needs a snapshot larger than the cap — 300+ records, each costing
+    // real binding calls — which is too slow for this suite. The 200 above only
+    // shows an oversized limit is accepted, not what it was reduced to.
   });
 
   it("restores an empty snapshot without tripping the cursor guard", async () => {

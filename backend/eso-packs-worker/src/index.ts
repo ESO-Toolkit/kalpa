@@ -813,14 +813,14 @@ async function handleScheduled(env: Env): Promise<void> {
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
  * is the failure the paging was added to avoid in the first place.
  */
-const SUBREQUESTS_PER_RECORD = 3;
+export const SUBREQUESTS_PER_RECORD = 3;
 /** Per-request subrequest ceiling on Workers Paid. */
-const SUBREQUEST_CEILING = 1000;
+export const SUBREQUEST_CEILING = 1000;
 /** Held back for the backup read, the fresh index read, the DO index swap and
  *  the cache purge — everything a page does outside the record loop. */
-const SUBREQUEST_RESERVE = 100;
+export const SUBREQUEST_RESERVE = 100;
 
-const RESTORE_MAX_PAGE_SIZE = Math.floor(
+export const RESTORE_MAX_PAGE_SIZE = Math.floor(
   (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
 );
 /** Default page: half the cap, so an operator who passes no limit stays well
@@ -921,7 +921,11 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
  * any pack in the current live index that predates or postdates the
  * snapshot entirely (so a pack created after the backup isn't deleted).
  *
- * Paged. A call restores at most `RESTORE_PAGE_SIZE` records and, if more
+ * Paged. A call restores `RESTORE_PAGE_SIZE` records by default, or up to
+ * `RESTORE_MAX_PAGE_SIZE` — twice that — when the caller passes `limit`. Quote
+ * the max, not the default, when reasoning about the subrequest budget: the
+ * default is deliberately half the cap, so checking headroom against it hides
+ * the factor of two an operator gets just by passing `limit`. If more records
  * remain, returns `{ done: false, cursor, token }` for the operator to pass
  * straight back in the next request body — the endpoint is a manual incident
  * tool, so a caller-driven cursor beats a background job that can fail
