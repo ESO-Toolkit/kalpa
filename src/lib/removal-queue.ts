@@ -209,23 +209,30 @@ export class RemovalQueue {
  * Generic over anything folder-keyed, so the addon list and its update rows
  * filter through the same rule.
  *
- * KNOWN LIMIT — the mask is read when the request RESOLVES, not when it is
- * issued, and it only knows about removals that are still queued or still
- * committing. A request issued BEFORE a removal and resolving AFTER that
- * removal has finished sees an empty queue and republishes the deleted addon.
- * `check_for_updates` is a per-addon network round trip, so on a large folder
- * it routinely outlives the 3s undo window plus the delete:
+ * KNOWN LIMIT — the mask is read when the request RESOLVES, not when the
+ * backend read the folder, and it only knows about removals that are still
+ * queued or still committing. So the race is between the backend ENUMERATING
+ * the addon and this code applying the result:
  *
- *     t=0.0  Refresh issues check_for_updates (backend reads Foo off disk)
+ *     t=0.0  Refresh issues scan_installed_addons
+ *     t=0.1  the backend enumerates the folder — Foo is still on disk
  *     t=0.2  user removes Foo — row hidden, entry queued
  *     t=3.2  timer fires, remove_addon starts (beginCommit masks Foo)
  *     t=3.3  delete succeeds, endCommit lifts the mask
- *     t=4.2  the check resolves — nothing is queued, nothing is committing,
- *            so Foo's update row goes back into `updateResults`
+ *     t=3.4  the scan resolves — nothing is queued, nothing is committing,
+ *            so Foo goes back into `addons`
+ *
+ * The window is "enumerated before the delete, delivered after it", NOT the
+ * whole request duration. A request that has not read the folder yet when the
+ * delete lands sees Foo already gone and reports nothing, which is why
+ * `check_for_updates` is the WEAKER example despite being the slower call: it
+ * fetches the full ESOUI filelist first and only then compares local metadata,
+ * so a delete during that fetch is simply reflected. Its exposure is the
+ * narrower gap between the metadata phase and delivery.
  *
  * The result is a phantom row and an inflated banner count until the next
  * scan. Closing it needs the queue to remember removals that COMPLETED after a
- * given request was issued — a generation stamped on each request and an
+ * given request enumerated — a generation stamped on each request and an
  * expiring log of finished removals — which is materially more machinery than
  * the mask itself, on a path where the wrong answer is a stale row rather than
  * a lost file. Deliberately not built here; tracked as a follow-up.
