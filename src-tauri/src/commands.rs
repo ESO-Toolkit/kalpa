@@ -8698,16 +8698,12 @@ pub struct SvImportResult {
 /// a literal `${WORLD:1}`, which ESO never reads, while the UI reported the
 /// addon as applied. Refusing is the honest answer: the user is told this
 /// addon's settings could not be mapped instead of silently getting nothing.
-fn has_unresolved_identity_placeholders(lua: &str) -> bool {
-    lua.contains("${ACCOUNT}")
-        || lua.contains("${ACCOUNT:")
-        || lua.contains("${ACCOUNT_NAME}")
-        || lua.contains("${ACCOUNT_NAME:")
-        || lua.contains("${CHAR:")
-        || lua.contains("${CHAR_ID:")
-        || lua.contains("${WORLD}")
-        || lua.contains("${WORLD:")
-}
+///
+/// Re-exported from `saved_variables::scrub` rather than defined here: the
+/// Slint sidecar reaches the same writer through the same shared scrub module,
+/// and while this guard was a private copy on each side only one of them
+/// learned about world tokens.
+use crate::saved_variables::scrub::has_unresolved_identity_placeholders;
 
 /// Import SavedVariables settings from a v2 `.esopack` file.
 ///
@@ -8723,7 +8719,15 @@ fn has_unresolved_identity_placeholders(lua: &str) -> bool {
 ///   `${ACCOUNT:N}` → `ctx.accounts[N]`
 ///   `${CHAR:N}` → `ctx.characters[N]`
 ///   `${CHAR_ID:N}` → `ctx.character_ids[N]`
-///   `${WORLD}` → first of `WELL_KNOWN_WORLDS` or `ctx.extra_worlds[0]`
+///
+/// World tokens do NOT follow that shape and are not documented here on
+/// purpose: they are allocated one-to-one by `substitute_placeholders`, whose
+/// three rules are the specification. Resolving `${WORLD}` to a canonical name
+/// the importer does not play on — which is what this doc-block used to
+/// describe — is the exact bug those rules exist to prevent, because it writes
+/// EU or PTS settings under `NA Megaserver` where ESO never looks.
+///
+/// A world token may therefore legitimately survive substitution.
 ///
 /// Placeholder tokens that have no mapping in `ctx` are rejected — the
 /// import is skipped and an error is returned for that addon.
@@ -8794,8 +8798,26 @@ pub async fn import_sv_settings(
             // Doing it safely needs substitution to work on parsed identity KEYS
             // rather than text — tracked as follow-up. Until then, refuse.
             if has_unresolved_identity_placeholders(&substituted) {
+                // Two audiences, and the advice only helps one of them. If Kalpa
+                // found no identities at all, launching ESO once is the fix. If
+                // it found some, this is a pack carrying a megaserver or account
+                // the importer simply does not have — telling that user to log
+                // into a server they do not own is advice they cannot act on,
+                // and since world tokens became one-to-one that is now the
+                // COMMON case rather than the rare one.
+                //
+                // The line continuations matter: a wrapped Rust literal without
+                // them carries its own indentation into the string, and this
+                // text is rendered verbatim in a toast.
+                let advice = if ctx.accounts.is_empty() && ctx.characters.is_empty() {
+                    "Launch ESO at least once on this machine so Kalpa can detect your \
+                     account and characters."
+                } else {
+                    "This pack's settings are stored under a megaserver or account you \
+                     don't have, so there is nowhere to put them."
+                };
                 errors.push(format!(
-                    "{folder}: settings could not be mapped to your account — this pack targets                      an identity or megaserver you don't have. Launch ESO at least once on the                      relevant megaserver so Kalpa knows who you are."
+                    "{folder}: settings could not be mapped to your account. {advice}"
                 ));
                 continue;
             }
