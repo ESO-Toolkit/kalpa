@@ -10278,7 +10278,17 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn unresolved_world_tokens_block_an_import() {
+    // Names the DETECTOR, not the import, because that is all it exercises.
+    //
+    // It called itself "block_an_import" while only asserting the helper, so
+    // deleting the guard from `import_sv_settings` would have left it green
+    // while the bug it describes returned. The import path itself is covered
+    // where the bug actually shipped: the sidecar's
+    // `pack_hub_esopack_settings_apply_refuses_an_unmappable_megaserver` drives
+    // the real writer end to end and was mutation-checked. Both writers now call
+    // this one shared helper, so what is untested here is the main app's single
+    // call site, not the rule.
+    fn unresolved_world_tokens_are_detected() {
         // Once world tokens map one-to-one, a leftover is a NORMAL outcome: a
         // two-megaserver export imported by a one-megaserver player deliberately
         // leaves the extra layer's token alone rather than clobbering a layer the
