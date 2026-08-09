@@ -1,8 +1,14 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import worker, { invalidatePackListCache } from "../src/index";
-import { putPack, putPackIndex, putVote } from "../src/kv";
+import worker, {
+  invalidatePackListCache,
+  RESTORE_MAX_PAGE_SIZE,
+  SUBREQUESTS_PER_RECORD,
+  SUBREQUEST_CEILING,
+  SUBREQUEST_RESERVE,
+} from "../src/index";
+import { getPackIndex, putPack, putPackIndex, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
 import type { Env, PackIndex } from "../src/types";
 import {
@@ -75,9 +81,7 @@ describe("unknown routes", () => {
 
 describe("OPTIONS preflight", () => {
   it("returns 204", async () => {
-    const res = await call(
-      new Request(BASE, { method: "OPTIONS" }),
-    );
+    const res = await call(new Request(BASE, { method: "OPTIONS" }));
     expect(res.status).toBe(204);
   });
 });
@@ -120,10 +124,7 @@ describe("GET /packs", () => {
 
   it("filters by search query", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("a", { title: "PvP Build" }),
-        makePack("b", { title: "Healing Setup" }),
-      ],
+      packs: [makePack("a", { title: "PvP Build" }), makePack("b", { title: "Healing Setup" })],
     });
 
     const res = await call(new Request(`${BASE}/packs?q=pvp`));
@@ -134,10 +135,7 @@ describe("GET /packs", () => {
 
   it("hides draft packs by default", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("pub", { status: "published" }),
-        makePack("drft", { status: "draft" }),
-      ],
+      packs: [makePack("pub", { status: "published" }), makePack("drft", { status: "draft" })],
     });
 
     // Use author filter to bypass CDN cache from prior tests
@@ -150,10 +148,7 @@ describe("GET /packs", () => {
 
   it("sorts by popular", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("low", { vote_count: 1 }),
-        makePack("high", { vote_count: 10 }),
-      ],
+      packs: [makePack("low", { vote_count: 1 }), makePack("high", { vote_count: 10 })],
     });
 
     const res = await call(new Request(`${BASE}/packs?sort=popular`));
@@ -190,10 +185,7 @@ describe("GET /packs", () => {
 
   it("sorts by installs by install_count desc", async () => {
     await putPackIndex(e, {
-      packs: [
-        makePack("few", { install_count: 2 }),
-        makePack("many", { install_count: 99 }),
-      ],
+      packs: [makePack("few", { install_count: 2 }), makePack("many", { install_count: 99 })],
     });
 
     const res = await call(new Request(`${BASE}/packs?sort=installs`));
@@ -247,7 +239,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody()),
-      }),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { id: string; title: string; author_id: string } }>();
@@ -266,7 +258,7 @@ describe("POST /packs", () => {
       new Request(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody()),
-      }),
+      })
     );
     expect(res.status).toBe(401);
   });
@@ -276,7 +268,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify({ title: "" }),
-      }),
+      })
     );
     expect(res.status).toBe(400);
   });
@@ -286,7 +278,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "My Cool Pack!" })),
-      }),
+      })
     );
     const body = await res.json<{ pack: { id: string } }>();
     expect(body.pack.id).toMatch(/^my-cool-pack/);
@@ -296,10 +288,8 @@ describe("POST /packs", () => {
     const res = await call(
       authedRequest(`${BASE}/packs`, {
         method: "POST",
-        body: JSON.stringify(
-          validPackBody({ title: "Published On Create", status: "published" }),
-        ),
-      }),
+        body: JSON.stringify(validPackBody({ title: "Published On Create", status: "published" })),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { id: string; status: string } }>();
@@ -315,7 +305,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "No Status Given" })),
-      }),
+      })
     );
     const body = await res.json<{ pack: { status: string } }>();
     expect(body.pack.status).toBe("draft");
@@ -326,7 +316,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "日本語のパック" })),
-      }),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { id: string } }>();
@@ -351,9 +341,9 @@ describe("POST /packs", () => {
                 junk: "x".repeat(2000),
               },
             ],
-          }),
+          })
         ),
-      }),
+      })
     );
     expect(res.status).toBe(201);
     const body = await res.json<{ pack: { addons: Record<string, unknown>[] } }>();
@@ -370,7 +360,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify({ junk: "x".repeat(300_000) }),
-      }),
+      })
     );
     expect(res.status).toBe(413);
   });
@@ -383,7 +373,7 @@ describe("POST /packs", () => {
       authedRequest(`${BASE}/packs`, {
         method: "POST",
         body: JSON.stringify(validPackBody({ title: "One Too Many" })),
-      }),
+      })
     );
     expect(res.status).toBe(429);
   });
@@ -420,9 +410,7 @@ describe("GET /packs/:id", () => {
 
   it("shows draft pack to authenticated user", async () => {
     await putPack(e, makePack("draft-visible", { status: "draft" }));
-    const res = await call(
-      authedRequest(`${BASE}/packs/draft-visible`),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/draft-visible`));
     expect(res.status).toBe(200);
   });
 
@@ -456,8 +444,7 @@ describe("GET /packs/:id", () => {
 // ── Anonymity enforcement ─────────────────────────────────────────
 
 describe("anonymous pack redaction", () => {
-  const anon = () =>
-    makePack("anon-pack", { is_anonymous: true, title: "Secret Pack" });
+  const anon = () => makePack("anon-pack", { is_anonymous: true, title: "Secret Pack" });
   const named = () => makePack("named-pack");
 
   it("redacts author fields of anonymous packs in the list", async () => {
@@ -479,9 +466,7 @@ describe("anonymous pack redaction", () => {
   it("excludes anonymous packs from ?author= for unauthenticated callers", async () => {
     await putPackIndex(e, { packs: [anon(), named()] });
 
-    const res = await call(
-      new Request(`${BASE}/packs?author=${TEST_USER.id}`),
-    );
+    const res = await call(new Request(`${BASE}/packs?author=${TEST_USER.id}`));
     const body = await res.json<{ packs: Array<{ id: string }> }>();
     expect(body.packs.map((p) => p.id)).toEqual(["named-pack"]);
   });
@@ -495,9 +480,7 @@ describe("anonymous pack redaction", () => {
       return originalFetch(input);
     });
 
-    const res = await call(
-      authedRequest(`${BASE}/packs?author=${TEST_USER.id}`),
-    );
+    const res = await call(authedRequest(`${BASE}/packs?author=${TEST_USER.id}`));
     const body = await res.json<{ packs: Array<{ id: string }> }>();
     expect(body.packs.map((p) => p.id)).toEqual(["named-pack"]);
   });
@@ -505,9 +488,7 @@ describe("anonymous pack redaction", () => {
   it("shows the author their own anonymous packs with real fields via ?author=", async () => {
     await putPackIndex(e, { packs: [anon(), named()] });
 
-    const res = await call(
-      authedRequest(`${BASE}/packs?author=${TEST_USER.id}`),
-    );
+    const res = await call(authedRequest(`${BASE}/packs?author=${TEST_USER.id}`));
     const body = await res.json<{
       packs: Array<{ id: string; author_name: string; author_id: string }>;
     }>();
@@ -553,7 +534,7 @@ describe("PUT /packs/:id", () => {
       authedRequest(`${BASE}/packs/update-me`, {
         method: "PUT",
         body: JSON.stringify(validPackBody({ title: "Updated Title" })),
-      }),
+      })
     );
     expect(res.status).toBe(200);
     const body = await res.json<{ pack: { title: string } }>();
@@ -561,16 +542,13 @@ describe("PUT /packs/:id", () => {
   });
 
   it("rejects update by different user", async () => {
-    await putPack(
-      e,
-      makePack("not-mine", { author_id: String(OTHER_USER.id) }),
-    );
+    await putPack(e, makePack("not-mine", { author_id: String(OTHER_USER.id) }));
 
     const res = await call(
       authedRequest(`${BASE}/packs/not-mine`, {
         method: "PUT",
         body: JSON.stringify(validPackBody()),
-      }),
+      })
     );
     expect(res.status).toBe(403);
   });
@@ -584,30 +562,21 @@ describe("DELETE /packs/:id", () => {
     await putPack(e, pack);
     await putPackIndex(e, { packs: [pack] });
 
-    const res = await call(
-      authedRequest(`${BASE}/packs/delete-me`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/delete-me`, { method: "DELETE" }));
     expect(res.status).toBe(200);
     const body = await res.json<{ ok: boolean }>();
     expect(body.ok).toBe(true);
   });
 
   it("rejects delete by different user", async () => {
-    await putPack(
-      e,
-      makePack("not-mine-del", { author_id: String(OTHER_USER.id) }),
-    );
+    await putPack(e, makePack("not-mine-del", { author_id: String(OTHER_USER.id) }));
 
-    const res = await call(
-      authedRequest(`${BASE}/packs/not-mine-del`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/not-mine-del`, { method: "DELETE" }));
     expect(res.status).toBe(403);
   });
 
   it("returns 404 for nonexistent pack", async () => {
-    const res = await call(
-      authedRequest(`${BASE}/packs/ghost`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/ghost`, { method: "DELETE" }));
     expect(res.status).toBe(404);
   });
 
@@ -617,9 +586,7 @@ describe("DELETE /packs/:id", () => {
     await putPackIndex(e, { packs: [pack] });
     await putVote(e, "recyclable", String(TEST_USER.id));
 
-    const res = await call(
-      authedRequest(`${BASE}/packs/recyclable`, { method: "DELETE" }),
-    );
+    const res = await call(authedRequest(`${BASE}/packs/recyclable`, { method: "DELETE" }));
     expect(res.status).toBe(200);
 
     expect(await e.ESO_PACKS.get(`vote:recyclable:${TEST_USER.id}`)).toBeNull();
@@ -635,16 +602,12 @@ describe("POST /packs/:id/vote", () => {
     await putPack(e, pack);
     await putPackIndex(e, { packs: [pack] });
 
-    const vote1 = await call(
-      authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }),
-    );
+    const vote1 = await call(authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }));
     const body1 = await vote1.json<{ voted: boolean; voteCount: number }>();
     expect(body1.voted).toBe(true);
     expect(body1.voteCount).toBe(1);
 
-    const vote2 = await call(
-      authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }),
-    );
+    const vote2 = await call(authedRequest(`${BASE}/packs/votable/vote`, { method: "POST" }));
     const body2 = await vote2.json<{ voted: boolean; voteCount: number }>();
     expect(body2.voted).toBe(false);
     expect(body2.voteCount).toBe(0);
@@ -659,23 +622,17 @@ describe("POST /packs/:id/vote", () => {
       return originalFetch(input);
     });
 
-    const res = await call(
-      new Request(`${BASE}/packs/noauth-vote/vote`, { method: "POST" }),
-    );
+    const res = await call(new Request(`${BASE}/packs/noauth-vote/vote`, { method: "POST" }));
     expect(res.status).toBe(401);
   });
 
   it("404s on a draft pack instead of revealing it via 401", async () => {
     await putPack(e, makePack("draft-vote", { status: "draft" }));
 
-    const anonymous = await call(
-      new Request(`${BASE}/packs/draft-vote/vote`, { method: "POST" }),
-    );
+    const anonymous = await call(new Request(`${BASE}/packs/draft-vote/vote`, { method: "POST" }));
     expect(anonymous.status).toBe(404);
 
-    const authed = await call(
-      authedRequest(`${BASE}/packs/draft-vote/vote`, { method: "POST" }),
-    );
+    const authed = await call(authedRequest(`${BASE}/packs/draft-vote/vote`, { method: "POST" }));
     expect(authed.status).toBe(404);
   });
 
@@ -690,9 +647,7 @@ describe("POST /packs/:id/vote", () => {
 
     // vote, unvote, vote, unvote — the record is gone and the counter is back
     // to where it started, regardless of how stale the KV read was.
-    const final = await call(
-      authedRequest(`${BASE}/packs/rapid-toggle/vote`, { method: "POST" }),
-    );
+    const final = await call(authedRequest(`${BASE}/packs/rapid-toggle/vote`, { method: "POST" }));
     const body = await final.json<{ voted: boolean; voteCount: number }>();
     expect(body.voted).toBe(true);
     expect(body.voteCount).toBe(1);
@@ -711,7 +666,7 @@ describe("POST /packs/:id/install", () => {
       new Request(`${BASE}/packs/installable/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "1.2.3.4" },
-      }),
+      })
     );
     expect(res.status).toBe(200);
     const body = await res.json<{ installCount: number }>();
@@ -727,14 +682,14 @@ describe("POST /packs/:id/install", () => {
       new Request(`${BASE}/packs/rate-limited/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "5.6.7.8" },
-      }),
+      })
     );
 
     const res2 = await call(
       new Request(`${BASE}/packs/rate-limited/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "5.6.7.8" },
-      }),
+      })
     );
     const body2 = await res2.json<{ installCount: number }>();
     // Second call returns current count without incrementing
@@ -750,14 +705,11 @@ describe("POST /packs/:id/install", () => {
       new Request(`${BASE}/packs/draft-install/install`, {
         method: "POST",
         headers: { "CF-Connecting-IP": "9.9.9.9" },
-      }),
+      })
     );
     expect(res.status).toBe(404);
 
-    const stored = await e.ESO_PACKS.get<{ install_count: number }>(
-      "pack:draft-install",
-      "json",
-    );
+    const stored = await e.ESO_PACKS.get<{ install_count: number }>("pack:draft-install", "json");
     expect(stored!.install_count).toBe(0);
   });
 });
@@ -766,9 +718,7 @@ describe("POST /packs/:id/install", () => {
 
 describe("POST /admin/seed", () => {
   it("seeds with valid API key", async () => {
-    const res = await call(
-      apiKeyRequest(`${BASE}/admin/seed`, { method: "POST" }),
-    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/seed`, { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json<{ ok: boolean; seeded: number }>();
     expect(body.ok).toBe(true);
@@ -776,9 +726,7 @@ describe("POST /admin/seed", () => {
   });
 
   it("rejects without API key", async () => {
-    const res = await call(
-      new Request(`${BASE}/admin/seed`, { method: "POST" }),
-    );
+    const res = await call(new Request(`${BASE}/admin/seed`, { method: "POST" }));
     expect(res.status).toBe(401);
   });
 });
@@ -787,17 +735,13 @@ describe("POST /admin/seed", () => {
 
 describe("POST /admin/restore", () => {
   it("rejects without API key", async () => {
-    const res = await call(
-      new Request(`${BASE}/admin/restore`, { method: "POST" }),
-    );
+    const res = await call(new Request(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(401);
   });
 
   it("404s when the requested backup snapshot doesn't exist", async () => {
     await e.ESO_PACKS.delete("backup:latest");
-    const res = await call(
-      apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }),
-    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(404);
   });
 
@@ -821,9 +765,7 @@ describe("POST /admin/restore", () => {
     await e.ESO_PACKS.delete(`pack:${pack.id}`);
     await putPackIndex(e, { packs: [] });
 
-    const res = await call(
-      apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }),
-    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json<{
       ok: boolean;
@@ -837,10 +779,580 @@ describe("POST /admin/restore", () => {
     const restoredPack = await e.ESO_PACKS.get(`pack:${pack.id}`, "json");
     expect(restoredPack).toEqual(pack);
 
-    const restoredVote = await e.ESO_PACKS.get(
-      `vote:${pack.id}:${TEST_USER.id}`,
-    );
+    const restoredVote = await e.ESO_PACKS.get(`vote:${pack.id}:${TEST_USER.id}`);
     expect(restoredVote).toBeTruthy();
+  });
+
+  it("pages a snapshot larger than one call and resumes from the cursor", async () => {
+    // A restore used to walk the whole snapshot in one request, two subrequests
+    // per pack, strictly serialized — so it fell over at exactly the corpus size
+    // where an incident recovery matters, with no way to resume.
+    const packs = Array.from({ length: 5 }, (_, i) => makePack(`paged-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2 }),
+      })
+    );
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<{
+      done: boolean;
+      cursor: number;
+      token: string;
+      total: number;
+      restored_packs: number;
+    }>();
+    expect(firstBody.done).toBe(false);
+    expect(firstBody.cursor).toBe(2);
+    expect(firstBody.total).toBe(5);
+    expect(firstBody.restored_packs).toBe(2);
+    expect(firstBody.token).toBeTruthy();
+
+    // The index must NOT have been swapped yet: publishing a half-restored
+    // corpus would be worse than the drift the restore is repairing.
+    const midIndex = await getPackIndex(e, { fresh: true });
+    expect(midIndex?.packs ?? []).toHaveLength(0);
+    expect(await e.ESO_PACKS.get(`pack:${packs[0]!.id}`)).toBeTruthy();
+    expect(await e.ESO_PACKS.get(`pack:${packs[4]!.id}`)).toBeNull();
+
+    let cursor: number | null = firstBody.cursor;
+    let token = firstBody.token;
+    let guard = 0;
+    while (cursor !== null && guard++ < 10) {
+      const res = await call(
+        apiKeyRequest(`${BASE}/admin/restore`, {
+          method: "POST",
+          body: JSON.stringify({ limit: 2, cursor, token }),
+        })
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json<{ done: boolean; cursor: number | null; token: string }>();
+      cursor = body.done ? null : body.cursor;
+      if (body.token) token = body.token;
+    }
+
+    // Only now is the whole corpus live and indexed.
+    for (const pack of packs) {
+      expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
+    }
+    const finalIndex = await getPackIndex(e, { fresh: true });
+    expect((finalIndex?.packs ?? []).map((p) => p.id).sort()).toEqual(
+      packs.map((p) => p.id).sort()
+    );
+  });
+
+  it("refuses a cursor issued against a different snapshot", async () => {
+    // The daily cron overwrites backup:latest at midnight UTC, so a paged
+    // restore straddling midnight silently changes snapshots mid-run. Applying
+    // the old offset to the new work list skips every record before it — and
+    // the final page would still publish an index listing packs whose bodies
+    // were never written.
+    const packs = Array.from({ length: 4 }, (_, i) => makePack(`stale-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-01-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2 }),
+      })
+    );
+    const { cursor, token } = await first.json<{ cursor: number; token: string }>();
+
+    // The snapshot is replaced underneath, exactly as the cron would.
+    const replacement = Array.from({ length: 4 }, (_, i) => makePack(`fresh-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-01-02T00:00:00.000Z",
+        packs: replacement,
+        packBodies: Object.fromEntries(replacement.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+
+    const resumed = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2, cursor, token }),
+      })
+    );
+    expect(resumed.status).toBe(409);
+
+    // Nothing from the replacement snapshot was written, and the index was not
+    // republished — a refused resume must leave the corpus exactly as it was.
+    expect(await e.ESO_PACKS.get(`pack:${replacement[0]!.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("does not rate-limit an authenticated admin restore across many pages", async () => {
+    // WRITE_LIMITER allows 10 writes/minute per IP and runs before routing, so a
+    // paged restore — one POST per page — used to 429 partway through and never
+    // reach the final page that swaps the index. That breaks exactly the
+    // large-corpus recovery the paging exists for.
+    const packs = Array.from({ length: 14 }, (_, i) => makePack(`limiter-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-07-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const ip = "203.0.113.7";
+    const page = (body: Record<string, unknown>) =>
+      call(
+        apiKeyRequest(`${BASE}/admin/restore`, {
+          method: "POST",
+          headers: { "CF-Connecting-IP": ip },
+          body: JSON.stringify(body),
+        })
+      );
+
+    // 14 records at one per page = 14 sequential POSTs, comfortably past the
+    // 10/minute write limit.
+    let res = await page({ limit: 1 });
+    expect(res.status).toBe(200);
+    let state = await res.json<{ done: boolean; cursor: number; token: string }>();
+    let pages = 1;
+    while (!state.done && pages < 30) {
+      res = await page({ limit: 1, cursor: state.cursor, token: state.token });
+      expect(res.status, `page ${pages + 1} was rejected`).toBe(200);
+      state = await res.json<{ done: boolean; cursor: number; token: string }>();
+      pages++;
+    }
+    expect(state.done, "restore never completed").toBe(true);
+    expect(pages).toBeGreaterThan(10);
+
+    const index = await getPackIndex(e, { fresh: true });
+    expect((index?.packs ?? []).length).toBe(packs.length);
+  });
+
+  it("still rate-limits an admin path without a valid key", async () => {
+    // The exemption is for AUTHENTICATED admins only — it must not become a
+    // way for an anonymous caller to sidestep the limiter by path prefix.
+    const ip = "203.0.113.9";
+    const unauthed = () =>
+      call(
+        new Request(`${BASE}/admin/restore`, {
+          method: "POST",
+          headers: { "CF-Connecting-IP": ip },
+        })
+      );
+    // Accepting "401 or 429" proves nothing: handleRestore returns 401 as its
+    // first act, so an unauthenticated caller gets 401 whether or not the
+    // limiter counted it — the assertion passed identically with the auth check
+    // deleted from the exemption, which is the regression it exists to catch.
+    // WRITE_LIMITER allows 10 a minute, so drive past it and demand the 429.
+    // Only a request that was actually COUNTED can produce one.
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      statuses.push((await unauthed()).status);
+    }
+
+    expect(statuses[0]).toBe(401);
+    expect(
+      statuses,
+      `an unauthenticated /admin/ POST must still be rate-limited, got ${statuses.join(",")}`
+    ).toContain(429);
+  });
+
+  it("refuses a valid token paired with a cursor it was not issued for", async () => {
+    // The token used to fingerprint only the snapshot, so it validated ANY
+    // in-range cursor. A mistyped offset — or a 409 retried with the
+    // expected_token the handler used to echo back — could jump the middle of
+    // the corpus and still publish an index for bodies never replayed.
+    const packs = Array.from({ length: 6 }, (_, i) => makePack(`skip-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-05-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 2 }),
+      })
+    );
+    const { cursor, token } = await first.json<{ cursor: number; token: string }>();
+    expect(cursor).toBe(2);
+
+    // Same snapshot, genuine token, but jump to the last page.
+    const skipped = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: 4, token, limit: 2 }),
+      })
+    );
+    expect(skipped.status).toBe(409);
+    // And the 409 must not hand back a token that would make the retry work.
+    const body = await skipped.json<Record<string, unknown>>();
+    expect(body.expected_token).toBeUndefined();
+
+    // Records 2..3 were never written and the index was never published.
+    expect(await e.ESO_PACKS.get(`pack:${packs[3]!.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("resumes a DATED snapshot from cursor and token alone", async () => {
+    // The paged response carries cursor and token but not `date`, and the docs
+    // say to pass the response straight back — so a dated restore used to fall
+    // through to backup:latest on page 2 and 409 against its own token. A dated
+    // multi-page restore is exactly the incident-recovery case.
+    const packs = Array.from({ length: 4 }, (_, i) => makePack(`dated-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:2026-02-14",
+      JSON.stringify({
+        created_at: "2026-02-14T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    // A DIFFERENT latest snapshot, so falling through to it is unmistakable.
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-06-01T00:00:00.000Z",
+        packs: [makePack("wrong-snapshot")],
+        packBodies: { "wrong-snapshot": makePack("wrong-snapshot") },
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await e.ESO_PACKS.delete("pack:wrong-snapshot");
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ date: "2026-02-14", limit: 2 }),
+      })
+    );
+    expect(first.status).toBe(200);
+    let { cursor, token, done } = await first.json<{
+      cursor: number;
+      token: string;
+      done: boolean;
+    }>();
+    expect(done).toBe(false);
+
+    // Only cursor + token, exactly what the response hands back.
+    let guard = 0;
+    while (!done && guard++ < 10) {
+      const res = await call(
+        apiKeyRequest(`${BASE}/admin/restore`, {
+          method: "POST",
+          body: JSON.stringify({ cursor, token, limit: 2 }),
+        })
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json<{ done: boolean; cursor: number; token: string }>();
+      done = body.done;
+      if (!done) {
+        cursor = body.cursor;
+        token = body.token;
+      }
+    }
+    expect(done).toBe(true);
+
+    // The dated snapshot restored, and the unrelated latest one did not leak in.
+    for (const pack of packs) {
+      expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
+    }
+    expect(await e.ESO_PACKS.get("pack:wrong-snapshot")).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect((index?.packs ?? []).map((p) => p.id).sort()).toEqual(packs.map((p) => p.id).sort());
+  });
+
+  it("advances even when given a fractional limit", async () => {
+    // 0 < limit < 1 floored to 0, so end === start: the page wrote nothing and
+    // returned the same cursor with done:false — a caller looping until done
+    // would spin forever.
+    const packs = Array.from({ length: 2 }, (_, i) => makePack(`frac-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-04-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 0.5 }),
+      })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json<{ done: boolean; cursor: number; restored_packs: number }>();
+    expect(body.restored_packs, "a fractional limit restored nothing").toBeGreaterThan(0);
+    expect(body.done ? Infinity : body.cursor, "cursor did not advance").toBeGreaterThan(0);
+  });
+
+  it("refuses a cursor equal to the total, which writes nothing but republishes", async () => {
+    // `total` and `cursor` sit next to each other in the response, and copying
+    // the wrong one produced an empty page that fell straight into the
+    // final-page branch — replacing the index for records it never wrote.
+    const packs = Array.from({ length: 3 }, (_, i) => makePack(`at-total-${i}`));
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-03-01T00:00:00.000Z",
+        packs,
+        packBodies: Object.fromEntries(packs.map((p) => [p.id, p])),
+        votes: {},
+      })
+    );
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 1 }),
+      })
+    );
+    const { total, token } = await first.json<{ total: number; token: string }>();
+    expect(total).toBe(3);
+
+    // Mint the token this cursor WOULD have been issued with. Sending the
+    // page-1 token alongside `cursor: total` is refused by the token check
+    // first, so the range check below it never ran — deleting that check broke
+    // no test. The token is plaintext `key|created_at|total|cursor`, so an
+    // operator hitting the deliberately uninformative 409 can do this edit by
+    // hand; the range check is the only thing standing behind it.
+    const fields = token.split("|");
+    fields[fields.length - 1] = String(total);
+    const matchingToken = fields.join("|");
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: total, token: matchingToken }),
+      })
+    );
+    expect(res.status).toBe(409);
+    // Assert on the distinguishing text, so a 409 from the token branch can
+    // never again be mistaken for one from the range branch.
+    const body = await res.json<{ error: string }>();
+    expect(body.error).toMatch(/is not inside this snapshot/);
+
+    // Only the single record page 1 wrote is present, and the index is untouched.
+    expect(await e.ESO_PACKS.get(`pack:${packs[2]!.id}`)).toBeNull();
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("keeps the page cap under the Worker subrequest ceiling", async () => {
+    // Each published pack costs a KV put plus two D1 calls, and every binding
+    // call counts against the same 1000-subrequest ceiling. A cap of 400 was
+    // ~1200 — over the limit the paging exists to stay under.
+    //
+    // Seed a snapshot LARGER than the cap, out of vote records. An earlier
+    // version of this test seeded an empty one, which proved nothing: with
+    // `work.length === 0` the page ends at 0 whether `clampLimit` is honoured or
+    // deleted outright, so a regression that stopped clamping real pages passed
+    // here and would have failed only during a production restore.
+    //
+    // Votes rather than packs because they are the cheapest record the work list
+    // accepts — one `restoreVote` each, no pack body, no D1 tag batch — which
+    // keeps a 301-record snapshot fast enough for a unit suite.
+    const overCap = RESTORE_MAX_PAGE_SIZE + 1;
+    const votes: Record<string, unknown> = {};
+    for (let i = 0; i < overCap; i++) {
+      votes[`cap-pack-${i}:cap-user-${i}`] = {
+        packId: `cap-pack-${i}`,
+        userId: `cap-user-${i}`,
+        votedAt: "2026-06-01T00:00:00.000Z",
+      };
+    }
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-06-01T00:00:00.000Z",
+        packs: [],
+        packBodies: {},
+        votes,
+      })
+    );
+
+    const oversized = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 100000 }),
+      })
+    );
+    expect(oversized.status).toBe(200);
+
+    // The clamp, observed through the endpoint: an absurd limit must come back
+    // having advanced exactly one capped page, with work still outstanding.
+    const body = await oversized.json<{ done: boolean; cursor: number; total: number }>();
+    expect(body.total).toBe(overCap);
+    expect(body.done).toBe(false);
+    expect(body.cursor).toBe(RESTORE_MAX_PAGE_SIZE);
+
+    // And the budget the cap is derived from still holds. Note this pair is
+    // weaker than it looks on its own — `derived * perRecord <= budget` is true
+    // by construction — so the load-bearing half is that the cap is still
+    // DERIVED rather than a literal, which is the "cap of 400 was ~1200
+    // subrequests" bug this block exists for.
+    expect(RESTORE_MAX_PAGE_SIZE).toBe(
+      Math.floor((SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD)
+    );
+    expect(RESTORE_MAX_PAGE_SIZE * SUBREQUESTS_PER_RECORD).toBeLessThanOrEqual(
+      SUBREQUEST_CEILING - SUBREQUEST_RESERVE
+    );
+
+    // Clean up after ourselves. This case really does restore 300 votes, and
+    // `restoreVote` writes TWO keys each — `vote:` and the `user-votes:` index —
+    // so leaving them behind would seed 600 keys that any later case listing
+    // votes or snapshotting the corpus would silently inherit. This file has no
+    // per-test storage isolation; the previous version of this test inherited
+    // another case's snapshot, which is the same class of problem pointing the
+    // other way.
+    await Promise.all(
+      Array.from({ length: RESTORE_MAX_PAGE_SIZE }, (_, i) =>
+        Promise.all([
+          e.ESO_PACKS.delete(`vote:cap-pack-${i}:cap-user-${i}`),
+          e.ESO_PACKS.delete(`user-votes:cap-user-${i}:cap-pack-${i}`),
+        ])
+      )
+    );
+    await e.ESO_PACKS.delete("backup:latest");
+    // 30s, not the 5s default: this case restores 300 vote records for real and
+    // then deletes the 600 keys they wrote. That is the price of proving the
+    // clamp through the endpoint instead of asserting arithmetic, and the suite
+    // is already known to flake against a 5s budget on CI.
+  }, 30_000);
+
+  it("restores an empty snapshot without tripping the cursor guard", async () => {
+    // start === 0 is always legitimate, including when there is nothing to do.
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: "2026-03-02T00:00:00.000Z",
+        packs: [],
+        packBodies: {},
+        votes: {},
+      })
+    );
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
+    expect(res.status).toBe(200);
+    const body = await res.json<{ done: boolean; restored_packs: number }>();
+    expect(body.done).toBe(true);
+    expect(body.restored_packs).toBe(0);
+  });
+
+  it("refuses a cursor past the end instead of publishing an unwritten index", async () => {
+    // Clamping an out-of-range cursor to the end made start === end: the call
+    // wrote nothing, then took the final-page branch and replaced the index
+    // with the whole snapshot anyway.
+    const pack = makePack("past-end");
+    const created = new Date().toISOString();
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: created,
+        packs: [pack],
+        packBodies: { [pack.id]: pack },
+        votes: {},
+      })
+    );
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    // Mint the token this cursor WOULD have been issued with, exactly as the
+    // equal-to-total case does. `token: "anything"` was answered by the
+    // cursor/token mismatch branch above the range check, so the range guard was
+    // never reached and deleting it broke nothing. The dangerous input is a
+    // MATCHING token for an out-of-range cursor — a one-character edit on a
+    // plaintext token, and the natural move for an operator who hit the
+    // deliberately uninformative 409.
+    // Built by hand, NOT from a real continuation. Calling the endpoint first to
+    // obtain a token would restore this one-record snapshot outright and publish
+    // the index, destroying the very thing the assertions below check. The token
+    // is plaintext `backupKey|created_at|total|cursor`, which is the whole point
+    // — an operator can produce this with a text editor.
+    const forged = `backup:latest|${created}|1|9999`;
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: 9999, token: forged }),
+      })
+    );
+    expect(res.status).toBe(409);
+    // The distinguishing text, so a 409 from the token branch can never be
+    // mistaken for one from the range branch again.
+    const body = await res.json<{ error: string }>();
+    expect(body.error).toMatch(/is not inside this snapshot/);
+    const index = await getPackIndex(e, { fresh: true });
+    expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("ignores a nonsense cursor rather than skipping records", async () => {
+    const pack = makePack("cursor-guard");
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs: [pack],
+        packBodies: { [pack.id]: pack },
+        votes: {},
+      })
+    );
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ cursor: -5 }),
+      })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json<{ done: boolean; restored_packs: number }>();
+    expect(body.done).toBe(true);
+    expect(body.restored_packs).toBe(1);
+    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
   });
 });
 
@@ -879,7 +1391,7 @@ describe("DELETE /account", () => {
             votedAt: "2025-01-01T00:00:00.000Z",
           },
         },
-      }),
+      })
     );
 
     await putPack(e, mine);

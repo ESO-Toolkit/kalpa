@@ -51,8 +51,11 @@ jobs:
       - name: Rust format check
         run: cargo fmt --check --manifest-path prototypes/slint-kalpa/Cargo.toml
 
+      # --all-targets so the #[cfg(test)] code is linted too. Without it the test
+      # module accumulated 20 warnings CI could not see, and a lint regression
+      # there is invisible until someone runs clippy locally.
       - name: Rust clippy
-        run: cargo clippy --manifest-path prototypes/slint-kalpa/Cargo.toml -- -D warnings
+        run: cargo clippy --manifest-path prototypes/slint-kalpa/Cargo.toml --all-targets -- -D warnings
 
       - name: Rust tests
         run: cargo test --manifest-path prototypes/slint-kalpa/Cargo.toml

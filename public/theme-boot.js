@@ -74,7 +74,7 @@
     "--brand-cyan-readable": "#4dc2e6",
     "--addon-disabled": "#6b7280",
     "--status-error": "#f87171",
-    "--status-error-strong": "#ef4444"
+    "--status-error-strong": "#ef4444",
   };
 
   var root = document.documentElement;

@@ -597,6 +597,36 @@ export function Packs({
     setInstalling(true);
     // The gate covers the settings-only path too: import_sv_settings rewrites
     // SavedVariables, which a running game overwrites again at logout.
+    //
+    // With ONE hole, deliberately left for now: `ensureEsoNotBlocking` returns
+    // true without prompting when `suppressEsoRunningWarning` is set. That
+    // preference is the user's opt-out from the ADDON reminder — the one about
+    // needing /reloadui — so dismissing it silently becomes permission to write
+    // SavedVariables under a running client, where the import is discarded when
+    // ESO rewrites them from memory at logout. The user is told it applied.
+    //
+    // And a second, independent hole: this check runs BEFORE the addon install
+    // below, while `import_sv_settings` runs after it. A user who closes ESO,
+    // clicks import, then launches the game while addons are downloading gets
+    // the settings write anyway, because the answer was sampled minutes
+    // earlier. The sidecar had the same shape and now re-checks immediately
+    // before its write.
+    //
+    // The sidecar's equivalent path was split (see `settings_write_eso_running`)
+    // so the preference no longer governs its settings write. Doing the same
+    // here needs settings-specific dialog copy — reusing the addon wording,
+    // which promises the change loads after /reloadui, is the misleading-message
+    // bug that split was fixing — so it is a UX decision rather than a drive-by.
+    // And it is a CLASS, not this site. Auditing all 14 `ensureEsoNotBlocking()`
+    // callers: eleven are genuine addon writes, where the preference belongs.
+    // Two touch SavedVariables and are silently ungated for a suppressed user —
+    // this one, and `handleRestore` in safety-center.tsx, whose comment says the
+    // gate "matters most here" while a suppressed user gets no gate at all. Both
+    // therefore assert a protection they do not have.
+    //
+    // That makes the shared hook the root, so the fix belongs there — an opt-in
+    // for SavedVariables-affecting callers — rather than patched per site. All
+    // of it is tracked as one follow-up on the PR.
     if (!(await ensureEsoNotBlocking())) {
       setInstalling(false);
       return;

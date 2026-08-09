@@ -8750,14 +8750,23 @@ pub struct SvImportResult {
     pub errors: Vec<String>,
 }
 
-fn has_unresolved_identity_placeholders(lua: &str) -> bool {
-    lua.contains("${ACCOUNT}")
-        || lua.contains("${ACCOUNT:")
-        || lua.contains("${ACCOUNT_NAME}")
-        || lua.contains("${ACCOUNT_NAME:")
-        || lua.contains("${CHAR:")
-        || lua.contains("${CHAR_ID:")
-}
+/// Does `lua` still carry an identity placeholder the importer could not resolve?
+///
+/// World tokens count. They did not used to: every world collapsed to a single
+/// `${WORLD}` that was always substituted, so an unresolved one was impossible.
+/// Now that world tokens are mapped one-to-one, a leftover is a NORMAL outcome —
+/// a two-megaserver export imported by a one-megaserver player deliberately
+/// leaves the extra layer's token alone rather than clobbering a layer the
+/// importer does use. Writing that file anyway produced SavedVariables keyed on
+/// a literal `${WORLD:1}`, which ESO never reads, while the UI reported the
+/// addon as applied. Refusing is the honest answer: the user is told this
+/// addon's settings could not be mapped instead of silently getting nothing.
+///
+/// Re-exported from `saved_variables::scrub` rather than defined here: the
+/// Slint sidecar reaches the same writer through the same shared scrub module,
+/// and while this guard was a private copy on each side only one of them
+/// learned about world tokens.
+use crate::saved_variables::scrub::has_unresolved_identity_placeholders;
 
 /// Import SavedVariables settings from a v2 `.esopack` file.
 ///
@@ -8773,7 +8782,15 @@ fn has_unresolved_identity_placeholders(lua: &str) -> bool {
 ///   `${ACCOUNT:N}` → `ctx.accounts[N]`
 ///   `${CHAR:N}` → `ctx.characters[N]`
 ///   `${CHAR_ID:N}` → `ctx.character_ids[N]`
-///   `${WORLD}` → first of `WELL_KNOWN_WORLDS` or `ctx.extra_worlds[0]`
+///
+/// World tokens do NOT follow that shape and are not documented here on
+/// purpose: they are allocated one-to-one by `substitute_placeholders`, whose
+/// three rules are the specification. Resolving `${WORLD}` to a canonical name
+/// the importer does not play on — which is what this doc-block used to
+/// describe — is the exact bug those rules exist to prevent, because it writes
+/// EU or PTS settings under `NA Megaserver` where ESO never looks.
+///
+/// A world token may therefore legitimately survive substitution.
 ///
 /// Placeholder tokens that have no mapping in `ctx` are rejected — the
 /// import is skipped and an error is returned for that addon.
@@ -8827,10 +8844,28 @@ pub async fn import_sv_settings(
                 WELL_KNOWN_WORLDS,
             );
 
-            // Reject if identity placeholders could not be resolved
+            // Refuse anything that still carries an unresolved identity
+            // placeholder. Writing it would key settings ESO never reads while
+            // the UI reported success.
+            //
+            // A partial import — pruning only the unmappable layers and writing
+            // the rest — was implemented here and REVERTED. Substitution runs on
+            // the raw Lua text before parsing, so a placeholder-shaped literal in
+            // an ordinary key or value is rewritten before any tree-level guard
+            // can see it, and world-slot allocation counts those literals too:
+            // a stray `${WORLD}` in a value could consume the importer's only
+            // world and cause the real identity layer to be dropped, while the
+            // file still had content and was written as a partial success. Three
+            // successive attempts to guard that at the tree level each missed a
+            // shape, one of them overwriting real settings with an empty shell.
+            // Doing it safely needs substitution to work on parsed identity KEYS
+            // rather than text — tracked as follow-up. Until then, refuse.
             if has_unresolved_identity_placeholders(&substituted) {
+                // Shared with the sidecar, which refuses the same files through
+                // the same guard — see `unresolved_identity_advice`.
+                let advice = crate::saved_variables::scrub::unresolved_identity_advice(&ctx);
                 errors.push(format!(
-                    "{folder}: unresolved identity placeholders — launch ESO at least once to establish your identity"
+                    "{folder}: settings could not be mapped to your account. {advice}"
                 ));
                 continue;
             }
@@ -10445,6 +10480,49 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    // Names the DETECTOR, not the import, because that is all it exercises.
+    //
+    // It called itself "block_an_import" while only asserting the helper, so
+    // deleting the guard from `import_sv_settings` would have left it green
+    // while the bug it describes returned. The import path itself is covered
+    // where the bug actually shipped: the sidecar's
+    // `pack_hub_esopack_settings_apply_refuses_an_unmappable_megaserver` drives
+    // the real writer end to end and was mutation-checked. Both writers now call
+    // this one shared helper, so what is untested here is the main app's single
+    // call site, not the rule.
+    fn unresolved_world_tokens_are_detected() {
+        // Once world tokens map one-to-one, a leftover is a NORMAL outcome: a
+        // two-megaserver export imported by a one-megaserver player deliberately
+        // leaves the extra layer's token alone rather than clobbering a layer the
+        // importer does use. Writing that file anyway keyed SavedVariables on a
+        // literal `${WORLD:1}` — which ESO never reads — while the UI reported
+        // the addon as applied.
+        assert!(has_unresolved_identity_placeholders(
+            r#"Var = { ["${WORLD:1}"] = { } }"#
+        ));
+        assert!(has_unresolved_identity_placeholders(
+            r#"Var = { ["${WORLD}"] = { } }"#
+        ));
+
+        // The pre-existing identity tokens still block, unchanged.
+        assert!(has_unresolved_identity_placeholders(
+            r#"Var = { ["${ACCOUNT}"] = { } }"#
+        ));
+        assert!(has_unresolved_identity_placeholders(
+            r#"Var = { ["${CHAR:0}"] = { } }"#
+        ));
+
+        // A fully resolved file still imports.
+        assert!(!has_unresolved_identity_placeholders(
+            r#"Var = { ["EU Megaserver"] = { ["@Someone"] = { ["Alt"] = 1 } } }"#
+        ));
+        // And the word "world" in ordinary content is not a placeholder.
+        assert!(!has_unresolved_identity_placeholders(
+            r#"Var = { ["greeting"] = "hello world" }"#
+        ));
+    }
 
     #[test]
     fn should_emit_progress_first_stride_and_completion() {

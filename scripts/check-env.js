@@ -141,7 +141,7 @@ check("Cargo", () => {
 check("Tauri CLI", () => {
   // Check if @tauri-apps/cli is installed locally in node_modules
   const localVersion = run(
-    'node -e "process.stdout.write(JSON.parse(require(\'fs\').readFileSync(\'node_modules/@tauri-apps/cli/package.json\',\'utf-8\')).version)"'
+    "node -e \"process.stdout.write(JSON.parse(require('fs').readFileSync('node_modules/@tauri-apps/cli/package.json','utf-8')).version)\""
   );
   if (localVersion) return { ok: true, detail: `v${localVersion} (local)` };
 
@@ -173,11 +173,11 @@ if (isWindows) {
     // Check via registry — WebView2 Evergreen or Fixed installs write here
     const regKeys = [
       // x64 / WoW64
-      'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+      "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
       // ARM64 and native x64
-      'HKLM\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+      "HKLM\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
       // User-level install
-      'HKCU\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+      "HKCU\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
     ];
     for (const key of regKeys) {
       const reg = run(`reg query "${key}" /v pv 2>nul`);

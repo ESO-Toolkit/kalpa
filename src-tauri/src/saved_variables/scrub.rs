@@ -352,6 +352,113 @@ fn ordered_worlds(ctx: &ScrubContext, world_names: &[&str]) -> Vec<String> {
     out
 }
 
+/// The world token for slot `i`: `${WORLD}` for 0, `${WORLD:i}` after that.
+fn world_token(i: usize) -> String {
+    if i == 0 {
+        "${WORLD}".to_string()
+    } else {
+        format!("${{WORLD:{i}}}")
+    }
+}
+
+/// The world-token slots that actually appear in `lua`, ascending and deduped.
+///
+/// Read out of the text rather than probed over a guessed range. Bounding the
+/// probe by the IMPORTER's world count missed any slot the exporter numbered
+/// higher — a file carrying only `${WORLD:4}` was never seen as containing a
+/// world token at all, so it stayed literal and those settings landed under a
+/// key ESO does not read, even when the importer had a free world to map it to.
+fn present_world_slots(lua: &str) -> Vec<usize> {
+    const PREFIX: &str = "${WORLD";
+    let mut slots: Vec<usize> = Vec::new();
+    let mut rest = lua;
+
+    while let Some(pos) = rest.find(PREFIX) {
+        let after = &rest[pos + PREFIX.len()..];
+        if let Some(tail) = after.strip_prefix('}') {
+            // Bare `${WORLD}` — slot 0.
+            if !slots.contains(&0) {
+                slots.push(0);
+            }
+            rest = tail;
+        } else if let Some(tail) = after.strip_prefix(':') {
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            let remainder = &tail[digits.len()..];
+            match (digits.parse::<usize>(), remainder.strip_prefix('}')) {
+                // Slot 0 is spelled `${WORLD}` and never `${WORLD:0}` — see
+                // `world_token`. Reporting `${WORLD:0}` as slot 0 would emit a
+                // substitution pair for `${WORLD}`, which does not appear in the
+                // text, so the literal `${WORLD:0}` would survive AND consume an
+                // importer world that a real token needed.
+                (Ok(0), Some(closed)) => rest = closed,
+                (Ok(slot), Some(closed)) => {
+                    if !slots.contains(&slot) {
+                        slots.push(slot);
+                    }
+                    rest = closed;
+                }
+                // `${WORLD:` with no closing brace or no digits: not a token.
+                _ => rest = tail,
+            }
+        } else {
+            rest = after;
+        }
+    }
+
+    slots.sort_unstable();
+    slots
+}
+
+/// Map the world tokens actually present in `lua` onto the importer's worlds,
+/// one-to-one. See `substitute_placeholders` for the three rules; the
+/// one-to-one part is the point — two tokens resolving to the same megaserver
+/// emit duplicate sibling keys, and Lua keeps only the last.
+fn world_substitutions(
+    lua: &str,
+    ctx: &ScrubContext,
+    world_names: &[&str],
+) -> Vec<(String, String)> {
+    let importer = ordered_worlds(ctx, world_names);
+    if importer.is_empty() {
+        return Vec::new();
+    }
+
+    let present = present_world_slots(lua);
+
+    let mut used = vec![false; importer.len()];
+    let mut pairs: Vec<(String, String)> = Vec::new();
+
+    // Rule 1: a token whose canonical megaserver the importer plays on.
+    for &i in &present {
+        let Some(canonical) = world_names.get(i) else {
+            continue;
+        };
+        if let Some(pos) = importer.iter().position(|w| w == canonical) {
+            used[pos] = true;
+            pairs.push((world_token(i), importer[pos].clone()));
+        }
+    }
+
+    // Rule 2: whatever is left takes the importer's next unused world. Rule 3 is
+    // the absence of an else — a token with nothing left stays unresolved.
+    let mut next_unused = 0;
+    for &i in &present {
+        if pairs.iter().any(|(token, _)| *token == world_token(i)) {
+            continue;
+        }
+        while next_unused < used.len() && used[next_unused] {
+            next_unused += 1;
+        }
+        if next_unused >= importer.len() {
+            break;
+        }
+        used[next_unused] = true;
+        pairs.push((world_token(i), importer[next_unused].clone()));
+    }
+
+    pairs
+}
+
 /// Replace identity placeholders in a Lua string with the importer's real values.
 ///
 /// Substitution order: longer tokens first to avoid `${ACCOUNT}` matching as a
@@ -359,12 +466,23 @@ fn ordered_worlds(ctx: &ScrubContext, world_names: &[&str]) -> Vec<String> {
 /// the caller can refuse an import it cannot resolve.
 ///
 /// `world_names` should be `WELL_KNOWN_WORLDS`. Every canonical megaserver has a
-/// fixed token slot (see `PlaceholderTable`), so `${WORLD}`/`${WORLD:N}` map
-/// to the importer's own megaserver at that slot, falling back to their primary
-/// one for slots they don't play on — a layer for a server they never log into
-/// would simply never be read. When the importer's megaserver is unknown the
-/// world tokens are deliberately left unresolved: substituting a guess wrote
-/// EU/PTS players' settings under `NA Megaserver`, where ESO never looks.
+/// fixed token slot (see `PlaceholderTable`), and world tokens are resolved so
+/// that **no two of them land on the same megaserver**:
+///
+/// 1. A token whose canonical slot the importer actually plays on maps to it —
+///    an exported EU layer lands on the importer's EU layer.
+/// 2. Any remaining token takes the importer's next unused world. This is what
+///    carries a single-megaserver export across: an EU-only exporter's
+///    `${WORLD:1}` resolves to an NA-only importer's `NA Megaserver`.
+/// 3. Tokens left over after that stay unresolved, as a literal `${WORLD:N}`
+///    key ESO never reads. Mapping them onto a world already in use would emit
+///    two sibling keys for the same megaserver, and Lua's last-one-wins would
+///    silently discard one layer's settings — which is the very collapse the
+///    indexed tokens exist to prevent.
+///
+/// When the importer's megaserver is unknown every world token is left
+/// unresolved: substituting a guess wrote EU/PTS players' settings under
+/// `NA Megaserver`, where ESO never looks.
 pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&str]) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
 
@@ -393,14 +511,7 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     for (i, id) in ctx.character_ids.iter().enumerate() {
         pairs.push((format!("${{CHAR_ID:{i}}}"), id.clone()));
     }
-    let worlds = ordered_worlds(ctx, world_names);
-    if let Some(primary) = worlds.first() {
-        pairs.push(("${WORLD}".to_string(), primary.clone()));
-        for i in 1..world_names.len() {
-            let value = worlds.get(i).unwrap_or(primary);
-            pairs.push((format!("${{WORLD:{i}}}"), value.clone()));
-        }
-    }
+    pairs.extend(world_substitutions(lua, ctx, world_names));
 
     // Sort by token length descending so longer tokens match first.
     pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
@@ -445,6 +556,52 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     }
     result.push_str(rest);
     result
+}
+
+/// Did `substitute_placeholders` leave a token it could not resolve?
+///
+/// This lives next to `substitute_placeholders` because its rules are what
+/// decide the answer — in particular Rule 3, which deliberately leaves a world
+/// token as a literal `${WORLD:N}` rather than collapsing two exported layers
+/// onto one megaserver. A leftover token is a valid Lua string key, so nothing
+/// downstream rejects it: `parse_sv_file` accepts the file, and writing it lands
+/// settings under a key ESO never reads while reporting success.
+///
+/// EVERY caller that writes a substituted file must gate on this. It was
+/// previously duplicated as a private helper in both `commands.rs` and the Slint
+/// sidecar's `main.rs`; the sidecar's copy never learned about world tokens, so
+/// once Rule 3 made an unresolved world token an ordinary outcome the sidecar
+/// wrote them straight over users' real SavedVariables and called it a success,
+/// while the main app refused the identical import. One substituter needs one
+/// guard beside it, not a copy per caller.
+/// Why an import was refused, phrased for the reader who caused it.
+///
+/// Shipped next to the guard for the same reason the guard is shared: the
+/// sidecar and the main app both refuse, and while the wording lived on each
+/// side separately only one of them was ever updated. The sidecar kept telling
+/// every user to "launch ESO at least once" — advice that cannot help someone
+/// who has identities but simply lacks the pack's megaserver, which is now the
+/// COMMON case rather than the rare one.
+///
+/// Detected-nothing is the only branch where launching ESO is the remedy.
+pub fn unresolved_identity_advice(ctx: &ScrubContext) -> &'static str {
+    if ctx.accounts.is_empty() && ctx.characters.is_empty() {
+        "Launch ESO at least once on this machine so Kalpa can detect your account and characters."
+    } else {
+        "This pack's settings are stored under a megaserver or account you don't have, so there is \
+         nowhere to put them."
+    }
+}
+
+pub fn has_unresolved_identity_placeholders(lua: &str) -> bool {
+    lua.contains("${ACCOUNT}")
+        || lua.contains("${ACCOUNT:")
+        || lua.contains("${ACCOUNT_NAME}")
+        || lua.contains("${ACCOUNT_NAME:")
+        || lua.contains("${CHAR:")
+        || lua.contains("${CHAR_ID:")
+        || lua.contains("${WORLD}")
+        || lua.contains("${WORLD:")
 }
 
 /// Run the scrubber. Returns the cleaned tree alongside a report describing
@@ -1532,7 +1689,13 @@ mod tests {
     }
 
     #[test]
-    fn substitute_world_uses_the_importers_megaserver() {
+    fn substitute_world_never_maps_two_layers_onto_one_megaserver() {
+        // A two-megaserver export landing on a one-megaserver importer used to
+        // resolve BOTH world tokens to that importer's single world, emitting
+        // two sibling `["EU Megaserver"]` keys — and Lua's last-one-wins then
+        // silently discarded one layer's settings. That is the exact collapse
+        // the indexed `${WORLD:N}` tokens were introduced to prevent, so the
+        // fallback now stops at one token per megaserver.
         let ctx = ScrubContext {
             accounts: vec!["@Importer".to_string()],
             extra_worlds: vec!["EU Megaserver".to_string()],
@@ -1547,8 +1710,108 @@ mod tests {
             !result.contains("NA Megaserver"),
             "EU importer got the NA layer: {result}"
         );
-        // Both slots land on the only megaserver this importer plays on.
-        assert_eq!(result.matches("EU Megaserver").count(), 2, "{result}");
+        // The EU slot resolves to the importer's EU layer...
+        assert_eq!(result.matches("EU Megaserver").count(), 1, "{result}");
+        // ...and the NA slot stays a literal token, which ESO simply never
+        // reads. Dead weight beats clobbering a layer the importer does use.
+        assert!(result.contains("${WORLD}"), "{result}");
+    }
+
+    #[test]
+    fn substitute_world_resolves_a_high_custom_slot() {
+        // Bounding the token probe by the IMPORTER's world count never spotted a
+        // slot the exporter had numbered higher, so a file carrying only
+        // `${WORLD:4}` kept the literal token and wrote its settings under a key
+        // ESO does not read — even with a free importer world to map onto.
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["NA Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(r#"["${WORLD:4}"] = { }"#, &ctx, WELL_KNOWN_WORLDS);
+        assert_eq!(result, r#"["NA Megaserver"] = { }"#, "{result}");
+    }
+
+    #[test]
+    fn present_world_slots_reads_the_text_not_a_guessed_range() {
+        assert_eq!(present_world_slots(r#"["${WORLD}"]"#), vec![0]);
+        assert_eq!(
+            present_world_slots(r#"["${WORLD}"] ["${WORLD:2}"] ["${WORLD:11}"]"#),
+            vec![0, 2, 11]
+        );
+        // Deduped and ordered regardless of the order they appear in.
+        assert_eq!(
+            present_world_slots(r#"["${WORLD:3}"] ["${WORLD:1}"] ["${WORLD:3}"]"#),
+            vec![1, 3]
+        );
+        // Malformed shapes are not tokens and must not be reported as slots.
+        assert_eq!(
+            present_world_slots("${WORLD:} ${WORLD:x} ${WORLD:7"),
+            Vec::<usize>::new()
+        );
+        assert_eq!(present_world_slots("no tokens here"), Vec::<usize>::new());
+        // `${WORLD:0}` is not a shape the exporter emits — slot 0 is `${WORLD}`
+        // (see `world_token`). Claiming it would generate a pair keyed on
+        // `${WORLD}`, which does not appear in the text, so the literal would
+        // survive while still spending an importer world on it.
+        assert_eq!(
+            present_world_slots(r#"["${WORLD:0}"]"#),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            present_world_slots(r#"["${WORLD:0}"] ["${WORLD:2}"]"#),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn substitute_world_ignores_the_never_emitted_zero_slot() {
+        // A hand-edited pack carrying `${WORLD:0}` alongside a real token must
+        // not have the real one starved of the importer's only world.
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["EU Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(
+            r#"["${WORLD:0}"] = { } ["${WORLD:1}"] = { }"#,
+            &ctx,
+            WELL_KNOWN_WORLDS,
+        );
+        assert!(result.contains(r#"["EU Megaserver"]"#), "{result}");
+        assert!(result.contains(r#"["${WORLD:0}"]"#), "{result}");
+    }
+
+    #[test]
+    fn substitute_world_carries_a_single_megaserver_export_across() {
+        // The common sharing case: an EU-only exporter's layer is token slot 1,
+        // and an NA-only importer must still get those settings under THEIR
+        // megaserver. Nothing is competing for the slot, so the fallback applies.
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["NA Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(r#"["${WORLD:1}"] = { }"#, &ctx, WELL_KNOWN_WORLDS);
+        assert_eq!(result, r#"["NA Megaserver"] = { }"#, "{result}");
+    }
+
+    #[test]
+    fn substitute_world_matches_canonical_slots_when_both_sides_agree() {
+        let ctx = ScrubContext {
+            accounts: vec!["@Importer".to_string()],
+            extra_worlds: vec!["NA Megaserver".to_string(), "EU Megaserver".to_string()],
+            ..ScrubContext::default()
+        };
+        let result = substitute_placeholders(
+            r#"["${WORLD}"] = { } ["${WORLD:1}"] = { }"#,
+            &ctx,
+            WELL_KNOWN_WORLDS,
+        );
+        assert_eq!(
+            result, r#"["NA Megaserver"] = { } ["EU Megaserver"] = { }"#,
+            "{result}"
+        );
     }
 
     #[test]

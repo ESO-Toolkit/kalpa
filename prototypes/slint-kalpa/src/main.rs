@@ -107,6 +107,34 @@ fn addon_write_eso_running_warning_active(ui: &KalpaWindow) -> bool {
     ui.get_settings_warn_eso_running() && is_eso_running_blocking().unwrap_or(false)
 }
 
+/// Is ESO running, for the purposes of a SavedVariables write?
+///
+/// Deliberately NOT `addon_write_eso_running_warning_active`, and the difference
+/// is the whole point: that one folds in `settings_warn_eso_running`, which is
+/// the user's opt-out from the ADDON reminder — the one whose copy is about
+/// needing `/reloadui` for changes to take effect. Turning that reminder off is
+/// a statement about notification noise, not consent to lose settings.
+///
+/// Reusing it here made the preference a silent data-loss switch: a user who had
+/// dismissed the addon reminder got SavedVariables written under a running
+/// client, reported as applied, and then discarded when ESO rewrote them from
+/// memory at logout.
+///
+/// Fails OPEN on a detection error, matching `addon_write_eso_running_warning_active`
+/// and the main app's `ensureEsoNotBlocking`. Failing closed would make settings
+/// imports impossible on a machine where process detection is broken, and
+/// flipping that direction is a decision for every caller at once, not this one.
+/// Call this as late as you can, never at click time. Settings are applied after
+/// the addon install, which can run for minutes.
+fn settings_write_eso_running() -> bool {
+    is_eso_running_blocking().unwrap_or(false)
+}
+
+/// Why a settings import stopped. Shared so the two checkpoints cannot drift.
+const ESO_RUNNING_SETTINGS_REFUSAL: &str =
+    "Close ESO before applying pack settings — the game rewrites SavedVariables from memory \
+     when you log out, which would discard them.";
+
 fn addon_write_status_message(message: impl AsRef<str>, eso_running: bool) -> String {
     let message = message.as_ref();
     if !eso_running {
@@ -522,6 +550,25 @@ struct NativeSvImportResult {
     applied: Vec<String>,
     skipped: Vec<String>,
     errors: Vec<String>,
+    /// Addons deliberately not written because ESO was running. Used to NAME
+    /// them in one sentence; it is not the count source.
+    refused_eso_running: Vec<String>,
+    /// How many addons the import covered.
+    ///
+    /// The not-applied count is DERIVED from this — `total - applied - skipped`
+    /// — rather than accumulated from error entries. Counting `errors.len()`
+    /// treats every entry as one addon, which breaks the moment any entry covers
+    /// several: it undercounted the ESO refusals, then still undercounted them
+    /// when mixed with a real error, and then undercounted the
+    /// SavedVariables-directory failure. Three producers, three separate fixes,
+    /// one bug.
+    ///
+    /// This does not make a future producer safe, and nothing enforces that one
+    /// sets `total` — leave it zero and the summary under-reports exactly as
+    /// before. What changed is how many places have to be right: one field at
+    /// construction, instead of every error path remembering to contribute to a
+    /// running count.
+    total: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4206,6 +4253,31 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let pack = ui.get_pack_hub_import_pack();
+        // Addon writes and SavedVariables writes need OPPOSITE handling here,
+        // which is why one flag cannot serve both.
+        //
+        // For addon files the notice is true and the write is fine: the game
+        // picks them up after /reloadui or relog. For SavedVariables it is
+        // neither. ESO holds those in memory and rewrites them at logout, so a
+        // write underneath a running client is discarded — and telling that user
+        // "changes will load after /reloadui" is a reassurance that is simply
+        // false. Applying and reporting success is the worst of the options.
+        //
+        // So settings are REFUSED while ESO runs rather than warned about. The
+        // main app reaches the same place through a cancelable confirm that says
+        // the same thing (see the comment on the gate in packs.tsx); the sidecar
+        // has no confirm affordance, so it declines and explains.
+        //
+        // The addon notice honours `settings_warn_eso_running`, because that
+        // preference is exactly about that reminder.
+        //
+        // The settings decision is NOT made here. It reads a different source
+        // (see `settings_write_eso_running`) and it is taken inside the worker
+        // below, immediately before the write: settings are applied only after
+        // the addon install finishes, which can run for minutes, and a flag
+        // sampled at click time says nothing about whether ESO is running by
+        // then. Deciding early let a client launched mid-install receive the
+        // write anyway — the same sample-then-await mistake one layer down.
         let eso_running = pending > 0 && addon_write_eso_running_warning_active(&ui);
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_install_label(
@@ -4236,8 +4308,23 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 install_pack_hub_addons_blocking(&addons_dir, rows)
             };
-            let settings_result = (!settings.is_empty())
-                .then(|| apply_imported_pack_settings_blocking(&addons_dir, settings));
+            let settings_result = if settings.is_empty() {
+                None
+            } else if settings_write_eso_running() {
+                // Same structured field the per-addon path uses. Returning a
+                // bare error here meant the ALREADY-running case — the common
+                // one — summarised as "1 failed" and named nothing, however
+                // many addons the pack carried.
+                let mut refused = settings.keys().cloned().collect::<Vec<_>>();
+                refused.sort();
+                Some(NativeSvImportResult {
+                    total: refused.len(),
+                    refused_eso_running: refused,
+                    ..Default::default()
+                })
+            } else {
+                Some(apply_imported_pack_settings_blocking(&addons_dir, settings))
+            };
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -5150,7 +5237,18 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         match result {
             Ok(()) => {
                 apply_svm_editor_state(&ui, &svm_editor_save_state.borrow());
-                let message = if addon_write_eso_running_warning_active(&ui) {
+                // `settings_write_eso_running`, not the addon helper: this
+                // caveat is about SavedVariables being overwritten, and gating
+                // it on the ADDON reminder preference meant a user who had
+                // dismissed that reminder saved an edit with no hint that ESO
+                // would discard it. The preference is about /reloadui noise for
+                // addon files; it is not a statement about this.
+                //
+                // Unlike the pack-settings import this is message-only — the
+                // write happens either way, because the user explicitly asked to
+                // save an edit they are looking at. Withholding the warning is
+                // the whole harm.
+                let message = if settings_write_eso_running() {
                     "Saved - but ESO is running and will overwrite SavedVariables when it exits. Use /reloadui or restart ESO to keep this change."
                 } else {
                     "Saved SavedVariables changes."
@@ -6562,12 +6660,19 @@ fn pack_hub_settings_summary(result: &NativeSvImportResult) -> String {
     if !result.skipped.is_empty() {
         summary.push_str(&format!(", {} skipped", result.skipped.len()));
     }
-    if !result.errors.is_empty() {
-        summary.push_str(&format!(
-            ", {} failed: {}",
-            result.errors.len(),
-            result.errors.join("; ")
-        ));
+    // Derived, never accumulated: every addon is applied, skipped, or not.
+    let not_applied = result
+        .total
+        .saturating_sub(result.applied.len() + result.skipped.len());
+    if not_applied > 0 {
+        let mut details = result.errors.clone();
+        if !result.refused_eso_running.is_empty() {
+            details.push(format!(
+                "{ESO_RUNNING_SETTINGS_REFUSAL} Not applied: {}",
+                result.refused_eso_running.join(", ")
+            ));
+        }
+        summary.push_str(&format!(", {not_applied} failed: {}", details.join("; ")));
     }
     summary.push('.');
     summary
@@ -6594,7 +6699,11 @@ fn apply_imported_pack_settings_blocking(
 
     let sv_dir = settings_saved_variables_dir(addons_dir);
     if let Err(error) = fs::create_dir_all(&sv_dir) {
+        // `total` matters here: nothing is applied, so the summary must report
+        // every addon as not applied. Returning a bare error made this path
+        // say "1 failed" no matter how many settings the pack carried.
         return NativeSvImportResult {
+            total: settings.len(),
             errors: vec![format!(
                 "Failed to create SavedVariables directory: {error}"
             )],
@@ -6603,7 +6712,16 @@ fn apply_imported_pack_settings_blocking(
     }
 
     let ctx = collect_import_saved_variable_identities(addons_dir);
-    let mut result = NativeSvImportResult::default();
+
+    let mut result = NativeSvImportResult {
+        total: settings.len(),
+        ..Default::default()
+    };
+    // Collected rather than pushed per addon: `pack_hub_settings_summary` joins
+    // every error into one status line with no cap, so a thirty-addon pack that
+    // meets a running client after the fifth would have emitted twenty-five
+    // copies of the same sentence into a single message.
+    let mut refused_while_eso_running: Vec<String> = Vec::new();
     let mut folders = settings.keys().cloned().collect::<Vec<_>>();
     folders.sort();
 
@@ -6634,8 +6752,12 @@ fn apply_imported_pack_settings_blocking(
             saved_variables::scrub::WELL_KNOWN_WORLDS,
         );
         if has_unresolved_identity_placeholders(&substituted) {
+            // Same wording as the main app, from the same helper. This used to
+            // be a private string telling everyone to launch ESO, which is no
+            // help to a user who has identities but lacks the pack's megaserver.
+            let advice = saved_variables::scrub::unresolved_identity_advice(&ctx);
             result.errors.push(format!(
-                "{folder}: unresolved identity placeholders - launch ESO at least once to establish your identity"
+                "{folder}: settings could not be mapped to your account. {advice}"
             ));
             continue;
         }
@@ -6645,6 +6767,24 @@ fn apply_imported_pack_settings_blocking(
             result.errors.push(format!(
                 "{folder}: settings file failed validation: {error}"
             ));
+            continue;
+        }
+
+        // Per addon, immediately before its first write.
+        //
+        // Checking once for the whole import left every addon after the first
+        // inside the window: a pack with twenty addons substitutes, parses and
+        // backs each one up in turn, and ESO can start part-way through. This is
+        // a `CreateToolhelp32Snapshot` process-table walk, not a spawned
+        // command, so paying it per addon costs single-digit milliseconds.
+        //
+        // It still cannot close the race — ESO may start between this line and
+        // the rename below — but the exposure is now one addon's work rather
+        // than a whole pack's. Addons already written stay written and are
+        // reported as applied; the rest are reported by name, so the user knows
+        // exactly what did and did not land.
+        if settings_write_eso_running() {
+            refused_while_eso_running.push(folder);
             continue;
         }
 
@@ -6680,6 +6820,8 @@ fn apply_imported_pack_settings_blocking(
 
         result.applied.push(folder);
     }
+
+    result.refused_eso_running = refused_while_eso_running;
 
     result
 }
@@ -6730,14 +6872,15 @@ fn merge_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
     }
 }
 
-fn has_unresolved_identity_placeholders(lua: &str) -> bool {
-    lua.contains("${ACCOUNT}")
-        || lua.contains("${ACCOUNT:")
-        || lua.contains("${ACCOUNT_NAME}")
-        || lua.contains("${ACCOUNT_NAME:")
-        || lua.contains("${CHAR:")
-        || lua.contains("${CHAR_ID:")
-}
+/// The import guard, taken from the same module as the substituter it guards.
+///
+/// This used to be a private copy here, and it silently fell behind: when world
+/// tokens became one-to-one, `substitute_placeholders` started leaving an
+/// unmappable `${WORLD:N}` in place as a normal outcome, and this copy — which
+/// only ever looked for ACCOUNT and CHAR tokens — waved those files through. The
+/// sidecar renamed them over the user's live SavedVariables and reported the
+/// addon as applied, while the main app refused the identical import.
+use saved_variables::scrub::has_unresolved_identity_placeholders;
 
 fn addon_count_label(count: usize) -> String {
     format!("{count} addon{}", if count == 1 { "" } else { "s" })
@@ -19430,7 +19573,7 @@ mod tests {
     fn active_theme_id_round_trips_through_production_settings_store() {
         let root = test_temp_dir("active-theme-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"autoUpdate":true}"#).expect("seed settings store");
 
         persist_active_theme_id_to_settings_path(&path, "apocrypha-ink")
@@ -19477,7 +19620,7 @@ mod tests {
     fn custom_theme_store_round_trips_production_settings_key() {
         let root = test_temp_dir("custom-theme-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"conflictPolicy":"ask"}"#).expect("seed settings store");
         let theme = sample_custom_theme("custom-one", "Custom One");
 
@@ -19511,7 +19654,7 @@ mod tests {
     fn addons_path_reads_production_settings_key() {
         let root = test_temp_dir("addons-path-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(
             &path,
             serde_json::json!({
@@ -19536,7 +19679,7 @@ mod tests {
     fn addons_path_persists_production_settings_key() {
         let root = test_temp_dir("addons-path-persist");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"autoUpdate":true,"conflictPolicy":"ask"}"#)
             .expect("seed settings store");
 
@@ -19570,7 +19713,7 @@ mod tests {
     fn installed_pack_refs_round_trip_through_production_settings_key() {
         let root = test_temp_dir("installed-packs-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, r#"{"autoUpdate":true}"#).expect("seed settings store");
         let refs = vec![
             NativeInstalledPackRef {
@@ -19640,7 +19783,7 @@ mod tests {
     fn settings_store_reader_accepts_utf8_bom() {
         let root = test_temp_dir("settings-bom");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create settings directory");
+        fs::create_dir_all(root).expect("create settings directory");
         fs::write(&path, "\u{feff}{\"addonsPath\":\"D:/ESO/live/AddOns\"}")
             .expect("seed bom settings store");
 
@@ -19996,7 +20139,7 @@ mod tests {
     #[test]
     fn native_uploader_preflight_counts_sessions_and_fights() {
         let root = test_temp_dir("uploader-preflight");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         fs::write(
             &path,
@@ -20025,7 +20168,7 @@ mod tests {
     #[test]
     fn native_uploader_preflight_captures_zone_and_titles_fights() {
         let root = test_temp_dir("uploader-zone");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         fs::write(
             &path,
@@ -20067,7 +20210,7 @@ mod tests {
     #[test]
     fn native_uploader_preflight_previews_up_to_six_fights() {
         let root = test_temp_dir("uploader-cap");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         let mut log = String::from("0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\"\n");
         for i in 0..8 {
@@ -20119,7 +20262,7 @@ mod tests {
     #[test]
     fn split_plan_writes_one_file_per_selected_fight() {
         let root = test_temp_dir("split-plan-fights");
-        fs::create_dir_all(&root).expect("create temp dir");
+        fs::create_dir_all(root).expect("create temp dir");
         let path = root.join("Encounter.log");
         // Two fights inside one session, each with a preamble line before combat.
         fs::write(
@@ -20224,7 +20367,7 @@ mod tests {
     fn native_settings_round_trip_and_clamp_conflict_policy() {
         let root = test_temp_dir("native-settings");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create temp settings directory");
+        fs::create_dir_all(root).expect("create temp settings directory");
         fs::write(
             &path,
             serde_json::json!({
@@ -20326,7 +20469,7 @@ mod tests {
     fn native_settings_read_production_store_keys() {
         let root = test_temp_dir("native-settings-production");
         let path = root.join("settings.json");
-        fs::create_dir_all(&root).expect("create temp settings directory");
+        fs::create_dir_all(root).expect("create temp settings directory");
         fs::write(
             &path,
             serde_json::json!({
@@ -20962,16 +21105,16 @@ mod tests {
         )
         .expect("write addon lua");
 
-        let addons = real_addon_entries(&root).expect("load real addon entries");
+        let addons = real_addon_entries(root).expect("load real addon entries");
         assert_eq!(addons.len(), 1);
         assert_eq!(addons[0].folder_name.as_str(), "DisabledAddon");
         assert!(addons[0].disabled);
         assert_eq!(addons[0].badge3.as_str(), "Disabled");
 
         let resolved =
-            resolve_addon_disk_path(&root, "DisabledAddon").expect("resolve disabled folder");
+            resolve_addon_disk_path(root, "DisabledAddon").expect("resolve disabled folder");
         assert!(resolved.ends_with("DisabledAddon.disabled"));
-        assert!(addon_file_path(&root, "DisabledAddon", "DisabledAddon.lua")
+        assert!(addon_file_path(root, "DisabledAddon", "DisabledAddon.lua")
             .expect("resolve disabled addon file")
             .ends_with("DisabledAddon.lua"));
 
@@ -21133,7 +21276,7 @@ mod tests {
     #[test]
     fn saved_variable_profile_parser_ignores_accountwide_and_nested_keys() {
         let root = test_temp_dir("sv-profile-parser");
-        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(root).expect("create root");
         let path = root.join("CombatMetrics.lua");
         fs::write(
             &path,
@@ -21168,7 +21311,7 @@ CombatMetrics_SavedVariables = {
     #[test]
     fn saved_variable_profiles_are_found_past_the_first_256kb() {
         let root = test_temp_dir("sv-profile-past-prefix");
-        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(root).expect("create root");
         let path = root.join("Huge.lua");
         let padding = "            -- pad\n".repeat(20_000);
         fs::write(
@@ -21917,12 +22060,12 @@ CombatMetrics_SavedVariables = {
         )
         .expect("write backup manifest");
 
-        let backups = edit_backup_entries(&root, "BackupAddon");
+        let backups = edit_backup_entries(root, "BackupAddon");
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].relative_path.as_str(), "lang/en.lua");
         assert_eq!(backups[0].update_from.as_str(), "1.0");
 
-        restore_edit_backup_file(&root, "BackupAddon", &backups[0]).expect("restore backup");
+        restore_edit_backup_file(root, "BackupAddon", &backups[0]).expect("restore backup");
         assert_eq!(
             fs::read_to_string(addon_dir.join("lang/en.lua")).expect("read restored file"),
             "restored"
@@ -22701,6 +22844,163 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn settings_summary_counts_addons_not_error_entries() {
+        // Two earlier shapes of this reporting both passed their gates while
+        // lying to the user: one error per refused addon printed the same
+        // sentence twenty-five times, and one aggregate entry reported
+        // "1 failed" for twenty-five addons. Both derived the count from
+        // `errors.len()`, which stops being an addon count the moment one entry
+        // covers many addons.
+        let refusals_only = NativeSvImportResult {
+            total: 4,
+            applied: vec!["Applied".to_string()],
+            refused_eso_running: vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            ..Default::default()
+        };
+        let summary = pack_hub_settings_summary(&refusals_only);
+        assert!(
+            summary.contains("3 failed"),
+            "three refused addons must count as three: {summary}"
+        );
+        assert!(
+            summary.contains("A, B, C"),
+            "refused addons must be named: {summary}"
+        );
+
+        // The case the previous shape got wrong even after the count was added:
+        // a genuine per-addon error alongside the aggregate.
+        let mixed = NativeSvImportResult {
+            total: 4,
+            applied: vec!["Applied".to_string()],
+            errors: vec!["Broken: settings file failed validation".to_string()],
+            refused_eso_running: vec!["A".to_string(), "B".to_string()],
+            ..Default::default()
+        };
+        let summary = pack_hub_settings_summary(&mixed);
+        assert!(
+            summary.contains("3 failed"),
+            "one error plus two refusals is three addons: {summary}"
+        );
+        assert!(
+            summary.contains("Broken"),
+            "the real error must survive: {summary}"
+        );
+
+        // And one refusal still reads correctly.
+        let single = NativeSvImportResult {
+            total: 1,
+            refused_eso_running: vec!["Only".to_string()],
+            ..Default::default()
+        };
+        assert!(pack_hub_settings_summary(&single).contains("1 failed"));
+
+        // A GLOBAL failure with no per-addon detail — the SavedVariables
+        // directory could not be created, so nothing was attempted. One error
+        // entry, five addons. Counting entries reported "1 failed" here even
+        // after the refusal accounting was fixed, which is why the count is
+        // derived from `total` rather than accumulated by each producer.
+        let global = NativeSvImportResult {
+            total: 5,
+            errors: vec!["Failed to create SavedVariables directory: denied".to_string()],
+            ..Default::default()
+        };
+        let summary = pack_hub_settings_summary(&global);
+        assert!(
+            summary.contains("5 failed"),
+            "a global failure means every addon was not applied: {summary}"
+        );
+
+        // Skipped addons are not failures.
+        let skipped = NativeSvImportResult {
+            total: 3,
+            applied: vec!["A".to_string()],
+            skipped: vec!["B".to_string(), "C".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            !pack_hub_settings_summary(&skipped).contains("failed"),
+            "skipped addons must not be counted as failures"
+        );
+    }
+
+    #[test]
+    fn pack_hub_esopack_settings_apply_refuses_an_unmappable_megaserver() {
+        // The sidecar shares `substitute_placeholders` with the main app through
+        // the `#[path]`-included saved_variables module, but it used to keep its
+        // OWN copy of the import guard — and that copy never learned about world
+        // tokens. Once world tokens were mapped one-to-one, a leftover
+        // `${WORLD:N}` became an ordinary outcome for any two-megaserver export
+        // landing on a one-megaserver player, and this path renamed the file
+        // straight over their live SavedVariables and reported it applied, while
+        // the main app refused the identical import.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_root = temp.path().join("live").join("AddOns");
+        fs::create_dir_all(&addons_root).expect("addons root");
+        let sv_dir = settings_saved_variables_dir(&addons_root);
+        fs::create_dir_all(&sv_dir).expect("saved variables dir");
+
+        // This importer plays exactly one megaserver, so a two-layer export has
+        // one layer with nowhere to go.
+        fs::write(
+            sv_dir.join("Identity.lua"),
+            r#"Identity = {
+                ["Default"] = {
+                    ["NA Megaserver"] = {
+                        ["@Importer"] = { ["Mainchar"] = { ["x"] = 1 } },
+                    },
+                },
+            }"#,
+        )
+        .expect("seed importer identity");
+
+        let destination = sv_dir.join("TwoWorlds.lua");
+        let original = "TwoWorlds = { [\"untouched\"] = true }\n";
+        fs::write(&destination, original).expect("seed existing settings");
+
+        let mut settings = HashMap::new();
+        settings.insert(
+            "TwoWorlds".to_string(),
+            NativeAddonSettings {
+                encoding: "lua-text".to_string(),
+                lua: r#"TwoWorlds = {
+                    ["Default"] = {
+                        ["${WORLD}"] = { ["@Exporter"] = { ["a"] = 1 } },
+                        ["${WORLD:1}"] = { ["@Exporter"] = { ["b"] = 2 } },
+                    },
+                }"#
+                .to_string(),
+                _original_bytes: 0,
+                _scrubbed_bytes: 0,
+                _final_bytes: 0,
+            },
+        );
+
+        let result = apply_imported_pack_settings_blocking(&addons_root, settings);
+
+        assert!(
+            result.applied.is_empty(),
+            "an unmappable megaserver must not be reported as applied: {:?}",
+            result.applied
+        );
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "expected one refusal, got {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors[0].contains("TwoWorlds"),
+            "the refusal must name the addon: {}",
+            result.errors[0]
+        );
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read destination"),
+            original,
+            "the live SavedVariables file must be left exactly as it was"
+        );
+    }
+
+    #[test]
     fn pack_hub_install_helpers_parse_ids_and_summarize_results() {
         let installed = sample_pack_hub_addon_row("Addon Selector", "#1161", true);
         let missing = sample_pack_hub_addon_row("Combat Metrics", "1360", false);
@@ -22712,7 +23012,7 @@ CombatMetrics_SavedVariables = {
             "Install 1 New Addon"
         );
         assert_eq!(
-            pack_hub_install_label(&[installed.clone()]),
+            pack_hub_install_label(std::slice::from_ref(&installed)),
             "All Addons Installed"
         );
 
