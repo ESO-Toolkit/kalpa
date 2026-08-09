@@ -569,37 +569,85 @@ function App() {
   }, []);
 
   const initializeApp = useCallback(async () => {
-    // Restore cached account identity first so an already-signed-in user never
-    // sees a signed-out flash while the network verification runs.
-    void invokeResult<AuthUser | null>("auth_cached_user")
-      .then((cachedResult) => {
-        if (cachedResult.ok) {
-          setAuthUser(cachedResult.data ?? null);
-        } else {
-          console.error(`[tauri:auth_cached_user] ${cachedResult.error}`);
-        }
-        return invokeResult<AuthUser | null>("auth_get_user");
-      })
-      .then((authResult) => {
-        if (authResult.ok) {
-          setAuthUser(authResult.data ?? null);
-          warnIfSessionNotPersisted(authResult.data);
-        } else {
-          setAuthUser(null);
-          toast.error(`Could not restore sign-in: ${authResult.error}`);
-        }
-      })
-      .finally(() => setAuthVerifying(false));
+    // Resolve the sandbox override BEFORE anything with side effects. Credentials
+    // are not sandboxed — Tauri resolves app-data from the bundle identifier —
+    // so `auth_get_user` refreshing or clearing a session would touch the
+    // developer's real ESO Logs state. Firing that before knowing whether this
+    // is a test run meant `npm run test:e2e:sandbox` could alter saved sign-in
+    // state before a single spec executed.
+    const sandbox = await invokeResult<string | null>("debug_addons_dir_override");
+
+    // Bail BEFORE any auth work. An error here means a sandbox was requested and
+    // could not be prepared — exactly the case where touching real credentials
+    // is least acceptable. Treating it as "not a sandbox run" and falling
+    // through to the auth chain defeated the point of resolving this first.
+    if (!sandbox.ok) {
+      setError(
+        `Could not determine whether a sandbox AddOns folder was requested: ${sandbox.error}. ` +
+          "Refusing to fall back to the saved AddOns folder, in case this is a sandboxed run."
+      );
+      setErrorShowSettings(false);
+      setAuthVerifying(false);
+      setLoading(false);
+      return;
+    }
+
+    const sandboxActive = Boolean(sandbox.data);
+
+    if (sandboxActive) {
+      // Nothing in the @sandbox suite exercises auth, and a test harness has no
+      // business refreshing real tokens.
+      setAuthVerifying(false);
+    } else {
+      // Restore cached account identity first so an already-signed-in user never
+      // sees a signed-out flash while the network verification runs.
+      void invokeResult<AuthUser | null>("auth_cached_user")
+        .then((cachedResult) => {
+          if (cachedResult.ok) {
+            setAuthUser(cachedResult.data ?? null);
+          } else {
+            console.error(`[tauri:auth_cached_user] ${cachedResult.error}`);
+          }
+          return invokeResult<AuthUser | null>("auth_get_user");
+        })
+        .then((authResult) => {
+          if (authResult.ok) {
+            setAuthUser(authResult.data ?? null);
+            warnIfSessionNotPersisted(authResult.data);
+          } else {
+            setAuthUser(null);
+            toast.error(`Could not restore sign-in: ${authResult.error}`);
+          }
+        })
+        .finally(() => setAuthVerifying(false));
+    }
 
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
-    const [savedSort, savedFilter, savedPath, autoUpdate, introDismissed] = await Promise.all([
+    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed] = await Promise.all([
       getSetting<string>("sortMode", "name"),
       getSetting<string>("filterMode", "all"),
       getSetting<string>("addonsPath", ""),
       getSetting<boolean>("autoUpdate", false),
       getSetting<boolean>("uploaderIntroDismissed", false),
     ]);
+
+    // A debug build started with KALPA_ADDONS_DIR runs against a throwaway
+    // AddOns folder instead of the real ESO install, which is what lets the e2e
+    // suite exercise install/remove/restore at all. Never persisted: the sandbox
+    // must not survive into the developer's saved settings. Always Ok(null) in
+    // release builds, where the command is compiled to return nothing.
+    //
+    // Fail CLOSED. The command only errors when KALPA_ADDONS_DIR is set and the
+    // folder could not be created or canonicalized — so an error means a sandbox
+    // was asked for and could not be had. Falling back to the stored path there
+    // would boot the destructive e2e run against the developer's real AddOns
+    // folder and, with auto-update on, start mutating it before the spec's own
+    // guard ever runs.
+    // The `!sandbox.ok` bail happens at the top of this function, before any
+    // auth work — see there for why.
+    const sandboxPath = sandbox.data ?? "";
+    const savedPath = sandboxPath || storedPath;
 
     const normalizedSort = isSortMode(savedSort) ? savedSort : "name";
     const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";

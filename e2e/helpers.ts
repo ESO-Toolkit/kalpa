@@ -10,7 +10,9 @@ import {
   type Request,
 } from "@playwright/test";
 
-const CDP_ENDPOINT = process.env.KALPA_CDP_ENDPOINT ?? "http://localhost:9222";
+// 127.0.0.1, not `localhost`: WebView2's debug server binds IPv4 loopback only,
+// and a host that resolves `localhost` to ::1 first refuses every connection.
+const CDP_ENDPOINT = process.env.KALPA_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const PACKAGED_ORIGIN = "http://tauri.localhost/";
 
 /**
@@ -47,23 +49,56 @@ async function connectToTauriAt(
   startCommand: string
 ): Promise<{ browser: Browser; page: Page }> {
   const browser = await chromium.connectOverCDP(endpoint);
-  const contexts = browser.contexts();
 
-  if (contexts.length === 0) {
-    throw new Error(
-      `No browser contexts found. Make sure the Tauri app is running with ${startCommand}.`
-    );
+  // No single-shot pre-checks for "are there contexts / pages yet". They used to
+  // sit here and they defeated the poll below: both threw before the loop was
+  // ever entered, on exactly the startup race the loop exists to survive. The
+  // deadline path already reports the URLs it saw and names the start command,
+  // which is strictly more useful than "No pages found".
+
+  // Pick the page that actually IS the app, rather than trusting index 0.
+  // WebView2 exposes extra targets (about:blank, the sign-in webview, devtools),
+  // and taking the first one intermittently attached to a page with no Tauri IPC
+  // — a flake that reads like a product failure: "Tauri IPC is not exposed on
+  // this page".
+  //
+  // Polled, because CDP answering does not mean the app's page exists yet. When
+  // the runner owns the process it connects the instant the debug port opens,
+  // and for a moment the only target is about:blank. Searching once turned that
+  // startup race into a hard failure.
+  // IPC presence alone is not enough to identify the main window. Kalpa opens a
+  // second WebView2 for the ESO Logs sign-in, and that one carries Tauri
+  // internals too — attaching to it produced "Origin header is not a valid URL"
+  // from the first `evaluate` that passed arguments, which reads like a product
+  // bug rather than the harness holding the wrong window. Require the app's own
+  // origin as well.
+  const isAppUrl = (url: string) =>
+    url.startsWith(PACKAGED_ORIGIN) || /^https?:\/\/(127\.0\.0\.1|localhost):\d+\//.test(url);
+
+  const deadline = Date.now() + 20_000;
+  let seen: string[] = [];
+  while (Date.now() < deadline) {
+    const candidates = browser.contexts().flatMap((context) => context.pages());
+    seen = candidates.map((p) => p.url());
+    for (const candidate of candidates) {
+      if (!isAppUrl(candidate.url())) continue;
+      try {
+        await candidate.waitForLoadState("domcontentloaded");
+        const hasIpc = await candidate.evaluate(
+          () => "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
+        );
+        if (hasIpc) return { browser, page: candidate };
+      } catch {
+        // A target that vanished or refuses evaluation is not the app page.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  const pages = contexts[0].pages();
-  if (pages.length === 0) {
-    throw new Error("No pages found in the Tauri webview.");
-  }
-
-  const page = pages[0];
-  await page.waitForLoadState("domcontentloaded");
-
-  return { browser, page };
+  throw new Error(
+    `No page exposing Tauri IPC appeared within 20s — is the app running via ${startCommand}? ` +
+      `Last saw: ${seen.join(", ") || "no pages"}`
+  );
 }
 
 export interface ChunkLoadRecorder {

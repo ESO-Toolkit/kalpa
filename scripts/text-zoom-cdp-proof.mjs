@@ -12,7 +12,10 @@ const MIN_CSS_HEIGHT_AT_MAX_ZOOM = 500;
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const exePath = path.join(repoRoot, "src-tauri", "target", "debug", "kalpa.exe");
-const webviewUserDataDir = path.join(process.env.TEMP ?? repoRoot, "kalpa-text-zoom-webview2-proof");
+const webviewUserDataDir = path.join(
+  process.env.TEMP ?? repoRoot,
+  "kalpa-text-zoom-webview2-proof"
+);
 
 function killKalpa() {
   try {
@@ -59,8 +62,9 @@ async function getPage(browser) {
 
 async function invoke(page, cmd, args = {}) {
   return page.evaluate(
-    async ({ cmd: command, args: invokeArgs }) => window.__TAURI_INTERNALS__.invoke(command, invokeArgs),
-    { cmd, args },
+    async ({ cmd: command, args: invokeArgs }) =>
+      window.__TAURI_INTERNALS__.invoke(command, invokeArgs),
+    { cmd, args }
   );
 }
 
@@ -112,13 +116,15 @@ function printTable(rows) {
   console.log("| ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const row of rows) {
     console.log(
-      `| ${row.factor} | ${row.innerWidth}x${row.innerHeight} | ${row.dpr} | ${row.outerWidth}x${row.outerHeight} | ${formatNativeInner(row.nativeInner)} | ${row.visualViewportScale ?? "n/a"} |`,
+      `| ${row.factor} | ${row.innerWidth}x${row.innerHeight} | ${row.dpr} | ${row.outerWidth}x${row.outerHeight} | ${formatNativeInner(row.nativeInner)} | ${row.visualViewportScale ?? "n/a"} |`
     );
   }
 }
 
 if (!existsSync(exePath)) {
-  throw new Error(`Missing ${exePath}. Build it first with: npm run tauri -- build --debug --no-bundle`);
+  throw new Error(
+    `Missing ${exePath}. Build it first with: npm run tauri -- build --debug --no-bundle`
+  );
 }
 
 killKalpa();
@@ -170,7 +176,7 @@ try {
     const current = rows[i];
     if (current.innerWidth === prev.innerWidth && current.innerHeight === prev.innerHeight) {
       throw new Error(
-        `CSS viewport did not change between ${prev.factor} and ${current.factor}: ${current.innerWidth}x${current.innerHeight}`,
+        `CSS viewport did not change between ${prev.factor} and ${current.factor}: ${current.innerWidth}x${current.innerHeight}`
       );
     }
   }
@@ -182,7 +188,7 @@ try {
     maxZoom.innerHeight < MIN_CSS_HEIGHT_AT_MAX_ZOOM
   ) {
     throw new Error(
-      `1.5 zoom viewport too small: ${maxZoom.innerWidth}x${maxZoom.innerHeight}; expected at least ${MIN_CSS_WIDTH_AT_MAX_ZOOM}x${MIN_CSS_HEIGHT_AT_MAX_ZOOM}`,
+      `1.5 zoom viewport too small: ${maxZoom.innerWidth}x${maxZoom.innerHeight}; expected at least ${MIN_CSS_WIDTH_AT_MAX_ZOOM}x${MIN_CSS_HEIGHT_AT_MAX_ZOOM}`
     );
   }
 } finally {

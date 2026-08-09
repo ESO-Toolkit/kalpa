@@ -58,12 +58,53 @@ fn require_allowed_path(
 /// Called by the frontend to register the approved addons directory.
 /// Stores both the configured and canonicalized paths so commands can validate
 /// symlink/junction targets without losing the configured ESO live directory.
+///
+/// While a sandbox override is active this is also an enforcement point for it:
+/// see the `#[cfg(debug_assertions)]` block below. Refusing here is what keeps a
+/// sandboxed e2e run off a real install, because a spec asserting the same thing
+/// afterwards runs far too late to prevent anything.
+///
+/// It is not the ONLY enforcement point, and an earlier version of this comment
+/// wrongly said every destructive command authorizes against what this function
+/// registers. `copy_addons_to_instance` takes a second AddOns root and validates
+/// it against detected game instances instead — the developer's real folders —
+/// so it carries its own sandbox refusal. Anything added later with a second
+/// write root needs one too; every other command routes its single path through
+/// `require_allowed_path`.
 #[tauri::command]
 pub fn set_addons_path(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<(), String> {
     let (configured, canonical) = validate_addons_path(&addons_path)?;
+
+    // A sandbox run may register the sandbox and nothing else.
+    //
+    // The frontend chooses the boot folder on ONE unguarded line
+    // (`sandboxPath || storedPath` in `initializeApp`). Lose that line to a
+    // refactor and a destructive e2e run boots onto the developer's real
+    // install — and by the time any spec could notice, `scanAddons`,
+    // `runAutoLink` and, with `autoUpdate` on in the developer's real
+    // settings.json, a whole batch update have already run against it. The
+    // damage lands before Playwright even connects, so no spec can be the
+    // guard. This can: it fails the boot instead.
+    //
+    // `dunce::canonicalize` on both sides deliberately — `validate_addons_path`
+    // returns a `std` canonicalization, which carries a `\\?\` prefix on
+    // Windows that would never compare equal to the override.
+    #[cfg(debug_assertions)]
+    if let Some(sandbox) = debug_addons_dir_override()? {
+        let resolved = dunce::canonicalize(&configured)
+            .map_err(|e| format!("Could not resolve the AddOns folder: {e}"))?;
+        if resolved != Path::new(&sandbox) {
+            return Err(format!(
+                "KALPA_ADDONS_DIR is set, so this build may only use the sandbox AddOns \
+                 folder ({sandbox}). Refusing to register {}.",
+                resolved.display()
+            ));
+        }
+    }
+
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
     *guard = Some(crate::ApprovedAddonsPath {
         configured,
@@ -6347,6 +6388,28 @@ pub async fn copy_addons_to_instance(
     target_addons_path: String,
 ) -> Result<CopyAddonsResult, String> {
     let source = require_allowed_path(&state, &addons_path)?;
+
+    // The one command with a SECOND AddOns root, and therefore the one that can
+    // write outside the registered folder. `target_addons_path` is validated
+    // against detected game instances, which is the right check in production
+    // and exactly the wrong one under a sandbox: a detected instance is by
+    // definition the developer's real Live or PTS folder. A sandbox run could
+    // copy fixture addons straight into it, creating directories and rewriting
+    // that instance's kalpa.json, without the target ever being registered.
+    //
+    // While the override is active this build may not write outside the
+    // sandbox, and a cross-instance copy targets another folder by definition,
+    // so refuse the whole command. Testing it would need a second throwaway
+    // instance and both roots validated in the backend.
+    #[cfg(debug_assertions)]
+    if debug_addons_dir_override()?.is_some() {
+        return Err(
+            "KALPA_ADDONS_DIR is set: cross-instance copies are refused, because the target \
+             would be a real detected game instance rather than the sandbox."
+                .to_string(),
+        );
+    }
+
     let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -9503,6 +9566,147 @@ pub async fn dev_scrub_saved_variable(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Filename the e2e runner drops into a sandbox AddOns folder it created.
+///
+/// The marker, not the env var, is what makes a folder eligible for destructive
+/// debug commands: an environment variable can name any directory, including a
+/// live ESO install, but only the runner writes this file.
+///
+/// Necessary, not sufficient. The file must also carry THIS run's
+/// `KALPA_E2E_TOKEN` (see the comparison in `debug_install_fixture_zip`), because
+/// a marked tree can outlive the run that made it: teardown gives up after ten
+/// attempts and only warns, and a crashed run never cleans up at all. Presence
+/// alone would authorise a stale sandbox.
+#[cfg(debug_assertions)]
+pub const SANDBOX_MARKER: &str = ".kalpa-e2e-sandbox";
+
+/// The sandbox AddOns folder named by `KALPA_ADDONS_DIR`, if one is set.
+///
+/// The e2e suite otherwise drives the developer's REAL ESO install, which is why
+/// no spec has ever touched install, update, remove, restore, migrate or
+/// profile-apply: a destructive assertion would mutate the machine running it.
+/// Pointing the app at a throwaway folder makes those flows testable.
+///
+/// The env var is read ONLY in debug builds: the `#[cfg(debug_assertions)]` arm
+/// below is the whole implementation, and a release build returns `Ok(None)`
+/// without ever looking at the environment. So no shipped binary can be aimed
+/// away from a user's real AddOns folder by a stray environment variable.
+///
+/// The COMMAND itself is registered in every build, deliberately, and must stay
+/// that way. `initializeApp` fails closed on an error from this call — an error
+/// means a sandbox was requested and could not be prepared, and booting onto the
+/// saved path there would let a destructive run loose on a real install. If the
+/// handler were `#[cfg]`-gated out of release, that invoke would fail for every
+/// release user and the fail-closed branch would replace their addon list with
+/// an error screen. Gating the body, not the registration, is what makes both
+/// properties hold at once.
+///
+/// The folder is created if absent (an empty sandbox is the point, and a missing
+/// one would drop the app into the setup wizard instead) and returned in
+/// canonical drive-letter form so it compares equal to what `set_addons_path`
+/// stores. Note `validate_addons_path` requires the leaf to be named `AddOns`.
+#[tauri::command]
+pub fn debug_addons_dir_override() -> Result<Option<String>, String> {
+    #[cfg(not(debug_assertions))]
+    {
+        Ok(None)
+    }
+    #[cfg(debug_assertions)]
+    {
+        let Some(raw) = std::env::var_os("KALPA_ADDONS_DIR") else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(raw);
+        if path.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        fs::create_dir_all(&path)
+            .map_err(|e| format!("Could not create the sandbox AddOns folder: {e}"))?;
+        let canonical = dunce::canonicalize(&path)
+            .map_err(|e| format!("Could not resolve the sandbox AddOns folder: {e}"))?;
+        Ok(Some(canonical.to_string_lossy().into_owned()))
+    }
+}
+
+/// Debug-only: install an addon into the sandbox from a LOCAL zip.
+///
+/// The production install path downloads from ESOUI. An e2e spec must not depend
+/// on the network or on whatever a third party happens to be shipping today, so
+/// this runs the same extractor against a fixture zip already on disk rather
+/// than a stub.
+///
+/// What that covers today is the HAPPY PATH ONLY. The one fixture the runner
+/// builds is a foldered archive that extracts cleanly, so `contains_foldered_addon`
+/// matches, `flat_archive_wrap_name` returns `None`, and the rollback branch —
+/// `if let Err(..) = result` — never runs. This comment used to claim the wrap
+/// and rollback paths were exercised; they are not, and the flat-archive wrap is
+/// the path a prior audit found defeating Protected Edits, so the false claim
+/// was worse than no claim. Covering them needs two more fixtures: a flat
+/// archive asserting the wrap folder appears, and a corrupt one asserting no new
+/// top-level folder survives.
+///
+/// Refuses unless the target is a folder the e2e runner itself created and
+/// marked.
+///
+/// Matching the target against `KALPA_ADDONS_DIR` is NOT sufficient, and an
+/// earlier version of this comment wrongly claimed it was. That check only says
+/// "the caller named the folder the env var names" — it says nothing about
+/// whether that folder is disposable. A debug build launched with
+/// `KALPA_ADDONS_DIR` pointed at a real ESO AddOns directory, by accident or
+/// otherwise, would have satisfied it and let this command extract an arbitrary
+/// local zip into a live install while skipping every safeguard the real install
+/// path applies.
+///
+/// So the boundary is a marker file the runner writes into the sandbox it just
+/// created (see `SANDBOX_MARKER`). A real AddOns folder does not have one, and
+/// the runner deletes the whole tree afterwards.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_install_fixture_zip(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    zip_path: String,
+) -> Result<Vec<String>, String> {
+    let Some(sandbox) = debug_addons_dir_override()? else {
+        return Err("Fixture installs require KALPA_ADDONS_DIR to be set.".to_string());
+    };
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let resolved = dunce::canonicalize(&addons_dir)
+        .map_err(|e| format!("Could not resolve the AddOns folder: {e}"))?;
+    if resolved != Path::new(&sandbox) {
+        return Err(
+            "Fixture installs are only allowed into the sandbox AddOns folder.".to_string(),
+        );
+    }
+    // The marker must prove THIS run owns the folder, not merely that some
+    // runner once did. A crashed run can leave a marked directory behind, so a
+    // static marker would authorise a stale sandbox — and the folder it names
+    // is where destructive commands are allowed to write.
+    let expected_token = std::env::var("KALPA_E2E_TOKEN").unwrap_or_default();
+    if expected_token.is_empty() {
+        return Err("Fixture installs require KALPA_E2E_TOKEN to be set.".to_string());
+    }
+    let marker = resolved.join(SANDBOX_MARKER);
+    let found_token = fs::read_to_string(&marker).unwrap_or_default();
+    if found_token.trim() != expected_token {
+        return Err(format!(
+            "Refusing to install a fixture into {}: its {SANDBOX_MARKER} marker does not match \
+             this run's token, so the folder was not created by this e2e run. Pointing \
+             KALPA_ADDONS_DIR at a real AddOns folder does not make it a sandbox.",
+            resolved.display()
+        ));
+    }
+
+    let zip = PathBuf::from(zip_path);
+    if !zip.is_file() {
+        return Err(format!("Fixture zip not found: {}", zip.display()));
+    }
+
+    tokio::task::spawn_blocking(move || installer::extract_addon_zip(&zip, &resolved))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]

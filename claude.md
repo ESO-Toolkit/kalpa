@@ -145,9 +145,43 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed s
   - This runs TypeScript, ESLint, and Prettier.
 - Fix all reported issues before considering the work complete.
 
+**End-to-end**
+
+E2E drives the real Tauri webview over CDP, so it is Windows-only (the debug port
+comes from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, which WebKitGTK/WKWebView do
+not have). There are two flavours, and the difference matters:
+
+- `npm run test:e2e` — attaches to whatever `npm run tauri dev` is already
+  running, which is your REAL ESO install. Read-only specs only. Never add a spec
+  here that installs, updates, removes, restores, migrates or applies a profile.
+- `npm run test:e2e:sandbox` — builds the debug binary, launches it with
+  `KALPA_ADDONS_DIR` pointed at a throwaway `AddOns` folder, and runs the
+  `@sandbox` specs against it. This is where destructive coverage belongs. The
+  override is `debug_addons_dir_override` in `commands.rs`; the env var is read
+  only in debug builds, so no shipped binary can be aimed away from a user's
+  real folder. Pass `--no-build` when iterating on the specs themselves.
+
+  Two things it is **not**. It is not a CI gate — nothing runs it automatically
+  on any platform, so a destructive regression can merge; treat it as local
+  validation you run before a release, not a barrier. And its isolation is
+  **partial**: only the AddOns folder is throwaway. `settings.json`, the manifest
+  cache, uploader history, saved tokens and the WebView2 profile are the
+  developer's real files, because Tauri resolves the app-data dir from the bundle
+  identifier rather than any environment variable — including the WebView2
+  profile, which Tauri always passes explicitly, so `WEBVIEW2_USER_DATA_FOLDER`
+  is inert. Every run also empties the manifest-cache DB, because the first scan
+  of an empty sandbox prunes it against zero folder names. The runner's header
+  documents the exact line. Specs must normalise persisted state they depend on.
+
 **CI**
 
 - GitHub Actions enforces Rust and frontend checks on every PR.
+- Neither e2e flavour runs in CI, and `test:packaged` doesn't either. All three
+  drive a real WebView2 window over CDP, and on a GitHub Windows runner the app
+  launches and stays alive but **never binds the debug port** — verified three
+  times with `netstat` showing no listener on 9222. Run them locally before a
+  release. `ci.yml` records what was ruled out, so a future attempt starts from
+  evidence instead of repeating it.
 - Treat CI failures as blockers; update code until CI is green.
 
 ---

@@ -128,6 +128,25 @@ jobs:
       - name: Build Tauri
         run: cargo build --manifest-path src-tauri/Cargo.toml
 
+  # NO e2e job here, and it is not an oversight — `npm run test:e2e:sandbox` is
+  # local-only, like `npm run test:packaged`.
+  #
+  # It was tried on windows-latest three times and failed identically each time.
+  # The evidence, from the harness's own diagnostic: the Rust build succeeds, the
+  # app launches, our PID is the only kalpa.exe, the process stays alive for the
+  # full 120s wait — and `netstat` reports NOTHING listening on 9222. WebView2
+  # never binds the debug port on a GitHub runner even though lib.rs sets
+  # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS and `tauri build --debug` really does
+  # produce a debug_assertions binary.
+  #
+  # Ruled out along the way: IPv6-vs-IPv4 loopback (the probe now uses 127.0.0.1
+  # and still gets ECONNREFUSED), a too-short timeout (30s -> 120s), a
+  # non-writable WebView2 user-data folder (given its own directory), and a
+  # missing Playwright browser (connectOverCDP never launches one).
+  #
+  # Before trying again, prove WebView2 can bind a debug port at all on the
+  # runner with a minimal app — do not re-litigate the list above.
+
   # Compile + test the Linux port. Lint/format/audit run once in the Windows
   # job above; this job proves the Linux cfg arms build clean and pass tests.
   # ubuntu-22.04 is the release baseline (WebKitGTK 4.1, glibc 2.35).
