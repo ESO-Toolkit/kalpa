@@ -6,6 +6,74 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.16] — 2026-08-08
+
+Three follow-ups to the audit remediation in beta.15. Most of the work is
+internal, but reviewing it turned up several ways settings and addons could go
+missing quietly — including one that reported success while doing the opposite.
+
+### Bug Fixes
+
+- **Importing pack settings in the performance UI no longer overwrites your real
+  settings with something the game cannot read.** When a pack carried a
+  megaserver you do not play on, the performance UI wrote the file anyway — with
+  the unmapped layer left as a placeholder key ESO never looks at — and reported
+  the addon as applied. Your previous settings for that addon were replaced. The
+  main window refused the same import correctly; now both refuse it, and say
+  which addon could not be mapped and why.
+  ([#344](https://github.com/ESO-Toolkit/kalpa/pull/344))
+- **Pack settings are no longer applied while ESO is running.** The game holds
+  SavedVariables in memory and rewrites them when you log out, so an import
+  applied underneath a running client was discarded — after Kalpa had told you it
+  worked. Kalpa now asks you to close ESO first, and re-checks immediately before
+  writing rather than once when you clicked.
+  ([#344](https://github.com/ESO-Toolkit/kalpa/pull/344))
+- **Removing an addon and then refreshing no longer brings it back as a row for
+  something that is gone.** A removal hides the row immediately and deletes the
+  folder three seconds later, so a refresh in that window read the addon straight
+  back off disk and restored it — and once the delete landed, nothing hid it
+  again. Refreshes now mask anything queued for removal, and keep masking it
+  across the delete itself. ([#342](https://github.com/ESO-Toolkit/kalpa/pull/342))
+- **Importing pack settings no longer silently discards a megaserver's worth of
+  them.** Every world layer in an exported pack was templated to the same
+  placeholder, so a file holding both an NA and an EU layer emitted two identical
+  keys on import and Lua's last-one-wins quietly dropped one. Layers now map
+  one-to-one. ([#344](https://github.com/ESO-Toolkit/kalpa/pull/344))
+- **Update All no longer acts on a list that went stale while it waited on you.**
+  The "ESO is running" prompt has no time limit and the addon list stays live
+  behind it, so an addon removed while that prompt was open could still be
+  downloaded and extracted into a folder seconds from deletion — and switching
+  your AddOns folder mid-prompt could start the batch against the instance you
+  had just left. Both are re-checked at the last moment, and a folder switch
+  stops the run rather than guessing.
+  ([#342](https://github.com/ESO-Toolkit/kalpa/pull/342))
+- **A SavedVariables edit saved while ESO is running now always warns you** that
+  the game will overwrite it at logout. The warning was tied to the addon
+  reminder setting, so anyone who had dismissed that never saw it.
+  ([#344](https://github.com/ESO-Toolkit/kalpa/pull/344))
+
+### Internal
+
+- Addon removal, the Update All re-entry guard and the rescan's selection
+  handling moved out of `App.tsx` into tested modules.
+  ([#342](https://github.com/ESO-Toolkit/kalpa/pull/342))
+- Destructive end-to-end tests, which previously could not exist: the suite ran
+  against the developer's real ESO install. A debug-only AddOns override plus a
+  runner that owns the app makes install, remove and restore testable — and the
+  backend now refuses to register any other folder while that override is set, so
+  a regression fails the boot instead of a later assertion.
+  ([#343](https://github.com/ESO-Toolkit/kalpa/pull/343))
+- Pack Hub restore is resumable. It walked the whole snapshot in one request and
+  hit Cloudflare's subrequest ceiling, so a large corpus could not be restored at
+  all. ([#344](https://github.com/ESO-Toolkit/kalpa/pull/344))
+- Gates that were not running: the worker's tests had never been typechecked,
+  `clippy` never linted either crate's test target, `prettier` never saw
+  `public/`, `scripts/` or `e2e/`, and the guard against source files containing
+  raw control bytes — the defect class that hid a whole module from review in
+  beta.15 — only ever looked at the frontend. All now run across the repository.
+  ([#344](https://github.com/ESO-Toolkit/kalpa/pull/344),
+  [#342](https://github.com/ESO-Toolkit/kalpa/pull/342))
+
 ## [0.1.0-beta.15] — 2026-07-31
 
 Splitting a log now finishes the job. The output used to land outside the folder every upload path reads from, so the one reason to split — uploading part of a session — was unreachable without dragging the file back in by hand.
@@ -462,7 +530,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...HEAD
+[0.1.0-beta.16]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...v0.1.0-beta.16
 [0.1.0-beta.15]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.14...v0.1.0-beta.15
 [0.1.0-beta.14]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.13...v0.1.0-beta.14
 [0.1.0-beta.13]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.12...v0.1.0-beta.13
