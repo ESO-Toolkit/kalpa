@@ -52,16 +52,42 @@ async function main() {
   }
 }
 
+/**
+ * Wait for the app's own page, then insist it is the packaged origin.
+ *
+ * POLLED, and that is the whole point. `waitForCdp` only proves the debug port
+ * answers `/json/version` and `/json/list`, which WebView2 does the moment it
+ * opens — while the only target is still `about:blank`. Checking once here
+ * turned that startup race into a hard failure that reads like a product bug:
+ * "Packaged origin was not present in CDP pages. Saw: about:blank."
+ *
+ * The identical mistake was fixed in `connectToTauriAt` (e2e/helpers.ts), where
+ * two single-shot pre-checks sat above the poll loop added to survive exactly
+ * this. Fixing it there and not here left the same defect one file away.
+ *
+ * A dev-server run must still fail: the deadline expires having seen only
+ * `http://127.0.0.1:1430/`, and the message says so.
+ */
 async function assertPackagedOrigin() {
-  const pages = await httpJson(CDP_PAGES_URL, 2_000);
-  const urls = Array.isArray(pages)
-    ? pages.map((page) => (typeof page?.url === "string" ? page.url : ""))
-    : [];
-  if (!urls.some((url) => url === "http://tauri.localhost/")) {
-    throw new Error(
-      `Packaged origin was not present in CDP pages. Saw: ${urls.join(", ") || "none"}. A dev-server run must fail here.`
-    );
+  const deadline = Date.now() + 20_000;
+  let seen = [];
+
+  while (Date.now() < deadline) {
+    const pages = await httpJson(CDP_PAGES_URL, 2_000).catch(() => null);
+    seen = Array.isArray(pages)
+      ? pages.map((page) => (typeof page?.url === "string" ? page.url : "")).filter(Boolean)
+      : [];
+    if (seen.some((url) => url === "http://tauri.localhost/")) return;
+    // A dev-server origin is not a race — it is the thing this gate exists to
+    // catch — so fail immediately rather than burning the full deadline.
+    if (seen.some((url) => /^https?:\/\/(127\.0\.0\.1|localhost):\d+\//.test(url))) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
+
+  throw new Error(
+    `Packaged origin never appeared in CDP pages within 20s. Saw: ${seen.join(", ") || "none"}. ` +
+      `A dev-server run must fail here.`
+  );
 }
 
 function assertBuildArtifacts() {
