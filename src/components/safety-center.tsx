@@ -12,7 +12,10 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsIndicator, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
-import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
+import {
+  ESO_RUNNING_SETTINGS_REFUSAL,
+  esoIsRunningForSettingsWrite,
+} from "@/lib/eso-settings-gate";
 import { formatBytes } from "@/lib/utils";
 import type { SnapshotManifest, IntegrityResult, OpLogEntry } from "@/types";
 
@@ -107,7 +110,6 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
   const [deleting, setDeleting] = useState<string | null>(null);
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
 
   // A restore rewrites SavedVariables (and possibly the whole AddOns tree), so
   // no snapshot may be deleted underneath it — and vice versa.
@@ -141,10 +143,18 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
     if (anyOpInFlight) return;
     setRestoring(id);
     try {
-      // Same gate as every other write to the ESO tree. It matters most here:
-      // ESO holds SavedVariables in memory and rewrites them at logout, so a
-      // restore applied while the game runs is silently undone afterwards.
-      if (!(await ensureEsoNotBlocking())) return;
+      // NOT the same gate as an addon write, despite restoring addon files too:
+      // a snapshot carries SavedVariables, and ESO rewrites those from memory at
+      // every loading screen, so a restore applied under a running client is
+      // silently undone. This comment used to say the shared gate "matters most
+      // here" while `suppressEsoRunningWarning` let a suppressed user past it
+      // without a prompt at all — asserting exactly the protection it lacked.
+      //
+      // Refused, not warned, and the addon-reminder preference cannot silence it.
+      if (await esoIsRunningForSettingsWrite()) {
+        toast.error(ESO_RUNNING_SETTINGS_REFUSAL);
+        return;
+      }
       const count = await invokeOrThrow<number>("restore_snapshot", {
         addonsPath,
         snapshotId: id,

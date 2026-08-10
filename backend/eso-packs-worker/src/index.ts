@@ -715,6 +715,61 @@ interface BackupMeta {
 // Warn (not fail) if the snapshot is approaching KV's 25MB per-value limit.
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
 
+/** Key marking a user as deleted, so a stale backup read cannot republish them. */
+function deletedUserKey(userId: string): string {
+  return `deleted:${userId}`;
+}
+
+/**
+ * How long a deletion tombstone outlives the deletion.
+ *
+ * Only has to cover the window in which a backup read can still be in flight —
+ * a single cron invocation — so this is enormously generous. It expires because
+ * an unbounded set of tombstones is its own storage problem, and after a full
+ * backup cycle no live snapshot can still contain the user.
+ */
+const DELETED_USER_TTL_SECONDS = 30 * 86400;
+
+/**
+ * Remove records belonging to deleted users from a snapshot before it is written.
+ *
+ * See the call site for why this happens at write time rather than by ordering
+ * the read against the delete.
+ */
+async function dropDeletedUsers(
+  env: Env,
+  snapshot: { packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> },
+): Promise<{ packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> }> {
+  const userIds = new Set<string>();
+  for (const pack of snapshot.packs) if (pack.author_id) userIds.add(String(pack.author_id));
+  for (const pack of Object.values(snapshot.packBodies)) {
+    if (pack?.author_id) userIds.add(String(pack.author_id));
+  }
+  for (const vote of Object.values(snapshot.votes)) {
+    if (vote?.userId) userIds.add(String(vote.userId));
+  }
+  if (userIds.size === 0) return snapshot;
+
+  // One get per DISTINCT user in the corpus, not per record. Every KV call
+  // counts against the same per-invocation subrequest ceiling that already
+  // forced this cron to stop fanning out per record.
+  const ids = [...userIds];
+  const present = await Promise.all(ids.map((id) => env.ESO_PACKS.get(deletedUserKey(id))));
+  const deleted = new Set(ids.filter((_, i) => present[i] !== null));
+  if (deleted.size === 0) return snapshot;
+
+  console.log(`Backup excluding ${deleted.size} deleted user(s)`);
+  return {
+    packs: snapshot.packs.filter((p) => !deleted.has(String(p.author_id))),
+    packBodies: Object.fromEntries(
+      Object.entries(snapshot.packBodies).filter(([, p]) => !deleted.has(String(p?.author_id))),
+    ),
+    votes: Object.fromEntries(
+      Object.entries(snapshot.votes).filter(([, v]) => !deleted.has(String(v?.userId))),
+    ),
+  };
+}
+
 async function handleScheduled(env: Env): Promise<void> {
   // Fresh (uncached) read so the snapshot reflects the latest mutation rather
   // than a stale up-to-60s-cached index.
@@ -748,11 +803,28 @@ async function handleScheduled(env: Env): Promise<void> {
   );
   const votes = await listAllVotes(env);
 
-  const snapshot: PackBackupSnapshot = {
-    created_at: new Date().toISOString(),
+  // Drop anyone who asked to be deleted, at WRITE time.
+  //
+  // This read of the index and votes may predate an account deletion that
+  // completes before the put below. `purgeUserFromLatestBackup` scrubs
+  // `backup:latest` when the deletion runs, but nothing orders the two, so a
+  // cron holding a stale read could put those records straight back — into the
+  // one backup key with no TTL, where a later restore replays them.
+  //
+  // Filtering here rather than relying on having read after the delete is what
+  // makes the ordering irrelevant: the tombstone outlives the read, so a stale
+  // snapshot still cannot publish a deleted user.
+  const { packs, packBodies: keptBodies, votes: keptVotes } = await dropDeletedUsers(env, {
     packs: index.packs,
     packBodies,
     votes,
+  });
+
+  const snapshot: PackBackupSnapshot = {
+    created_at: new Date().toISOString(),
+    packs,
+    packBodies: keptBodies,
+    votes: keptVotes,
   };
 
   const serialized = JSON.stringify(snapshot);
@@ -1160,18 +1232,16 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
  * Best-effort. The live data is already gone by the time this runs, so a
  * failure here must not fail the deletion request — it is logged and swallowed.
  *
- * A concurrent scheduled backup CAN reintroduce the user, and an earlier version
- * of this comment claimed otherwise. `handleScheduled` reads the live index and
- * votes, then writes `backup:latest`, with no lock or ordering shared with this
- * path. A cron that read before the deletion and writes after this purge
- * restores the deleted records into `backup:latest` — which has no TTL, unlike
- * the dated snapshots — and a later restore replays them.
+ * This scrub alone does NOT stop a concurrent scheduled backup reintroducing the
+ * user, and an earlier version of this comment claimed it did. `handleScheduled`
+ * reads the live index and votes and then writes `backup:latest`, sharing no
+ * lock with this path, so a cron that read before the deletion could write after
+ * this scrub and put the records back — into the one key with no TTL.
  *
- * Narrow (it needs the daily cron to straddle an account deletion) but real, and
- * it is a deletion guarantee rather than a convenience. Closing it means putting
- * the backup write and this purge behind the same Durable Object, or a durable
- * deleted-user tombstone that `handleScheduled` applies before publishing.
- * Neither belongs in an audit-residue change; tracked as a follow-up on the PR.
+ * What actually closes that is the tombstone written by the caller before this
+ * runs: `dropDeletedUsers` filters tombstoned users out at WRITE time, so a
+ * stale read cannot publish them however the two interleave. This function
+ * remains necessary for the snapshot that is already on disk.
  */
 async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void> {
   try {
@@ -1284,7 +1354,17 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
     await invalidatePackListCache(url);
   }
 
-  // 4. Scrub them from the one backup key that never expires. The dated
+  // 4. Tombstone the user BEFORE scrubbing the backup.
+  //
+  // Ordering matters here and only here: a scheduled backup holding a read from
+  // before this request can still write after the scrub below, and the tombstone
+  // is what stops it republishing them (see `dropDeletedUsers`). Writing it
+  // first means even a cron that lands between these two lines is covered.
+  await env.ESO_PACKS.put(deletedUserKey(userId), new Date().toISOString(), {
+    expirationTtl: DELETED_USER_TTL_SECONDS,
+  });
+
+  // 5. Scrub them from the one backup key that never expires. The dated
   // snapshots keep their 90-day TTL and age out on their own.
   await purgeUserFromLatestBackup(env, userId);
 
