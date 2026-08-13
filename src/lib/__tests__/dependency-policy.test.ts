@@ -51,3 +51,22 @@ describe("setAskRequiredDependenciesOnly", () => {
     await expect(setAskRequiredDependenciesOnly(true)).resolves.toBe(false);
   });
 });
+
+describe("setDependencyPolicy", () => {
+  // The settings radio reverts its optimistic selection when this resolves
+  // false. If the signal were ever swallowed the radio would silently show a
+  // policy that is not the stored one, and the install path reads the STORED
+  // value — so "ask" on screen with "skip" on disk means a missing required
+  // library is never offered at all.
+  it("propagates a failed write so the radio can revert", async () => {
+    const { setDependencyPolicy } = await import("../dependency-policy");
+    mockSetSetting.mockResolvedValue(false);
+    await expect(setDependencyPolicy("ask")).resolves.toBe(false);
+  });
+
+  it("reports success so a good write keeps the selection", async () => {
+    const { setDependencyPolicy, DEPENDENCY_POLICY_KEY } = await import("../dependency-policy");
+    await expect(setDependencyPolicy("ask")).resolves.toBe(true);
+    expect(mockSetSetting).toHaveBeenCalledWith(DEPENDENCY_POLICY_KEY, "ask");
+  });
+});

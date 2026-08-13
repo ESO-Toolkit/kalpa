@@ -820,9 +820,25 @@ export function Settings({
                         key={value}
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
+                        // Revert on a failed write, exactly as the conflict
+                        // policy above does. Without this the radio was the one
+                        // control here that could lie: a failed write left the
+                        // UI showing "ask" while settings.json still said
+                        // "skip", and the install path reads the STORED value —
+                        // so a missing required library would be silently never
+                        // offered, which is the one outcome this whole feature
+                        // exists to prevent. It also gates the scope checkbox
+                        // below, which would then be configuring a policy that
+                        // was not in force.
                         onClick={() => {
+                          const previous = dependencyPolicy;
                           setDependencyPolicy(value);
-                          void saveDependencyPolicy(value);
+                          void saveDependencyPolicy(value).then((ok) => {
+                            if (!ok) {
+                              setDependencyPolicy(previous);
+                              toast.error("Couldn't save that setting — try again.");
+                            }
+                          });
                         }}
                       >
                         <span
