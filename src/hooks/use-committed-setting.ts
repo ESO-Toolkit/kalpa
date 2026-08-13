@@ -40,22 +40,33 @@ export function useCommittedSetting<T>(
   hydrate: (loaded: T) => void;
 } {
   const [value, setValue] = useState<T>(initial);
+  // Starts at the caller's DEFAULT, which is a guess — the stored value is not
+  // known until `hydrate` lands. `writeCommittedRef` records when this stops
+  // being a guess, so a rollback can never target a default that disagrees with
+  // what is actually on disk.
   const committedRef = useRef<T>(initial);
+  const writeCommittedRef = useRef(false);
   const seqRef = useRef(0);
 
   const hydrate = useCallback((loaded: T) => {
-    // Only before the user has acted. The mount load is async, so a click can
-    // land while it is still in flight — and then this stale read would put the
-    // control back to the old value while the click's write goes on to succeed,
-    // leaving the display behind the store with nothing said. The user's choice
-    // is newer than any value read before they made it, so the load is dropped
-    // outright rather than merged.
-    if (seqRef.current !== 0) return;
-    // Otherwise a load is ground truth: it both displays and counts as
-    // committed. It does NOT bump `seq` — that would make the next real write
-    // look superseded.
-    committedRef.current = loaded;
-    setValue(loaded);
+    // Split, because a load that arrives late is stale for the DISPLAY but
+    // still authoritative for ROLLBACK.
+    //
+    // Display: only before the user has acted. The mount load is async, so a
+    // click can land while it is in flight, and letting the stale read win puts
+    // the control back while the click's write goes on to succeed — display
+    // behind the store, with nothing said.
+    if (seqRef.current === 0) setValue(loaded);
+    // Rollback: this is what disk held before any of those clicks, so it is the
+    // correct place to land if they fail — unless a write has already succeeded
+    // since, in which case that newer value is the truth and this read is
+    // simply out of date. Skipping this entirely (the previous fix) left the
+    // rollback target on the constructor default: stored "skip", a click before
+    // hydration, a failed write, and the control settles on "ask" while the
+    // install path still reads "skip" — the silent-suppression case again.
+    if (!writeCommittedRef.current) committedRef.current = loaded;
+    // Note it does NOT bump `seq`: that would make the next real write look
+    // superseded and skip its rollback.
   }, []);
 
   const commit = useCallback(
@@ -74,8 +85,10 @@ export function useCommittedSetting<T>(
           if (ok) {
             // Any successful write is now the truth on disk, even if a newer
             // write is still in flight — that one will overwrite this on
-            // success or roll back to it on failure.
+            // success or roll back to it on failure. It also outranks any
+            // still-pending mount load, which read disk before this write.
             committedRef.current = next;
+            writeCommittedRef.current = true;
             return;
           }
           // Superseded: a later click owns the display now. Rolling back here

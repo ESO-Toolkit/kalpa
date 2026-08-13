@@ -43,6 +43,40 @@ export function parseDependencyPolicy(value: unknown): DependencyPolicy {
 }
 
 /**
+ * How long a dependency read will wait for pending settings writes before
+ * giving up and reading anyway.
+ *
+ * The settle wait exists to avoid reading a policy the user just replaced, but
+ * it waits on the GLOBAL write chain — any unrelated settings write that never
+ * settles (a `flush_settings` invoke that never returns) would otherwise hang
+ * these reads forever, and with them the install path and the dependency
+ * prompt. A stuck prompt is a worse failure than a stale read: it is the same
+ * "required library never offered" outcome, with no toast and no way out.
+ *
+ * On timeout the read simply proceeds, which is exactly the behaviour before
+ * the ordering was added — degraded, not broken. Generous enough that a normal
+ * flush (a local temp+rename) is never close to it.
+ */
+const SETTLE_TIMEOUT_MS = 3000;
+
+/** Wait for queued settings writes, but never longer than
+ * {@link SETTLE_TIMEOUT_MS}. Never rejects; the timer is always cleared, so a
+ * fast settle does not leave a pending handle behind. */
+async function settledOrTimeout(): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      settingsWritesSettled(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SETTLE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * Read the persisted policy. Never throws — a degraded store yields the default.
  *
  * Ordered behind any settings write still in flight, like the native-upload
@@ -54,7 +88,7 @@ export function parseDependencyPolicy(value: unknown): DependencyPolicy {
  * moments after the user selected the setting meant to offer it.
  */
 export async function getDependencyPolicy(): Promise<DependencyPolicy> {
-  await settingsWritesSettled();
+  await settledOrTimeout();
   return parseDependencyPolicy(await getSetting<unknown>(DEPENDENCY_POLICY_KEY, undefined));
 }
 
@@ -91,7 +125,7 @@ export const DEFAULT_ASK_REQUIRED_ONLY: boolean = false;
  * writes for the same reason as `getDependencyPolicy` — this one decides
  * whether a prompt is suppressed, so a stale read suppresses the wrong thing. */
 export async function getAskRequiredDependenciesOnly(): Promise<boolean> {
-  await settingsWritesSettled();
+  await settledOrTimeout();
   const raw = await getSetting<unknown>(ASK_REQUIRED_ONLY_KEY, undefined);
   return typeof raw === "boolean" ? raw : DEFAULT_ASK_REQUIRED_ONLY;
 }

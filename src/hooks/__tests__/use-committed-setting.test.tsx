@@ -126,17 +126,40 @@ describe("useCommittedSetting", () => {
     expect(result.current.value).toBe("auto");
   });
 
-  it("does not let a dropped load become the rollback target", async () => {
+  // (A round-4 test asserting that a late load is ignored for rollback too was
+  // removed here: round 5 showed that leaves the rollback target on the
+  // constructor default, which is the bug the next two tests pin down. A late
+  // load is stale for the DISPLAY but authoritative for ROLLBACK.)
+
+  // The round-5 finding. `committedRef` starts at the caller's DEFAULT, which
+  // is only a guess until the load lands — so a rollback before then must not
+  // target it. Stored "skip", a click before hydration, a failed write: landing
+  // on the "ask" default would leave the UI promising prompts the install path
+  // will never produce.
+  it("rolls back to a late load rather than the default it started on", async () => {
     const { save, settles } = deferredSave<string>();
-    const { result } = renderHook(() => useCommittedSetting<string>("skip", save));
+    const { result } = renderHook(() => useCommittedSetting<string>("ask", save));
 
     act(() => result.current.commit("auto"));
-    act(() => result.current.hydrate("ask"));
+    act(() => result.current.hydrate("skip"));
     await act(async () => settles[0]!(false));
 
-    // Rolls back to "skip" — what the store held — not to the load that arrived
-    // after the click and was discarded.
     expect(result.current.value).toBe("skip");
+  });
+
+  it("does not let a late load overrule a write that already succeeded", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useCommittedSetting<string>("ask", save));
+
+    act(() => result.current.commit("auto"));
+    await act(async () => settles[0]!(true));
+    // The mount load finally arrives, holding what disk had BEFORE that write.
+    act(() => result.current.hydrate("skip"));
+    act(() => result.current.commit("ask"));
+    await act(async () => settles[1]!(false));
+
+    // Rolls back to "auto" — the write that actually landed — not the stale load.
+    expect(result.current.value).toBe("auto");
   });
 
   it("treats a rejected save as a failed one", async () => {

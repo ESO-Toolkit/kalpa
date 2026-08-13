@@ -42,6 +42,25 @@ describe("stale-read ordering", () => {
     expect(order).toEqual(["settled", "read"]);
   });
 
+  // The round-5 finding: the settle wait is on the GLOBAL write chain, so an
+  // unrelated wedged write must not be able to hang the install path — that is
+  // the same "required library never offered" outcome, with no way out.
+  it("reads anyway when a settings write never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const { getDependencyPolicy } = await import("../dependency-policy");
+      mockSettled.mockReturnValue(new Promise<void>(() => {}));
+      mockGetSetting.mockResolvedValue("skip");
+
+      const read = getDependencyPolicy();
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await expect(read).resolves.toBe("skip");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("waits for pending settings writes before reading the required-only scope", async () => {
     const { getAskRequiredDependenciesOnly } = await import("../dependency-policy");
     const order: string[] = [];
