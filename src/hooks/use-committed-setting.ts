@@ -44,9 +44,16 @@ export function useCommittedSetting<T>(
   const seqRef = useRef(0);
 
   const hydrate = useCallback((loaded: T) => {
-    // A load is ground truth, so it both displays and counts as committed.
-    // It does NOT bump `seq`: hydration happens once on mount, before any
-    // click, and claiming a write id here would let it cancel a real one.
+    // Only before the user has acted. The mount load is async, so a click can
+    // land while it is still in flight — and then this stale read would put the
+    // control back to the old value while the click's write goes on to succeed,
+    // leaving the display behind the store with nothing said. The user's choice
+    // is newer than any value read before they made it, so the load is dropped
+    // outright rather than merged.
+    if (seqRef.current !== 0) return;
+    // Otherwise a load is ground truth: it both displays and counts as
+    // committed. It does NOT bump `seq` — that would make the next real write
+    // look superseded.
     committedRef.current = loaded;
     setValue(loaded);
   }, []);
@@ -55,20 +62,28 @@ export function useCommittedSetting<T>(
     (next: T) => {
       const seq = ++seqRef.current;
       setValue(next);
-      void save(next).then((ok) => {
-        if (ok) {
-          // Any successful write is now the truth on disk, even if a newer
-          // write is still in flight — that one will overwrite this on success
-          // or roll back to it on failure.
-          committedRef.current = next;
-          return;
-        }
-        // Superseded: a later click owns the display now. Rolling back here
-        // would undo a selection the user made after this one.
-        if (seq !== seqRef.current) return;
-        setValue(committedRef.current);
-        toast.error("Couldn't save that setting — try again.");
-      });
+      void save(next)
+        // A rejection is a failed write like any other. Both current callers go
+        // through `setSetting`, which is documented never to throw, but the
+        // hook's guarantee is "never display what is not stored" and that must
+        // not rest on a convention the signature does not enforce — an
+        // unhandled rejection here would strand the optimistic value on screen
+        // with no toast, which is the exact failure this hook exists to remove.
+        .catch(() => false)
+        .then((ok) => {
+          if (ok) {
+            // Any successful write is now the truth on disk, even if a newer
+            // write is still in flight — that one will overwrite this on
+            // success or roll back to it on failure.
+            committedRef.current = next;
+            return;
+          }
+          // Superseded: a later click owns the display now. Rolling back here
+          // would undo a selection the user made after this one.
+          if (seq !== seqRef.current) return;
+          setValue(committedRef.current);
+          toast.error("Couldn't save that setting — try again.");
+        });
     },
     [save]
   );

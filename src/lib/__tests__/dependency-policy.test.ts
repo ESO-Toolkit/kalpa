@@ -2,16 +2,62 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockGetSetting = vi.fn();
 const mockSetSetting = vi.fn();
+const mockSettled = vi.fn();
 
 vi.mock("@/lib/store", () => ({
   getSetting: (...args: unknown[]) => mockGetSetting(...args),
   setSetting: (...args: unknown[]) => mockSetSetting(...args),
+  settingsWritesSettled: () => mockSettled(),
 }));
 
 beforeEach(() => {
   mockGetSetting.mockReset();
   mockSetSetting.mockReset();
+  mockSettled.mockReset();
   mockSetSetting.mockResolvedValue(true);
+  mockSettled.mockResolvedValue(undefined);
+});
+
+/**
+ * Both readers feed the install path, which is what decides whether a missing
+ * required library is offered at all. Settings writes them fire-and-forget and
+ * writes are queued, so a read that does not wait can hand Rust the policy the
+ * user just replaced — and a stale "skip" means no prompt at all.
+ */
+describe("stale-read ordering", () => {
+  it("waits for pending settings writes before reading the policy", async () => {
+    const { getDependencyPolicy } = await import("../dependency-policy");
+    const order: string[] = [];
+    mockSettled.mockImplementation(() => {
+      order.push("settled");
+      return Promise.resolve();
+    });
+    mockGetSetting.mockImplementation(() => {
+      order.push("read");
+      return Promise.resolve("ask");
+    });
+
+    await getDependencyPolicy();
+
+    expect(order).toEqual(["settled", "read"]);
+  });
+
+  it("waits for pending settings writes before reading the required-only scope", async () => {
+    const { getAskRequiredDependenciesOnly } = await import("../dependency-policy");
+    const order: string[] = [];
+    mockSettled.mockImplementation(() => {
+      order.push("settled");
+      return Promise.resolve();
+    });
+    mockGetSetting.mockImplementation(() => {
+      order.push("read");
+      return Promise.resolve(true);
+    });
+
+    await getAskRequiredDependenciesOnly();
+
+    expect(order).toEqual(["settled", "read"]);
+  });
 });
 
 describe("getAskRequiredDependenciesOnly", () => {

@@ -112,6 +112,45 @@ describe("useCommittedSetting", () => {
     expect(result.current.value).toBe("auto");
   });
 
+  // The round-4 finding. The mount load is async, so a click can land while it
+  // is still in flight; letting the stale read win puts the control back while
+  // the click's write goes on to succeed — display behind the store, silently.
+  it("drops a mount load that resolves after the user has already chosen", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useCommittedSetting<string>("skip", save));
+
+    act(() => result.current.commit("auto"));
+    act(() => result.current.hydrate("skip"));
+    await act(async () => settles[0]!(true));
+
+    expect(result.current.value).toBe("auto");
+  });
+
+  it("does not let a dropped load become the rollback target", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useCommittedSetting<string>("skip", save));
+
+    act(() => result.current.commit("auto"));
+    act(() => result.current.hydrate("ask"));
+    await act(async () => settles[0]!(false));
+
+    // Rolls back to "skip" — what the store held — not to the load that arrived
+    // after the click and was discarded.
+    expect(result.current.value).toBe("skip");
+  });
+
+  it("treats a rejected save as a failed one", async () => {
+    const save = vi.fn(() => Promise.reject(new Error("store exploded")));
+    const { result } = renderHook(() => useCommittedSetting<string>("skip", save));
+
+    await act(async () => {
+      result.current.commit("ask");
+    });
+
+    expect(result.current.value).toBe("skip");
+    await waitFor(() => expect(mockToastError).toHaveBeenCalledTimes(1));
+  });
+
   it("works for a boolean setting toggled twice in a row", async () => {
     const { save, settles } = deferredSave<boolean>();
     const { result } = renderHook(() => useCommittedSetting<boolean>(false, save));

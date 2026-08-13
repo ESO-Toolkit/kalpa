@@ -1,4 +1,4 @@
-import { getSetting, setSetting } from "@/lib/store";
+import { getSetting, setSetting, settingsWritesSettled } from "@/lib/store";
 
 /**
  * The "dependencyPolicy" preference: how Kalpa treats the libraries an addon
@@ -42,8 +42,19 @@ export function parseDependencyPolicy(value: unknown): DependencyPolicy {
     : DEFAULT_DEPENDENCY_POLICY;
 }
 
-/** Read the persisted policy. Never throws — a degraded store yields the default. */
+/**
+ * Read the persisted policy. Never throws — a degraded store yields the default.
+ *
+ * Ordered behind any settings write still in flight, like the native-upload
+ * opt-out. The Settings radio writes fire-and-forget, and writes are queued, so
+ * a policy chosen moments before an install could still be sitting behind
+ * another write when this reads — handing Rust the OLD policy. Reading a stale
+ * "skip" is the damaging direction: the backend then reports no pending
+ * dependencies at all, so a missing required library is silently never offered,
+ * moments after the user selected the setting meant to offer it.
+ */
 export async function getDependencyPolicy(): Promise<DependencyPolicy> {
+  await settingsWritesSettled();
   return parseDependencyPolicy(await getSetting<unknown>(DEPENDENCY_POLICY_KEY, undefined));
 }
 
@@ -76,8 +87,11 @@ export function setDependencyPolicy(policy: DependencyPolicy): Promise<boolean> 
 export const DEFAULT_ASK_REQUIRED_ONLY: boolean = false;
 
 /** Read the opt-in. Never throws; a degraded store or a non-boolean value
- * (settings.json is user-editable) yields the default. */
+ * (settings.json is user-editable) yields the default. Ordered behind pending
+ * writes for the same reason as `getDependencyPolicy` — this one decides
+ * whether a prompt is suppressed, so a stale read suppresses the wrong thing. */
 export async function getAskRequiredDependenciesOnly(): Promise<boolean> {
+  await settingsWritesSettled();
   const raw = await getSetting<unknown>(ASK_REQUIRED_ONLY_KEY, undefined);
   return typeof raw === "boolean" ? raw : DEFAULT_ASK_REQUIRED_ONLY;
 }
