@@ -28,6 +28,7 @@ import { DependencyPickerDialog } from "./components/dependency-picker-dialog";
 import { getSetting, setSetting } from "@/lib/store";
 import {
   addSkippedDependencies,
+  getAskRequiredDependenciesOnly,
   getDependencyPolicy,
   getSkippedDependencies,
   isDependencySkipped,
@@ -1013,10 +1014,25 @@ function App() {
         return;
       }
 
-      const skipped = await getSkippedDependencies();
+      // Read together: both are independent settings reads on a path that runs
+      // straight after an install, and the picker should not wait on two round
+      // trips in series.
+      const [skipped, requiredOnly] = await Promise.all([
+        getSkippedDependencies(),
+        getAskRequiredDependenciesOnly(),
+      ]);
       const candidates = dedupeDependencies(pending).filter(
-        (dep) => dep.required || !isDependencySkipped(dep.name, skipped)
+        (dep) =>
+          dep.required ||
+          // Optional entries drop out wholesale under the "required only"
+          // opt-in — before the skip-list test, which would otherwise be the
+          // only thing standing between the user and a prompt they asked never
+          // to see. Nothing is lost: they stay listed, with an Install button,
+          // in the addon's detail panel.
+          (!requiredOnly && !isDependencySkipped(dep.name, skipped))
       );
+      // Also covers "every entry was optional and the user only wants required"
+      // — no picker at all, rather than an empty one.
       if (candidates.length === 0) return;
 
       // One picker at a time — a second would replace the first's list

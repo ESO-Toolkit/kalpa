@@ -26,6 +26,9 @@ export const DEPENDENCY_POLICY_KEY = "dependencyPolicy";
 /** settings.json key holding the declined-dependency list (see below). */
 export const SKIPPED_DEPENDENCIES_KEY = "skippedDependencies";
 
+/** settings.json key holding the {@link getAskRequiredDependenciesOnly} opt-in. */
+export const ASK_REQUIRED_ONLY_KEY = "askRequiredDependenciesOnly";
+
 export const DEFAULT_DEPENDENCY_POLICY: DependencyPolicy = "ask";
 
 const POLICIES: readonly DependencyPolicy[] = ["auto", "ask", "skip"];
@@ -47,6 +50,38 @@ export async function getDependencyPolicy(): Promise<DependencyPolicy> {
 /** Persist the policy. Returns false when the write failed (see `setSetting`). */
 export function setDependencyPolicy(policy: DependencyPolicy): Promise<boolean> {
   return setSetting(DEPENDENCY_POLICY_KEY, policy);
+}
+
+/**
+ * Narrows the "ask" policy to required (`DependsOn`) libraries only, dropping
+ * optional (`OptionalDependsOn`) entries before the picker ever opens.
+ *
+ * Scope, not action: it modifies what "ask" asks about and is meaningless under
+ * the other two policies, which never surface an optional dependency in the
+ * first place — "auto" installs required entries only (see
+ * `resolve_transitive_deps` in commands.rs, which filters on `d.required`) and
+ * "skip" installs nothing. The settings UI only offers it alongside "ask" for
+ * that reason.
+ *
+ * Turning it on costs no discoverability: an addon's optional libraries are
+ * listed permanently in its detail panel, each with its own Install button, so
+ * the prompt was never the only way to find them.
+ *
+ * Defaults to false — today's behaviour, where the picker lists both groups and
+ * optional entries simply arrive unticked.
+ */
+export const DEFAULT_ASK_REQUIRED_ONLY = false;
+
+/** Read the opt-in. Never throws; a degraded store or a non-boolean value
+ * (settings.json is user-editable) yields the default. */
+export async function getAskRequiredDependenciesOnly(): Promise<boolean> {
+  const raw = await getSetting<unknown>(ASK_REQUIRED_ONLY_KEY, undefined);
+  return typeof raw === "boolean" ? raw : DEFAULT_ASK_REQUIRED_ONLY;
+}
+
+/** Persist the opt-in. Returns false when the write failed (see `setSetting`). */
+export function setAskRequiredDependenciesOnly(enabled: boolean): Promise<boolean> {
+  return setSetting(ASK_REQUIRED_ONLY_KEY, enabled);
 }
 
 /**

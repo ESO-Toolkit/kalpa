@@ -8,6 +8,9 @@ import { FEEDBACK_DISCORD_URL, FEEDBACK_ISSUES_URL, openFeedbackUrl } from "@/li
 import {
   clearSkippedDependencies,
   getSkippedDependencies,
+  getAskRequiredDependenciesOnly,
+  setAskRequiredDependenciesOnly,
+  DEFAULT_ASK_REQUIRED_ONLY,
   getDependencyPolicy,
   DEFAULT_DEPENDENCY_POLICY,
   // Aliased: the local useState setter below already owns the plain name.
@@ -124,6 +127,10 @@ export function Settings({
   // opaque thing to be asked to clear.
   const [skippedDependencies, setSkippedDependencies] = useState<string[]>([]);
   const [clearingSkippedDependencies, setClearingSkippedDependencies] = useState(false);
+  // Narrows the "ask" prompt to required libraries. Stored separately from the
+  // policy rather than as a fourth radio: it answers "about what", where the
+  // radios answer "do what", and only one of the three has anything to narrow.
+  const [askRequiredOnly, setAskRequiredOnly] = useState(DEFAULT_ASK_REQUIRED_ONLY);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
@@ -155,6 +162,7 @@ export function Settings({
     // radio unselected while the app quietly behaves as the default.
     void getDependencyPolicy().then(setDependencyPolicy);
     void getSkippedDependencies().then(setSkippedDependencies);
+    void getAskRequiredDependenciesOnly().then(setAskRequiredOnly);
     void invokeResult<boolean>("detect_minion").then((result) => {
       if (result.ok) {
         setMinionDetected(result.data);
@@ -796,7 +804,14 @@ export function Settings({
                     <SectionHeader>When an addon needs other libraries</SectionHeader>
                     {(
                       [
-                        ["auto", "Install them automatically"],
+                        // "required ones" is not a softening of the label — it
+                        // is what this mode does. Auto-resolution filters to
+                        // required entries (`resolve_transitive_deps` in
+                        // commands.rs); optional libraries are never installed
+                        // without an explicit tick under any policy. The old
+                        // "Install them automatically" read as "all of them",
+                        // which drove users away from the mode they wanted.
+                        ["auto", "Install required ones automatically"],
                         ["ask", "Ask me which ones to install (default)"],
                         ["skip", "Never install them"],
                       ] as const
@@ -830,6 +845,36 @@ export function Settings({
                         Addons that depend on a missing library won&apos;t load until you install it
                         yourself.
                       </p>
+                    )}
+
+                    {/* Only under "ask": the other two policies never surface an
+                      optional library, so there would be nothing to narrow. The
+                      stored value is left alone when the row is hidden, so
+                      passing through "auto" and back doesn't silently reset it. */}
+                    {dependencyPolicy === "ask" && (
+                      <label className="flex cursor-pointer items-start gap-3 border-t border-structure-06 pt-2">
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={askRequiredOnly}
+                          onCheckedChange={(checked) => {
+                            const value = checked === true;
+                            setAskRequiredOnly(value);
+                            void setAskRequiredDependenciesOnly(value).then((ok) => {
+                              if (!ok) {
+                                setAskRequiredOnly(!value);
+                                toast.error("Couldn't save that setting — try again.");
+                              }
+                            });
+                          }}
+                        />
+                        <div>
+                          <p className="text-sm text-foreground">Only ask about required ones</p>
+                          <p className="text-xs text-muted-foreground">
+                            Optional libraries stay listed under an addon&apos;s Details tab, each
+                            with an Install button.
+                          </p>
+                        </div>
+                      </label>
                     )}
 
                     {/* Escape hatch for “don’t ask again”: that choice is otherwise
