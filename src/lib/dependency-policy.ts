@@ -70,7 +70,10 @@ export function setDependencyPolicy(policy: DependencyPolicy): Promise<boolean> 
  * Defaults to false — today's behaviour, where the picker lists both groups and
  * optional entries simply arrive unticked.
  */
-export const DEFAULT_ASK_REQUIRED_ONLY = false;
+// Annotated rather than inferred, matching DEFAULT_DEPENDENCY_POLICY above: a
+// bare `false` infers the literal type, which then narrows every consumer's
+// generic to `false` and rejects ever setting it true.
+export const DEFAULT_ASK_REQUIRED_ONLY: boolean = false;
 
 /** Read the opt-in. Never throws; a degraded store or a non-boolean value
  * (settings.json is user-editable) yields the default. */

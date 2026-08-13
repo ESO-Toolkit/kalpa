@@ -17,6 +17,7 @@ import {
   setDependencyPolicy as saveDependencyPolicy,
   type DependencyPolicy,
 } from "@/lib/dependency-policy";
+import { useCommittedSetting } from "@/hooks/use-committed-setting";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -120,8 +121,11 @@ export function Settings({
   const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
   const [copying, setCopying] = useState(false);
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
-  const [dependencyPolicy, setDependencyPolicy] =
-    useState<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY);
+  const {
+    value: dependencyPolicy,
+    commit: commitDependencyPolicy,
+    hydrate: hydrateDependencyPolicy,
+  } = useCommittedSetting<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY, saveDependencyPolicy);
   // Names the user answered "don't ask again" for. Kept as the full list (not just
   // a count) so the row can name them in a tooltip — otherwise "3 libraries" is an
   // opaque thing to be asked to clear.
@@ -130,7 +134,14 @@ export function Settings({
   // Narrows the "ask" prompt to required libraries. Stored separately from the
   // policy rather than as a fourth radio: it answers "about what", where the
   // radios answer "do what", and only one of the three has anything to narrow.
-  const [askRequiredOnly, setAskRequiredOnly] = useState(DEFAULT_ASK_REQUIRED_ONLY);
+  //
+  // Both go through useCommittedSetting: the install path reads the STORED
+  // values, so neither control may show something settings.json does not have.
+  const {
+    value: askRequiredOnly,
+    commit: commitAskRequiredOnly,
+    hydrate: hydrateAskRequiredOnly,
+  } = useCommittedSetting(DEFAULT_ASK_REQUIRED_ONLY, setAskRequiredDependenciesOnly);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
@@ -160,15 +171,17 @@ export function Settings({
     // Via the module's reader, which narrows: settings.json is user-editable and
     // survives downgrades, so a bad value must fall back rather than leave every
     // radio unselected while the app quietly behaves as the default.
-    void getDependencyPolicy().then(setDependencyPolicy);
+    void getDependencyPolicy().then(hydrateDependencyPolicy);
     void getSkippedDependencies().then(setSkippedDependencies);
-    void getAskRequiredDependenciesOnly().then(setAskRequiredOnly);
+    void getAskRequiredDependenciesOnly().then(hydrateAskRequiredOnly);
     void invokeResult<boolean>("detect_minion").then((result) => {
       if (result.ok) {
         setMinionDetected(result.data);
       }
     });
-  }, []);
+    // Both hydrators are useCallback([]) inside the hook, so listing them keeps
+    // this a mount-only load rather than re-running it.
+  }, [hydrateDependencyPolicy, hydrateAskRequiredOnly]);
 
   // Silently refresh the detected-instance list every time Settings opens, so
   // a PTS install created after app startup shows up in the switcher without
@@ -820,26 +833,17 @@ export function Settings({
                         key={value}
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
-                        // Revert on a failed write, exactly as the conflict
-                        // policy above does. Without this the radio was the one
-                        // control here that could lie: a failed write left the
-                        // UI showing "ask" while settings.json still said
-                        // "skip", and the install path reads the STORED value —
-                        // so a missing required library would be silently never
-                        // offered, which is the one outcome this whole feature
-                        // exists to prevent. It also gates the scope checkbox
-                        // below, which would then be configuring a policy that
-                        // was not in force.
-                        onClick={() => {
-                          const previous = dependencyPolicy;
-                          setDependencyPolicy(value);
-                          void saveDependencyPolicy(value).then((ok) => {
-                            if (!ok) {
-                              setDependencyPolicy(previous);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
-                        }}
+                        // Rollback on a failed write is the hook's job, and it
+                        // rolls back to the last value known to be ON DISK
+                        // rather than to one captured at click time. Two rapid
+                        // clicks put two writes in flight; if both fail, a
+                        // click-time snapshot would restore the first click's
+                        // value, which never persisted either — leaving "ask"
+                        // on screen over a stored "skip". The install path
+                        // reads the stored value, so that combination silently
+                        // never offers a missing required library, which is the
+                        // outcome this whole feature exists to prevent.
+                        onClick={() => commitDependencyPolicy(value)}
                       >
                         <span
                           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
@@ -872,16 +876,7 @@ export function Settings({
                         <Checkbox
                           className="mt-0.5"
                           checked={askRequiredOnly}
-                          onCheckedChange={(checked) => {
-                            const value = checked === true;
-                            setAskRequiredOnly(value);
-                            void setAskRequiredDependenciesOnly(value).then((ok) => {
-                              if (!ok) {
-                                setAskRequiredOnly(!value);
-                                toast.error("Couldn't save that setting — try again.");
-                              }
-                            });
-                          }}
+                          onCheckedChange={(checked) => commitAskRequiredOnly(checked === true)}
                         />
                         <div>
                           <p className="text-sm text-foreground">Only ask about required ones</p>
