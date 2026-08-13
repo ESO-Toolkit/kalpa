@@ -1,4 +1,4 @@
-import { getSetting, setSetting, settingsWritesSettled } from "@/lib/store";
+import { getSetting, setSetting } from "@/lib/store";
 
 /**
  * The "dependencyPolicy" preference: how Kalpa treats the libraries an addon
@@ -43,52 +43,18 @@ export function parseDependencyPolicy(value: unknown): DependencyPolicy {
 }
 
 /**
- * How long a dependency read will wait for pending settings writes before
- * giving up and reading anyway.
- *
- * The settle wait exists to avoid reading a policy the user just replaced, but
- * it waits on the GLOBAL write chain — any unrelated settings write that never
- * settles (a `flush_settings` invoke that never returns) would otherwise hang
- * these reads forever, and with them the install path and the dependency
- * prompt. A stuck prompt is a worse failure than a stale read: it is the same
- * "required library never offered" outcome, with no toast and no way out.
- *
- * On timeout the read simply proceeds, which is exactly the behaviour before
- * the ordering was added — degraded, not broken. Generous enough that a normal
- * flush (a local temp+rename) is never close to it.
- */
-const SETTLE_TIMEOUT_MS = 3000;
-
-/** Wait for queued settings writes, but never longer than
- * {@link SETTLE_TIMEOUT_MS}. Never rejects; the timer is always cleared, so a
- * fast settle does not leave a pending handle behind. */
-async function settledOrTimeout(): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      settingsWritesSettled(),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, SETTLE_TIMEOUT_MS);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-/**
  * Read the persisted policy. Never throws — a degraded store yields the default.
  *
- * Ordered behind any settings write still in flight, like the native-upload
- * opt-out. The Settings radio writes fire-and-forget, and writes are queued, so
- * a policy chosen moments before an install could still be sitting behind
- * another write when this reads — handing Rust the OLD policy. Reading a stale
- * "skip" is the damaging direction: the backend then reports no pending
- * dependencies at all, so a missing required library is silently never offered,
- * moments after the user selected the setting meant to offer it.
+ * Needs no ordering against pending writes, which is a property of how the
+ * Settings control writes it rather than luck: `useConfirmedSetting` only shows
+ * a value once its write has confirmed, so by the time the radio displays a
+ * policy the store already holds it. An earlier revision ordered this read
+ * behind `settingsWritesSettled()` to compensate for an optimistic control, and
+ * that could not be made correct — a write queued behind a wedged one has not
+ * run at all, so waiting on it either read a stale value anyway or hung the
+ * install path. Keep the control confirmed-write and this stays a plain read.
  */
 export async function getDependencyPolicy(): Promise<DependencyPolicy> {
-  await settledOrTimeout();
   return parseDependencyPolicy(await getSetting<unknown>(DEPENDENCY_POLICY_KEY, undefined));
 }
 
@@ -121,11 +87,10 @@ export function setDependencyPolicy(policy: DependencyPolicy): Promise<boolean> 
 export const DEFAULT_ASK_REQUIRED_ONLY: boolean = false;
 
 /** Read the opt-in. Never throws; a degraded store or a non-boolean value
- * (settings.json is user-editable) yields the default. Ordered behind pending
- * writes for the same reason as `getDependencyPolicy` — this one decides
- * whether a prompt is suppressed, so a stale read suppresses the wrong thing. */
+ * (settings.json is user-editable) yields the default. A plain read for the
+ * same reason as `getDependencyPolicy` — its control confirms before it
+ * displays, so the store is never behind what the user can see. */
 export async function getAskRequiredDependenciesOnly(): Promise<boolean> {
-  await settledOrTimeout();
   const raw = await getSetting<unknown>(ASK_REQUIRED_ONLY_KEY, undefined);
   return typeof raw === "boolean" ? raw : DEFAULT_ASK_REQUIRED_ONLY;
 }

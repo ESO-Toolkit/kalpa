@@ -13,11 +13,11 @@ import {
   DEFAULT_ASK_REQUIRED_ONLY,
   getDependencyPolicy,
   DEFAULT_DEPENDENCY_POLICY,
-  // Aliased: the local useState setter below already owns the plain name.
+  // Aliased to keep "set" from reading like local state: this one writes to disk.
   setDependencyPolicy as saveDependencyPolicy,
   type DependencyPolicy,
 } from "@/lib/dependency-policy";
-import { useCommittedSetting } from "@/hooks/use-committed-setting";
+import { useConfirmedSetting } from "@/hooks/use-confirmed-setting";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -125,7 +125,7 @@ export function Settings({
     value: dependencyPolicy,
     commit: commitDependencyPolicy,
     hydrate: hydrateDependencyPolicy,
-  } = useCommittedSetting<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY, saveDependencyPolicy);
+  } = useConfirmedSetting<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY, saveDependencyPolicy);
   // Names the user answered "don't ask again" for. Kept as the full list (not just
   // a count) so the row can name them in a tooltip — otherwise "3 libraries" is an
   // opaque thing to be asked to clear.
@@ -135,13 +135,14 @@ export function Settings({
   // policy rather than as a fourth radio: it answers "about what", where the
   // radios answer "do what", and only one of the three has anything to narrow.
   //
-  // Both go through useCommittedSetting: the install path reads the STORED
+  // Both go through useConfirmedSetting: the install path reads the STORED
   // values, so neither control may show something settings.json does not have.
+  // They lag a click by one local write and cannot show an unsaved value.
   const {
     value: askRequiredOnly,
     commit: commitAskRequiredOnly,
     hydrate: hydrateAskRequiredOnly,
-  } = useCommittedSetting(DEFAULT_ASK_REQUIRED_ONLY, setAskRequiredDependenciesOnly);
+  } = useConfirmedSetting<boolean>(DEFAULT_ASK_REQUIRED_ONLY, setAskRequiredDependenciesOnly);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
@@ -833,16 +834,13 @@ export function Settings({
                         key={value}
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
-                        // Rollback on a failed write is the hook's job, and it
-                        // rolls back to the last value known to be ON DISK
-                        // rather than to one captured at click time. Two rapid
-                        // clicks put two writes in flight; if both fail, a
-                        // click-time snapshot would restore the first click's
-                        // value, which never persisted either — leaving "ask"
-                        // on screen over a stored "skip". The install path
-                        // reads the stored value, so that combination silently
-                        // never offers a missing required library, which is the
-                        // outcome this whole feature exists to prevent.
+                        // Deliberately NOT optimistic: the selection moves only
+                        // once the write confirms. The install path reads the
+                        // stored policy, so a radio showing "ask" over a stored
+                        // "skip" would silently never offer a missing required
+                        // library — the outcome this whole feature exists to
+                        // prevent. Confirming first makes that state
+                        // unreachable rather than recoverable.
                         onClick={() => commitDependencyPolicy(value)}
                       >
                         <span
