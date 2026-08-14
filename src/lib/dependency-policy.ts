@@ -26,6 +26,9 @@ export const DEPENDENCY_POLICY_KEY = "dependencyPolicy";
 /** settings.json key holding the declined-dependency list (see below). */
 export const SKIPPED_DEPENDENCIES_KEY = "skippedDependencies";
 
+/** settings.json key holding the {@link getAskRequiredDependenciesOnly} opt-in. */
+export const ASK_REQUIRED_ONLY_KEY = "askRequiredDependenciesOnly";
+
 export const DEFAULT_DEPENDENCY_POLICY: DependencyPolicy = "ask";
 
 const POLICIES: readonly DependencyPolicy[] = ["auto", "ask", "skip"];
@@ -39,7 +42,18 @@ export function parseDependencyPolicy(value: unknown): DependencyPolicy {
     : DEFAULT_DEPENDENCY_POLICY;
 }
 
-/** Read the persisted policy. Never throws — a degraded store yields the default. */
+/**
+ * Read the persisted policy. Never throws — a degraded store yields the default.
+ *
+ * Needs no ordering against pending writes, which is a property of how the
+ * Settings control writes it rather than luck: `useConfirmedSetting` only shows
+ * a value once its write has confirmed, so by the time the radio displays a
+ * policy the store already holds it. An earlier revision ordered this read
+ * behind `settingsWritesSettled()` to compensate for an optimistic control, and
+ * that could not be made correct — a write queued behind a wedged one has not
+ * run at all, so waiting on it either read a stale value anyway or hung the
+ * install path. Keep the control confirmed-write and this stays a plain read.
+ */
 export async function getDependencyPolicy(): Promise<DependencyPolicy> {
   return parseDependencyPolicy(await getSetting<unknown>(DEPENDENCY_POLICY_KEY, undefined));
 }
@@ -47,6 +61,43 @@ export async function getDependencyPolicy(): Promise<DependencyPolicy> {
 /** Persist the policy. Returns false when the write failed (see `setSetting`). */
 export function setDependencyPolicy(policy: DependencyPolicy): Promise<boolean> {
   return setSetting(DEPENDENCY_POLICY_KEY, policy);
+}
+
+/**
+ * Narrows the "ask" policy to required (`DependsOn`) libraries only, dropping
+ * optional (`OptionalDependsOn`) entries before the picker ever opens.
+ *
+ * Scope, not action: it modifies what "ask" asks about and is meaningless under
+ * the other two policies, which never surface an optional dependency in the
+ * first place — "auto" installs required entries only (see
+ * `resolve_transitive_deps` in commands.rs, which filters on `d.required`) and
+ * "skip" installs nothing. The settings UI only offers it alongside "ask" for
+ * that reason.
+ *
+ * Turning it on costs no discoverability: an addon's optional libraries are
+ * listed permanently in its detail panel, each with its own Install button, so
+ * the prompt was never the only way to find them.
+ *
+ * Defaults to false — today's behaviour, where the picker lists both groups and
+ * optional entries simply arrive unticked.
+ */
+// Annotated rather than inferred, matching DEFAULT_DEPENDENCY_POLICY above: a
+// bare `false` infers the literal type, which then narrows every consumer's
+// generic to `false` and rejects ever setting it true.
+export const DEFAULT_ASK_REQUIRED_ONLY: boolean = false;
+
+/** Read the opt-in. Never throws; a degraded store or a non-boolean value
+ * (settings.json is user-editable) yields the default. A plain read for the
+ * same reason as `getDependencyPolicy` — its control confirms before it
+ * displays, so the store is never behind what the user can see. */
+export async function getAskRequiredDependenciesOnly(): Promise<boolean> {
+  const raw = await getSetting<unknown>(ASK_REQUIRED_ONLY_KEY, undefined);
+  return typeof raw === "boolean" ? raw : DEFAULT_ASK_REQUIRED_ONLY;
+}
+
+/** Persist the opt-in. Returns false when the write failed (see `setSetting`). */
+export function setAskRequiredDependenciesOnly(enabled: boolean): Promise<boolean> {
+  return setSetting(ASK_REQUIRED_ONLY_KEY, enabled);
 }
 
 /**

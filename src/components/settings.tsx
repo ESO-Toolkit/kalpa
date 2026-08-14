@@ -8,12 +8,16 @@ import { FEEDBACK_DISCORD_URL, FEEDBACK_ISSUES_URL, openFeedbackUrl } from "@/li
 import {
   clearSkippedDependencies,
   getSkippedDependencies,
+  getAskRequiredDependenciesOnly,
+  setAskRequiredDependenciesOnly,
+  DEFAULT_ASK_REQUIRED_ONLY,
   getDependencyPolicy,
   DEFAULT_DEPENDENCY_POLICY,
-  // Aliased: the local useState setter below already owns the plain name.
+  // Aliased to keep "set" from reading like local state: this one writes to disk.
   setDependencyPolicy as saveDependencyPolicy,
   type DependencyPolicy,
 } from "@/lib/dependency-policy";
+import { useConfirmedSetting } from "@/hooks/use-confirmed-setting";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -117,13 +121,28 @@ export function Settings({
   const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
   const [copying, setCopying] = useState(false);
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
-  const [dependencyPolicy, setDependencyPolicy] =
-    useState<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY);
+  const {
+    value: dependencyPolicy,
+    commit: commitDependencyPolicy,
+    hydrate: hydrateDependencyPolicy,
+  } = useConfirmedSetting<DependencyPolicy>(DEFAULT_DEPENDENCY_POLICY, saveDependencyPolicy);
   // Names the user answered "don't ask again" for. Kept as the full list (not just
   // a count) so the row can name them in a tooltip — otherwise "3 libraries" is an
   // opaque thing to be asked to clear.
   const [skippedDependencies, setSkippedDependencies] = useState<string[]>([]);
   const [clearingSkippedDependencies, setClearingSkippedDependencies] = useState(false);
+  // Narrows the "ask" prompt to required libraries. Stored separately from the
+  // policy rather than as a fourth radio: it answers "about what", where the
+  // radios answer "do what", and only one of the three has anything to narrow.
+  //
+  // Both go through useConfirmedSetting: the install path reads the STORED
+  // values, so neither control may show something settings.json does not have.
+  // They lag a click by one local write and cannot show an unsaved value.
+  const {
+    value: askRequiredOnly,
+    commit: commitAskRequiredOnly,
+    hydrate: hydrateAskRequiredOnly,
+  } = useConfirmedSetting<boolean>(DEFAULT_ASK_REQUIRED_ONLY, setAskRequiredDependenciesOnly);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
@@ -153,14 +172,17 @@ export function Settings({
     // Via the module's reader, which narrows: settings.json is user-editable and
     // survives downgrades, so a bad value must fall back rather than leave every
     // radio unselected while the app quietly behaves as the default.
-    void getDependencyPolicy().then(setDependencyPolicy);
+    void getDependencyPolicy().then(hydrateDependencyPolicy);
     void getSkippedDependencies().then(setSkippedDependencies);
+    void getAskRequiredDependenciesOnly().then(hydrateAskRequiredOnly);
     void invokeResult<boolean>("detect_minion").then((result) => {
       if (result.ok) {
         setMinionDetected(result.data);
       }
     });
-  }, []);
+    // Both hydrators are useCallback([]) inside the hook, so listing them keeps
+    // this a mount-only load rather than re-running it.
+  }, [hydrateDependencyPolicy, hydrateAskRequiredOnly]);
 
   // Silently refresh the detected-instance list every time Settings opens, so
   // a PTS install created after app startup shows up in the switcher without
@@ -796,7 +818,14 @@ export function Settings({
                     <SectionHeader>When an addon needs other libraries</SectionHeader>
                     {(
                       [
-                        ["auto", "Install them automatically"],
+                        // "required ones" is not a softening of the label — it
+                        // is what this mode does. Auto-resolution filters to
+                        // required entries (`resolve_transitive_deps` in
+                        // commands.rs); optional libraries are never installed
+                        // without an explicit tick under any policy. The old
+                        // "Install them automatically" read as "all of them",
+                        // which drove users away from the mode they wanted.
+                        ["auto", "Install required ones automatically"],
                         ["ask", "Ask me which ones to install (default)"],
                         ["skip", "Never install them"],
                       ] as const
@@ -805,10 +834,14 @@ export function Settings({
                         key={value}
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
-                        onClick={() => {
-                          setDependencyPolicy(value);
-                          void saveDependencyPolicy(value);
-                        }}
+                        // Deliberately NOT optimistic: the selection moves only
+                        // once the write confirms. The install path reads the
+                        // stored policy, so a radio showing "ask" over a stored
+                        // "skip" would silently never offer a missing required
+                        // library — the outcome this whole feature exists to
+                        // prevent. Confirming first makes that state
+                        // unreachable rather than recoverable.
+                        onClick={() => commitDependencyPolicy(value)}
                       >
                         <span
                           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
@@ -830,6 +863,27 @@ export function Settings({
                         Addons that depend on a missing library won&apos;t load until you install it
                         yourself.
                       </p>
+                    )}
+
+                    {/* Only under "ask": the other two policies never surface an
+                      optional library, so there would be nothing to narrow. The
+                      stored value is left alone when the row is hidden, so
+                      passing through "auto" and back doesn't silently reset it. */}
+                    {dependencyPolicy === "ask" && (
+                      <label className="flex cursor-pointer items-start gap-3 border-t border-structure-06 pt-2">
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={askRequiredOnly}
+                          onCheckedChange={(checked) => commitAskRequiredOnly(checked === true)}
+                        />
+                        <div>
+                          <p className="text-sm text-foreground">Only ask about required ones</p>
+                          <p className="text-xs text-muted-foreground">
+                            Optional libraries stay listed under an addon&apos;s Details tab, each
+                            with an Install button.
+                          </p>
+                        </div>
+                      </label>
                     )}
 
                     {/* Escape hatch for “don’t ask again”: that choice is otherwise
