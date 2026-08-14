@@ -34,6 +34,11 @@ import { toast } from "sonner";
  *
  * The cost is that the control lags a click by one local file write. The
  * benefit is that it cannot lie.
+ *
+ * ASSUMES `save` completes in submission order, which `setSetting` guarantees
+ * by serializing writes on a shared chain (`enqueueWrite` in lib/store.ts).
+ * Only that ordering makes "the last success is what storage holds" true. A
+ * caller whose writes can genuinely land out of order needs a different hook.
  */
 export function useConfirmedSetting<T>(
   initial: T,
@@ -75,21 +80,27 @@ export function useConfirmedSetting<T>(
         .catch(() => false)
         .then((ok) => {
           if (ok) {
+            // Displayed straight away, even if the user has clicked past it:
+            // this value IS in storage now, and a pending newer write has not
+            // changed that yet. Holding it back until the newer write settles
+            // is indefinite — that write may never settle — which left the
+            // control showing a value storage did not have, forever.
+            //
+            // The visible cost is a flicker through the intermediate value
+            // during a fast double-click. That is the honest rendering: the
+            // setting really did pass through it.
             confirmedRef.current = next;
             writeConfirmedRef.current = true;
+            setValue(next);
+            return;
           }
-          // Superseded: a later click is still in flight and will settle the
-          // display itself. Its success or failure — not this one — is what the
-          // control should end up reflecting.
+          // A failure changed nothing, so a superseded one has nothing to say —
+          // the click that replaced it owns both the display and the toast.
           if (seq !== seqRef.current) return;
-          // Always follow storage, never the click. On success that is `next`;
-          // on failure it is whatever last landed, which may be an EARLIER
-          // click of this same burst that succeeded while this one failed.
-          // Leaving the display alone there was the bug: click skip, click ask
-          // again, skip lands and ask fails, and the control kept saying "ask"
-          // over a stored "skip" — the silent-suppression case.
+          // Fall back to what actually landed, which may be an EARLIER click of
+          // this same burst that succeeded while this one failed.
           setValue(confirmedRef.current);
-          if (!ok) toast.error("Couldn't save that setting — try again.");
+          toast.error("Couldn't save that setting — try again.");
         });
     },
     [save]

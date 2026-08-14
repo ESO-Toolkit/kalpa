@@ -71,18 +71,24 @@ describe("useConfirmedSetting", () => {
     expect(mockToastError).not.toHaveBeenCalled();
   });
 
-  it("ignores an older write that settles after a newer one", async () => {
+  // Writes complete in submission order — `setSetting` serializes them on a
+  // shared chain (`enqueueWrite` in lib/store.ts), so the later click's value
+  // is also the later one in storage. The hook relies on that: with genuinely
+  // out-of-order completions, "the last success wins" is the only rule it could
+  // apply, and it would be wrong. An earlier revision seq-gated successes to
+  // guard the reordered case, which cost far more than it bought — it let a
+  // never-settling newer write hide a landed older one indefinitely.
+  it("ends on the later click's value when writes land in order", async () => {
     const { save, settles } = deferredSave<string>();
     const { result } = renderHook(() => useConfirmedSetting<string>("skip", save));
 
     act(() => result.current.commit("ask"));
     act(() => result.current.commit("auto"));
     await act(async () => {
-      settles[1]!(true);
       settles[0]!(true);
+      settles[1]!(true);
     });
 
-    // "ask" landing last must not paint over the newer "auto".
     expect(result.current.value).toBe("auto");
   });
 
@@ -121,19 +127,37 @@ describe("useConfirmedSetting", () => {
     await waitFor(() => expect(mockToastError).toHaveBeenCalledTimes(1));
   });
 
-  it("keeps a superseded success out of the display while a newer write is pending", async () => {
+  // Inverted from an earlier revision, which held a superseded success back
+  // until the newer write settled. Round 8: the newer write may never settle,
+  // and then the control shows a value storage does not have, forever.
+  it("shows a superseded success immediately, then the newer one", async () => {
     const { save, settles } = deferredSave<string>();
     const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
 
     act(() => result.current.commit("skip"));
     act(() => result.current.commit("auto"));
-    await act(async () => settles[0]!(true));
 
-    // "skip" landed, but "auto" is still in flight and owns the outcome.
-    expect(result.current.value).toBe("ask");
+    // "skip" is in storage the moment it lands, so that is what to show.
+    await act(async () => settles[0]!(true));
+    expect(result.current.value).toBe("skip");
 
     await act(async () => settles[1]!(true));
     expect(result.current.value).toBe("auto");
+  });
+
+  it("keeps showing a landed write when the newer one never settles", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("skip"));
+    act(() => result.current.commit("ask"));
+    await act(async () => settles[0]!(true));
+    // settles[1] is never called: the second write hangs forever.
+    await act(async () => {});
+
+    // Storage holds "skip". Showing "ask" here would be the silent-suppression
+    // case with no toast and no way for the user to notice.
+    expect(result.current.value).toBe("skip");
   });
 
   // The round-5 case, re-checked under the new model: a click before the mount
