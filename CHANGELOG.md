@@ -6,6 +6,52 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.17] — 2026-08-14
+
+A new dependency setting, and two fixes for cases where Kalpa could act on
+something other than what it had told you.
+
+### Features
+
+- **You can now be asked about required libraries only.** An addon's manifest
+  separates the libraries it needs from the ones it merely supports, but the
+  prompt listed both — so anyone who only wanted the required ones had to untick
+  the optional rows on every install. Settings → "When an addon needs other
+  libraries" now has an "Only ask about required ones" option alongside "Ask me
+  which ones to install". Optional libraries stay listed under each addon's
+  Details tab, with an Install button, so nothing becomes harder to find.
+  ([#357](https://github.com/ESO-Toolkit/kalpa/pull/357))
+- **"Install them automatically" is now labelled "Install required ones
+  automatically."** That is what it has always done — optional libraries are
+  never installed without you ticking them — but the old wording read as "all of
+  them" and steered people away from the setting they actually wanted.
+  ([#357](https://github.com/ESO-Toolkit/kalpa/pull/357))
+
+### Bug Fixes
+
+- **The dependency setting can no longer show one thing while Kalpa does
+  another.** The radio applied your click immediately and saved in the
+  background without checking whether the save worked. If it failed — or was
+  still queued when an install started — Settings could say "ask me" while the
+  stored setting was still "never install them", and a missing required library
+  was silently never offered. The setting now changes only once the save is
+  confirmed, and tells you if it could not be saved.
+  ([#357](https://github.com/ESO-Toolkit/kalpa/pull/357))
+- **A deleted account can no longer be restored by a backup that was already in
+  flight.** The nightly backup read the pack index and wrote it minutes later,
+  sharing no ordering with account deletion, so a backup that started before a
+  deletion could republish the deleted records into the one backup key that
+  never expires. Deletions now leave a marker that the backup honours whichever
+  way the two interleave. ([#352](https://github.com/ESO-Toolkit/kalpa/pull/352))
+- **SavedVariables are no longer written while ESO is running.** Importing a
+  pack's settings and restoring a snapshot both relied on a preference that only
+  ever governed the addon reminder, so anyone who had dismissed that reminder
+  got no warning at all — and the game, which rewrites SavedVariables from
+  memory at every loading screen, discarded the result. Both now decline until
+  you close ESO. Addon installs and updates are unaffected: writing addon files
+  under a running client really is safe.
+  ([#352](https://github.com/ESO-Toolkit/kalpa/pull/352))
+
 ## [0.1.0-beta.16] — 2026-08-08
 
 Three follow-ups to the audit remediation in beta.15. Most of the work is
@@ -530,7 +576,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.17...HEAD
+[0.1.0-beta.17]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...v0.1.0-beta.17
 [0.1.0-beta.16]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...v0.1.0-beta.16
 [0.1.0-beta.15]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.14...v0.1.0-beta.15
 [0.1.0-beta.14]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.13...v0.1.0-beta.14
