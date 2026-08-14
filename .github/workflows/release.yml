@@ -146,14 +146,16 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
-            ## Changed: settings that said they applied, and removals that came back
-            Importing a pack's settings through the performance UI could replace your real settings with a file the game cannot read — and report the addon as applied. It happened whenever a pack carried a megaserver you do not play on: the unmapped layer was left as a placeholder key ESO never looks at, and written anyway. The main window refused the same import correctly, so the two interfaces disagreed on the same machine. **Now both refuse it**, and name the addon that could not be mapped.
+            ## Changed: ask about required libraries only
+            An addon's manifest separates the libraries it **needs** from the ones it merely supports, but the prompt listed both together — so anyone who only wanted the required ones had to untick the optional rows on every single install. Settings → "When an addon needs other libraries" now has an **"Only ask about required ones"** option.
 
-            Pack settings are also no longer written while ESO is running. The game keeps SavedVariables in memory and rewrites them when you log out, so those imports were being thrown away after Kalpa had said they worked. The same warning now reaches you when you save a SavedVariables edit — previously it was tied to the addon reminder, so anyone who had dismissed that never saw it.
+            Nothing becomes harder to find: an addon's optional libraries stay listed under its Details tab, each with its own Install button. The prompt was never the only way to reach them.
 
-            On the addon side, **removing something and hitting Refresh brought the row back**: the delete is deferred three seconds so undo can work, and a refresh in that window read the addon straight back off disk. Once the delete landed, nothing hid it again.
+            While we were there, **"Install them automatically" is now labelled "Install required ones automatically"** — which is what it has always done. Optional libraries are never installed without you ticking them, under any setting. The old wording read as "all of them" and was steering people away from the option they actually wanted.
 
-            **Update All** had a related problem — it acted on the list as it was when you clicked, so an addon removed while the "ESO is running" prompt sat open could still be reinstalled into a folder that was seconds from deletion, and switching your AddOns folder mid-prompt could send the batch at the instance you had just left.
+            **The dependency setting could also show one thing while Kalpa did another.** The radio applied your click straight away and saved in the background without checking the result, so a failed or still-queued save could leave Settings saying "ask me" while the stored setting was "never install them" — and a missing required library was then silently never offered. The setting now changes only once the save is confirmed, and says so if it could not be saved.
+
+            **SavedVariables are no longer written while ESO is running.** Importing a pack's settings and restoring a snapshot both relied on a preference that only ever governed the addon reminder, so anyone who had dismissed that reminder got no warning — and the game, which rewrites SavedVariables from memory at every loading screen, discarded the result anyway. Addon installs and updates are unaffected; writing addon files under a running client really is safe.
 
             ## Verify your download
             Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
