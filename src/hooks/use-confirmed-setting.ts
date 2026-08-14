@@ -62,12 +62,18 @@ export function useConfirmedSetting<T>(
   const seqRef = useRef(0);
 
   const hydrate = useCallback((loaded: T) => {
-    // The load reflects storage, so it updates the confirmed value — unless a
-    // write has already landed, which is newer than this mount-time read.
-    if (!writeConfirmedRef.current) confirmedRef.current = loaded;
-    // It only reaches the display before the user has acted: the load is async,
-    // so a click can land while it is in flight, and this read predates it.
-    if (seqRef.current === 0) setValue(loaded);
+    // A load is an observation of confirmed storage, exactly like a successful
+    // write, so it feeds the display under the same rule — unless a write has
+    // already landed, which is newer than this mount-time read.
+    //
+    // Gating this on "no click yet" instead was wrong: a click that FAILS
+    // before the load resolves leaves the display on the constructor default,
+    // and then the real stored value arrives and is dropped, stranding the
+    // control on a default that storage never held. A pending click is not a
+    // reason to hide storage — it replaces this only once it confirms.
+    if (writeConfirmedRef.current) return;
+    confirmedRef.current = loaded;
+    setValue(loaded);
   }, []);
 
   const commit = useCallback(

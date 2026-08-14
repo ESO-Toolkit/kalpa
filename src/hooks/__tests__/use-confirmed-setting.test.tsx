@@ -197,17 +197,45 @@ describe("useConfirmedSetting", () => {
     expect(result.current.value).toBe("skip");
   });
 
-  // The mount load is async, so it can arrive after a click. It read storage
-  // before that click, so it is simply out of date.
-  it("drops a mount load that arrives after the user has chosen", async () => {
+  // The mount load can arrive after a click. Until that click CONFIRMS, the
+  // load is still the best knowledge of storage, so it shows — and is then
+  // replaced when the write lands.
+  it("shows a late mount load until the pending write confirms", async () => {
     const { save, settles } = deferredSave<string>();
     const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
 
     act(() => result.current.commit("auto"));
     act(() => result.current.hydrate("skip"));
-    await act(async () => settles[0]!(true));
+    expect(result.current.value).toBe("skip");
 
+    await act(async () => settles[0]!(true));
     expect(result.current.value).toBe("auto");
+  });
+
+  // The round-9 finding. A failed click before the load resolves used to leave
+  // the control on the constructor default and then discard the real stored
+  // value when it arrived.
+  it("still shows a late load after a pre-hydration click failed", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("auto"));
+    await act(async () => settles[0]!(false));
+    // Display fell back to the default "ask" — which is a guess, not storage.
+    act(() => result.current.hydrate("skip"));
+
+    expect(result.current.value).toBe("skip");
+  });
+
+  it("still shows a late load when a pre-hydration click never settles", async () => {
+    const save = vi.fn(() => new Promise<boolean>(() => {}));
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("auto"));
+    act(() => result.current.hydrate("skip"));
+    await act(async () => {});
+
+    expect(result.current.value).toBe("skip");
   });
 
   it("works for a boolean setting", async () => {
