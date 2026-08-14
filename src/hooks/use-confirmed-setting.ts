@@ -20,9 +20,13 @@ import { toast } from "sonner";
  * bookkeeping fixes that, because the bug is displaying an unconfirmed value in
  * the first place.
  *
- * So the value moves only when the write says it landed:
+ * So the displayed value follows CONFIRMED STORAGE, never the last click:
  *
- *   - A failed write leaves the control where it was, and says so.
+ *   - A confirmed write is displayed, and is remembered as what storage holds
+ *     even if the user has clicked past it since.
+ *   - A failed write shows whatever last landed, and says so. That is not
+ *     always where the control started: clicking twice in a burst can land the
+ *     first write and fail the second.
  *   - A write that never settles leaves the control where it was, silently —
  *     truthful, since the setting genuinely did not change.
  *   - Readers need no ordering against pending writes. Once the control shows a
@@ -43,18 +47,22 @@ export function useConfirmedSetting<T>(
   hydrate: (loaded: T) => void;
 } {
   const [value, setValue] = useState<T>(initial);
-  // Identifies the newest write. Two clicks can be in flight at once and can
-  // resolve out of order, so an older one settling last must not paint its
-  // value over the newer choice.
+  // Best knowledge of what storage holds. Every confirmed write updates it,
+  // including one the user has already clicked past — that write reached disk,
+  // so it is the truth regardless of what was clicked afterwards. Starts at the
+  // caller's default, which is only a guess until `hydrate` or a write lands.
+  const confirmedRef = useRef<T>(initial);
+  const writeConfirmedRef = useRef(false);
+  // Identifies the newest click, so only that one decides what is displayed.
   const seqRef = useRef(0);
 
   const hydrate = useCallback((loaded: T) => {
-    // Ignored once the user has acted: the mount load is async, so a click can
-    // land while it is in flight, and this read predates that click. There is
-    // no rollback target to keep in step any more — the displayed value is
-    // always a confirmed one — so dropping it outright is the whole handling.
-    if (seqRef.current !== 0) return;
-    setValue(loaded);
+    // The load reflects storage, so it updates the confirmed value — unless a
+    // write has already landed, which is newer than this mount-time read.
+    if (!writeConfirmedRef.current) confirmedRef.current = loaded;
+    // It only reaches the display before the user has acted: the load is async,
+    // so a click can land while it is in flight, and this read predates it.
+    if (seqRef.current === 0) setValue(loaded);
   }, []);
 
   const commit = useCallback(
@@ -66,11 +74,22 @@ export function useConfirmedSetting<T>(
         // here must not rest on a convention the signature does not enforce.
         .catch(() => false)
         .then((ok) => {
-          // Superseded: the user has chosen again since. Neither the value nor
-          // the toast belongs to the current state of the control any more.
+          if (ok) {
+            confirmedRef.current = next;
+            writeConfirmedRef.current = true;
+          }
+          // Superseded: a later click is still in flight and will settle the
+          // display itself. Its success or failure — not this one — is what the
+          // control should end up reflecting.
           if (seq !== seqRef.current) return;
-          if (ok) setValue(next);
-          else toast.error("Couldn't save that setting — try again.");
+          // Always follow storage, never the click. On success that is `next`;
+          // on failure it is whatever last landed, which may be an EARLIER
+          // click of this same burst that succeeded while this one failed.
+          // Leaving the display alone there was the bug: click skip, click ask
+          // again, skip lands and ask fails, and the control kept saying "ask"
+          // over a stored "skip" — the silent-suppression case.
+          setValue(confirmedRef.current);
+          if (!ok) toast.error("Couldn't save that setting — try again.");
         });
     },
     [save]

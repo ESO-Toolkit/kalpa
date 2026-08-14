@@ -101,6 +101,69 @@ describe("useConfirmedSetting", () => {
     expect(mockToastError).not.toHaveBeenCalled();
   });
 
+  // The round-7 finding, and it needs no out-of-order completion: an earlier
+  // click lands while a later one fails, so the store moved even though the
+  // user's final choice did not take.
+  it("shows the earlier write that landed when the later one fails", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("skip"));
+    act(() => result.current.commit("ask"));
+    await act(async () => {
+      settles[0]!(true);
+      settles[1]!(false);
+    });
+
+    // Storage holds "skip" — the control must say so rather than keep showing
+    // the "ask" the user asked for and did not get.
+    expect(result.current.value).toBe("skip");
+    await waitFor(() => expect(mockToastError).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps a superseded success out of the display while a newer write is pending", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("skip"));
+    act(() => result.current.commit("auto"));
+    await act(async () => settles[0]!(true));
+
+    // "skip" landed, but "auto" is still in flight and owns the outcome.
+    expect(result.current.value).toBe("ask");
+
+    await act(async () => settles[1]!(true));
+    expect(result.current.value).toBe("auto");
+  });
+
+  // The round-5 case, re-checked under the new model: a click before the mount
+  // load lands, then a failed write. The control must not fall back to the
+  // constructor default when storage says otherwise.
+  it("falls back to a late load rather than the default it started on", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("auto"));
+    act(() => result.current.hydrate("skip"));
+    await act(async () => settles[0]!(false));
+
+    expect(result.current.value).toBe("skip");
+  });
+
+  it("does not let a late load overrule a write that already landed", async () => {
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
+
+    act(() => result.current.commit("auto"));
+    await act(async () => settles[0]!(true));
+    // The mount load finally arrives, holding what storage had BEFORE that write.
+    act(() => result.current.hydrate("skip"));
+    act(() => result.current.commit("ask"));
+    await act(async () => settles[1]!(false));
+
+    expect(result.current.value).toBe("auto");
+  });
+
   it("shows the loaded value on mount", async () => {
     const { save } = deferredSave<string>();
     const { result } = renderHook(() => useConfirmedSetting<string>("ask", save));
