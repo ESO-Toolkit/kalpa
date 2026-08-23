@@ -6,6 +6,29 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.18] — 2026-08-23
+
+A focused security and dependency release. There are no feature changes.
+
+### Security
+
+- **Updated the HTTP/2 stack to address RUSTSEC-2026-0258.** Kalpa now ships
+  `h2` 0.4.16 instead of 0.4.14, fixing an issue where a peer could consume
+  unbounded resources by sending empty DATA frames. The crate is used by both
+  Kalpa's HTTP client and the built-in updater. ([#361](https://github.com/ESO-Toolkit/kalpa/pull/361))
+
+### Maintenance
+
+- Refreshed the frontend production and development dependencies, including
+  Base UI, Motion, Vite, Playwright, ESLint, and testing libraries.
+  ([#359](https://github.com/ESO-Toolkit/kalpa/pull/359),
+  [#360](https://github.com/ESO-Toolkit/kalpa/pull/360))
+- Updated the Pack Hub's Cloudflare development and test tooling, the Rust
+  `base64` crate, and the GitHub Actions Rust cache revision.
+  ([#339](https://github.com/ESO-Toolkit/kalpa/pull/339),
+  [#355](https://github.com/ESO-Toolkit/kalpa/pull/355),
+  [#353](https://github.com/ESO-Toolkit/kalpa/pull/353))
+
 ## [0.1.0-beta.17] — 2026-08-14
 
 A new dependency setting, and two fixes for cases where Kalpa could act on
@@ -576,7 +599,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.17...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...HEAD
+[0.1.0-beta.18]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.17...v0.1.0-beta.18
 [0.1.0-beta.17]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...v0.1.0-beta.17
 [0.1.0-beta.16]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...v0.1.0-beta.16
 [0.1.0-beta.15]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.14...v0.1.0-beta.15
