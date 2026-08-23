@@ -103,7 +103,7 @@ test("sends a mention-safe webhook payload with confirmation enabled", async () 
 test("embedded GitHub workflow scripts are valid JavaScript", () => {
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const workflows = [
-    ".github/workflows/release.yml",
+    ".github/workflows/discord-release-published.yml",
     ".github/workflows/discord-release-backfill.yml",
     ".github/workflows/discord-pr-notify.yml",
   ];

@@ -1,0 +1,72 @@
+name: Discord Release Announcement
+
+# Run from the current default branch after the tag workflow completes. A job
+# embedded in release.yml is frozen to the tagged commit, so a tag created
+# before this automation (beta.18) could never see or run it.
+on:
+  workflow_run:
+    workflows: ["Build & Release"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    name: Post Published Release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout current release-message helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Send published release to Discord
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_RELEASES }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const {
+              sendReleaseToDiscord,
+            } = require('./.github/scripts/discord-release.cjs');
+
+            if (!process.env.DISCORD_WEBHOOK) {
+              core.setFailed(
+                'DISCORD_WEBHOOK_RELEASES is not configured for this repository.',
+              );
+              return;
+            }
+
+            const { data: release } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: process.env.RELEASE_TAG,
+            });
+
+            if (release.draft || !release.published_at) {
+              core.setFailed(`Release ${release.tag_name} is not published.`);
+              return;
+            }
+
+            const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+            try {
+              await sendReleaseToDiscord({
+                release,
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                changelog,
+                webhook: process.env.DISCORD_WEBHOOK,
+                core,
+              });
+              core.info(
+                `Discord release announcement sent for ${release.tag_name}.`,
+              );
+            } catch (error) {
+              core.setFailed(error.message);
+            }
