@@ -1,0 +1,138 @@
+name: Discord Release Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List releases without posting to Discord
+        required: true
+        type: boolean
+        default: true
+      start_after_tag:
+        description: Resume after this already-posted tag (optional)
+        required: false
+        type: string
+      through_tag:
+        description: Stop after this tag (optional)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    name: Post Historical Releases
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout release-message helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Post published releases oldest first
+        uses: actions/github-script@373c709c69115d41ff229c7e5df9f8788daa9553 # v9
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_RELEASES }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          START_AFTER_TAG: ${{ inputs.start_after_tag }}
+          THROUGH_TAG: ${{ inputs.through_tag }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const {
+              sendReleaseToDiscord,
+            } = require('./.github/scripts/discord-release.cjs');
+
+            const dryRun = process.env.DRY_RUN === 'true';
+            if (!dryRun && !process.env.DISCORD_WEBHOOK) {
+              core.setFailed(
+                'DISCORD_WEBHOOK_RELEASES is not configured for this repository.',
+              );
+              return;
+            }
+
+            const releases = (
+              await github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              })
+            )
+              .filter((release) => !release.draft && release.published_at)
+              .sort(
+                (left, right) =>
+                  new Date(left.published_at) - new Date(right.published_at),
+              );
+
+            let firstIndex = 0;
+            if (process.env.START_AFTER_TAG) {
+              const resumeIndex = releases.findIndex(
+                (release) => release.tag_name === process.env.START_AFTER_TAG,
+              );
+              if (resumeIndex === -1) {
+                core.setFailed(
+                  `Unknown start_after_tag: ${process.env.START_AFTER_TAG}`,
+                );
+                return;
+              }
+              firstIndex = resumeIndex + 1;
+            }
+
+            let lastIndex = releases.length - 1;
+            if (process.env.THROUGH_TAG) {
+              const throughIndex = releases.findIndex(
+                (release) => release.tag_name === process.env.THROUGH_TAG,
+              );
+              if (throughIndex === -1) {
+                core.setFailed(`Unknown through_tag: ${process.env.THROUGH_TAG}`);
+                return;
+              }
+              lastIndex = throughIndex;
+            }
+
+            const selected = releases.slice(firstIndex, lastIndex + 1);
+            if (selected.length === 0) {
+              core.info('No published releases matched the selected range.');
+              return;
+            }
+
+            core.info(
+              `${dryRun ? 'Would post' : 'Posting'} ${selected.length} release(s), ` +
+                `${selected[0].tag_name} through ${selected.at(-1).tag_name}.`,
+            );
+
+            if (dryRun) {
+              for (const release of selected) core.info(release.tag_name);
+              return;
+            }
+
+            const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+            for (const [index, release] of selected.entries()) {
+              try {
+                await sendReleaseToDiscord({
+                  release,
+                  repository: `${context.repo.owner}/${context.repo.repo}`,
+                  changelog,
+                  historical: true,
+                  webhook: process.env.DISCORD_WEBHOOK,
+                  core,
+                });
+              } catch (error) {
+                core.setFailed(
+                  `${error.message} Resume with start_after_tag=${
+                    index > 0 ? selected[index - 1].tag_name : '(leave blank)'
+                  }.`,
+                );
+                return;
+              }
+
+              core.info(
+                `Posted ${index + 1}/${selected.length}: ${release.tag_name}`,
+              );
+
+              // Stay comfortably below Discord's webhook burst limit. The
+              // sender also retries 429 and transient 5xx responses.
+              if (index < selected.length - 1) {
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+              }
+            }
