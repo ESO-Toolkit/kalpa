@@ -4,7 +4,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
-| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1, D-W1-2 | REVISE; follow-up pending | Worker check; 168 tests; Wrangler dry-run | First-review findings fixed; no push or real deployment. |
+| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1, D-W1-2 | REVISE; follow-up findings addressed | Worker check; 170 tests; Wrangler dry-run | Awaiting maintainer review; no push or real deployment. |
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
@@ -42,12 +42,12 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 ### D-W1-2 — Continuously merged shadow with a parity-gated authority flip
 
-- Chosen: default the durable `meta:authority` flag to `kv`, re-read and additively merge the KV index on every serialized mutation, and keep per-id tombstones so stale KV cannot restore deletions. DO records win once present and every mutation continues to mirror the unchanged KV wire shape.
+- Chosen: default the durable `meta:authority` flag to `kv`, re-read and additively merge the KV index on every serialized mutation, and keep per-id tombstones so stale KV cannot restore deletions. DO records win once present. During shadow mode, list and backup reads use the merged DO view, while mutations update only affected KV detail keys; they do not overwrite the full KV index from a potentially incomplete shadow. After the parity-gated flip, the DO resumes full KV-index mirroring with the unchanged wire shape.
 - The first deployment is the shadow/backfill phase. After at least one post-deploy daily backup, an operator must observe two clean parity reads more than 60 seconds apart before explicitly switching authority to `do`.
-- Parity uses D1 ids and `backup:latest` as independent witnesses. Missing untombstoned ids block the flip. The admin-only adoption endpoint can recover a specifically adjudicated id from its independently propagated KV detail record; it never adopts D1 rows automatically because a failed historical D1 delete can be a zombie.
+- Parity uses D1 ids, `backup:latest`, and enumerated `pack:<id>` detail keys as independent witnesses. Missing untombstoned ids block the flip. The admin-only adoption endpoint can recover a specifically adjudicated id from its independently propagated KV detail record; it never adopts D1 rows automatically because a failed historical D1 delete can be a zombie.
 - Rejected: one-shot or timed bootstrap gates. KV provides no bounded propagation time, and an auto-deployed maintenance gate would create operator-bounded mutation downtime without proving completeness.
 - Rejected: all dated backups as live witnesses. Their intentional 90-day retention includes deleted packs and would make parity impossible; only a post-deploy `backup:latest` represents the current corpus.
-- Rollback: before the authority flip, old code can resume from the KV mirror. After the flip, rollback requires a verified backup restore; changing the flag alone cannot reconcile edits made by old code.
+- Rollback: shadow-mode mutations deliberately do not rewrite the full KV index, so rolling back to old code can omit post-deploy creates from listings even though their detail and D1 rows survive. Any rollback after this deployment therefore requires a verified backup/DO export restore; changing the flag alone is not a reconciliation strategy.
 
 ## Session Log
 
@@ -55,10 +55,11 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 - Active branch: `fix/audit-w1-worker-consistency`
 - Completed: read repository guidance, master prompt, and audit memory; fetched and fast-forward checked `main`; created the persistent tracker; started Kalpa successfully in Tauri dev mode; completed the W1 Fable review; captured five failing-before DO tests; implemented DO-authoritative mutations; added route-level duplicate, stale-update, and delete/vote race coverage; Worker typecheck and 159 tests pass.
-- Active work: W1 follow-up review after the first Sol review.
+- Active work: W1 maintainer handoff after addressing the single Sol follow-up.
 - Completed follow-up: Fable selected the continuously merged shadow design in D-W1-2. Implemented lifecycle guards for vote/install, canonical update/delete authorization, atomic restore preservation, deleted-pack vote cleanup (including `backup:latest`), repeated KV backfill with tombstones, parity-gated authority control, and explicit detail-witness adoption. Worker typecheck, 168 tests, and Wrangler dry-run pass; `wrangler.toml` remains `kalpa-pack-hub`.
-- Blockers: none in implementation. The authority flip is deliberately an operator step after the documented soak/parity checks and must not occur as part of deployment.
-- Exact next action: commit the W1 revisions and request the single required Sol follow-up review.
+- Sol follow-up: `REVISE`. Verified an incomplete-shadow full-index clobber, scheduled-backup reintroduction of another user's vote on a deleted pack, and delete/recreate vote-cleanup interleaving. Addressed by suppressing full-index writes during shadow mode, serving merged list/backup reads from the DO, filtering backup votes by deleted pack id, and moving vote cleanup inside the serialized delete lifecycle. Added the three requested regressions; Worker typecheck and 170 tests pass.
+- Blockers: the required single Sol follow-up has been consumed and did not approve. Its verified findings are fixed locally, but the branch must receive maintainer review before push/PR/merge. The authority flip remains a separate operator step after soak/parity checks.
+- Exact next action: commit the follow-up fixes, rerun Wrangler dry-run, and hand the local branch plus rollback caveat to the maintainer.
 
 ### Sol review 1 — REVISE
 

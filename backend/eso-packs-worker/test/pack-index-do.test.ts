@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { getPackIndex, putPack } from "../src/kv";
+import { putPack, putVote } from "../src/kv";
 import type { Env, Pack } from "../src/types";
 import { makePack } from "./helpers";
 
@@ -26,7 +26,26 @@ describe("PackIndexDO authoritative mutations", () => {
 
     expect(results.filter((result) => result.ok)).toHaveLength(1);
     expect(results.find((result) => !result.ok)).toMatchObject({ reason: "duplicate" });
-    expect((await getPackIndex(e))!.packs.filter(({ id }) => id === pack.id)).toHaveLength(1);
+    expect((await packIndex().getIndex()).packs.filter(({ id }) => id === pack.id)).toHaveLength(1);
+  });
+
+  it("does not overwrite an omitted pre-deploy pack during shadow mutation", async () => {
+    const visible = makePack("w1-visible-shadow");
+    const delayed = makePack("w1-omitted-shadow");
+    await e.ESO_PACKS.put("index:packs", JSON.stringify({ packs: [visible] }));
+    await putPack(e, delayed);
+
+    const duplicate = await packIndex().addPack({ ...delayed, title: "Collision" }, 25);
+    expect(duplicate).toMatchObject({ ok: false, reason: "duplicate" });
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${delayed.id}`, "json"))
+      .toMatchObject({ title: delayed.title });
+    expect((await e.ESO_PACKS.get<{ packs: Pack[] }>("index:packs", "json"))!.packs)
+      .toEqual([visible]);
+
+    await e.ESO_PACKS.put("index:packs", JSON.stringify({ packs: [visible, delayed] }));
+    expect((await packIndex().getIndex()).packs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: delayed.id })]),
+    );
   });
 
   it("does not resurrect a deleted pack when a vote carries a stale detail body", async () => {
@@ -39,7 +58,7 @@ describe("PackIndexDO authoritative mutations", () => {
     const result = await index.toggleVote(pack.id, "stale-voter", pack);
 
     expect(result.pack).toBeNull();
-    expect((await getPackIndex(e))!.packs.some(({ id }) => id === pack.id)).toBe(false);
+    expect((await index.getIndex()).packs.some(({ id }) => id === pack.id)).toBe(false);
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
     expect(await e.ESO_PACKS.get(`vote:${pack.id}:stale-voter`)).toBeNull();
   });
@@ -54,7 +73,7 @@ describe("PackIndexDO authoritative mutations", () => {
     const result = await index.bumpPackCounter(pack.id, "install_count", 1, pack);
 
     expect(result).toBeNull();
-    expect((await getPackIndex(e))!.packs.some(({ id }) => id === pack.id)).toBe(false);
+    expect((await index.getIndex()).packs.some(({ id }) => id === pack.id)).toBe(false);
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
   });
 
@@ -70,7 +89,7 @@ describe("PackIndexDO authoritative mutations", () => {
     const staleUpdate: Pack = { ...pack, title: "Updated title", [field]: 0 };
     await index.updatePack(pack.id, staleUpdate);
 
-    const stored = (await getPackIndex(e))!.packs.find(({ id }) => id === pack.id);
+    const stored = (await index.getIndex()).packs.find(({ id }) => id === pack.id);
     expect(stored).toMatchObject({ title: "Updated title", [field]: 1 });
     },
   );
@@ -115,7 +134,7 @@ describe("PackIndexDO authoritative mutations", () => {
       [restored.id],
     );
 
-    expect((await getPackIndex(e))!.packs).toEqual(
+    expect((await index.getIndex()).packs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: restored.id, title: "Restored title" }),
         expect.objectContaining({ id: concurrent.id }),
@@ -184,5 +203,24 @@ describe("PackIndexDO authoritative mutations", () => {
       adopted: [],
       tombstoned: [pack.id],
     });
+  });
+
+  it("serializes old vote cleanup before a recreated slug can accept votes", async () => {
+    const oldPack = makePack("w1-cleanup-reuse");
+    const newPack = makePack(oldPack.id, {
+      created_at: "2026-08-26T01:00:00.000Z",
+      updated_at: "2026-08-26T01:00:00.000Z",
+    });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [oldPack] });
+    await putVote(e, oldPack.id, "same-voter");
+
+    const removing = index.removePack(oldPack.id);
+    const recreating = index.addPack(newPack);
+    expect(await removing).toBe("ok");
+    expect(await recreating).toMatchObject({ ok: true });
+    const result = await index.toggleVote(newPack.id, "same-voter", newPack.created_at);
+    expect(result).toMatchObject({ voted: true, pack: { vote_count: 1 } });
+    expect(await e.ESO_PACKS.get(`vote:${newPack.id}:same-voter`)).not.toBeNull();
   });
 });

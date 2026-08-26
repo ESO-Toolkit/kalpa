@@ -5,7 +5,6 @@ import {
   putPack,
   getVotedPackIds,
   getVote,
-  deleteVotesForPack,
   restoreVote,
   listAllVotes,
 } from "./kv";
@@ -98,18 +97,6 @@ async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promi
       .run();
   } catch (err) {
     console.error(`D1 vote_count sync failed [${id}]:`, err);
-  }
-}
-
-async function d1DeletePack(env: Env, id: string): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  try {
-    await env.ROSTER_HUB_DB.batch([
-      env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
-      env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
-    ]);
-  } catch (err) {
-    console.error(`D1 delete failed [${id}]:`, err);
   }
 }
 
@@ -234,10 +221,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     if (cached) return cached;
   }
 
-  const index = await getPackIndex(env);
-  if (!index) {
-    return json(request, { packs: [], page: 1, sort: sortParam ?? "updated" }, 200, 30);
-  }
+  const index = await getPackIndexDO(env).getIndex();
 
   let packs = index.packs;
 
@@ -521,13 +505,7 @@ async function handleDeletePack(
   if (removed === "forbidden") {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
-  // Slugs become available again once a pack is deleted, so its vote records
-  // must go with it — otherwise a pack that reuses the id inherits them and a
-  // previous voter's first vote is treated as an unvote.
-  await deleteVotesForPack(env, id);
-
   await invalidatePackListCache(url);
-  await d1DeletePack(env, id);
 
   return json(request, { ok: true });
 }
@@ -690,8 +668,22 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
   });
 }
 
+async function packDetailWitnessIds(env: Env): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.ESO_PACKS.list({ prefix: "pack:", cursor });
+    for (const { name } of page.keys) {
+      const id = name.slice("pack:".length);
+      if (id) ids.push(id);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return ids;
+}
+
 async function migrationWitnessIds(env: Env): Promise<string[]> {
-  const ids = new Set<string>();
+  const ids = new Set(await packDetailWitnessIds(env));
 
   if (env.ROSTER_HUB_DB) {
     const rows = await env.ROSTER_HUB_DB.prepare("SELECT id FROM packs").all<{ id: string }>();
@@ -707,6 +699,7 @@ async function migrationWitnessIds(env: Env): Promise<string[]> {
   }>("backup:latest", "json");
   for (const pack of snapshot?.packs ?? []) ids.add(pack.id);
   for (const id of Object.keys(snapshot?.packBodies ?? {})) ids.add(id);
+
   return [...ids];
 }
 
@@ -840,6 +833,15 @@ async function dropDeletedUsers(
   const deleted = new Set(ids.filter((_, i) => present[i] !== null));
   if (deleted.size === 0) return snapshot;
 
+  const deletedPackIds = new Set(
+    snapshot.packs
+      .filter((pack) => deleted.has(String(pack.author_id)))
+      .map((pack) => pack.id),
+  );
+  for (const [id, pack] of Object.entries(snapshot.packBodies)) {
+    if (deleted.has(String(pack?.author_id))) deletedPackIds.add(id);
+  }
+
   console.log(`Backup excluding ${deleted.size} deleted user(s)`);
   return {
     packs: snapshot.packs.filter((p) => !deleted.has(String(p.author_id))),
@@ -847,16 +849,17 @@ async function dropDeletedUsers(
       Object.entries(snapshot.packBodies).filter(([, p]) => !deleted.has(String(p?.author_id))),
     ),
     votes: Object.fromEntries(
-      Object.entries(snapshot.votes).filter(([, v]) => !deleted.has(String(v?.userId))),
+      Object.entries(snapshot.votes).filter(([, vote]) =>
+        !deleted.has(String(vote?.userId)) &&
+        !deletedPackIds.has(String(vote?.packId)),
+      ),
     ),
   };
 }
 
 async function handleScheduled(env: Env): Promise<void> {
-  // Fresh (uncached) read so the snapshot reflects the latest mutation rather
-  // than a stale up-to-60s-cached index.
-  const index = await getPackIndex(env, { fresh: true });
-  if (!index || index.packs.length === 0) return;
+  const index = await getPackIndexDO(env).getIndex();
+  if (index.packs.length === 0) return;
 
   const timestamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const backupKey = `backup:${timestamp}`;
@@ -1385,20 +1388,6 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   // Delete individual pack KV entries
   for (const packId of packIds) {
     await env.ESO_PACKS.delete(`pack:${packId}`);
-    await deleteVotesForPack(env, packId);
-  }
-
-  // Batch-delete from D1
-  if (packIds.length > 0 && env.ROSTER_HUB_DB) {
-    try {
-      const stmts = packIds.flatMap((packId) => [
-        env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(packId),
-        env.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id = ?").bind(packId),
-      ]);
-      await env.ROSTER_HUB_DB.batch(stmts);
-    } catch (err) {
-      console.error("D1 batch delete failed:", err);
-    }
   }
 
   // 2. Delete all user's votes via reverse index (user-votes:{userId}:{packId})

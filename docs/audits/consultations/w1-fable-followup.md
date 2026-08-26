@@ -124,3 +124,11 @@ Implementation requirements adopted from the review:
 Fable also required tests that distinguish repeated backfill from a latched
 bootstrap, prove tombstones reject stale re-import, prove a failed parity check
 leaves KV authority active, and cover explicit detail adoption.
+
+The subsequent Sol follow-up found that writing a full KV index during this
+shadow phase could still publish an incomplete first read. The implementation
+therefore refines Candidate B by suppressing full-index writes until the
+authority flip and serving list/backup reads from the additive DO shadow. This
+changes the rollback rule: rollback before the flip also requires corpus
+recovery because post-deploy creates are intentionally not inserted into the
+legacy full-index value while shadow completeness is unproven.

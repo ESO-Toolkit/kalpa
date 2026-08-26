@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, Pack, PackIndex } from "./types";
-import { deleteVote, getVote, putVote } from "./kv";
+import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -40,7 +40,11 @@ export class PackIndexDO extends DurableObject<Env> {
   ): Promise<{ ok: true } | { ok: false; reason: "duplicate" | "limit" }> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const packs = await this.loadPacks();
-      if (packs.some(({ id }) => id === pack.id)) {
+      const detail = await this.env.ESO_PACKS.get<Pack>(`pack:${pack.id}`, {
+        type: "json",
+        cacheTtl: 30,
+      });
+      if (packs.some(({ id }) => id === pack.id) || detail) {
         return { ok: false, reason: "duplicate" };
       }
       if (
@@ -127,6 +131,8 @@ export class PackIndexDO extends DurableObject<Env> {
       if (!existing) return "not-found";
       if (actorId !== undefined && actorId !== existing.author_id) return "forbidden";
 
+      await deleteVotesForPack(this.env, id);
+      await this.deleteD1Pack(id);
       await this.deleteStoredPack(id);
       await this.mirror(await this.getStoredPacks(), undefined, id);
       return "ok";
@@ -135,9 +141,15 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async removePacksByAuthor(authorId: string): Promise<string[]> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const packs = await this.loadPacks();
+      await this.loadPacks();
+      await this.hydrateDetailCorpus();
+      const packs = await this.getStoredPacks();
       const removed = packs.filter((pack) => pack.author_id === authorId).map((pack) => pack.id);
-      for (const id of removed) await this.deleteStoredPack(id);
+      for (const id of removed) {
+        await deleteVotesForPack(this.env, id);
+        await this.deleteD1Pack(id);
+        await this.deleteStoredPack(id);
+      }
       if (removed.length > 0) {
         await this.mirror(await this.getStoredPacks(), undefined, undefined, removed);
       }
@@ -148,7 +160,7 @@ export class PackIndexDO extends DurableObject<Env> {
   async replaceIndex(index: PackIndex): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
       await this.loadPacks();
-      await this.applyReplacement(index.packs);
+      await this.applyReplacement(index.packs, true);
     });
   }
 
@@ -159,15 +171,29 @@ export class PackIndexDO extends DurableObject<Env> {
       const preserved = current.filter(({ id }) => !restored.has(id));
       const desired = new Map<string, Pack>();
       for (const pack of [...index.packs, ...preserved]) desired.set(pack.id, pack);
-      await this.applyReplacement([...desired.values()]);
+      await this.applyReplacement([...desired.values()], false);
     });
   }
 
   async getPack(id: string): Promise<Pack | null> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.loadPacks();
-      return (await this.ctx.storage.get<Pack>(this.packKey(id))) ?? null;
+      const stored = await this.ctx.storage.get<Pack>(this.packKey(id));
+      if (stored || await this.ctx.storage.get<string>(this.tombstoneKey(id))) {
+        return stored ?? null;
+      }
+      const detail = await this.env.ESO_PACKS.get<Pack>(`pack:${id}`, {
+        type: "json",
+        cacheTtl: 30,
+      });
+      if (!detail || detail.id !== id) return null;
+      await this.ctx.storage.put(this.packKey(id), detail);
+      return detail;
     });
+  }
+
+  async getIndex(): Promise<PackIndex> {
+    return this.ctx.blockConcurrencyWhile(async () => ({ packs: await this.loadPacks() }));
   }
 
   async migrationParity(witnessIds: string[]): Promise<MigrationParity> {
@@ -237,10 +263,6 @@ export class PackIndexDO extends DurableObject<Env> {
     if (authority === "do") return this.getStoredPacks();
 
     const kv = await this.readKvIndex();
-    const stored = await this.getStoredPacks();
-    if (kv.packs.length === 0 && stored.length > 0) {
-      throw new Error("KV index is unexpectedly empty while the DO shadow contains packs");
-    }
     await this.mergeFromKv(kv);
     return this.getStoredPacks();
   }
@@ -250,9 +272,9 @@ export class PackIndexDO extends DurableObject<Env> {
       type: "json",
       cacheTtl: 30,
     });
-    // A namespace that has never been seeded is a valid empty index. loadPacks()
-    // still fails closed if a previously populated DO shadow sees an empty KV
-    // index, which distinguishes a fresh deployment from accidental KV loss.
+    // A namespace that has never been seeded is a valid empty index. In shadow
+    // mode an empty/stale index is merged additively and is never mirrored back,
+    // so it cannot erase already observed DO records.
     return index ?? { packs: [] };
   }
 
@@ -264,6 +286,27 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.ctx.storage.put(this.packKey(pack.id), pack);
       }
     }
+  }
+
+  private async hydrateDetailCorpus(): Promise<void> {
+    let cursor: string | undefined;
+    do {
+      const page = await this.env.ESO_PACKS.list({ prefix: "pack:", cursor });
+      for (const { name } of page.keys) {
+        const id = name.slice("pack:".length);
+        if (
+          !id ||
+          await this.ctx.storage.get<Pack>(this.packKey(id)) ||
+          await this.ctx.storage.get<string>(this.tombstoneKey(id))
+        ) continue;
+        const detail = await this.env.ESO_PACKS.get<Pack>(name, {
+          type: "json",
+          cacheTtl: 30,
+        });
+        if (detail?.id === id) await this.ctx.storage.put(this.packKey(id), detail);
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
   }
 
   private async applyCounter(
@@ -284,7 +327,7 @@ export class PackIndexDO extends DurableObject<Env> {
     return pack.created_at === createdAt;
   }
 
-  private async applyReplacement(packs: Pack[]): Promise<void> {
+  private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
     const current = await this.getStoredPacks();
     const desiredIds = new Set(packs.map(({ id }) => id));
     const removed = current.filter(({ id }) => !desiredIds.has(id)).map(({ id }) => id);
@@ -293,7 +336,7 @@ export class PackIndexDO extends DurableObject<Env> {
       await this.ctx.storage.delete(this.tombstoneKey(pack.id));
       await this.ctx.storage.put(this.packKey(pack.id), pack);
     }
-    await this.mirror(packs, undefined, undefined, removed);
+    await this.mirror(packs, undefined, undefined, removed, forceIndex);
     this.voteMemo.clear();
   }
 
@@ -301,6 +344,18 @@ export class PackIndexDO extends DurableObject<Env> {
     await this.ctx.storage.delete(this.packKey(id));
     await this.ctx.storage.put(this.tombstoneKey(id), new Date().toISOString());
     this.forgetVotes(id);
+  }
+
+  private async deleteD1Pack(id: string): Promise<void> {
+    if (!this.env.ROSTER_HUB_DB) return;
+    try {
+      await this.env.ROSTER_HUB_DB.batch([
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+      ]);
+    } catch (error) {
+      console.error(`D1 delete failed [${id}]:`, error);
+    }
   }
 
   private forgetVotes(packId: string): void {
@@ -353,8 +408,14 @@ export class PackIndexDO extends DurableObject<Env> {
     changed?: Pack,
     deletedId?: string,
     deletedIds: string[] = [],
+    forceIndex = false,
   ): Promise<void> {
-    await this.env.ESO_PACKS.put(INDEX_KEY, JSON.stringify({ packs }));
+    // During shadow mode, an eventually consistent KV read may omit a live
+    // pre-deploy pack. Never publish that incomplete shadow back over the full
+    // index. Reads go through getIndex() until the parity-gated authority flip.
+    if (forceIndex || await this.getAuthority() === "do") {
+      await this.env.ESO_PACKS.put(INDEX_KEY, JSON.stringify({ packs }));
+    }
     if (changed) await this.env.ESO_PACKS.put(`pack:${changed.id}`, JSON.stringify(changed));
     for (const id of [...deletedIds, ...(deletedId ? [deletedId] : [])]) {
       await this.env.ESO_PACKS.delete(`pack:${id}`);

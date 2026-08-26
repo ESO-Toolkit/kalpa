@@ -8,7 +8,7 @@ import worker, {
   SUBREQUEST_CEILING,
   SUBREQUEST_RESERVE,
 } from "../src/index";
-import { getPackIndex, putPack, putVote } from "../src/kv";
+import { putPack, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
 import type { Env, PackIndex } from "../src/types";
 import {
@@ -28,6 +28,11 @@ const e = env as unknown as Env;
 async function putPackIndex(testEnv: Env, index: PackIndex): Promise<void> {
   const id = testEnv.PACK_INDEX.idFromName("singleton");
   await testEnv.PACK_INDEX.get(id).replaceIndex(index);
+}
+
+async function getCanonicalIndex(testEnv: Env): Promise<PackIndex> {
+  const id = testEnv.PACK_INDEX.idFromName("singleton");
+  return testEnv.PACK_INDEX.get(id).getIndex();
 }
 
 let fetchSpy: ReturnType<typeof vi.fn>;
@@ -392,7 +397,8 @@ describe("POST /packs", () => {
     ]);
 
     expect(responses.map(({ status }) => status).sort()).toEqual([201, 409]);
-    expect((await getPackIndex(e))!.packs.filter(({ id }) => id === "same-slug")).toHaveLength(1);
+    expect((await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).getIndex()).packs
+      .filter(({ id }) => id === "same-slug")).toHaveLength(1);
   });
 });
 
@@ -768,7 +774,8 @@ describe("POST /packs/:id/vote", () => {
     releaseVote!();
 
     expect((await vote).status).toBe(404);
-    expect((await getPackIndex(e))!.packs.some(({ id }) => id === pack.id)).toBe(false);
+    expect((await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).getIndex()).packs
+      .some(({ id }) => id === pack.id)).toBe(false);
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
     expect(await e.ESO_PACKS.get(`vote:${pack.id}:${OTHER_USER.id}`)).toBeNull();
   });
@@ -943,7 +950,7 @@ describe("POST /admin/restore", () => {
 
     // The index must NOT have been swapped yet: publishing a half-restored
     // corpus would be worse than the drift the restore is repairing.
-    const midIndex = await getPackIndex(e, { fresh: true });
+    const midIndex = await getCanonicalIndex(e);
     expect(midIndex?.packs ?? []).toHaveLength(0);
     expect(await e.ESO_PACKS.get(`pack:${packs[0]!.id}`)).toBeTruthy();
     expect(await e.ESO_PACKS.get(`pack:${packs[4]!.id}`)).toBeNull();
@@ -968,7 +975,7 @@ describe("POST /admin/restore", () => {
     for (const pack of packs) {
       expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
     }
-    const finalIndex = await getPackIndex(e, { fresh: true });
+    const finalIndex = await getCanonicalIndex(e);
     expect((finalIndex?.packs ?? []).map((p) => p.id).sort()).toEqual(
       packs.map((p) => p.id).sort()
     );
@@ -1024,7 +1031,7 @@ describe("POST /admin/restore", () => {
     // Nothing from the replacement snapshot was written, and the index was not
     // republished — a refused resume must leave the corpus exactly as it was.
     expect(await e.ESO_PACKS.get(`pack:${replacement[0]!.id}`)).toBeNull();
-    const index = await getPackIndex(e, { fresh: true });
+    const index = await getCanonicalIndex(e);
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
@@ -1071,7 +1078,7 @@ describe("POST /admin/restore", () => {
     expect(state.done, "restore never completed").toBe(true);
     expect(pages).toBeGreaterThan(10);
 
-    const index = await getPackIndex(e, { fresh: true });
+    const index = await getCanonicalIndex(e);
     expect((index?.packs ?? []).length).toBe(packs.length);
   });
 
@@ -1145,7 +1152,7 @@ describe("POST /admin/restore", () => {
 
     // Records 2..3 were never written and the index was never published.
     expect(await e.ESO_PACKS.get(`pack:${packs[3]!.id}`)).toBeNull();
-    const index = await getPackIndex(e, { fresh: true });
+    const index = await getCanonicalIndex(e);
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
@@ -1216,7 +1223,7 @@ describe("POST /admin/restore", () => {
       expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeTruthy();
     }
     expect(await e.ESO_PACKS.get("pack:wrong-snapshot")).toBeNull();
-    const index = await getPackIndex(e, { fresh: true });
+    const index = await getCanonicalIndex(e);
     expect((index?.packs ?? []).map((p) => p.id).sort()).toEqual(packs.map((p) => p.id).sort());
   });
 
@@ -1298,7 +1305,7 @@ describe("POST /admin/restore", () => {
 
     // Only the single record page 1 wrote is present, and the index is untouched.
     expect(await e.ESO_PACKS.get(`pack:${packs[2]!.id}`)).toBeNull();
-    const index = await getPackIndex(e, { fresh: true });
+    const index = await getCanonicalIndex(e);
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
@@ -1445,7 +1452,7 @@ describe("POST /admin/restore", () => {
     // mistaken for one from the range branch again.
     const body = await res.json<{ error: string }>();
     expect(body.error).toMatch(/is not inside this snapshot/);
-    const index = await getPackIndex(e, { fresh: true });
+    const index = await getCanonicalIndex(e);
     expect(index?.packs ?? []).toHaveLength(0);
   });
 
