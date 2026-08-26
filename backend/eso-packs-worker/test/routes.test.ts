@@ -8,7 +8,7 @@ import worker, {
   SUBREQUEST_CEILING,
   SUBREQUEST_RESERVE,
 } from "../src/index";
-import { getPackIndex, putPack, putPackIndex, putVote } from "../src/kv";
+import { getPackIndex, putPack, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
 import type { Env, PackIndex } from "../src/types";
 import {
@@ -24,6 +24,11 @@ import {
 
 const BASE = "https://kalpa-pack-hub.eso-toolkit.workers.dev";
 const e = env as unknown as Env;
+
+async function putPackIndex(testEnv: Env, index: PackIndex): Promise<void> {
+  const id = testEnv.PACK_INDEX.idFromName("singleton");
+  await testEnv.PACK_INDEX.get(id).replaceIndex(index);
+}
 
 let fetchSpy: ReturnType<typeof vi.fn>;
 const originalFetch = globalThis.fetch;
@@ -41,6 +46,7 @@ beforeEach(async () => {
   // the same token to different identities, and every spelling of the default
   // list view now shares one cache entry.
   resetTokenCache();
+  await putPackIndex(e, { packs: [] });
   await invalidatePackListCache(new URL(BASE));
 });
 
@@ -377,6 +383,17 @@ describe("POST /packs", () => {
     );
     expect(res.status).toBe(429);
   });
+
+  it("returns one 409 when concurrent creates request the same id", async () => {
+    const body = JSON.stringify(validPackBody({ id: "same-slug", title: "Same Slug" }));
+    const responses = await Promise.all([
+      call(authedRequest(`${BASE}/packs`, { method: "POST", body })),
+      call(authedRequest(`${BASE}/packs`, { method: "POST", body })),
+    ]);
+
+    expect(responses.map(({ status }) => status).sort()).toEqual([201, 409]);
+    expect((await getPackIndex(e))!.packs.filter(({ id }) => id === "same-slug")).toHaveLength(1);
+  });
 });
 
 // ── GET /packs/:id ────────────────────────────────────────────────
@@ -541,6 +558,28 @@ describe("PUT /packs/:id", () => {
     expect(body.pack.title).toBe("Updated Title");
   });
 
+  it("uses DO-owned counters when the detail body read by update is stale", async () => {
+    const stale = makePack("update-stale-counter", { vote_count: 0 });
+    await putPackIndex(e, { packs: [{ ...stale, vote_count: 1 }] });
+    await putPack(e, stale);
+
+    const res = await call(
+      authedRequest(`${BASE}/packs/update-stale-counter`, {
+        method: "PUT",
+        body: JSON.stringify(validPackBody({ title: "Fresh content" })),
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json<{ pack: { title: string; vote_count: number } }>();
+    expect(body.pack).toMatchObject({ title: "Fresh content", vote_count: 1 });
+    const detail = await e.ESO_PACKS.get<{ vote_count: number }>(
+      "pack:update-stale-counter",
+      "json",
+    );
+    expect(detail!.vote_count).toBe(1);
+  });
+
   it("rejects update by different user", async () => {
     await putPack(e, makePack("not-mine", { author_id: String(OTHER_USER.id) }));
 
@@ -651,6 +690,44 @@ describe("POST /packs/:id/vote", () => {
     const body = await final.json<{ voted: boolean; voteCount: number }>();
     expect(body.voted).toBe(true);
     expect(body.voteCount).toBe(1);
+  });
+
+  it("does not let a vote that read stale detail state recreate a deleted pack", async () => {
+    const pack = makePack("delete-while-voting");
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+
+    let releaseVote: (() => void) | undefined;
+    fetchSpy.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.includes("esologs.com")) return originalFetch(input);
+      const token = new Headers(init?.headers).get("Authorization");
+      if (token === "Bearer slow-voter") {
+        return new Promise<Response>((resolve) => {
+          releaseVote = () => resolve(esoLogsResponse(OTHER_USER));
+        });
+      }
+      return Promise.resolve(esoLogsResponse(TEST_USER));
+    });
+
+    const vote = call(
+      new Request(`${BASE}/packs/delete-while-voting/vote`, {
+        method: "POST",
+        headers: { Authorization: "Bearer slow-voter" },
+      }),
+    );
+    await vi.waitFor(() => expect(releaseVote).toBeTypeOf("function"));
+
+    const deleted = await call(
+      authedRequest(`${BASE}/packs/delete-while-voting`, { method: "DELETE" }),
+    );
+    expect(deleted.status).toBe(200);
+    releaseVote!();
+
+    expect((await vote).status).toBe(404);
+    expect((await getPackIndex(e))!.packs.some(({ id }) => id === pack.id)).toBe(false);
+    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`vote:${pack.id}:${OTHER_USER.id}`)).toBeNull();
   });
 });
 

@@ -396,12 +396,6 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     id = `pack-${Date.now().toString(36)}`;
   }
 
-  // Ensure unique (fresh read so a recently-created id isn't missed)
-  const existing = await getPack(env, id, { fresh: true });
-  if (existing) {
-    id = `${id}-${Date.now().toString(36)}`;
-  }
-
   const now = new Date().toISOString();
   const pack: Pack = {
     id,
@@ -429,13 +423,15 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   const MAX_PACKS_PER_USER = 25;
   const added = await getPackIndexDO(env).addPack(pack, MAX_PACKS_PER_USER);
   if (!added.ok) {
+    if (added.reason === "duplicate") {
+      return json(request, { error: "A pack with this id already exists" }, 409);
+    }
     return json(
       request,
       { error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.` },
       429,
     );
   }
-  await putPack(env, pack);
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -497,13 +493,15 @@ async function handleUpdatePack(
     status: (input.status as PackStatus) ?? existing.status ?? "published",
   };
 
-  await putPack(env, pack);
-  await getPackIndexDO(env).updatePack(id, pack);
+  const updated = await getPackIndexDO(env).updatePack(id, pack);
+  if (!updated) {
+    return notFound(request);
+  }
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, pack);
+  await d1UpsertPack(env, updated);
 
-  return json(request, { pack });
+  return json(request, { pack: updated });
 }
 
 // ── DELETE /packs/:id ──────────────────────────────────────────────
@@ -529,7 +527,6 @@ async function handleDeletePack(
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
 
-  await env.ESO_PACKS.delete(`pack:${id}`);
   await getPackIndexDO(env).removePack(id);
   // Slugs become available again once a pack is deleted, so its vote records
   // must go with it — otherwise a pack that reuses the id inherits them and a
@@ -597,12 +594,14 @@ async function handleVotePack(
   // KV's edge cache, so a rapid vote/unvote could see the same stale state
   // twice and inflate vote_count permanently. The DO also syncs the per-pack
   // KV detail from its own fresh copy.
-  const { voted, pack: updated } = await getPackIndexDO(env).toggleVote(id, userId, pack);
+  const { voted, pack: updated } = await getPackIndexDO(env).toggleVote(id, userId);
+  if (!updated) {
+    return notFound(request);
+  }
 
   await invalidatePackListCache(url);
 
-  const voteCount =
-    updated?.vote_count ?? Math.max(0, (pack.vote_count ?? 0) + (voted ? 1 : -1));
+  const voteCount = updated.vote_count;
   await d1UpdateVoteCount(env, id, voteCount);
 
   const response: VoteResponse = { voted, voteCount };
@@ -635,16 +634,18 @@ async function handleInstallPack(
   if (existing) {
     return json(request, { installCount: pack.install_count ?? 0 });
   }
-  await env.ESO_PACKS.put(rateLimitKey, "1", { expirationTtl: 3600 });
-
   // Increment inside the DO (fresh, single-threaded) instead of writing back a
   // possibly-stale cached snapshot, which would lose concurrent installs and
   // revert recent author edits. The DO also syncs the per-pack KV detail.
-  const updated = await getPackIndexDO(env).bumpPackCounter(id, "install_count", 1, pack);
+  const updated = await getPackIndexDO(env).bumpPackCounter(id, "install_count", 1);
+  if (!updated) {
+    return notFound(request);
+  }
+  await env.ESO_PACKS.put(rateLimitKey, "1", { expirationTtl: 3600 });
 
   await invalidatePackListCache(url);
 
-  const installCount = updated?.install_count ?? (pack.install_count ?? 0) + 1;
+  const installCount = updated.install_count;
   return json(request, { installCount });
 }
 
