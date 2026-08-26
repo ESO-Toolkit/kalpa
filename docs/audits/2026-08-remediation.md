@@ -4,7 +4,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
-| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1 | pending | focused 8 pass; Worker 159 pass | Implementation complete locally; rollout bootstrap decision remains open. |
+| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1 | REVISE | focused 8 pass; Worker 159 pass | Sol found five verified propagation/rollout issues; no push or deploy. |
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
@@ -46,9 +46,21 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 - Active branch: `fix/audit-w1-worker-consistency`
 - Completed: read repository guidance, master prompt, and audit memory; fetched and fast-forward checked `main`; created the persistent tracker; started Kalpa successfully in Tauri dev mode; completed the W1 Fable review; captured five failing-before DO tests; implemented DO-authoritative mutations; added route-level duplicate, stale-update, and delete/vote race coverage; Worker typecheck and 159 tests pass.
-- Active work: W1 dry-run build, Sol review, and rollout decision.
-- Blockers: none.
-- Exact next action: run the Worker dry-run, obtain the required Sol review, resolve verified findings, and decide the safe first-bootstrap rollout before opening a PR.
+- Active work: W1 revisions after the first Sol review.
+- Blockers: a production-safe first bootstrap cannot rely on one potentially stale KV read. No branch push, PR, merge, or deployment should occur until the migration design is resolved.
+- Exact next action: reconsult Fable with Sol's bootstrap evidence, then add failing tests and fix lifecycle reuse, canonical authorization, atomic restore preservation, and account-deletion vote cleanup before requesting one Sol follow-up.
+
+### Sol review 1 — REVISE
+
+Verified findings:
+
+1. First post-deploy bootstrap can permanently omit a live pack when KV returns a stale index.
+2. A stale vote/install request can cross delete-and-recreate and mutate the new pack lifecycle.
+3. Update/delete authorization still trusts stale KV ownership rather than canonical DO ownership.
+4. Restore finalization preserves concurrent packs from KV instead of atomically from DO authority.
+5. Account deletion leaves other users' vote records attached to removed pack IDs, so a reused ID can inherit votes.
+
+Wire contract verdict: OK. Bug-class sweep found the restore and account-deletion sites above.
 
 ## Open Questions
 
