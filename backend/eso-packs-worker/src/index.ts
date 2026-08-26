@@ -451,9 +451,7 @@ async function handleUpdatePack(
     return unauthorized(request);
   }
 
-  // Fresh read: this handler carries vote_count/install_count forward from
-  // `existing`, so a stale cached snapshot would revert recent counter changes.
-  const existing = await getPack(env, id, { fresh: true });
+  const existing = await getPackIndexDO(env).getPack(id);
   if (!existing) {
     return notFound(request);
   }
@@ -493,10 +491,12 @@ async function handleUpdatePack(
     status: (input.status as PackStatus) ?? existing.status ?? "published",
   };
 
-  const updated = await getPackIndexDO(env).updatePack(id, pack);
-  if (!updated) {
-    return notFound(request);
+  const result = await getPackIndexDO(env).updatePack(id, pack, String(user.id));
+  if (result.status === "not-found") return notFound(request);
+  if (result.status === "forbidden") {
+    return json(request, { error: "Only the pack creator can update it" }, 403);
   }
+  const updated = result.pack;
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, updated);
@@ -516,18 +516,11 @@ async function handleDeletePack(
     return unauthorized(request);
   }
 
-  // Fresh read so a just-created pack isn't seen as missing and ownership is
-  // checked against current data.
-  const existing = await getPack(env, id, { fresh: true });
-  if (!existing) {
-    return notFound(request);
-  }
-
-  if (!existing.author_id || String(user.id) !== existing.author_id) {
+  const removed = await getPackIndexDO(env).removePack(id, String(user.id));
+  if (removed === "not-found") return notFound(request);
+  if (removed === "forbidden") {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
-
-  await getPackIndexDO(env).removePack(id);
   // Slugs become available again once a pack is deleted, so its vote records
   // must go with it — otherwise a pack that reuses the id inherits them and a
   // previous voter's first vote is treated as an unvote.
@@ -594,7 +587,11 @@ async function handleVotePack(
   // KV's edge cache, so a rapid vote/unvote could see the same stale state
   // twice and inflate vote_count permanently. The DO also syncs the per-pack
   // KV detail from its own fresh copy.
-  const { voted, pack: updated } = await getPackIndexDO(env).toggleVote(id, userId);
+  const { voted, pack: updated } = await getPackIndexDO(env).toggleVote(
+    id,
+    userId,
+    pack.created_at,
+  );
   if (!updated) {
     return notFound(request);
   }
@@ -637,7 +634,12 @@ async function handleInstallPack(
   // Increment inside the DO (fresh, single-threaded) instead of writing back a
   // possibly-stale cached snapshot, which would lose concurrent installs and
   // revert recent author edits. The DO also syncs the per-pack KV detail.
-  const updated = await getPackIndexDO(env).bumpPackCounter(id, "install_count", 1);
+  const updated = await getPackIndexDO(env).bumpPackCounter(
+    id,
+    "install_count",
+    1,
+    pack.created_at,
+  );
   if (!updated) {
     return notFound(request);
   }
@@ -686,6 +688,85 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
     last_backup_ok: lastBackupOk,
     timestamp: new Date().toISOString(),
   });
+}
+
+async function migrationWitnessIds(env: Env): Promise<string[]> {
+  const ids = new Set<string>();
+
+  if (env.ROSTER_HUB_DB) {
+    const rows = await env.ROSTER_HUB_DB.prepare("SELECT id FROM packs").all<{ id: string }>();
+    for (const row of rows.results) if (row.id) ids.add(row.id);
+  }
+
+  // Dated snapshots deliberately retain deleted data for 90 days, so treating
+  // all of them as live witnesses would make parity impossible. Operators wait
+  // for one post-deploy backup cycle; backup:latest is then the current corpus.
+  const snapshot = await env.ESO_PACKS.get<{
+    packs?: Pack[];
+    packBodies?: Record<string, Pack>;
+  }>("backup:latest", "json");
+  for (const pack of snapshot?.packs ?? []) ids.add(pack.id);
+  for (const id of Object.keys(snapshot?.packBodies ?? {})) ids.add(id);
+  return [...ids];
+}
+
+async function handleMigrationParity(request: Request, env: Env): Promise<Response> {
+  if (!requireAuth(request, env)) return unauthorized(request);
+  try {
+    const parity = await getPackIndexDO(env).migrationParity(await migrationWitnessIds(env));
+    return json(request, parity);
+  } catch (error) {
+    console.error("Pack-index migration parity failed:", error);
+    return json(request, { error: "Migration parity could not be verified" }, 503);
+  }
+}
+
+async function handleMigrationAuthority(request: Request, env: Env): Promise<Response> {
+  if (!requireAuth(request, env)) return unauthorized(request);
+  let authority: "kv" | "do";
+  try {
+    const body = (await request.json()) as { authority?: unknown };
+    if (body.authority !== "kv" && body.authority !== "do") {
+      return badRequest(request, [{ field: "authority", message: 'authority must be "kv" or "do"' }]);
+    }
+    authority = body.authority;
+  } catch {
+    return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
+  }
+
+  try {
+    const result = await getPackIndexDO(env).setAuthority(
+      authority,
+      await migrationWitnessIds(env),
+    );
+    return result.ok
+      ? json(request, result.parity)
+      : json(request, { error: "Pack-index parity check failed", parity: result.parity }, 409);
+  } catch (error) {
+    console.error("Pack-index authority change failed:", error);
+    return json(request, { error: "Pack-index authority could not be changed" }, 503);
+  }
+}
+
+async function handleMigrationAdopt(request: Request, env: Env): Promise<Response> {
+  if (!requireAuth(request, env)) return unauthorized(request);
+  try {
+    const body = (await request.json()) as { ids?: unknown };
+    if (
+      !Array.isArray(body.ids) ||
+      body.ids.length === 0 ||
+      body.ids.length > 100 ||
+      body.ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id))
+    ) {
+      return badRequest(request, [{
+        field: "ids",
+        message: "ids must contain 1 to 100 valid pack ids",
+      }]);
+    }
+    return json(request, await getPackIndexDO(env).adoptWitnesses(body.ids as string[]));
+  } catch {
+    return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
+  }
 }
 
 // ── Scheduled backup ──────────────────────────────────────────────
@@ -1194,10 +1275,7 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   // absent from `preservedPacks` and dropped from the rebuilt index — which is
   // exactly what the preservation above promises not to do, and restore runs
   // at incident time when recent writes are most likely in flight.
-  const restoredIds = new Set(Object.keys(packBodies));
-  const liveIndex = await getPackIndex(env, { fresh: true });
-  const preservedPacks = (liveIndex?.packs ?? []).filter((p) => !restoredIds.has(p.id));
-  await getPackIndexDO(env).replaceIndex({ packs: [...packs, ...preservedPacks] });
+  await getPackIndexDO(env).replaceIndexPreserving({ packs }, Object.keys(packBodies));
 
   await invalidatePackListCache(url);
 
@@ -1226,9 +1304,9 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
  * PRIVACY.md commits to.
  *
  * Mirrors handleDeleteAccount's treatment of live data exactly: it drops the
- * user's own packs and their own votes, and deliberately does NOT drop votes
- * other users cast on those packs (live deletion leaves those in place, and a
- * restore must not silently discard other people's records).
+ * user's own packs, their own votes, and every vote attached to a removed pack
+ * id. Slugs are reusable, so retaining those votes would let a restored or
+ * recreated pack inherit votes from an earlier lifecycle.
  *
  * Best-effort. The live data is already gone by the time this runs, so a
  * failure here must not fail the deletion request — it is logged and swallowed.
@@ -1251,14 +1329,22 @@ async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void
 
     const snapshot = JSON.parse(raw) as PackBackupSnapshot;
 
-    const keptPacks = (snapshot.packs ?? []).filter((p) => p.author_id !== userId);
+    const removedPackIds = new Set(
+      (snapshot.packs ?? [])
+        .filter((pack) => pack.author_id === userId)
+        .map((pack) => pack.id),
+    );
+    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
+      if (pack?.author_id === userId) removedPackIds.add(id);
+    }
+    const keptPacks = (snapshot.packs ?? []).filter((p) => !removedPackIds.has(p.id));
     const keptBodies: Record<string, Pack> = {};
     for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
-      if (pack?.author_id !== userId) keptBodies[id] = pack;
+      if (!removedPackIds.has(id) && pack?.author_id !== userId) keptBodies[id] = pack;
     }
     const keptVotes: Record<string, VoteRecord> = {};
     for (const [key, vote] of Object.entries(snapshot.votes ?? {})) {
-      if (vote?.userId !== userId) keptVotes[key] = vote;
+      if (vote?.userId !== userId && !removedPackIds.has(vote?.packId)) keptVotes[key] = vote;
     }
 
     const removed =
@@ -1293,14 +1379,13 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   // moments before the deletion request — invisible to even a fresh cached read —
   // still has its body and D1 rows removed. Without that, the only pack of a
   // brand-new account could survive deletion entirely.
-  const index = await getPackIndex(env, { fresh: true });
-  const snapshotIds = index?.packs.filter((p) => p.author_id === userId).map((p) => p.id) ?? [];
   const removedIds = await getPackIndexDO(env).removePacksByAuthor(userId);
-  const packIds = [...new Set([...snapshotIds, ...removedIds])];
+  const packIds = removedIds;
 
   // Delete individual pack KV entries
   for (const packId of packIds) {
     await env.ESO_PACKS.delete(`pack:${packId}`);
+    await deleteVotesForPack(env, packId);
   }
 
   // Batch-delete from D1
@@ -1503,6 +1588,19 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const shareMatch = pathname.match(/^\/shares\/([23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6})$/);
   if (shareMatch && method === "GET") {
     return handleResolveShare(request, env, shareMatch[1]);
+  }
+
+  // Migration control routes are admin-only inside their handlers.
+  if (method === "GET" && pathname === "/admin/migration/parity") {
+    return handleMigrationParity(request, env);
+  }
+
+  if (method === "POST" && pathname === "/admin/migration/authority") {
+    return handleMigrationAuthority(request, env);
+  }
+
+  if (method === "POST" && pathname === "/admin/migration/adopt") {
+    return handleMigrationAdopt(request, env);
   }
 
   // POST /admin/seed — dev-only seeding route

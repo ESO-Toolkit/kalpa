@@ -12,6 +12,7 @@ function packIndex() {
 
 describe("PackIndexDO authoritative mutations", () => {
   beforeEach(async () => {
+    await packIndex().setAuthority("kv", []);
     await packIndex().replaceIndex({ packs: [] });
   });
 
@@ -73,4 +74,115 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(stored).toMatchObject({ title: "Updated title", [field]: 1 });
     },
   );
+
+  it.each(["vote", "install"] as const)(
+    "does not apply a stale %s to a recreated slug",
+    async (operation) => {
+      const oldPack = makePack(`w1-reused-${operation}`);
+      const newPack = makePack(oldPack.id, {
+        author_id: "new-owner",
+        created_at: "2026-08-26T00:00:00.000Z",
+        updated_at: "2026-08-26T00:00:00.000Z",
+      });
+      const index = packIndex();
+      await index.replaceIndex({ packs: [oldPack] });
+      await index.removePack(oldPack.id);
+      await index.addPack(newPack);
+
+      const result = operation === "vote"
+        ? (await index.toggleVote(oldPack.id, "late-voter", oldPack.created_at)).pack
+        : await index.bumpPackCounter(oldPack.id, "install_count", 1, oldPack.created_at);
+
+      expect(result).toBeNull();
+      expect(await index.getPack(oldPack.id)).toMatchObject({
+        author_id: "new-owner",
+        vote_count: 0,
+        install_count: 0,
+      });
+      expect(await e.ESO_PACKS.get(`vote:${oldPack.id}:late-voter`)).toBeNull();
+    },
+  );
+
+  it("preserves packs created while a restore page is being applied", async () => {
+    const restored = makePack("w1-restored", { title: "Old title" });
+    const concurrent = makePack("w1-concurrent");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [restored] });
+    await index.addPack(concurrent);
+
+    await index.replaceIndexPreserving(
+      { packs: [{ ...restored, title: "Restored title" }] },
+      [restored.id],
+    );
+
+    expect((await getPackIndex(e))!.packs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: restored.id, title: "Restored title" }),
+        expect.objectContaining({ id: concurrent.id }),
+      ]),
+    );
+  });
+
+  it("backfills repeatedly, keeps DO mutations, and flips only after parity", async () => {
+    const index = packIndex();
+    const first = makePack("w1-shadow-first");
+    const delayed = makePack("w1-shadow-delayed");
+    await index.addPack(first);
+
+    // Model a pre-deploy KV write becoming visible only after the first new-code
+    // mutation. A latched one-shot bootstrap never imports this second pack.
+    await e.ESO_PACKS.put("index:packs", JSON.stringify({ packs: [first, delayed] }));
+
+    expect(await index.migrationParity([first.id, delayed.id])).toMatchObject({
+      authority: "kv",
+      kv_count: 2,
+      do_count: 2,
+      missing_from_do: [],
+    });
+
+    await index.updatePack(first.id, { ...first, title: "DO wins" });
+    await e.ESO_PACKS.put("index:packs", JSON.stringify({ packs: [first, delayed] }));
+    expect(await index.getPack(first.id)).toMatchObject({ title: "DO wins" });
+
+    const flipped = await index.setAuthority("do", [first.id, delayed.id]);
+    expect(flipped.ok).toBe(true);
+    expect(flipped.parity.authority).toBe("do");
+  });
+
+  it("keeps KV authority when an untombstoned witness is missing", async () => {
+    const result = await packIndex().setAuthority("do", ["w1-missing-witness"]);
+
+    expect(result.ok).toBe(false);
+    expect(result.parity.missing_from_do).toEqual(["w1-missing-witness"]);
+    expect((await packIndex().migrationParity([])).authority).toBe("kv");
+  });
+
+  it("explicitly adopts an independently propagated detail witness", async () => {
+    const pack = makePack("w1-detail-witness");
+    await putPack(e, pack);
+
+    expect(await packIndex().adoptWitnesses([pack.id])).toMatchObject({
+      adopted: [pack.id],
+      tombstoned: [],
+      unavailable: [],
+    });
+    expect(await packIndex().getPack(pack.id)).toMatchObject({ id: pack.id });
+  });
+
+  it("uses tombstones to reject stale KV resurrection during backfill", async () => {
+    const pack = makePack("w1-shadow-tombstone");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.removePack(pack.id);
+    await e.ESO_PACKS.put("index:packs", JSON.stringify({ packs: [pack] }));
+
+    const parity = await index.migrationParity([pack.id]);
+    expect(parity).toMatchObject({ do_count: 0, missing_from_do: [] });
+    expect(parity.tombstones).toContain(pack.id);
+    expect(await index.getPack(pack.id)).toBeNull();
+    expect(await index.adoptWitnesses([pack.id])).toMatchObject({
+      adopted: [],
+      tombstoned: [pack.id],
+    });
+  });
 });

@@ -581,7 +581,9 @@ describe("PUT /packs/:id", () => {
   });
 
   it("rejects update by different user", async () => {
-    await putPack(e, makePack("not-mine", { author_id: String(OTHER_USER.id) }));
+    const pack = makePack("not-mine", { author_id: String(OTHER_USER.id) });
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
 
     const res = await call(
       authedRequest(`${BASE}/packs/not-mine`, {
@@ -590,6 +592,28 @@ describe("PUT /packs/:id", () => {
       })
     );
     expect(res.status).toBe(403);
+  });
+
+  it("rejects a stale former owner after the slug is recreated", async () => {
+    const stale = makePack("reused-update");
+    const canonical = makePack(stale.id, {
+      author_id: String(OTHER_USER.id),
+      author_name: OTHER_USER.name,
+      created_at: "2026-08-26T00:00:00.000Z",
+    });
+    await putPackIndex(e, { packs: [canonical] });
+    await putPack(e, stale);
+
+    const res = await call(
+      authedRequest(`${BASE}/packs/${stale.id}`, {
+        method: "PUT",
+        body: JSON.stringify(validPackBody()),
+      }),
+    );
+
+    expect(res.status).toBe(403);
+    expect(await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).getPack(stale.id))
+      .toMatchObject({ author_id: String(OTHER_USER.id) });
   });
 });
 
@@ -608,10 +632,29 @@ describe("DELETE /packs/:id", () => {
   });
 
   it("rejects delete by different user", async () => {
-    await putPack(e, makePack("not-mine-del", { author_id: String(OTHER_USER.id) }));
+    const pack = makePack("not-mine-del", { author_id: String(OTHER_USER.id) });
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
 
     const res = await call(authedRequest(`${BASE}/packs/not-mine-del`, { method: "DELETE" }));
     expect(res.status).toBe(403);
+  });
+
+  it("rejects deletion by a stale former owner after the slug is recreated", async () => {
+    const stale = makePack("reused-delete");
+    const canonical = makePack(stale.id, {
+      author_id: String(OTHER_USER.id),
+      author_name: OTHER_USER.name,
+      created_at: "2026-08-26T00:00:00.000Z",
+    });
+    await putPackIndex(e, { packs: [canonical] });
+    await putPack(e, stale);
+
+    const res = await call(authedRequest(`${BASE}/packs/${stale.id}`, { method: "DELETE" }));
+
+    expect(res.status).toBe(403);
+    expect(await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).getPack(stale.id))
+      .toMatchObject({ author_id: String(OTHER_USER.id) });
   });
 
   it("returns 404 for nonexistent pack", async () => {
@@ -1474,6 +1517,7 @@ describe("DELETE /account", () => {
     await putPack(e, mine);
     await putPack(e, theirs);
     await putPackIndex(e, { packs: [mine, theirs] });
+    await putVote(e, mine.id, String(OTHER_USER.id));
 
     const res = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
     expect(res.status).toBe(200);
@@ -1489,10 +1533,11 @@ describe("DELETE /account", () => {
     expect(Object.keys(snapshot!.packBodies)).toEqual([theirs.id]);
     expect(snapshot!.votes[myVoteKey]).toBeUndefined();
 
-    // ...but the other user's records survive. Votes others cast on the
-    // deleted user's packs are deliberately kept, mirroring how the live
-    // deletion path leaves them in place.
-    expect(snapshot!.votes[theirVoteKey]).toBeDefined();
+    // Votes attached to the deleted pack are lifecycle data, even when another
+    // user cast them, so neither live state nor a future restore may retain them.
+    expect(snapshot!.votes[theirVoteKey]).toBeUndefined();
+    expect(await e.ESO_PACKS.get(`vote:${mine.id}:${OTHER_USER.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`user-votes:${OTHER_USER.id}:${mine.id}`)).toBeNull();
   });
 
   it("leaves backup:latest untouched when the user has nothing in it", async () => {

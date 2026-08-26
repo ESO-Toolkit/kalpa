@@ -4,7 +4,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
-| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1 | REVISE | focused 8 pass; Worker 159 pass | Sol found five verified propagation/rollout issues; no push or deploy. |
+| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1, D-W1-2 | REVISE; follow-up pending | Worker check; 168 tests; Wrangler dry-run | First-review findings fixed; no push or real deployment. |
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
@@ -40,15 +40,25 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Compatibility: successful response fields and the KV `PackIndex`/`Pack` shapes are unchanged; duplicate create uses the existing `{ error: string }` error shape with HTTP 409.
 - Rollout caveat: the first post-deploy bootstrap must import the existing KV index. A quiet/controlled rollout or an explicit bootstrap mechanism must be chosen before merge because the freshest KV read can still lag a just-completed pre-deploy mutation.
 
+### D-W1-2 — Continuously merged shadow with a parity-gated authority flip
+
+- Chosen: default the durable `meta:authority` flag to `kv`, re-read and additively merge the KV index on every serialized mutation, and keep per-id tombstones so stale KV cannot restore deletions. DO records win once present and every mutation continues to mirror the unchanged KV wire shape.
+- The first deployment is the shadow/backfill phase. After at least one post-deploy daily backup, an operator must observe two clean parity reads more than 60 seconds apart before explicitly switching authority to `do`.
+- Parity uses D1 ids and `backup:latest` as independent witnesses. Missing untombstoned ids block the flip. The admin-only adoption endpoint can recover a specifically adjudicated id from its independently propagated KV detail record; it never adopts D1 rows automatically because a failed historical D1 delete can be a zombie.
+- Rejected: one-shot or timed bootstrap gates. KV provides no bounded propagation time, and an auto-deployed maintenance gate would create operator-bounded mutation downtime without proving completeness.
+- Rejected: all dated backups as live witnesses. Their intentional 90-day retention includes deleted packs and would make parity impossible; only a post-deploy `backup:latest` represents the current corpus.
+- Rollback: before the authority flip, old code can resume from the KV mirror. After the flip, rollback requires a verified backup restore; changing the flag alone cannot reconcile edits made by old code.
+
 ## Session Log
 
 ### 2026-08-26 — Codex
 
 - Active branch: `fix/audit-w1-worker-consistency`
 - Completed: read repository guidance, master prompt, and audit memory; fetched and fast-forward checked `main`; created the persistent tracker; started Kalpa successfully in Tauri dev mode; completed the W1 Fable review; captured five failing-before DO tests; implemented DO-authoritative mutations; added route-level duplicate, stale-update, and delete/vote race coverage; Worker typecheck and 159 tests pass.
-- Active work: W1 revisions after the first Sol review.
-- Blockers: a production-safe first bootstrap cannot rely on one potentially stale KV read. No branch push, PR, merge, or deployment should occur until the migration design is resolved.
-- Exact next action: reconsult Fable with Sol's bootstrap evidence, then add failing tests and fix lifecycle reuse, canonical authorization, atomic restore preservation, and account-deletion vote cleanup before requesting one Sol follow-up.
+- Active work: W1 follow-up review after the first Sol review.
+- Completed follow-up: Fable selected the continuously merged shadow design in D-W1-2. Implemented lifecycle guards for vote/install, canonical update/delete authorization, atomic restore preservation, deleted-pack vote cleanup (including `backup:latest`), repeated KV backfill with tombstones, parity-gated authority control, and explicit detail-witness adoption. Worker typecheck, 168 tests, and Wrangler dry-run pass; `wrangler.toml` remains `kalpa-pack-hub`.
+- Blockers: none in implementation. The authority flip is deliberately an operator step after the documented soak/parity checks and must not occur as part of deployment.
+- Exact next action: commit the W1 revisions and request the single required Sol follow-up review.
 
 ### Sol review 1 — REVISE
 
@@ -65,8 +75,8 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 ## Open Questions
 
 - W2: maintainer approval is required before merging any reconciliation path that can delete rows from shared D1.
-- W1: choose between a coordinated quiet first mutation and an explicit authenticated bootstrap operation; do not merge until the stale-KV bootstrap risk is resolved.
 - W1: decide whether moving vote-record authority from KV/in-memory memo into DO storage belongs in W1 or W3. The current W1 code prevents resurrection but retains the pre-existing eviction/double-toggle limitation for later hardening.
+- W1: owner sign-off is required before the later manual `kv` → `do` authority flip and must accept backup restore as the post-flip rollback path.
 - P0-A2: lock dependency and user-visible timeout behavior require a Fable recommendation and may require maintainer input.
 - R4/R5: ownership/conflict behavior that changes install outcomes requires explicit design review before implementation.
 - H2: `kalpa-elder-scrolls-themes/` is currently untracked; provenance must be inspected before tracking or ignoring it.
