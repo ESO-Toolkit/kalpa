@@ -27,7 +27,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
-| H6 | ready | `fix/audit-h6-quick-xml-advisory` | pending | - | D-H6-1 | REVISE; verified docs/gate findings addressed; follow-up pending | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
+| H6 | ready | `fix/audit-h6-quick-xml-advisory` | pending | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
 
 ## Decisions
 
@@ -110,16 +110,17 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
   tests (755 passed, 15 ignored), fmt check, and `npm run build:native-slint`
   pass. Main `cargo audit` reports zero vulnerabilities; Slint no longer reports
   either H6 advisory.
-- Active work: obtain Sol review and open a draft stacked PR.
-- Exact next action: commit the reviewed diff, invoke Sol, and address any
-  verified findings.
+- Active work: open a draft stacked PR against W1.
+- Exact next action: push the reviewed commits and create the draft PR.
 - Sol review: `REVISE`. Verified that `README.md` and `SECURITY.md` still
   described the removed quick-xml exceptions as current, and that Slint CI had
   no committed regression gate for its separate lockfile. Corrected both public
   documents and added a locked Cargo-metadata floor check for every resolved
   Slint quick-xml package without suppressing unrelated sidecar advisories.
-- Follow-up action: rerun focused and full gates, commit the corrections, and
-  request the single required Sol follow-up.
+- Follow-up action: focused and full gates were rerun and passed. The single
+  required Sol follow-up returned no findings, confirming that the stale
+  documentation, obsolete main-CI ignores, and missing Slint lockfile gate are
+  resolved.
 
 ### 2026-08-26 — Codex
 
