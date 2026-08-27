@@ -18,7 +18,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
 | F2 | pr-open | `fix/audit-f2-log-directory-sequencing` | [#373](https://github.com/ESO-Toolkit/kalpa/pull/373) (draft) | - | D-F2-1 | REVISE x2; all verified findings addressed | Frontend check; 496 tests | Stacked on W1; no wire or persisted-data changes. |
-| F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
+| F3 | pr-open | `fix/audit-f3-fresh-import-metadata` | [#375](https://github.com/ESO-Toolkit/kalpa/pull/375) (draft) | - | D-F3-1 | APPROVE | Frontend check; 498 tests | Stacked on F2; no wire or persisted-data changes. |
 | F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
@@ -64,6 +64,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Rejected: checking only the directory. A same-directory refresh can still resolve out of order. Rejected: checking only an operation ID local to `loadLogs`; detection and import completion can independently reclaim stale directory or selection state.
 - Compatibility: frontend-only state sequencing; no IPC, wire-format, persisted-data, or backend behavior changes.
 
+### D-F3-1 — Select imports from the applied refresh result
+
+- Chosen: return the exact `LogFileInfo[]` applied by the operation/directory-guarded `loadLogs` call, find the imported path in that result, and pass its metadata directly into selection. Stale, failed, or mismatched refreshes return no usable result and cannot select.
+- Rejected: awaiting `setLogs` and then reading the selector's captured `logs` array. React state application does not update the closure of an already-running import callback, so classification remains render-timing dependent.
+- Large imports use the refreshed `sizeBytes` and enter the existing deferred/full-preflight route without invoking `uploader_preflight`. Small imports still preflight normally.
+- Compatibility: frontend-only orchestration; no IPC, wire-format, persisted-data, backend, dependency, or Worker changes.
+
 ## Session Log
 
 ### 2026-08-27 — W1 twice-reject escalation
@@ -94,6 +101,16 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Handoff: pushed the branch and opened draft PR [#373](https://github.com/ESO-Toolkit/kalpa/pull/373). No deployment, merge, dependency, IPC, or persisted-data change occurred.
 - Blockers: none. PR remains draft and must follow its stacked W1 base.
 - Exact next action: wait for stacked-base availability and green PR CI, then mark PR #373 ready for maintainer review.
+
+### 2026-08-26 — Codex (F3)
+
+- Active branch: `fix/audit-f3-fresh-import-metadata`, stacked on `fix/audit-f2-log-directory-sequencing`.
+- Completed: captured two failing-before regressions proving prior-render metadata controlled import selection; implemented D-F3-1 so the imported path is selected from the exact guarded refresh result; kept large imports on the deferred/full-scan route and small imports on immediate preflight.
+- Tests: focused uploader sequencing suite passes 8/8; `npm run check` passes; full frontend suite passes 38 files/498 tests.
+- Sol: `APPROVE`; no findings or missing tests, wire contract `OK`, bug-class sweep `CLEAN`. The read-only reviewer could not start Vitest because its sandbox denied process spawn, while executor-run focused and full suites passed.
+- Handoff: pushed the branch and opened draft PR [#375](https://github.com/ESO-Toolkit/kalpa/pull/375) against the F2 branch. No deployment, merge, dependency, IPC, or persisted-data change occurred.
+- Blockers: none in F3. The PR remains stacked and must follow F2.
+- Exact next action: wait for the stacked F2 base and green PR CI, then mark PR #375 ready for maintainer review.
 
 ### Sol review 1 — REVISE
 
