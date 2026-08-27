@@ -38,7 +38,7 @@ jobs:
       # detection, embed limits, and mention safety correct before a workflow
       # can post externally.
       - name: Discord release message tests
-        run: node --test .github/scripts/discord-release.test.cjs
+        run: node --test .github/scripts/discord-release.test.cjs .github/scripts/release-body.test.cjs
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
