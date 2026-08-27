@@ -386,7 +386,7 @@ struct NativeCustomThemeStore {
     themes: Vec<CatalogTheme>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct NativeSettings {
     auto_update: bool,
@@ -6947,7 +6947,11 @@ fn pack_iso_date_label(value: &str) -> Option<String> {
 }
 
 fn apply_initial_native_settings(ui: &KalpaWindow) {
-    apply_native_settings(ui, &read_native_settings());
+    let settings = read_native_settings();
+    *native_settings_baseline()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(settings.clone());
+    apply_native_settings(ui, &settings);
     ui.set_settings_addons_path(configured_addons_path_display().into());
 }
 
@@ -18889,22 +18893,63 @@ fn persist_native_settings(settings: &NativeSettings) {
         return;
     };
 
-    if let Err(error) = persist_native_settings_to_path(&path, settings) {
+    // The settings callback supplies the whole UI snapshot even though one
+    // control changed. Compare it to this shell's last snapshot, then merge only
+    // those changed fields into the latest disk object under the OS lock. This
+    // prevents a stale, unchanged Slint field from erasing a newer Tauri value.
+    let mut baseline = native_settings_baseline()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let before = baseline
+        .clone()
+        .unwrap_or_else(|| read_native_settings_from_path(&path).unwrap_or_default());
+    if let Err(error) = persist_native_settings_delta_to_path(&path, &before, settings) {
         eprintln!("Failed to persist native settings: {error}");
+    } else {
+        *baseline = Some(normalize_native_settings(settings.clone()));
     }
 }
 
-fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
-    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
-        .map_err(|error| error.to_string())?;
-    let mut settings = settings.clone();
+fn native_settings_baseline() -> &'static Mutex<Option<NativeSettings>> {
+    static BASELINE: OnceLock<Mutex<Option<NativeSettings>>> = OnceLock::new();
+    BASELINE.get_or_init(|| Mutex::new(None))
+}
+
+fn normalize_native_settings(mut settings: NativeSettings) -> NativeSettings {
     settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
     settings.uploader_region = settings.uploader_region.clamp(1, 2);
     settings.uploader_visibility = settings.uploader_visibility.clamp(0, 2);
+    settings
+}
+
+#[cfg(test)]
+fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let settings = normalize_native_settings(settings.clone());
     let existing = fs::read_to_string(path)
         .ok()
         .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
     let store_value = native_settings_to_store_value(&settings, existing);
+    let json = serde_json::to_string_pretty(&store_value)
+        .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
+    write_string_atomic(path, &json)
+        .map_err(|error| format!("Failed to write native settings: {error}"))
+}
+
+fn persist_native_settings_delta_to_path(
+    path: &Path,
+    baseline: &NativeSettings,
+    settings: &NativeSettings,
+) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let baseline = normalize_native_settings(baseline.clone());
+    let settings = normalize_native_settings(settings.clone());
+    let existing = fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+    let store_value = native_settings_delta_to_store_value(&baseline, &settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
     write_string_atomic(path, &json)
@@ -19003,6 +19048,7 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
     }
 }
 
+#[cfg(test)]
 fn native_settings_to_store_value(
     settings: &NativeSettings,
     existing: Option<serde_json::Value>,
@@ -19049,6 +19095,73 @@ fn native_settings_to_store_value(
         "uploaderVisibility".to_string(),
         serde_json::Value::Number(settings.uploader_visibility.clamp(0, 2).into()),
     );
+
+    serde_json::Value::Object(object)
+}
+
+fn native_settings_delta_to_store_value(
+    baseline: &NativeSettings,
+    settings: &NativeSettings,
+    existing: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut object = existing
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    if baseline.auto_update != settings.auto_update {
+        object.insert(
+            "autoUpdate".to_string(),
+            serde_json::Value::Bool(settings.auto_update),
+        );
+    }
+    if baseline.warn_eso_running != settings.warn_eso_running {
+        object.remove("warnEsoRunning");
+        object.insert(
+            "suppressEsoRunningWarning".to_string(),
+            serde_json::Value::Bool(!settings.warn_eso_running),
+        );
+    }
+    if baseline.native_performance_mode != settings.native_performance_mode {
+        object.insert(
+            STORE_KEY_PERFORMANCE_MODE.to_string(),
+            native_performance_mode_to_store_value(settings.native_performance_mode),
+        );
+    }
+    if baseline.official_uploader != settings.official_uploader {
+        object.remove("officialUploader");
+        object.insert(
+            "manualUseOfficialUploader".to_string(),
+            serde_json::Value::Bool(settings.official_uploader),
+        );
+        object.insert(
+            "liveUseOfficialUploader".to_string(),
+            serde_json::Value::Bool(settings.official_uploader),
+        );
+    }
+    if baseline.auto_open_analysis != settings.auto_open_analysis {
+        object.insert(
+            "autoOpenAnalysis".to_string(),
+            serde_json::Value::Bool(settings.auto_open_analysis),
+        );
+    }
+    if baseline.conflict_policy != settings.conflict_policy {
+        object.insert(
+            "conflictPolicy".to_string(),
+            conflict_policy_to_store_value(settings.conflict_policy),
+        );
+    }
+    if baseline.uploader_region != settings.uploader_region {
+        object.insert(
+            "uploaderRegion".to_string(),
+            serde_json::Value::Number(settings.uploader_region.into()),
+        );
+    }
+    if baseline.uploader_visibility != settings.uploader_visibility {
+        object.insert(
+            "uploaderVisibility".to_string(),
+            serde_json::Value::Number(settings.uploader_visibility.into()),
+        );
+    }
 
     serde_json::Value::Object(object)
 }
@@ -20464,6 +20577,78 @@ mod tests {
         assert!(object.get("warnEsoRunning").is_none());
         assert!(object.get("officialUploader").is_none());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_preserves_newer_tauri_field() {
+        let root = test_temp_dir("native-settings-delta");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        fs::write(
+            &path,
+            serde_json::json!({
+                "autoUpdate": true,
+                "suppressEsoRunningWarning": false
+            })
+            .to_string(),
+        )
+        .expect("seed newer Tauri setting");
+        let mut desired = baseline.clone();
+        desired.warn_eso_running = false;
+
+        persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect("persist unrelated Slint setting");
+
+        let object = read_settings_store_object_from_path(&path).unwrap();
+        assert_eq!(
+            object
+                .get("autoUpdate")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the stale Slint snapshot must not overwrite Tauri's newer field"
+        );
+        assert_eq!(
+            object
+                .get("suppressEsoRunningWarning")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_full_native_snapshots_merge_independent_changes() {
+        let root = test_temp_dir("native-settings-full-snapshot-race");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let baseline = NativeSettings::default();
+        let mut left = baseline.clone();
+        left.auto_update = true;
+        let mut right = baseline.clone();
+        right.uploader_visibility = 0;
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_baseline = baseline.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left_writer = std::thread::spawn(move || {
+            left_start.wait();
+            persist_native_settings_delta_to_path(&left_path, &left_baseline, &left)
+        });
+        let right_writer = std::thread::spawn(move || {
+            start.wait();
+            persist_native_settings_delta_to_path(&right_path, &baseline, &right)
+        });
+
+        left_writer.join().unwrap().unwrap();
+        right_writer.join().unwrap().unwrap();
+
+        let saved = read_native_settings_from_path(&path).unwrap();
+        assert!(saved.auto_update);
+        assert_eq!(saved.uploader_visibility, 0);
         let _ = fs::remove_dir_all(root);
     }
 
