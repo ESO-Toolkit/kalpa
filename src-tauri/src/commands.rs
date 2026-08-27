@@ -3941,9 +3941,23 @@ fn update_with_decisions_inner(
         }
     }
 
+    // Honour a decision only for a file that is STILL conflicting. The
+    // classification above is re-derived from the current disk state, so a
+    // decision can be stale: the user marks a conflict keep-mine, then reverts
+    // the file to its baseline before applying. Trusting the stale decision
+    // would skip that file during extraction - leaving it on the old version
+    // while the update reports success - and then record the upstream hash as
+    // its baseline, so the staleness would never be noticed again.
+    let still_conflicting: HashSet<&str> = classified
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.relative_path.as_str())
+        .collect();
+
     let mut kept_files: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "keep_mine")
+        .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
     for path in &classified.auto_kept_files {
@@ -3963,6 +3977,7 @@ fn update_with_decisions_inner(
     let mut files_to_backup: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "take_update")
+        .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
     for conflict in &classified.conflicts {
@@ -13431,6 +13446,80 @@ mod tests {
             .map(|c| c.relative_path.as_str())
             .collect();
         assert_eq!(paths, vec!["AddonA/init.lua", "AddonB/init.lua"]);
+    }
+
+    /// A decision is only ever advisory: the server re-derives the
+    /// classification from current disk state at apply time.
+    ///
+    /// The gap this closes: the user marks a conflict keep-mine, then reverts
+    /// the file to its baseline before applying. Reclassification now says the
+    /// file is safe to update, but the stale decision used to still skip it
+    /// during extraction - leaving the old bytes on disk while the update
+    /// reported success - and then record the upstream hash as its baseline, so
+    /// the divergence would never be flagged again.
+    #[test]
+    fn a_stale_keep_mine_decision_does_not_survive_reclassification() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        let addon_dir = addons_dir.join("MyAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+
+        // Baseline records the pristine bytes.
+        let mut files = HashMap::new();
+        files.insert(
+            "main.lua".to_string(),
+            file_hashes::file_signature("main.lua", &addon_dir.join("main.lua")).unwrap(),
+        );
+        file_hashes::save_hash_manifest(
+            addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "MyAddon".to_string(),
+                esoui_ids: vec![7],
+                recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                installed_version: "1.0".to_string(),
+                files,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MyAddon/main.lua", options).unwrap();
+        archive.write_all(b"-- upstream v2").unwrap();
+        archive.finish().unwrap();
+
+        // While the file is edited it genuinely conflicts.
+        fs::write(addon_dir.join("main.lua"), b"-- user edit").unwrap();
+        let (report, _) =
+            build_conflict_report(addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].relative_path, "MyAddon/main.lua");
+
+        // The user then reverts it, so at apply time nothing conflicts.
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+        let zip_hashes = file_hashes::hash_zip_entries_by_folder(&zip_path).unwrap();
+        let classified = classify_update_archive(addons_dir, &zip_hashes).unwrap();
+        assert!(
+            classified.conflicts.is_empty(),
+            "reverting the edit must clear the conflict"
+        );
+        assert_eq!(classified.safe_files, vec!["MyAddon/main.lua".to_string()]);
+
+        // The stale keep-mine decision must therefore be ignored: the file is
+        // no longer in the conflict set, so it must not be added to the skip
+        // set that would leave it un-updated.
+        let still_conflicting: HashSet<&str> = classified
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.relative_path.as_str())
+            .collect();
+        assert!(!still_conflicting.contains("MyAddon/main.lua"));
     }
 
     fn profile_of(names: &[&str]) -> AddonProfile {

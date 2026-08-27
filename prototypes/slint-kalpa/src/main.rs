@@ -13555,7 +13555,15 @@ fn native_pending_conflict_diff_blocking(
         return Err("Conflict file was not found.".to_string());
     }
 
-    let user_path = addon_file_path(addons_dir, &pending.folder_name, relative_path)?;
+    // The conflict path names its own folder. Resolving it under the pending
+    // update's primary would read `AddOns/<primary>/LibFoo/init.lua` for a
+    // sibling conflict - a path that exists nowhere - so the diff showed empty
+    // local content and then failed to find the file in the ZIP.
+    let (conflict_folder, conflict_relative) = file_hashes::split_qualified(relative_path)
+        .filter(|(folder, _)| pending.zip_hashes.has_folder(folder))
+        .ok_or_else(|| format!("Conflict path does not belong to this update: {relative_path}"))?;
+
+    let user_path = addon_file_path(addons_dir, conflict_folder, conflict_relative)?;
     let user_bytes = fs::read(&user_path).unwrap_or_default();
     if bytes_look_binary(&user_bytes) {
         return Ok(NativeConflictDiffPreview {
@@ -13568,7 +13576,11 @@ fn native_pending_conflict_diff_blocking(
         .map_err(|error| format!("Failed to open pending update ZIP: {error}"))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| format!("Failed to read update ZIP: {error}"))?;
-    let zip_entry_name = format!("{}/{}", pending.folder_name, relative_path);
+    // A flat archive's entries carry no folder prefix, so the entry name cannot
+    // be rebuilt by concatenation.
+    let zip_entry_name = pending
+        .zip_hashes
+        .zip_entry_name(conflict_folder, conflict_relative);
     let mut entry = archive
         .by_name(&zip_entry_name)
         .map_err(|error| format!("File was not found in update ZIP: {error}"))?;
@@ -23953,6 +23965,105 @@ CombatMetrics_SavedVariables = {
         file_hashes::record_hashes_for_folders(root, &[folder.to_string()], 42, "1.0")
             .expect("record baseline");
         fs::write(addon_dir.join("main.lua"), "d('user edit')\n").expect("write user edit");
+    }
+
+    /// The sidecar diff must resolve a conflict under ITS OWN folder. Reading
+    /// it under the pending update's primary produced
+    /// `AddOns/<primary>/LibFoo/init.lua` - a path that exists nowhere - so the
+    /// user saw empty local content and then "file not found in update ZIP".
+    #[test]
+    fn native_diff_resolves_a_sibling_conflict_under_its_own_folder() {
+        let root = test_temp_dir("native-sibling-diff");
+        for (folder, body) in [("MainAddon", "-- main"), ("LibFoo", "-- lib baseline")] {
+            let dir = root.join(folder);
+            fs::create_dir_all(&dir).expect("create addon dir");
+            fs::write(
+                dir.join(format!("{folder}.txt")),
+                format!(
+                    "## Title: {folder}
+## Version: 1.0
+"
+                ),
+            )
+            .expect("write manifest");
+            fs::write(dir.join("init.lua"), body).expect("write lua");
+        }
+        file_hashes::record_hashes_for_folders(
+            root,
+            &["MainAddon".to_string(), "LibFoo".to_string()],
+            42,
+            "1.0",
+        )
+        .expect("record baselines");
+        // The user edits the LIBRARY, not the primary.
+        fs::write(root.join("LibFoo").join("init.lua"), "-- my lib edit").expect("edit lib");
+
+        let zip_path = root.join("update.zip");
+        write_multi_folder_zip(&zip_path);
+
+        let (report, zip_hashes) =
+            build_native_conflict_report(root, "MainAddon", &zip_path).expect("build report");
+        assert_eq!(report.conflicts, vec!["LibFoo/init.lua".to_string()]);
+
+        let pending = NativePendingConflict {
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 42,
+            update_version: "2.0".to_string(),
+            title: "MainAddon".to_string(),
+            download_url: String::new(),
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::new(),
+            zip_path: zip_path.clone(),
+            zip_hashes,
+        };
+
+        let preview = native_pending_conflict_diff_blocking(root, &pending, "LibFoo/init.lua")
+            .expect("diff resolves under the sibling folder");
+        assert!(!preview.binary);
+        assert!(
+            preview.user_preview.contains("my lib edit"),
+            "local side must read the sibling file, got: {:?}",
+            preview.user_preview
+        );
+        assert!(
+            preview.upstream_preview.contains("upstream lib"),
+            "upstream side must read the sibling ZIP entry, got: {:?}",
+            preview.upstream_preview
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_multi_folder_zip(zip_path: &Path) {
+        use std::io::Write;
+        let file = fs::File::create(zip_path).expect("create zip");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (folder, body) in [
+            ("MainAddon", "-- main v2"),
+            ("LibFoo", "-- upstream lib v2"),
+        ] {
+            archive
+                .start_file(format!("{folder}/{folder}.txt"), options)
+                .expect("start manifest");
+            archive
+                .write_all(
+                    format!(
+                        "## Title: {folder}
+## Version: 2.0
+"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write manifest");
+            archive
+                .start_file(format!("{folder}/init.lua"), options)
+                .expect("start lua");
+            archive.write_all(body.as_bytes()).expect("write lua");
+        }
+        archive.finish().expect("finish zip");
     }
 
     fn pending_conflict_for_test(
