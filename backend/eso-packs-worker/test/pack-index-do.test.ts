@@ -126,6 +126,68 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
   });
 
+  it("rejects stale same-author update and delete operations after slug reuse", async () => {
+    const oldPack = makePack("w1-same-author-reuse");
+    const replacement = makePack(oldPack.id, {
+      title: "Replacement",
+      created_at: "2026-08-27T02:00:00.000Z",
+      updated_at: "2026-08-27T02:00:00.000Z",
+    });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [oldPack] });
+    await index.removePack(oldPack.id, oldPack.author_id, oldPack.created_at);
+    await index.addPack(replacement);
+
+    expect(await index.updatePack(oldPack.id, { ...oldPack, title: "Late update" }, oldPack.author_id))
+      .toMatchObject({ status: "not-found" });
+    expect(await index.removePack(oldPack.id, oldPack.author_id, oldPack.created_at))
+      .toBe("not-found");
+    expect(await index.getPack(oldPack.id)).toMatchObject({
+      title: "Replacement",
+      created_at: replacement.created_at,
+    });
+  });
+
+  it.each(["vote_count", "install_count"] as const)(
+    "commits a %s once and repairs a failed KV detail mirror by alarm",
+    async (field) => {
+      const pack = makePack(`w1-dirty-${field}`);
+      const index = packIndex();
+      await index.replaceIndex({ packs: [pack] });
+      await putPack(e, pack);
+      const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
+      const put = vi.spyOn(e.ESO_PACKS, "put").mockImplementation(async (key, value, options) => {
+        if (key === `pack:${pack.id}`) throw new Error("injected detail mirror failure");
+        return originalPut(key, value, options);
+      });
+
+      const result = field === "vote_count"
+        ? (await index.toggleVote(pack.id, "dirty-voter", pack.created_at)).pack
+        : await index.bumpPackCounter(pack.id, field, 1, pack.created_at);
+      expect(result?.[field]).toBe(1);
+      expect((await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json"))?.[field]).toBe(0);
+      put.mockRestore();
+
+      expect(await runDurableObjectAlarm(index)).toBe(true);
+      expect((await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json"))?.[field]).toBe(1);
+      expect((await index.getPack(pack.id))?.[field]).toBe(1);
+    },
+  );
+
+  it("deletes only the target author's orphan detail records", async () => {
+    const mine = makePack("w1-account-mine", { author_id: "account-target" });
+    const unrelated = makePack("w1-unrelated-orphan", { author_id: "other-author" });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [mine] });
+    await putPack(e, mine);
+    await putPack(e, unrelated);
+
+    expect(await index.removePacksByAuthor(mine.author_id)).toEqual([mine.id]);
+    expect(await index.getPack(unrelated.id)).toBeNull();
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${unrelated.id}`, "json"))
+      .toMatchObject({ id: unrelated.id });
+  });
+
   it("tombstones before resumable vote cleanup can partially fail", async () => {
     const pack = makePack("w1-vote-cleanup-retry", { vote_count: 3 });
     const index = packIndex();

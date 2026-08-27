@@ -498,12 +498,14 @@ async function handleDeletePack(
   id: string,
   url: URL,
 ): Promise<Response> {
+  const lifecycle = (await getPackIndexDO(env).getPack(id))?.created_at;
   const user = await validateBearerToken(request);
   if (!user) {
     return unauthorized(request);
   }
-
-  const removed = await getPackIndexDO(env).removePack(id, String(user.id));
+  // A retry after the tombstone committed no longer has a live lifecycle to
+  // read. The DO still authenticates that retry against the journaled actor.
+  const removed = await getPackIndexDO(env).removePack(id, String(user.id), lifecycle);
   if (removed === "not-found") return notFound(request);
   if (removed === "forbidden") {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
@@ -795,9 +797,6 @@ interface BackupMeta {
   vote_count: number;
 }
 
-// Warn (not fail) if the snapshot is approaching KV's 25MB per-value limit.
-const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
-
 /** Key marking a user as deleted, so a stale backup read cannot republish them. */
 function deletedUserKey(userId: string): string {
   return `deleted:${userId}`;
@@ -925,33 +924,12 @@ async function handleScheduled(env: Env): Promise<void> {
     votes: keptVotes,
   };
 
-  const serialized = JSON.stringify(snapshot);
-  if (serialized.length > BACKUP_SIZE_WARN_BYTES) {
-    console.warn(
-      `Backup snapshot for ${backupKey} is ${serialized.length} bytes, approaching KV's 25MB value limit`,
-    );
-  }
-
-  // Write backup with 90-day TTL (keeps last ~90 daily snapshots)
-  await env.ESO_PACKS.put(backupKey, serialized, {
-    expirationTtl: 90 * 86400,
-  });
-
-  // Also write a non-expiring "latest" pointer so a silent multi-day failure
-  // gap can't erase all history once the 90-day-old daily snapshots roll off.
-  await env.ESO_PACKS.put("backup:latest", serialized);
-
-  const meta: BackupMeta = {
-    last_success: Date.now(),
-    last_backup_key: backupKey,
-    pack_count: index.packs.length,
-    pack_body_count: Object.keys(packBodies).length,
-    vote_count: Object.keys(votes).length,
-  };
-  await env.ESO_PACKS.put("backup:meta", JSON.stringify(meta));
+  // The singleton DO revalidates the corpus and performs all three writes
+  // under the same serialization boundary as account deletion.
+  const meta = await getPackIndexDO(env).writeBackup(backupKey, snapshot);
 
   console.log(
-    `Backup written: ${backupKey} (${index.packs.length} packs, ${meta.pack_body_count} bodies, ${meta.vote_count} votes)`,
+    `Backup written: ${backupKey} (${meta.pack_count} packs, ${meta.pack_body_count} bodies, ${meta.vote_count} votes)`,
   );
 }
 

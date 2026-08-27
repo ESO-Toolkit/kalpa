@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env, Pack, PackIndex } from "./types";
+import type { Env, Pack, PackIndex, VoteRecord } from "./types";
 import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
 
 const INDEX_KEY = "index:packs";
@@ -8,9 +8,27 @@ const TOMBSTONE_PREFIX = "tomb:";
 const OWNERSHIP_PREFIX = "own:";
 const OPERATION_PREFIX = "op:";
 const PENDING_PREFIX = "pending:";
+const DIRTY_MIRROR_PREFIX = "dirty:";
+const DELETED_AUTHOR_PREFIX = "deleted-author:";
 const AUTHORITY_KEY = "meta:authority";
 const VOTE_MEMO_LIMIT = 5000;
 const RETRY_DELAY_MS = 30_000;
+const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
+
+interface BackupSnapshot {
+  created_at: string;
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: Record<string, VoteRecord>;
+}
+
+interface BackupMeta {
+  last_success: number;
+  last_backup_key: string;
+  pack_count: number;
+  pack_body_count: number;
+  vote_count: number;
+}
 
 type Authority = "kv" | "do";
 type MutationResult =
@@ -96,6 +114,7 @@ export class PackIndexDO extends DurableObject<Env> {
 
       const operation = this.createOperation("create", pack, pack.author_id);
       await this.ctx.storage.transaction(async (txn) => {
+        await txn.delete(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`);
         await txn.delete(this.tombstoneKey(pack.id));
         await txn.put(this.packKey(pack.id), pack);
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
@@ -114,6 +133,7 @@ export class PackIndexDO extends DurableObject<Env> {
       const existing = await this.ctx.storage.get<Pack>(this.packKey(id));
       if (!existing) return { status: "not-found" };
       if ((actorId ?? pack.author_id) !== existing.author_id) return { status: "forbidden" };
+      if (pack.created_at !== existing.created_at) return { status: "not-found" };
 
       const updated: Pack = {
         ...pack,
@@ -126,7 +146,7 @@ export class PackIndexDO extends DurableObject<Env> {
       };
       await this.ctx.storage.put(this.packKey(id), updated);
       await this.ctx.storage.put(this.ownershipKey(id), updated.updated_at);
-      await this.mirror(await this.getStoredPacks(), updated);
+      await this.mirrorChangedBestEffort(updated);
       return { status: "ok", pack: updated };
     });
   }
@@ -171,7 +191,11 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
-  async removePack(id: string, actorId?: string): Promise<RemoveResult> {
+  async removePack(
+    id: string,
+    actorId?: string,
+    expectedLifecycle?: string,
+  ): Promise<RemoveResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.loadPacks();
       const existing = await this.ctx.storage.get<Pack>(this.packKey(id));
@@ -182,6 +206,9 @@ export class PackIndexDO extends DurableObject<Env> {
         return await this.finishDelete(pending) ? "ok" : "retry";
       }
       if (actorId !== undefined && actorId !== existing.author_id) return "forbidden";
+      if (expectedLifecycle !== undefined && expectedLifecycle !== existing.created_at) {
+        return "not-found";
+      }
 
       const operation = this.createOperation("delete", existing, actorId ?? existing.author_id);
       const tombstone: Tombstone = {
@@ -204,8 +231,11 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async removePacksByAuthor(authorId: string): Promise<string[]> {
     return this.ctx.blockConcurrencyWhile(async () => {
+      // This latch shares the same serialization boundary as backup writes.
+      // Once present, no stale cron snapshot can publish this author's data.
+      await this.ctx.storage.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, new Date().toISOString());
       await this.loadPacks();
-      await this.hydrateDetailCorpus();
+      await this.hydrateDetailsByAuthor(authorId);
       const packs = await this.getStoredPacks();
       const removedPacks = packs.filter((pack) => pack.author_id === authorId);
       for (const pack of removedPacks) {
@@ -227,6 +257,53 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.finishDelete(operation);
       }
       return removedPacks.map(({ id }) => id);
+    });
+  }
+
+  async writeBackup(
+    backupKey: string,
+    incoming: BackupSnapshot,
+  ): Promise<BackupMeta> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const deletedEntries = await this.ctx.storage.list<string>({
+        prefix: DELETED_AUTHOR_PREFIX,
+      });
+      const deletedAuthors = new Set(
+        [...deletedEntries.keys()].map((key) => key.slice(DELETED_AUTHOR_PREFIX.length)),
+      );
+      const incomingIds = new Set(incoming.packs.map(({ id }) => id));
+      const packs = (await this.loadPacks()).filter(
+        (pack) => incomingIds.has(pack.id) && !deletedAuthors.has(String(pack.author_id)),
+      );
+      const liveIds = new Set(packs.map(({ id }) => id));
+      const votes = Object.fromEntries(
+        Object.entries(incoming.votes).filter(([, vote]) =>
+          liveIds.has(vote.packId) && !deletedAuthors.has(String(vote.userId)),
+        ),
+      );
+      const snapshot: BackupSnapshot = {
+        created_at: incoming.created_at,
+        packs,
+        packBodies: Object.fromEntries(packs.map((pack) => [pack.id, pack])),
+        votes,
+      };
+      const serialized = JSON.stringify(snapshot);
+      if (serialized.length > BACKUP_SIZE_WARN_BYTES) {
+        console.warn(
+          `Backup snapshot for ${backupKey} is ${serialized.length} bytes, approaching KV's 25MB value limit`,
+        );
+      }
+      await this.env.ESO_PACKS.put(backupKey, serialized, { expirationTtl: 90 * 86400 });
+      await this.env.ESO_PACKS.put("backup:latest", serialized);
+      const meta: BackupMeta = {
+        last_success: Date.now(),
+        last_backup_key: backupKey,
+        pack_count: packs.length,
+        pack_body_count: packs.length,
+        vote_count: Object.keys(votes).length,
+      };
+      await this.env.ESO_PACKS.put("backup:meta", JSON.stringify(meta));
+      return meta;
     });
   }
 
@@ -275,7 +352,25 @@ export class PackIndexDO extends DurableObject<Env> {
         if (operation.kind === "create") await this.finishCreate(operation);
         else await this.finishDelete(operation);
       }
-      if ((await this.ctx.storage.list({ prefix: PENDING_PREFIX })).size > 0) {
+      const dirty = await this.ctx.storage.list<string>({ prefix: DIRTY_MIRROR_PREFIX });
+      for (const [key, lifecycle] of dirty) {
+        const packId = key.slice(DIRTY_MIRROR_PREFIX.length);
+        const pack = await this.ctx.storage.get<Pack>(this.packKey(packId));
+        if (!pack || pack.created_at !== lifecycle) {
+          await this.ctx.storage.delete(key);
+          continue;
+        }
+        try {
+          await this.mirror(await this.getStoredPacks(), pack);
+          await this.ctx.storage.delete(key);
+        } catch (error) {
+          console.error(`KV dirty mirror retry failed [${packId}]:`, error);
+        }
+      }
+      if (
+        (await this.ctx.storage.list({ prefix: PENDING_PREFIX })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: DIRTY_MIRROR_PREFIX })).size > 0
+      ) {
         await this.scheduleRetry();
       }
     });
@@ -384,7 +479,7 @@ export class PackIndexDO extends DurableObject<Env> {
     }
   }
 
-  private async hydrateDetailCorpus(): Promise<void> {
+  private async hydrateDetailsByAuthor(authorId: string): Promise<void> {
     let cursor: string | undefined;
     do {
       const page = await this.env.ESO_PACKS.list({ prefix: "pack:", cursor });
@@ -399,7 +494,9 @@ export class PackIndexDO extends DurableObject<Env> {
           type: "json",
           cacheTtl: 30,
         });
-        if (detail?.id === id) await this.ctx.storage.put(this.packKey(id), detail);
+        if (detail?.id === id && detail.author_id === authorId) {
+          await this.ctx.storage.put(this.packKey(id), detail);
+        }
       }
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
@@ -413,8 +510,19 @@ export class PackIndexDO extends DurableObject<Env> {
     pack[field] = Math.max(0, (pack[field] ?? 0) + delta);
     await this.ctx.storage.put(this.packKey(pack.id), pack);
     await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
-    await this.mirror(await this.getStoredPacks(), pack);
+    await this.mirrorChangedBestEffort(pack);
     return pack;
+  }
+
+  private async mirrorChangedBestEffort(pack: Pack): Promise<void> {
+    try {
+      await this.mirror(await this.getStoredPacks(), pack);
+      await this.ctx.storage.delete(`${DIRTY_MIRROR_PREFIX}${pack.id}`);
+    } catch (error) {
+      console.error(`KV pack mirror deferred [${pack.id}]:`, error);
+      await this.ctx.storage.put(`${DIRTY_MIRROR_PREFIX}${pack.id}`, pack.created_at);
+      await this.scheduleRetry();
+    }
   }
 
   private lifecycleMatches(pack: Pack | undefined, expected?: string | Pack | null): boolean {
@@ -426,10 +534,16 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
     const current = await this.getStoredPacks();
+    const deletedEntries = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
+    const deletedAuthors = new Set(
+      [...deletedEntries.keys()].map((key) => key.slice(DELETED_AUTHOR_PREFIX.length)),
+    );
     const accepted: Pack[] = [];
     for (const pack of packs) {
       const pending = await this.getPending(pack.id);
-      if (pending?.kind !== "delete") accepted.push(pack);
+      if (pending?.kind !== "delete" && !deletedAuthors.has(String(pack.author_id))) {
+        accepted.push(pack);
+      }
     }
     const desiredIds = new Set(accepted.map(({ id }) => id));
     const removed = current.filter(({ id }) => !desiredIds.has(id));
