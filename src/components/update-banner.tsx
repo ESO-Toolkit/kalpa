@@ -11,6 +11,7 @@ import {
   ListChecksIcon,
   PackageIcon,
   SearchIcon,
+  ShieldAlertIcon,
   XIcon,
 } from "lucide-react";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
@@ -26,6 +27,9 @@ export interface BannerUpdate {
   title: string;
   currentVersion: string;
   remoteVersion: string;
+  /** Present when the addon is ESOUI-tracked — gates the changelog button. */
+  esouiId?: number;
+  hasProtectedEditsBaseline: boolean;
 }
 
 interface UpdateBannerProps {
@@ -119,6 +123,14 @@ function ChooserRow({
       <span className="min-w-0 flex-1 truncate text-[13px] text-foreground" title={update.title}>
         {update.title}
       </span>
+      {!update.hasProtectedEditsBaseline && (
+        <SimpleTooltip content="Protected Edits cannot detect changed files without a trusted baseline">
+          <ShieldAlertIcon
+            className="h-3.5 w-3.5 shrink-0 text-status-warning"
+            aria-label="Protected Edits unavailable"
+          />
+        </SimpleTooltip>
+      )}
       <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums">
         <span
           className="max-w-[88px] truncate text-muted-foreground"
@@ -190,6 +202,7 @@ function UpdateBannerBase({
   }, [selected, updates]);
 
   const selectedCount = effectiveSelected.size;
+  const unprotectedCount = updates.filter((update) => !update.hasProtectedEditsBaseline).length;
   const allSelected = updates.length > 0 && selectedCount === updates.length;
   const someSelected = selectedCount > 0 && !allSelected;
 
@@ -347,6 +360,17 @@ function UpdateBannerBase({
         </div>
 
         {/* Expandable chooser — pick a subset to update in-context */}
+        {!updatingAll && unprotectedCount > 0 && (
+          <div
+            role="status"
+            className="border-t border-status-warning-strong/20 bg-status-warning-strong/[0.04] px-5 py-2 text-xs text-status-warning"
+          >
+            <span className="font-semibold">Protected Edits unavailable:</span> no trusted file
+            baseline exists for {unprotectedCount} addon{unprotectedCount === 1 ? "" : "s"}, so
+            Kalpa cannot detect which files you changed. Updating may overwrite those edits.
+          </div>
+        )}
+
         {canChoose && (
           <AutoHeight
             deps={[expanded, updates.length]}

@@ -1226,15 +1226,22 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    // Modified-file counts live in one JSON manifest per addon under
-    // .kalpa-hashes; each read is independent disk I/O, so collect them in
-    // parallel (mirroring the manifest parsing above) instead of paying one
-    // sequential read per addon inside the enrichment loop.
-    let modified_counts: HashMap<String, u32> = addons
+    // Protected Edits coverage and modified-file counts live in one JSON
+    // manifest per addon under .kalpa-hashes. Each read is independent disk I/O,
+    // so collect both in parallel instead of paying one sequential read per
+    // addon inside the enrichment loop.
+    let protected_edits_state: HashMap<String, (u32, bool)> = addons
         .par_iter()
-        .filter_map(|addon| {
-            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
-                .map(|count| (addon.folder_name.clone(), count))
+        .map(|addon| {
+            let modified_file_count =
+                file_hashes::load_modified_file_count(addons_dir, &addon.folder_name);
+            (
+                addon.folder_name.clone(),
+                (
+                    modified_file_count.unwrap_or(0),
+                    modified_file_count.is_some(),
+                ),
+            )
         })
         .collect();
 
@@ -1284,8 +1291,9 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(count) = modified_counts.get(&addon.folder_name) {
+        if let Some((count, has_baseline)) = protected_edits_state.get(&addon.folder_name) {
             addon.modified_file_count = *count;
+            addon.has_protected_edits_baseline = *has_baseline;
         }
     }
 
@@ -2354,6 +2362,7 @@ pub struct ConflictReport {
     pub safe_files: Vec<String>,
     pub auto_kept_files: Vec<String>,
     pub conflicts: Vec<FileConflict>,
+    pub has_hash_baseline: bool,
 }
 
 fn generate_session_id(folder_name: &str) -> String {
@@ -2373,6 +2382,7 @@ struct ClassifiedFiles {
     safe_files: Vec<String>,
     auto_kept_files: Vec<String>,
     conflicts: Vec<FileConflict>,
+    has_hash_baseline: bool,
 }
 
 /// Classify the files `zip_hashes` would write over the installed folder.
@@ -2453,6 +2463,7 @@ fn classify_update_files(
         safe_files,
         auto_kept_files,
         conflicts,
+        has_hash_baseline: stored.is_some(),
     })
 }
 
@@ -2476,6 +2487,7 @@ fn build_conflict_report(
         safe_files: classified.safe_files,
         auto_kept_files: classified.auto_kept_files,
         conflicts: classified.conflicts,
+        has_hash_baseline: classified.has_hash_baseline,
     };
 
     Ok((report, zip_hashes))
@@ -10900,6 +10912,37 @@ mod tests {
             report.safe_files,
             vec!["same.lua".to_string(), "stock.lua".to_string()]
         );
+        assert!(report.has_hash_baseline);
+    }
+
+    #[test]
+    fn conflict_report_discloses_when_protected_edits_has_no_baseline() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MigratedAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- possibly edited").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "MigratedAddon/main.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"-- upstream replacement").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MigratedAddon", &zip_path, "2.0", "session")
+                .unwrap();
+
+        assert!(!report.has_hash_baseline);
+        assert!(report.conflicts.is_empty());
     }
 
     #[test]

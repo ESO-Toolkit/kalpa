@@ -1374,14 +1374,19 @@ function App() {
   // banner's "Choose" checklist reads like the addon list rather than raw
   // folder names.
   const bannerUpdates = useMemo<BannerUpdate[]>(() => {
-    const titleByFolder = new Map(addons.map((a) => [a.folderName, a.title] as const));
+    const addonByFolder = new Map(addons.map((addon) => [addon.folderName, addon] as const));
     return updatesAvailable
-      .map((u) => ({
-        folderName: u.folderName,
-        title: titleByFolder.get(u.folderName) ?? u.folderName,
-        currentVersion: u.currentVersion,
-        remoteVersion: u.remoteVersion,
-      }))
+      .map((u) => {
+        const addon = addonByFolder.get(u.folderName);
+        return {
+          folderName: u.folderName,
+          title: addon?.title ?? u.folderName,
+          currentVersion: u.currentVersion,
+          remoteVersion: u.remoteVersion,
+          esouiId: u.esouiId,
+          hasProtectedEditsBaseline: addon?.hasProtectedEditsBaseline === true,
+        };
+      })
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [updatesAvailable, addons]);
 
