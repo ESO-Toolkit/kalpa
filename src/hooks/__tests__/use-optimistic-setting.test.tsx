@@ -30,6 +30,20 @@ describe("useOptimisticSetting", () => {
     expect(result.current.value).toBe(true);
   });
 
+  it("rolls a failed pending change back to late hydrated storage", async () => {
+    const { save, settles } = deferredSave<boolean>();
+    const { result } = renderHook(() => useOptimisticSetting<boolean>(false, save));
+
+    act(() => {
+      void result.current.commit(true);
+    });
+    act(() => result.current.hydrate(false));
+    await act(async () => settles[0]!(false));
+
+    expect(result.current.value).toBe(false);
+    await waitFor(() => expect(mockToastError).toHaveBeenCalledTimes(1));
+  });
+
   it("ignores an older failure after a newer write succeeds", async () => {
     const { save, settles } = deferredSave<boolean>();
     const { result } = renderHook(() => useOptimisticSetting<boolean>(false, save));
@@ -81,5 +95,19 @@ describe("useOptimisticSetting", () => {
 
     expect(result.current.value).toEqual(["old", "new"]);
     await waitFor(() => expect(mockToastError).toHaveBeenCalledTimes(1));
+  });
+
+  it("submits functional array mutations composed before either settles", () => {
+    const { save } = deferredSave<string[]>();
+    const { result } = renderHook(() => useOptimisticSetting<string[]>(["old"], save));
+
+    act(() => {
+      void result.current.commit((current) => [...current, "new"]);
+      void result.current.commit((current) => current.filter((item) => item !== "old"));
+    });
+
+    expect(save).toHaveBeenNthCalledWith(1, ["old", "new"]);
+    expect(save).toHaveBeenNthCalledWith(2, ["new"]);
+    expect(result.current.value).toEqual(["new"]);
   });
 });

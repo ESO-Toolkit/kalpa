@@ -54,4 +54,24 @@ describe("useLatestRequest", () => {
 
     expect(onError).not.toHaveBeenCalled();
   });
+
+  it("invalidates every handler when the owner unmounts", async () => {
+    const pending = deferred<string[]>();
+    const handlers = {
+      onSuccess: vi.fn(),
+      onError: vi.fn(),
+      onSettled: vi.fn(),
+    };
+    const { result, unmount } = renderHook(() => useLatestRequest());
+
+    act(() => {
+      void result.current(() => pending.promise, handlers);
+    });
+    unmount();
+    await act(async () => pending.resolve(["late"]));
+
+    expect(handlers.onSuccess).not.toHaveBeenCalled();
+    expect(handlers.onError).not.toHaveBeenCalled();
+    expect(handlers.onSettled).not.toHaveBeenCalled();
+  });
 });

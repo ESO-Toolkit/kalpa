@@ -2398,6 +2398,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const editorDirtyRef = useRef(false);
   const runLatestRequest = useLatestRequest();
+  const runLatestCharacterRequest = useLatestRequest();
 
   const installedFolders = useMemo(
     () => new Set(installedAddons.map((a) => a.folderName)),
@@ -2420,10 +2421,14 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadFiles();
-    invokeOrThrow<CharacterRoster>("list_characters", { addonsPath })
-      .then((roster) => setCharacters(roster.characters))
-      .catch(console.error);
-  }, [loadFiles, addonsPath]);
+    void runLatestCharacterRequest(
+      () => invokeOrThrow<CharacterRoster>("list_characters", { addonsPath }),
+      {
+        onSuccess: (roster) => setCharacters(roster.characters),
+        onError: console.error,
+      }
+    );
+  }, [loadFiles, addonsPath, runLatestCharacterRequest]);
 
   useEffect(() => {
     // Refresh periodically while the dialog is open so the editor's "ESO is

@@ -21,7 +21,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
 | F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
-| F6 | in-progress | `fix/audit-f6-optimistic-sequencing` | - | - | D-F6-1 | pending | Frontend check; 496 tests | Sequenced optimistic settings/library state and latest-only SavedVariables refreshes implemented; reviews pending. |
+| F6 | in-progress | `fix/audit-f6-optimistic-sequencing` | - | - | D-F6-1; Luna PASS | REVISE; verified finding addressed | Frontend check; 499 tests | Sequenced optimistic settings/library state and latest-only SavedVariables file/character refreshes implemented; Sol follow-up pending. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
@@ -105,7 +105,9 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - Failing-before evidence: focused Vitest run failed both new suites because the sequencing hooks did not exist. The tests cover late hydration after user intent, reverse-settled quick toggles, confirmed rollback after a newer failure, functional array rollback, reverse-settled refresh results, and stale refresh errors.
 - Passing-after evidence: focused 6/6 tests, full frontend 496/496 tests, and `npm run check` pass.
 - Decision: D-F6-1. No wire-format, persisted-shape, backend, Rust, Worker, or dependency changes.
-- Active work: required Luna review of failure feedback and Sol adversarial diff review before opening a stacked draft PR.
+- Luna review: `PASS`. `TOKEN_VIOLATIONS: None`; `ACCESSIBILITY: None`; `STATE_FEEDBACK: None`; `RESPONSIVE_BEHAVIOR: None`.
+- Sol review: `REVISE`. Verified that `list_characters` still ran outside the latest-request/unmount guard and could apply path-A character state after a path-B switch. Addressed with an independent latest/unmount request gate. Added the requested unmount, late-hydration failure rollback, and pre-settlement functional-array composition tests. Focused 9/9 tests, full frontend 499/499 tests, and `npm run check` pass.
+- Active work: required one Sol follow-up before opening a stacked draft PR.
 
 ## Open Questions
 
