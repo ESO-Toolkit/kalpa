@@ -214,20 +214,66 @@ pub struct UpdateCheckResult {
 
 /// Determine the "primary" folder from a list of installed folders.
 ///
-/// Prefer a folder whose name appears in the ESOUI title, otherwise
-/// fall back to the first folder in the list.
-fn determine_primary_folder(installed_folders: &[String], esoui_title: &str) -> String {
-    installed_folders
+/// The primary is the folder the archive is really *about*; every other
+/// top-level folder it creates is something the archive also ships.
+///
+/// Preference order, most to least trustworthy:
+///
+/// 1. A folder already recorded under this very ESOUI ID. On an update the
+///    existing primary must stay the primary, or an archive whose title stops
+///    matching would hand ownership to a bundled library.
+/// 2. An exact, case-insensitive match against the ESOUI title.
+/// 3. A folder name contained in the title, longest first - so "LibFoo-2.0"
+///    wins over "LibFoo" instead of depending on iteration order.
+/// 4. The first folder in the list.
+///
+/// Step 4 used to be reached far more often, and the list arrived from a
+/// `HashSet`, so which folder was treated as primary could differ between two
+/// runs over the same archive. `extract_addon_zip` now returns its folders
+/// sorted, which makes the fallback at least deterministic.
+fn determine_primary_folder(
+    store: &metadata::MetadataStore,
+    installed_folders: &[String],
+    esoui_id: u32,
+    esoui_title: &str,
+) -> String {
+    if esoui_id != 0 {
+        if let Some(existing) = installed_folders.iter().find(|folder| {
+            store
+                .addons
+                .get(folder.as_str())
+                .is_some_and(|meta| meta.esoui_id == esoui_id)
+        }) {
+            return existing.clone();
+        }
+    }
+
+    let title = esoui_title.trim();
+    if let Some(exact) = installed_folders
         .iter()
-        .find(|f| esoui_title.contains(f.as_str()))
-        .or(installed_folders.first())
-        .cloned()
-        .unwrap_or_default()
+        .find(|folder| folder.eq_ignore_ascii_case(title))
+    {
+        return exact.clone();
+    }
+
+    let mut contained: Vec<&String> = installed_folders
+        .iter()
+        .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+        .collect();
+    contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    if let Some(best) = contained.first() {
+        return (*best).clone();
+    }
+
+    installed_folders.first().cloned().unwrap_or_default()
 }
 
-/// Record metadata for a set of installed folders. The primary folder gets
-/// the esoui_id and version from ESOUI; secondary folders get id 0 and
-/// their local manifest version.
+/// Record metadata for every folder an archive created.
+///
+/// The primary folder is owned by this addon and takes the ESOUI identity and
+/// version. Every other folder goes through [`metadata::record_bundled_folder`],
+/// which keeps a separately tracked library on its own ESOUI entry instead of
+/// demoting it to ID 0 and silently dropping it out of update checks.
 #[allow(clippy::too_many_arguments)]
 fn record_installed_folders(
     store: &mut metadata::MetadataStore,
@@ -239,22 +285,29 @@ fn record_installed_folders(
     download_url: &str,
     esoui_last_update: u64,
 ) {
-    let primary = determine_primary_folder(installed_folders, esoui_title);
+    let primary = determine_primary_folder(store, installed_folders, esoui_id, esoui_title);
     for folder in installed_folders {
-        let is_primary = *folder == primary;
-        let version = if is_primary && !esoui_version.is_empty() {
-            esoui_version.to_string()
+        // The manifest on disk is the truth for anything Kalpa did not just
+        // fetch from ESOUI: the archive overwrote these files, so the recorded
+        // version has to describe what is actually installed.
+        let local_version = read_local_version(addons_dir, folder);
+        if *folder == primary {
+            let version = if esoui_version.is_empty() {
+                local_version
+            } else {
+                esoui_version.to_string()
+            };
+            metadata::record_install_ext(
+                store,
+                folder,
+                esoui_id,
+                &version,
+                download_url,
+                esoui_last_update,
+            );
         } else {
-            read_local_version(addons_dir, folder)
-        };
-        metadata::record_install_ext(
-            store,
-            folder,
-            if is_primary { esoui_id } else { 0 },
-            &version,
-            download_url,
-            if is_primary { esoui_last_update } else { 0 },
-        );
+            metadata::record_bundled_folder(store, folder, esoui_id, download_url, &local_version);
+        }
     }
 }
 
@@ -526,10 +579,22 @@ fn try_install_dep(
     file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
         .map_err(|_| "hash_record_failed")?;
 
-    for f in &dep_folders {
-        let dep_version = read_local_version(addons_dir, f);
-        metadata::record_install(store, f, dep_id, &dep_version, &dep_info.download_url);
-    }
+    // A dependency archive can create several folders, exactly like a normal
+    // install: stamping the dependency ID onto every one of them made a
+    // two-folder library produce two identical update rows and two downloads,
+    // and would overwrite the identity of any folder the user tracks
+    // separately. Route through the same primary/bundled rule as a direct
+    // install.
+    record_installed_folders(
+        store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+        0,
+    );
     Ok(dep_folders)
 }
 
@@ -1325,6 +1390,7 @@ pub async fn set_addon_tags(
                         installed_at: String::new(),
                         tags,
                         esoui_last_update: 0,
+                        bundled_by: Vec::new(),
                     },
                 );
             }
@@ -1488,7 +1554,15 @@ pub async fn remove_addon(
 
         // Clean up metadata
         let mut store = metadata::load_metadata(&addons_dir);
+        // Anything this addon also shipped into keeps its own identity and its
+        // files; only the record that this addon wrote there goes away. The
+        // folders themselves stay on disk because other addons may declare a
+        // dependency on them.
+        let removed_id = store.addons.get(&folder_name).map(|m| m.esoui_id);
         metadata::remove_entry(&mut store, &folder_name);
+        if let Some(id) = removed_id {
+            metadata::forget_bundled_parent(&mut store, id);
+        }
         metadata::save_metadata(&addons_dir, &store)?;
 
         Ok(())
@@ -1590,10 +1664,22 @@ fn install_dependency_blocking(
         .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
     let mut store = metadata::load_metadata(addons_dir);
-    for f in &dep_folders {
-        let dep_version = read_local_version(addons_dir, f);
-        metadata::record_install(&mut store, f, dep_id, &dep_version, &dep_info.download_url);
-    }
+    // A dependency archive can create several folders, exactly like a normal
+    // install: stamping the dependency ID onto every one of them made a
+    // two-folder library produce two identical update rows and two downloads,
+    // and would overwrite the identity of any folder the user tracks
+    // separately. Route through the same primary/bundled rule as a direct
+    // install.
+    record_installed_folders(
+        &mut store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+        0,
+    );
 
     // Hard-wired to "auto": the user explicitly asked for THIS library, and its
     // own libraries are an implementation detail — prompting again here would be
@@ -4049,17 +4135,40 @@ fn auto_link_addons_blocking(
         if let Some(api_entry) = api_lookup.get(&folder_name) {
             let already_tracked = store.addons.get(&folder_name);
 
-            // Skip bundled secondary folders: if esouiId is 0 and another
-            // addon in the store installed this folder (shares download_url),
-            // don't auto-link it to its own ESOUI entry — that would cause
-            // version mismatches since the bundled version differs from the
-            // standalone version.
+            // Skip bundled secondary folders: a folder another addon ships is
+            // not auto-linked to its own ESOUI entry, because the bundled
+            // version generally differs from the standalone one and linking
+            // would report a permanent phantom update.
+            //
+            // Provenance decides this now. Entries recorded since
+            // `bundled_by` exists say outright who shipped them. Older entries
+            // predate it and are still matched the legacy way, by ID 0 plus a
+            // shared download URL - but that heuristic is exactly what made a
+            // demoted library permanent: once demoted it shared the parent URL,
+            // so this guard refused to ever restore it.
+            //
+            // For those legacy entries the version on disk breaks the tie. If
+            // it equals what ESOUI publishes, the folder is byte-identical to
+            // the standalone release and can be relinked with no mismatch risk.
+            // Anything else is left alone rather than guessed at, and surfaces
+            // in the unlinked list for the user to decide.
             let is_bundled_secondary = already_tracked.is_some_and(|m| {
-                m.esoui_id == 0
+                if !m.bundled_by.is_empty() {
+                    return m.esoui_id == 0;
+                }
+                let legacy_shape = m.esoui_id == 0
                     && store
                         .addons
                         .values()
-                        .any(|other| other.esoui_id != 0 && other.download_url == m.download_url)
+                        .any(|other| other.esoui_id != 0 && other.download_url == m.download_url);
+                if !legacy_shape {
+                    return false;
+                }
+                let on_disk = read_local_version(addons_dir, &folder_name);
+                let heals = !on_disk.is_empty()
+                    && !api_entry.version.is_empty()
+                    && on_disk == api_entry.version;
+                !heals
             });
             if is_bundled_secondary {
                 continue;
@@ -4088,6 +4197,7 @@ fn auto_link_addons_blocking(
                         installed_at: String::new(),
                         tags: Vec::new(),
                         esoui_last_update: 0,
+                        bundled_by: Vec::new(),
                     }
                 });
                 metadata::reconcile_addon(
@@ -4216,6 +4326,7 @@ pub async fn batch_set_tags(
                             installed_at: String::new(),
                             tags: entry.tags,
                             esoui_last_update: 0,
+                            bundled_by: Vec::new(),
                         },
                     );
                 }
@@ -11096,6 +11207,143 @@ mod tests {
         fs::write(dir.join(format!("{base}.txt")), manifest).unwrap();
     }
 
+    /// Writes a manifest carrying a version, so `read_local_version` reports
+    /// what is actually on disk after an archive overwrites a folder.
+    fn write_versioned_addon(addons_dir: &Path, folder: &str, version: &str) {
+        let dir = addons_dir.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{folder}.txt")),
+            format!("## Title: {folder}\n## Version: {version}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The R4 invariant, end to end. Installing an addon that bundles a library
+    /// the user tracks separately must not take the library over.
+    ///
+    /// Update checks skip `esoui_id == 0`, so the old behaviour of stamping 0
+    /// onto every non-primary folder did not merely mislabel the library - it
+    /// removed it from update checks entirely, and permanently.
+    #[test]
+    fn bundling_a_separately_tracked_library_does_not_take_it_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+        write_versioned_addon(addons_dir, "LibFoo", "1.2");
+
+        // LibFoo is tracked in its own right, at a NEWER version than the copy
+        // AddonA bundles.
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 900);
+
+        // AddonA ships both folders.
+        record_installed_folders(
+            &mut store,
+            addons_dir,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+            500,
+        );
+
+        let addon = store.addons.get("AddonA").expect("primary recorded");
+        assert_eq!(addon.esoui_id, 3);
+        assert_eq!(addon.installed_version, "3.0");
+        assert!(addon.bundled_by.is_empty());
+
+        let lib = store.addons.get("LibFoo").expect("library still recorded");
+        assert_eq!(lib.esoui_id, 7, "the library must keep its own identity");
+        assert_eq!(lib.download_url, "https://esoui/lib-foo");
+        assert_eq!(lib.esoui_last_update, 900);
+        assert_eq!(lib.bundled_by, vec![3]);
+        // This is the condition every update check filters on.
+        assert_ne!(
+            lib.esoui_id, 0,
+            "a demoted library is skipped by update checks forever"
+        );
+        // The bundled copy really did overwrite the folder, so the recorded
+        // version is the older one now on disk - which is what makes the
+        // library's own update check offer the upgrade back.
+        assert_eq!(lib.installed_version, "1.2");
+    }
+
+    /// Which folder an archive "owns" must not depend on iteration order, and
+    /// on an update the existing owner must stay the owner.
+    #[test]
+    fn primary_folder_selection_is_deterministic_and_stable() {
+        let empty = metadata::MetadataStore::default();
+        let forward = vec!["LibFoo".to_string(), "FooAddon".to_string()];
+        let reversed = vec!["FooAddon".to_string(), "LibFoo".to_string()];
+
+        // Exact title match wins regardless of order.
+        for order in [&forward, &reversed] {
+            assert_eq!(
+                determine_primary_folder(&empty, order, 3, "FooAddon"),
+                "FooAddon"
+            );
+        }
+
+        // Containment prefers the longest match, not the first one seen.
+        let libs = vec!["Lib".to_string(), "LibFoo".to_string()];
+        assert_eq!(
+            determine_primary_folder(&empty, &libs, 3, "LibFoo Bundle"),
+            "LibFoo"
+        );
+
+        // Nothing matches: fall back deterministically rather than to whatever
+        // order the extractor happened to produce.
+        for order in [&forward, &reversed] {
+            assert_eq!(
+                determine_primary_folder(&empty, order, 3, "Totally Unrelated"),
+                order[0],
+                "the caller supplies a sorted list, so the first entry is stable"
+            );
+        }
+
+        // On an update the recorded owner wins even if the title stops matching,
+        // so ownership cannot drift to a bundled library.
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "FooAddon", 3, "1.0", "u", 0);
+        assert_eq!(
+            determine_primary_folder(&store, &forward, 3, "Renamed Upstream"),
+            "FooAddon"
+        );
+    }
+
+    /// Removing the parent must not disturb the library it happened to ship.
+    #[test]
+    fn removing_a_bundling_addon_leaves_the_library_tracked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+        write_versioned_addon(addons_dir, "LibFoo", "1.2");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib", 0);
+        record_installed_folders(
+            &mut store,
+            addons_dir,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+            0,
+        );
+
+        // Uninstalling AddonA drops its provenance, nothing else.
+        metadata::remove_entry(&mut store, "AddonA");
+        metadata::forget_bundled_parent(&mut store, 3);
+
+        let lib = store.addons.get("LibFoo").expect("library survives");
+        assert_eq!(lib.esoui_id, 7);
+        assert_eq!(lib.installed_version, "1.2");
+        assert!(lib.bundled_by.is_empty());
+    }
+
     fn profile_of(names: &[&str]) -> AddonProfile {
         AddonProfile {
             name: "test".to_string(),
@@ -11383,6 +11631,7 @@ mod tests {
                 installed_at: String::new(),
                 tags: vec!["favorite".to_string()],
                 esoui_last_update: 0,
+                bundled_by: Vec::new(),
             },
         );
         metadata::save_metadata(src.path(), &store).unwrap();

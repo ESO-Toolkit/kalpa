@@ -12540,6 +12540,13 @@ fn install_downloaded_addon_blocking(
     Ok(installed_folders)
 }
 
+/// Mirror of the Tauri app's `record_installed_folders`.
+///
+/// The ownership rule itself lives in `metadata.rs`, which this crate shares
+/// verbatim, so only the primary/bundled dispatch is duplicated here. A folder
+/// the archive does not own goes through `record_bundled_folder`, which keeps a
+/// separately tracked library on its own ESOUI entry instead of demoting it to
+/// ID 0 and dropping it out of update checks.
 fn record_native_installed_folders(
     store: &mut metadata::MetadataStore,
     addons_dir: &Path,
@@ -12549,32 +12556,61 @@ fn record_native_installed_folders(
     esoui_title: &str,
     download_url: &str,
 ) {
-    let primary = determine_primary_folder(installed_folders, esoui_title);
+    let primary = determine_primary_folder(store, installed_folders, esoui_id, esoui_title);
     for folder in installed_folders {
-        let is_primary = *folder == primary;
-        let version = if is_primary && !esoui_version.is_empty() {
-            esoui_version.to_string()
+        let local_version = read_local_version(addons_dir, folder);
+        if *folder == primary {
+            let version = if esoui_version.is_empty() {
+                local_version
+            } else {
+                esoui_version.to_string()
+            };
+            metadata::record_install_ext(store, folder, esoui_id, &version, download_url, 0);
         } else {
-            read_local_version(addons_dir, folder)
-        };
-        metadata::record_install_ext(
-            store,
-            folder,
-            if is_primary { esoui_id } else { 0 },
-            &version,
-            download_url,
-            0,
-        );
+            metadata::record_bundled_folder(store, folder, esoui_id, download_url, &local_version);
+        }
     }
 }
 
-fn determine_primary_folder(installed_folders: &[String], esoui_title: &str) -> String {
-    installed_folders
+/// Mirror of the Tauri app's `determine_primary_folder`; see that function for
+/// why each step exists. Kept in sync deliberately: the two crates must agree
+/// on which folder an archive owns, or installing through one and updating
+/// through the other would hand ownership back and forth.
+fn determine_primary_folder(
+    store: &metadata::MetadataStore,
+    installed_folders: &[String],
+    esoui_id: u32,
+    esoui_title: &str,
+) -> String {
+    if esoui_id != 0 {
+        if let Some(existing) = installed_folders.iter().find(|folder| {
+            store
+                .addons
+                .get(folder.as_str())
+                .is_some_and(|meta| meta.esoui_id == esoui_id)
+        }) {
+            return existing.clone();
+        }
+    }
+
+    let title = esoui_title.trim();
+    if let Some(exact) = installed_folders
         .iter()
-        .find(|folder| esoui_title.contains(folder.as_str()))
-        .or(installed_folders.first())
-        .cloned()
-        .unwrap_or_default()
+        .find(|folder| folder.eq_ignore_ascii_case(title))
+    {
+        return exact.clone();
+    }
+
+    let mut contained: Vec<&String> = installed_folders
+        .iter()
+        .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+        .collect();
+    contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    if let Some(best) = contained.first() {
+        return (*best).clone();
+    }
+
+    installed_folders.first().cloned().unwrap_or_default()
 }
 
 fn read_local_version(addons_dir: &Path, folder: &str) -> String {
@@ -13456,10 +13492,18 @@ fn native_try_install_dep(
     file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
         .map_err(|_| "hash_record_failed")?;
 
-    for folder in &dep_folders {
-        let version = read_local_version(addons_dir, folder);
-        metadata::record_install(store, folder, dep_id, &version, &dep_info.download_url);
-    }
+    // Same rule as a direct install: a multi-folder dependency must not stamp
+    // its ID onto folders it merely ships, or a separately tracked library
+    // loses its identity and the dependency produces duplicate update rows.
+    record_native_installed_folders(
+        store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+    );
 
     Ok(dep_folders)
 }
@@ -13803,6 +13847,7 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    bundled_by: Vec::new(),
                 },
             );
         }
@@ -21155,6 +21200,46 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The sidecar has its own copy of the primary/bundled dispatch, so it can
+    /// regress independently of the Tauri app even though the ownership rule
+    /// itself lives in the shared `metadata.rs`. If the two disagree,
+    /// installing through one and updating through the other would hand a
+    /// bundled library's identity back and forth.
+    #[test]
+    fn native_install_does_not_take_over_a_separately_tracked_library() {
+        let root = test_temp_dir("native-bundled-library");
+        for (folder, version) in [("AddonA", "3.0"), ("LibFoo", "1.2")] {
+            let dir = root.join(folder);
+            fs::create_dir_all(&dir).expect("create addon dir");
+            fs::write(
+                dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: {version}\n"),
+            )
+            .expect("write manifest");
+        }
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib", 0);
+
+        record_native_installed_folders(
+            &mut store,
+            root,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+        );
+
+        assert_eq!(store.addons.get("AddonA").unwrap().esoui_id, 3);
+        let lib = store.addons.get("LibFoo").expect("library still tracked");
+        assert_eq!(lib.esoui_id, 7, "the sidecar must not demote the library");
+        assert_eq!(lib.bundled_by, vec![3]);
+        assert_eq!(lib.installed_version, "1.2");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn native_remove_deletes_enabled_and_disabled_copies_and_metadata() {
         let root = test_temp_dir("native-remove-addon");
@@ -22197,6 +22282,7 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            bundled_by: Vec::new(),
         };
 
         hydrate_addon_from_metadata(&mut entry, &meta);

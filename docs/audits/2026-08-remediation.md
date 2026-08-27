@@ -10,7 +10,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
-| R4 | design-done | - | - | - | D-R4-1 | - | - | Fable design complete (`consultations/r4-fable.md`). Implementation not started. **Must land before R5.** |
+| R4 | pr-open | `fix/audit-r4-sibling-ownership` | [#392](https://github.com/ESO-Toolkit/kalpa/pull/392) (draft) | - | D-R4-1 | pending | Rust 816 passed/17 ignored; Slint 762 passed/15 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Implements D-R4-1. Stacked on the design branch. Dependency update-check behaviour changes (see Open Questions) - flagged for review rather than pre-approved. **R5 sequences after this.** |
 | R5 | design-done | - | - | - | D-R5-1 | - | - | Fable design complete (`consultations/r5-fable.md`). Implementation not started. Sequence **after R4**. |
 | R6 | design-done | - | - | - | D-R6-1 | - | - | Fable design complete (`consultations/r6-fable.md`). Implementation not started. Stacks on P0-A1 **and** P0-A2; cannot merge independently. |
 | R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
@@ -87,6 +87,20 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Supersedes `installer.rs:951` `cancel_midway_preserves_pre_existing_addon_files`, which currently asserts the in-place semantics ("no file is removed, only some are overwritten") as a requirement.
 
 ## Session Log
+
+### 2026-08-27 — R4 implemented
+
+- Implements D-R4-1. The ownership rule itself lives in `metadata::record_bundled_folder`, which the Slint crate shares verbatim by `#[path]`, so only the primary/bundled dispatch is duplicated between the two binaries.
+- `AddonMetadata` gains `bundled_by: Vec<u32>`, `#[serde(default, skip_serializing_if = "Vec::is_empty")]`. `metadata_without_provenance_round_trips_unchanged` pins both directions: a pre-change file loads, and an empty set is not written back into the JSON.
+- A separately tracked sibling keeps its ID, URL, ESOUI timestamp and tags, and gains the installing addon as provenance. `installed_version` is still refreshed from the manifest on disk, because the archive really did overwrite the files.
+- `record_install_ext` clears `bundled_by` when recording under a real ID: a folder recorded as owned is not simultaneously bundled.
+- Determinism: `extract_addon_zip` now returns its folder list **sorted** (it was `HashSet` order), and `determine_primary_folder` prefers a folder already recorded under this ID, then an exact case-insensitive title match, then the longest contained name, then the first entry. Previously an update whose title stopped matching could hand ownership to a bundled library.
+- The `auto_link` guard that made demotion permanent now keys on provenance. Entries written since `bundled_by` exists say outright who shipped them; legacy entries keep the old ID-0-plus-shared-URL shape but are healed when the on-disk manifest version equals the ESOUI version, which means the bundled copy is the standalone release and can be relinked with no mismatch risk. Anything else is left for the user rather than guessed.
+- Dependency installs route through the same rule. They previously stamped the dependency ID onto **every** extracted folder, which both overwrote separately tracked identities and made a two-folder dependency emit two identical update rows.
+- `write_folder_manifest` now unions `esoui_ids` instead of replacing it, so the hash store and the metadata store cannot disagree about who owns a folder.
+- Removing an addon drops only its provenance from other folders (`forget_bundled_parent`). Folders stay on disk because other addons may declare a dependency on them.
+- **Failing-first verified after the fact, by re-running against the old behaviour.** With the sibling branch reverted to `record_install_ext(store, folder, 0, ..)`, `bundling_a_separately_tracked_library_does_not_take_it_over` and `removing_a_bundling_addon_leaves_the_library_tracked` both fail with `left: 0, right: 7` — exactly the demotion the finding describes. The inventory found **zero** existing coverage on any function R4 touches.
+- Gates: Rust 816 passed/17 ignored; Slint 762 passed/15 ignored; `cargo clippy --all-targets -- -D warnings` clean on both crates; `cargo fmt --check` clean on both; `npm run build:native-slint` succeeds.
 
 ### 2026-08-27 — W1 twice-reject escalation
 

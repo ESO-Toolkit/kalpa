@@ -483,7 +483,13 @@ fn extract_addon_zip_inner(
         return Err("ZIP archive contained no addon folders.".to_string());
     }
 
-    Ok(created_folders.into_iter().collect())
+    // Sorted, not `HashSet` order. Callers pick an archive's "primary" folder
+    // and fall back to the first entry when nothing else distinguishes them, so
+    // an unordered list meant the same archive could nominate a different
+    // primary on a second run.
+    let mut created: Vec<String> = created_folders.into_iter().collect();
+    created.sort_unstable();
+    Ok(created)
 }
 
 pub fn remove_addon(addons_dir: &Path, folder_name: &str) -> Result<(), String> {

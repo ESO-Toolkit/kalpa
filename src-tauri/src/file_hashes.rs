@@ -659,9 +659,25 @@ fn write_folder_manifest(
         None => Vec::new(),
     };
 
+    // `esoui_ids` is the set of addons that ship files into this folder, so a
+    // rewrite must union rather than replace. Replacing it dropped every other
+    // owner on each install, which left this store disagreeing with the
+    // metadata store about who a bundled library belongs to.
+    let mut esoui_ids = load_hash_manifest(addons_dir, folder)
+        .map(|existing| existing.esoui_ids)
+        .unwrap_or_default();
+    if esoui_id != 0 && !esoui_ids.contains(&esoui_id) {
+        esoui_ids.push(esoui_id);
+    }
+    esoui_ids.sort_unstable();
+    esoui_ids.dedup();
+    if esoui_ids.is_empty() {
+        esoui_ids.push(esoui_id);
+    }
+
     let manifest = HashManifest {
         addon_folder: folder.to_string(),
-        esoui_ids: vec![esoui_id],
+        esoui_ids,
         recorded_at: timestamp.to_string(),
         installed_version: version.to_string(),
         files,
@@ -675,6 +691,41 @@ fn write_folder_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `esoui_ids` is the set of addons that ship files into a folder, so
+    /// recording a second owner must union rather than replace. Replacing it
+    /// dropped the library's own ID every time a bundling addon updated, which
+    /// left this store disagreeing with the metadata store about who owns the
+    /// folder.
+    #[test]
+    fn recording_hashes_unions_the_owning_addon_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        create_addon_dir(addons_dir, "LibFoo", &[("LibFoo.lua", "-- lua")]);
+        let folders = vec!["LibFoo".to_string()];
+
+        // The library records itself.
+        record_hashes_for_folders(addons_dir, &folders, 7, "1.5").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![7]
+        );
+
+        // An addon that bundles it records too; both owners must survive.
+        record_hashes_for_folders(addons_dir, &folders, 3, "3.0").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![3, 7],
+            "the library's own ID must not be dropped by a bundling install"
+        );
+
+        // Re-recording an existing owner is not a new owner.
+        record_hashes_for_folders(addons_dir, &folders, 3, "3.1").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![3, 7]
+        );
+    }
     use std::io::Write;
     use std::path::PathBuf;
 
