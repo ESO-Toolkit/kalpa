@@ -270,14 +270,17 @@ independent scheduled invocation, a `dry-run` Wrangler default, two Env fields,
 and focused tests. It changes no schema, public Worker/Rust JSON contract, or
 unrelated table SQL.
 
-The final suite has 197 passing Worker tests. Focused coverage includes missing
+The final suite has 208 passing Worker tests. Focused coverage includes missing
 D1 restore, owned/unowned pack zombies, owned/unowned tag-only zombies,
 authoritative drafts, valid empty authority, thrown/malformed authority, D1-read
 failure, exact mode parsing, exact and plus-one cases for all limits, partial
 apply breadcrumbs, stale slug lifecycle rejection in both coordinator and real
 DO tests, inline breadcrumb failure isolation, serializer/redaction parity, and
-an SQL table whitelist. Worker check and Wrangler dry-run pass; Wrangler name
-remains `kalpa-pack-hub`. No real deployment ran.
+an SQL table whitelist. The revalidation also covers shadow-authority deletion
+suppression, both D1 read ceilings, a real-DO single-flight lease, manual
+adjudication of shared-D1-only witnesses, persisted-authority shape validation,
+and restore ownership replacement. Worker check and Wrangler dry-run pass;
+Wrangler name remains `kalpa-pack-hub`. No real deployment ran.
 
 ## Candidate decisions for reconsultation
 
@@ -336,3 +339,23 @@ TESTS:
 RISKS:
 1. Remaining risks and required human decisions
 ```
+
+## Post-decision verification
+
+Fable accepted Candidate A with D-W2-2: gate deletes on W1's explicit `do`
+authority, reject ceiling-plus-one shared D1 reads, and serialize scheduled runs
+with a token-owned expiring DO lease. The fresh Sol review then returned
+`REVISE` for three verified gaps: shared-D1-only rows could permanently block
+the W1 authority flip, authority fields beyond status were insufficiently
+validated, and restore's conflict update omitted `author_id`.
+
+Those findings were corrected with an explicit, bounded `unowned_d1_ids`
+operator adjudication limited to D1-derived witnesses, full pack validation plus
+persisted-field invariants before any D1 read, and ownership replacement in the
+restore upsert. The single permitted Sol follow-up returned `APPROVE`, with no
+findings or missing tests, wire contract `OK`, and bug-class sweep `CLEAN`.
+
+PR #378 remains draft and stacked on W1. No schema change or real deployment was
+performed. Explicit maintainer approval is still required before merging code
+that can delete shared D1 rows, and a separate later approval is required before
+switching production from `dry-run` to exact `apply`.

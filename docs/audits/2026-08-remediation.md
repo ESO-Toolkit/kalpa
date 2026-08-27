@@ -5,7 +5,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
-| W2 | blocked | `fix/audit-w2-d1-reconciliation` | [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) (draft) | - | D-W2-1, D-W2-2 | Fresh REVISE; verified findings addressed; follow-up pending | Worker check; 208 tests; Wrangler dry-run | Fable accepted the architecture with shadow-delete, D1-read-bound, and single-flight corrections. Stacked on W1; deletion/apply require maintainer approval. |
+| W2 | pr-open | `fix/audit-w2-d1-reconciliation` | [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) (draft) | - | D-W2-1, D-W2-2 | Fresh REVISE; follow-up APPROVE | Worker check; 208 tests; Wrangler dry-run | Technically ready and stacked on W1. Draft/merge hold remains: deletion-capable code and later `apply` each require separate maintainer approval. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
@@ -65,6 +65,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Rejected: a KV repair queue, because KV cannot atomically append concurrent failures and the queue cannot discover historical or falsely successful stale writes. Rejected: a paginated cursor sweep, because no stable authority generation exists to prove completeness before zombie deletion.
 - No D1 schema, Worker/Rust wire shape, or unrelated shared table changes. Rollback is a code revert; checked-in dry-run performs no reconciliation mutations. Enabling `apply` and merging deletion-capable code both require explicit maintainer approval.
 
+### D-W2-2 — Authority-gated, bounded, single-flight scheduling
+
+- Chosen after the twice-`REVISE` Fable reconsultation: retain and report deletion candidates while W1 remains in `kv` shadow authority; permit deletion planning only after the explicit parity-gated `do` authority flip.
+- Bound shared D1 reads with ceiling-plus-one probes (`packs` 2,001; `pack_tags` 20,001) and reject the plan when either configured ceiling is exceeded.
+- Serialize scheduled reconciliation with a token-owned, expiring lease in the existing PackIndexDO. Overlapping runs record `skipped-overlap`, and a stale token cannot release a newer lease.
+- Preserve per-pack lifecycle gates for writes/deletes, deterministic planning, dry-run default, existing-table-only SQL, and the separate merge/apply approval sequence from D-W2-1.
+
 ## Session Log
 
 ### 2026-08-27 — W1 twice-reject escalation
@@ -87,6 +94,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Handoff: pushed the branch and opened draft stacked PR [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) targeting `fix/audit-w1-worker-consistency`. Deletion-capable reconciliation must not merge without explicit maintainer approval. Exact next action is maintainer review of the dry-run plan and ownership/limit evidence; enabling exact `apply` remains a separate later approval after soak.
 - Compliance revalidation: W2 was marked blocked because two verified Sol `REVISE` rounds require architectural reassessment. Fable accepted corrected D-W2-1 and required D-W2-2: suppress all deletes until W1 reports DO authority, cap both shared D1 reads at ceiling plus one, and single-flight scheduled runs with a token-owned expiring DO lease. Three focused regressions failed before implementation and now pass; pack/tag ceiling and real-DO lease/authority tests were added. Worker check, 203 tests, and Wrangler dry-run pass; fresh Sol review is pending. The PR remains draft and both deletion-capable merge and later `apply` require explicit maintainer approval.
 - Fresh Sol review after Fable: REVISE. Verified that unowned rows in the shared D1 `packs` table could permanently block W1's authority flip, malformed authority fields beyond status could reach D1, and restore's inline upsert retained stale `author_id`. Added an explicit `unowned_d1_ids` operator adjudication limited to D1 witnesses, reused full request validation plus persisted-field invariants for authority, and made restore conflict updates replace `author_id`. Focused endpoint/unit regressions pass; Worker check, 208 tests, and Wrangler dry-run pass. The single permitted Sol follow-up is pending.
+- Sol follow-up after the three corrections: APPROVE. Findings: none. Missing tests: none. Wire contract: OK. Bug-class propagation sweep: CLEAN. W2 is technically ready on its W1 base, but PR #378 remains draft and unmerged pending explicit maintainer approval for deletion-capable code; exact `apply` remains a separate approval after a dry-run soak and plan inspection.
 
 ### 2026-08-26 — Codex
 
