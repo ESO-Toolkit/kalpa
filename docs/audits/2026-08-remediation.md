@@ -23,7 +23,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
-| H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
+| H2 | in-progress | `fix/audit-h2-theme-provenance` | pending | - | not required | REVISE x2; all verified findings addressed | Ignore-rule and provenance checks; root check; frontend gates | Evidence supports treating the directory as local visual-review output; ignore narrowly without modifying it. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
@@ -98,4 +98,4 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - W1: owner sign-off is required before the later manual `kv` → `do` authority flip and must accept backup restore as the post-flip rollback path.
 - P0-A2: lock dependency and user-visible timeout behavior require a Fable recommendation and may require maintainer input.
 - R4/R5: ownership/conflict behavior that changes install outcomes requires explicit design review before implementation.
-- H2: `kalpa-elder-scrolls-themes/` is currently untracked; provenance must be inspected before tracking or ignoring it.
+- H2: the evidence and proposed ignore policy are recorded in `consultations/h2-theme-provenance.md`; final resolution awaits the corrected branch's follow-up review and PR.
