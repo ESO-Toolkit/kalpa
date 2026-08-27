@@ -26,7 +26,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
-| H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
+| H5 | in-progress | `fix/audit-h5-branch-pruning-proposal` | pending | - | D-H5-1 | APPROVE after one follow-up | `npm run check`; `git diff --check`; freshness guard | 54 evidence-backed candidates proposed; no branches deleted. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
 ## Decisions
@@ -67,6 +67,16 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### 2026-08-26 — Codex (H5)
+
+- Active branch: `fix/audit-h5-branch-pruning-proposal` (stacked on W1).
+- Completed: refreshed and pruned stale remote-tracking refs; inventoried 129 local and 110 remote branches against `origin/main`; correlated open PRs and worktree attachments; classified 54 safe candidates, 75 retain refs, and 110 needs-human-review refs in `2026-08-h5-branch-pruning-proposal.md`. Refreshed the snapshot after concurrent H1 PR #384 and the H3 worktree appeared.
+- Safety: no local or remote branch was deleted, and no branch tip or worktree was moved.
+- Reviews: initial Sol verdict `REVISE` after concurrent H1 PR #384 made the snapshot stale. Refreshed H1 and H3 state, added a mandatory freshness guard, and clarified protection/worktree-counterpart handling. The single follow-up verdict was `APPROVE` with exact count and candidate-set parity.
+- Verification: `npm run check` and `git diff --check` pass after installing locked dependencies in the isolated worktree.
+- Active work: final freshness guard and draft PR creation.
+- Blockers: none for the proposal. A final pre-PR freshness guard must remain clean; any later cleanup requires explicit maintainer approval naming the branches and another fresh guard recheck.
+- Exact next action: run the final freshness guard, push this branch, and open a draft PR stacked on W1.
 
 ### 2026-08-26 — Codex
 
