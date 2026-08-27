@@ -110,7 +110,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Sol: `APPROVE`; no findings or missing tests, wire contract `OK`, bug-class sweep `CLEAN`. The read-only reviewer could not start Vitest because its sandbox denied process spawn, while executor-run focused and full suites passed.
 - Handoff: pushed the branch and opened draft PR [#375](https://github.com/ESO-Toolkit/kalpa/pull/375) against the F2 branch. No deployment, merge, dependency, IPC, or persisted-data change occurred.
 - Blockers: none in F3. The PR remains stacked and must follow F2.
-- Exact next action: wait for the stacked F2 base and green PR CI, then mark PR #375 ready for maintainer review.
+- Exact next action: after F2 lands, retarget PR #375 to `main`, require the resulting GitHub CI to pass, then mark it ready for maintainer review.
 
 ### Sol review 1 — REVISE
 
