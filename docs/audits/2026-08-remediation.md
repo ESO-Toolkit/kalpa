@@ -57,7 +57,21 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
 
+### D-F1-1 — One sequence owns every import source
+
+- Chosen: share-code resolution and `.esopack` import capture IDs from one component-scoped monotonic sequence; only the current ID may publish pack data, file settings, errors, or share loading cleanup. Opening the file picker, changing import methods, and Clear invalidate prior work.
+- Rejected: independent per-source IDs, because a request from one source could still overwrite the other source. Rejected: guarding only successful results, because stale failures and cleanup could still replace the active operation's error/loading state.
+- Compatibility: no wire-format, persisted-data, dependency, or visible UI changes. Rollback is a normal code revert with no data action.
+
 ## Session Log
+
+### 2026-08-26 — Codex (F1)
+
+- Active branch: `fix/audit-f1-import-sequencing`; draft stacked PR [#371](https://github.com/ESO-Toolkit/kalpa/pull/371) targets `fix/audit-w1-worker-consistency`.
+- Completed: reproduced both cross-source races with deferred promises resolving in reverse order; implemented D-F1-1; added method-switch invalidation after the verified Sol finding; focused sequencing tests pass 3/3, `npm run check` passes, and `npm test` passes 40 files/593 tests.
+- Review: initial Sol `REVISE` found the method-toggle invalidation gap; follow-up Sol `APPROVE` reported no findings, no missing tests, wire contract OK, and a clean bug-class sweep.
+- Blockers: no F1 implementation blockers. The PR remains draft and stacked until its W1 base is available in the integration history.
+- Exact next action: run PR CI, then mark #371 ready after the base-branch sequencing is confirmed; do not merge from this worktree.
 
 ### 2026-08-27 — W1 twice-reject escalation
 
