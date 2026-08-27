@@ -86,14 +86,14 @@ function json(
   request: Request,
   data: unknown,
   status = 200,
-  cacheMaxAge = 0,
+  cacheMaxAge?: number,
   cacheScope: "public" | "private" = "public",
 ): Response {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...corsHeaders(request),
   };
-  if (cacheMaxAge > 0) {
+  if (cacheMaxAge !== undefined) {
     headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
   }
   return new Response(JSON.stringify(data), { status, headers });

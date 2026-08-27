@@ -263,7 +263,8 @@ describe("GET /packs", () => {
     }>();
     expect(body.packs.find((p) => p.id === "list-voted")!.user_voted).toBe(true);
     expect(body.packs.find((p) => p.id === "list-unvoted")!.user_voted).toBe(false);
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
   it("omits user_voted for anonymous callers", async () => {
@@ -272,6 +273,7 @@ describe("GET /packs", () => {
     const res = await call(new Request(`${BASE}/packs`));
     const body = await res.json<{ packs: Array<Record<string, unknown>> }>();
     expect(body.packs[0].user_voted).toBeUndefined();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=30");
   });
 });
 
@@ -503,7 +505,8 @@ describe("GET /packs/:id", () => {
     const body = await res.json<{ pack: { user_voted: boolean } }>();
     expect(body.pack.user_voted).toBe(true);
     // Per-viewer state must never be cached.
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
   it("reports user_voted false for a signed-in viewer who has not voted", async () => {
@@ -599,7 +602,8 @@ describe("anonymous pack redaction", () => {
     }>();
     expect(body.pack.author_name).toBe(TEST_USER.name);
     expect(body.pack.author_id).toBe(String(TEST_USER.id));
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Vary")).toContain("Authorization");
   });
 });
 

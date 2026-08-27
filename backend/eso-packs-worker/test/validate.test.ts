@@ -365,4 +365,21 @@ describe("readJsonBody", () => {
     expect(cancelled).toBe(true);
     expect(pulls).toBe(3);
   });
+
+  it("reports an aborted body stream as invalid JSON", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new Error("client aborted upload");
+      },
+    });
+    const request = new Request("https://example.com/packs", {
+      method: "POST",
+      body: stream,
+    });
+
+    await expect(readJsonBody(request)).resolves.toEqual({
+      ok: false,
+      reason: "invalid-json",
+    });
+  });
 });
