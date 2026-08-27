@@ -89,6 +89,28 @@ test("retains a trailing link definition used by release copy", () => {
   );
 });
 
+test("matches trailing reference labels case-insensitively with normalized whitespace", () => {
+  assert.equal(
+    extractReleaseSection(
+      [
+        "## [1.0.0] — 2026-08-26",
+        "",
+        "- Read [Details][Notes] and [release info][release notes].",
+        "",
+        "[notes]: https://example.test/notes",
+        "[release  notes]: https://example.test/release",
+      ].join("\n"),
+      "v1.0.0"
+    ),
+    [
+      "- Read [Details][Notes] and [release info][release notes].",
+      "",
+      "[notes]: https://example.test/notes",
+      "[release  notes]: https://example.test/release",
+    ].join("\n")
+  );
+});
+
 test("selects Unreleased only when explicitly requested", () => {
   assert.equal(
     extractReleaseSection(changelog, "Unreleased"),

@@ -59,9 +59,12 @@ function extractReleaseSection(changelog, releaseRef) {
     const mainLines = sectionLines.slice(0, trailingDefinitionsIndex);
     while (mainLines.at(-1) === "") mainLines.pop();
     const mainText = mainLines.join("\n");
+    const referencedLabels = new Set(
+      [...mainText.matchAll(/\[([^\]\n]+)\]/g)].map((match) => normalizeReferenceLabel(match[1]))
+    );
     const referencedDefinitions = sectionLines.slice(trailingDefinitionsIndex).filter((line) => {
       const definition = /^\[([^\]]+)\]:\s+\S/.exec(line);
-      return definition && mainText.includes(`[${definition[1]}]`);
+      return definition && referencedLabels.has(normalizeReferenceLabel(definition[1]));
     });
     contentLines = referencedDefinitions.length
       ? [...mainLines, "", ...referencedDefinitions]
@@ -73,6 +76,10 @@ function extractReleaseSection(changelog, releaseRef) {
     throw new Error(`Empty changelog section for ${releaseName}`);
   }
   return section;
+}
+
+function normalizeReferenceLabel(label) {
+  return label.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function escapeRegExp(value) {
