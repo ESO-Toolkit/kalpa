@@ -25,6 +25,10 @@ import {
 const BASE = "https://kalpa-pack-hub.eso-toolkit.workers.dev";
 const e = env as unknown as Env;
 
+function packIndexForTest() {
+  return e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton"));
+}
+
 async function putPackIndex(testEnv: Env, index: PackIndex): Promise<void> {
   const id = testEnv.PACK_INDEX.idFromName("singleton");
   await testEnv.PACK_INDEX.get(id).replaceIndex(index);
@@ -47,9 +51,7 @@ beforeEach(async () => {
     return originalFetch(input);
   });
   globalThis.fetch = fetchSpy as typeof fetch;
-  // The worker memoizes resolved tokens per isolate, but these cases resolve
-  // the same token to different identities, and every spelling of the default
-  // list view now shares one cache entry.
+  // These cases resolve the same memoized token to different identities.
   resetTokenCache();
   await putPackIndex(e, { packs: [] });
   await invalidatePackListCache(new URL(BASE));
@@ -77,6 +79,16 @@ describe("GET /health", () => {
     expect(body.status).toBe("ok");
     expect(body.kv).toBe(true);
   });
+
+  it("does not expose corpus size or backup timing publicly", async () => {
+    await e.ESO_PACKS.put("backup:meta", JSON.stringify({ last_success: Date.now() }));
+    await putPackIndex(e, { packs: [makePack("private-health-detail")] });
+
+    const body = await (await call(new Request(`${BASE}/health`))).json<Record<string, unknown>>();
+    expect(body).not.toHaveProperty("packCount");
+    expect(body).not.toHaveProperty("last_backup_at");
+    expect(body).not.toHaveProperty("last_backup_ok");
+  });
 });
 
 // ── 404 ───────────────────────────────────────────────────────────
@@ -100,6 +112,28 @@ describe("OPTIONS preflight", () => {
 // ── GET /packs ────────────────────────────────────────────────────
 
 describe("GET /packs", () => {
+  it("does not populate an isolate-unsafe manual Cache API entry", async () => {
+    const key = new Request(`${BASE}/packs?default=1`);
+    await caches.default.delete(key);
+    await call(new Request(`${BASE}/packs?sort=votes&page=1`));
+    expect(await caches.default.match(key)).toBeUndefined();
+  });
+
+  it("keeps omitted-sort and votes-sort wire results distinct", async () => {
+    await putPackIndex(e, {
+      packs: [
+        makePack("recent-low", { vote_count: 1, updated_at: "2026-08-26T00:00:00.000Z" }),
+        makePack("old-high", { vote_count: 10, updated_at: "2026-01-01T00:00:00.000Z" }),
+      ],
+    });
+    const omitted = await (await call(new Request(`${BASE}/packs`)))
+      .json<{ packs: Array<{ id: string }>; sort: string }>();
+    const votes = await (await call(new Request(`${BASE}/packs?sort=votes&page=1`)))
+      .json<{ packs: Array<{ id: string }>; sort: string }>();
+    expect([omitted.sort, omitted.packs[0].id]).toEqual(["updated", "recent-low"]);
+    expect([votes.sort, votes.packs[0].id]).toEqual(["votes", "old-high"]);
+  });
+
   it("returns empty list when no index", async () => {
     const res = await call(new Request(`${BASE}/packs`));
     expect(res.status).toBe(200);
@@ -229,6 +263,7 @@ describe("GET /packs", () => {
     }>();
     expect(body.packs.find((p) => p.id === "list-voted")!.user_voted).toBe(true);
     expect(body.packs.find((p) => p.id === "list-unvoted")!.user_voted).toBe(false);
+    expect(res.headers.get("Cache-Control")).toBeNull();
   });
 
   it("omits user_voted for anonymous callers", async () => {
@@ -830,6 +865,64 @@ describe("POST /packs/:id/vote", () => {
 // ── POST /packs/:id/install ───────────────────────────────────────
 
 describe("POST /packs/:id/install", () => {
+  it("honors a live limiter key written by the previous release", async () => {
+    const pack = makePack("legacy-install-limit", { install_count: 4 });
+    const ip = "4.3.2.1";
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+    await e.ESO_PACKS.put(`install-rate:${pack.id}:${ip}`, "1", { expirationTtl: 3600 });
+
+    const res = await call(new Request(`${BASE}/packs/${pack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": ip },
+    }));
+
+    expect(await res.json<{ installCount: number }>()).toEqual({ installCount: 4 });
+    expect(await packIndexForTest().getPack(pack.id)).toMatchObject({ install_count: 4 });
+  });
+
+  it("does not let a legacy limiter expose a tombstoned stale detail", async () => {
+    const pack = makePack("legacy-install-deleted", { install_count: 4 });
+    const ip = "4.3.2.2";
+    await putPackIndex(e, { packs: [pack] });
+    await packIndexForTest().removePack(pack.id);
+    await putPack(e, pack);
+    await e.ESO_PACKS.put(`install-rate:${pack.id}:${ip}`, "1", { expirationTtl: 3600 });
+
+    const res = await call(new Request(`${BASE}/packs/${pack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": ip },
+    }));
+
+    expect(res.status).toBe(404);
+  });
+
+  it("does not carry a legacy limiter into a recreated slug lifecycle", async () => {
+    const oldPack = makePack("legacy-install-recreated", { install_count: 9 });
+    const newPack = makePack(oldPack.id, {
+      install_count: 0,
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    });
+    const ip = "4.3.2.3";
+    await putPackIndex(e, { packs: [oldPack] });
+    await packIndexForTest().removePack(oldPack.id);
+    await packIndexForTest().addPack(newPack);
+    await putPack(e, oldPack);
+    await e.ESO_PACKS.put(`install-rate:${oldPack.id}:${ip}`, "1", { expirationTtl: 3600 });
+
+    const res = await call(new Request(`${BASE}/packs/${oldPack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": ip },
+    }));
+
+    expect(await res.json<{ installCount: number }>()).toEqual({ installCount: 1 });
+    expect(await packIndexForTest().getPack(oldPack.id)).toMatchObject({
+      created_at: newPack.created_at,
+      install_count: 1,
+    });
+  });
+
   it("increments install count", async () => {
     const pack = makePack("installable", { install_count: 0 });
     await putPack(e, pack);
@@ -867,6 +960,22 @@ describe("POST /packs/:id/install", () => {
     const body2 = await res2.json<{ installCount: number }>();
     // Second call returns current count without incrementing
     expect(body2.installCount).toBe(1);
+  });
+
+  it("does not double-count concurrent requests from the same IP", async () => {
+    const pack = makePack("concurrent-install", { install_count: 0 });
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+    const request = () => new Request(`${BASE}/packs/${pack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": "6.7.8.9" },
+    });
+
+    const responses = await Promise.all([call(request()), call(request())]);
+    const bodies = await Promise.all(responses.map((response) => response.json<{ installCount: number }>()));
+
+    expect(bodies.map(({ installCount }) => installCount)).toEqual([1, 1]);
+    expect(await packIndexForTest().getPack(pack.id)).toMatchObject({ install_count: 1 });
   });
 
   it("404s on a draft pack rather than bumping and disclosing its count", async () => {
@@ -950,6 +1059,14 @@ describe("POST /admin/restore", () => {
   it("rejects without API key", async () => {
     const res = await call(new Request(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(401);
+  });
+
+  it("rejects an oversized admin body before buffering it", async () => {
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, {
+      method: "POST",
+      body: JSON.stringify({ ignored: "😀".repeat(70_000) }),
+    }));
+    expect(res.status).toBe(413);
   });
 
   it("404s when the requested backup snapshot doesn't exist", async () => {

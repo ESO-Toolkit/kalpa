@@ -30,10 +30,22 @@ export async function readJsonBody(request: Request): Promise<JsonBodyResult> {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { ok: false, reason: "too-large" };
   }
-  const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) {
-    return { ok: false, reason: "too-large" };
+  const reader = request.body?.getReader();
+  if (!reader) return { ok: false, reason: "invalid-json" };
+  const decoder = new TextDecoder();
+  let byteCount = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    byteCount += value.byteLength;
+    if (byteCount > MAX_BODY_BYTES) {
+      await reader.cancel("Request body is too large");
+      return { ok: false, reason: "too-large" };
+    }
+    text += decoder.decode(value, { stream: true });
   }
+  text += decoder.decode();
   try {
     return { ok: true, body: JSON.parse(text) };
   } catch {

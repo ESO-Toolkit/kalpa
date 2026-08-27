@@ -335,4 +335,34 @@ describe("readJsonBody", () => {
     const result = await readJsonBody(post(JSON.stringify({ blob: "x".repeat(MAX_BODY_BYTES) })));
     expect(result).toEqual({ ok: false, reason: "too-large" });
   });
+
+  it("counts UTF-8 bytes rather than UTF-16 code units", async () => {
+    // Each emoji occupies four UTF-8 bytes but only two UTF-16 code units.
+    // The old string-length check accepted this payload below its byte ceiling.
+    const result = await readJsonBody(post(JSON.stringify({ blob: "😀".repeat(70_000) })));
+    expect(result).toEqual({ ok: false, reason: "too-large" });
+  });
+
+  it("cancels a streaming body as soon as the byte ceiling is crossed", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(100_000));
+        if (pulls === 4) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const request = new Request("https://example.com/packs", {
+      method: "POST",
+      body: stream,
+    });
+
+    expect(await readJsonBody(request)).toEqual({ ok: false, reason: "too-large" });
+    expect(cancelled).toBe(true);
+    expect(pulls).toBe(3);
+  });
 });
