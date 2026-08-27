@@ -87,6 +87,22 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
 
+### 2026-08-27 — P0-A3 resumed after interrupted session
+
+- Recovered the interrupted P0-A3 session. Three commits were already on `fix/audit-p0-a3-sidecar-handshake` (unpushed); a fourth change was left uncommitted mid-`cargo fmt`. The uncommitted work type-checked cleanly on recovery and was completed rather than discarded.
+- Committed as `fix(native): close handoff activation races`: authority release now commits under the authority mutex so a late activation cannot race the exit; duplicate-sidecar acceptance now requires positive proof of a live owner (matching ready marker **and** a genuinely held OS authority lock) so a stale `native-shell.active` record cannot mask a real startup failure; a deep link delivered to a reverse-handoff child is buffered until the page-ready callback owns authority.
+- Replaced `incoming_activation_cancels_only_an_active_native_handoff`, whose name and body had diverged when `cancel_native_handoff_for_activation` gained an `AppHandle` parameter. The successor covers `commit_native_handoff_authority_release` and all three `finish_native_handoff_exit` cases. Both handoff atomics are process-global, so the cases are deliberately kept in one test function rather than split, which would let the parallel harness race the flags.
+- Gates: Rust 842 passed/18 ignored; Slint 790 passed/16 ignored; `cargo clippy --all-targets -- -D warnings` clean on both crates; `cargo fmt --check` clean on both; `npm run build:native-slint` succeeds. The unrelated `src-tauri/Cargo.toml` CRLF phantom (empty numstat) remains excluded, as in prior sessions.
+- **Outstanding before merge**: the master prompt's required final Fable P0 review, and `npm run test:e2e:sandbox`. The sandbox gate was deliberately not run unattended — it only isolates the AddOns folder and would empty the developer's real manifest-cache database.
+
+### Cross-lane finding — `transaction_lock` two-process test is flaky under load
+
+- `transaction_lock::tests::two_process_read_modify_write_has_no_lost_updates` (added by P0-A2) failed once during a full Slint-suite run: the helper panicked on `atomic_file::atomic_write(...).unwrap()` at `transaction_lock.rs:350`.
+- It is not a P0-A3 regression — P0-A3 does not touch `transaction_lock.rs` or `atomic_file.rs`, and the same test passed in the main crate on the same tree.
+- Reproduction profile: 5/5 pass in isolation, 3/3 subsequent full-suite runs pass, 1 failure observed in the first full-suite run. Intermittent and load-dependent.
+- The failure is in the *rename*, not the lock: the lock timeout was already raised to 10s for this test, and the panic is on the atomic publish. `atomic_file::rename_with_retries` allows `RENAME_ATTEMPTS = 5` at `RENAME_BACKOFF = 40ms`, a total budget of ~200ms — plausibly exhausted when an antivirus scanner or the search indexer holds the freshly created staging file under heavy parallel load.
+- Not yet confirmed as a production defect, but the same ~200ms budget is used by `settings_store::rename_with_retries` on the real settings write path, so it is worth triaging against P0-A1 rather than only de-flaking the test. Recorded here so it is neither lost nor misattributed to P0-A3.
+
 ### 2026-08-26 — Codex (P0-A2)
 
 - Active branch: `fix/audit-p0-a2-cross-process-locking`, stacked on `fix/audit-p0-a1-atomic-writer`.
