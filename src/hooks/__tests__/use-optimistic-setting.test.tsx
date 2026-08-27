@@ -31,16 +31,16 @@ describe("useOptimisticSetting", () => {
   });
 
   it("rolls a failed pending change back to late hydrated storage", async () => {
-    const { save, settles } = deferredSave<boolean>();
-    const { result } = renderHook(() => useOptimisticSetting<boolean>(false, save));
+    const { save, settles } = deferredSave<string>();
+    const { result } = renderHook(() => useOptimisticSetting<string>("default", save));
 
     act(() => {
-      void result.current.commit(true);
+      void result.current.commit("requested");
     });
-    act(() => result.current.hydrate(false));
+    act(() => result.current.hydrate("stored"));
     await act(async () => settles[0]!(false));
 
-    expect(result.current.value).toBe(false);
+    expect(result.current.value).toBe("stored");
     await waitFor(() => expect(mockToastError).toHaveBeenCalledTimes(1));
   });
 

@@ -74,4 +74,22 @@ describe("useLatestRequest", () => {
     expect(handlers.onError).not.toHaveBeenCalled();
     expect(handlers.onSettled).not.toHaveBeenCalled();
   });
+
+  it("suppresses rejection and settlement after unmount", async () => {
+    const pending = deferred<string[]>();
+    const handlers = {
+      onError: vi.fn(),
+      onSettled: vi.fn(),
+    };
+    const { result, unmount } = renderHook(() => useLatestRequest());
+
+    act(() => {
+      void result.current(() => pending.promise, handlers);
+    });
+    unmount();
+    await act(async () => pending.reject(new Error("late failure")));
+
+    expect(handlers.onError).not.toHaveBeenCalled();
+    expect(handlers.onSettled).not.toHaveBeenCalled();
+  });
 });
