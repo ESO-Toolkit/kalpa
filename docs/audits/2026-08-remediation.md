@@ -4,7 +4,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
-| W1 | in-progress | `fix/audit-w1-worker-consistency` | - | - | D-W1-1, D-W1-2 | REVISE; follow-up findings addressed | Worker check; 170 tests; Wrangler dry-run | Awaiting maintainer review; no push or real deployment. |
+| W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2 | REVISE; follow-up findings addressed | Worker check; 170 tests; Wrangler dry-run | Awaiting maintainer review; no real deployment. |
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
@@ -55,11 +55,12 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 - Active branch: `fix/audit-w1-worker-consistency`
 - Completed: read repository guidance, master prompt, and audit memory; fetched and fast-forward checked `main`; created the persistent tracker; started Kalpa successfully in Tauri dev mode; completed the W1 Fable review; captured five failing-before DO tests; implemented DO-authoritative mutations; added route-level duplicate, stale-update, and delete/vote race coverage; Worker typecheck and 159 tests pass.
-- Active work: W1 maintainer handoff after addressing the single Sol follow-up.
+- Active work: W1 draft PR maintainer review after addressing the single Sol follow-up.
 - Completed follow-up: Fable selected the continuously merged shadow design in D-W1-2. Implemented lifecycle guards for vote/install, canonical update/delete authorization, atomic restore preservation, deleted-pack vote cleanup (including `backup:latest`), repeated KV backfill with tombstones, parity-gated authority control, and explicit detail-witness adoption. Worker typecheck, 168 tests, and Wrangler dry-run pass; `wrangler.toml` remains `kalpa-pack-hub`.
 - Sol follow-up: `REVISE`. Verified an incomplete-shadow full-index clobber, scheduled-backup reintroduction of another user's vote on a deleted pack, and delete/recreate vote-cleanup interleaving. Addressed by suppressing full-index writes during shadow mode, serving merged list/backup reads from the DO, filtering backup votes by deleted pack id, and moving vote cleanup inside the serialized delete lifecycle. Added the three requested regressions; Worker typecheck and 170 tests pass.
-- Blockers: the required single Sol follow-up has been consumed and did not approve. Its verified findings are fixed locally, but the branch must receive maintainer review before push/PR/merge. The authority flip remains a separate operator step after soak/parity checks.
-- Exact next action: commit the follow-up fixes, rerun Wrangler dry-run, and hand the local branch plus rollback caveat to the maintainer.
+- Handoff: pushed `fix/audit-w1-worker-consistency` and opened draft PR [#369](https://github.com/ESO-Toolkit/kalpa/pull/369). No merge or deployment was performed; unrelated local `Cargo.toml` and theme-directory changes remain excluded.
+- Blockers: the required single Sol follow-up has been consumed and did not approve. Its verified findings are fixed, but PR #369 requires maintainer review before it can leave draft or merge. The authority flip remains a separate operator step after soak/parity checks.
+- Exact next action: maintainer reviews PR #369, the shadow-mode rollback caveat, and the production parity/authority-flip runbook.
 
 ### Sol review 1 — REVISE
 
