@@ -366,12 +366,21 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 
 ```
 src/                        # React frontend
+  __mocks__/                # Shared frontend test mocks
+  __tests__/                # Frontend setup and source-hygiene tests
   components/               # Feature components (addon list, packs, settings)
+  components/__tests__/     # Feature-component tests
+  components/animate-ui/    # Motion primitives grouped by animate/base/buttons/effects/texts
   components/ui/            # shadcn-ui primitives
   components/uploader/      # ESO Logs uploader workspace
+  components/uploader/__tests__/ # Uploader component and reducer tests
   hooks/                    # Shared React hooks
+  hooks/__tests__/          # Shared hook tests
   lib/                      # Utilities, Tauri bindings, store, theme presets
+  lib/__tests__/            # Frontend utility and contract tests
   types.ts                  # Shared TypeScript interfaces
+
+e2e/                       # Windows WebView2 read-only and sandbox Playwright specs
 
 src-tauri/src/              # Rust backend
   commands.rs               # All Tauri command handlers
@@ -399,6 +408,7 @@ backend/eso-packs-worker/   # Pack Hub API (packs, votes, shares)
   src/validate.ts           # Input validation
   src/shares.ts             # Share code generation and resolution
   src/pack-index-do.ts      # Durable Object for atomic index mutations
+  test/                     # Worker unit, route, Durable Object, and scheduled tests
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar
 context/                    # Architecture and design documentation
