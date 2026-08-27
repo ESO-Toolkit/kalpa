@@ -502,7 +502,9 @@ export function UploaderWorkspace({
           await applyDetectedLogs(det);
         }
       } catch (e) {
-        if (!cancelled) toast.error(getTauriErrorMessage(e));
+        if (!cancelled && detectLogsSeqRef.current === detectionOperationId) {
+          toast.error(getTauriErrorMessage(e));
+        }
       }
       if (!cancelled) await refreshHistory();
     })();
@@ -634,8 +636,8 @@ export function UploaderWorkspace({
 
   const handleRefreshLogs = useCallback(async () => {
     if (!logsDir) {
+      const detectionOperationId = ++detectLogsSeqRef.current;
       try {
-        const detectionOperationId = ++detectLogsSeqRef.current;
         const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
         if (detectLogsSeqRef.current !== detectionOperationId || logsDirRef.current !== null) {
           return;
@@ -643,15 +645,17 @@ export function UploaderWorkspace({
         setDetection(det);
         await applyDetectedLogs(det);
       } catch (e) {
-        toast.error(getTauriErrorMessage(e));
+        if (detectLogsSeqRef.current === detectionOperationId && logsDirRef.current === null) {
+          toast.error(getTauriErrorMessage(e));
+        }
       }
       return;
     }
 
     if (detection?.path === logsDir) {
+      const activeDirectory = logsDir;
+      const detectionOperationId = ++detectLogsSeqRef.current;
       try {
-        const activeDirectory = logsDir;
-        const detectionOperationId = ++detectLogsSeqRef.current;
         const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
         if (
           detectLogsSeqRef.current !== detectionOperationId ||
@@ -662,7 +666,12 @@ export function UploaderWorkspace({
         setDetection(det);
         await applyDetectedLogs(det);
       } catch (e) {
-        toast.error(getTauriErrorMessage(e));
+        if (
+          detectLogsSeqRef.current === detectionOperationId &&
+          logsDirRef.current === activeDirectory
+        ) {
+          toast.error(getTauriErrorMessage(e));
+        }
       }
       return;
     }

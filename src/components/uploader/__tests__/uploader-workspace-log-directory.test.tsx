@@ -172,42 +172,47 @@ describe("UploaderWorkspace log-directory sequencing", () => {
     }
   );
 
-  it("does not let late initial detection replace a manually selected directory", async () => {
-    const detectA = deferred<LogPathDetection>();
+  it.each(["resolve", "reject"] as const)(
+    "does not let late initial detection %s replace or report over a manual directory",
+    async (settlement) => {
+      const detectA = deferred<LogPathDetection>();
 
-    mocks.open.mockResolvedValue("B");
-    mocks.invoke.mockImplementation((command: string, args?: { logsDir?: string }) => {
-      if (command === "uploader_detect_path") return detectA.promise;
-      if (command === "uploader_transport_info") return Promise.resolve(transport);
-      if (command === "uploader_list_logs" && args?.logsDir === "B") {
-        return Promise.resolve([log("B-file")]);
-      }
-      if (command === "uploader_list_history") return Promise.resolve([]);
-      if (command === "uploader_has_session") return Promise.resolve(false);
-      if (command === "settings_tainted") return Promise.resolve(false);
-      return Promise.resolve(null);
-    });
+      mocks.open.mockResolvedValue("B");
+      mocks.invoke.mockImplementation((command: string, args?: { logsDir?: string }) => {
+        if (command === "uploader_detect_path") return detectA.promise;
+        if (command === "uploader_transport_info") return Promise.resolve(transport);
+        if (command === "uploader_list_logs" && args?.logsDir === "B") {
+          return Promise.resolve([log("B-file")]);
+        }
+        if (command === "uploader_list_history") return Promise.resolve([]);
+        if (command === "uploader_has_session") return Promise.resolve(false);
+        if (command === "settings_tainted") return Promise.resolve(false);
+        return Promise.resolve(null);
+      });
 
-    render(
-      <UploaderWorkspace
-        open
-        authUser={null}
-        onAuthChange={vi.fn()}
-        onClose={vi.fn()}
-        onOpen={vi.fn()}
-      />
-    );
+      render(
+        <UploaderWorkspace
+          open
+          authUser={null}
+          onAuthChange={vi.fn()}
+          onClose={vi.fn()}
+          onOpen={vi.fn()}
+        />
+      );
 
-    fireEvent.click(screen.getByRole("button", { name: "Choose folder" }));
-    await screen.findByText("B-file.log");
+      fireEvent.click(screen.getByRole("button", { name: "Choose folder" }));
+      await screen.findByText("B-file.log");
 
-    detectA.resolve(detection);
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("uploader_list_history"));
+      if (settlement === "resolve") detectA.resolve(detection);
+      else detectA.reject(new Error("stale detection failed"));
+      await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("uploader_list_history"));
 
-    expect(screen.getByTitle("B")).toBeInTheDocument();
-    expect(screen.getByText("B-file.log")).toBeInTheDocument();
-    expect(mocks.invoke).not.toHaveBeenCalledWith("uploader_list_logs", { logsDir: "A" });
-  });
+      expect(screen.getByTitle("B")).toBeInTheDocument();
+      expect(screen.getByText("B-file.log")).toBeInTheDocument();
+      expect(mocks.invoke).not.toHaveBeenCalledWith("uploader_list_logs", { logsDir: "A" });
+      expect(mocks.toastError).not.toHaveBeenCalledWith("stale detection failed");
+    }
+  );
 
   it("clears the old selection when refreshed detection changes directories and listing fails", async () => {
     let detectionCalls = 0;
