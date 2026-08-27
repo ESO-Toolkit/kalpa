@@ -83,6 +83,7 @@ import {
   RotateCcwIcon,
 } from "lucide-react";
 import { SavedVariablesSkeleton } from "@/components/ui/skeletons";
+import { useLatestRequest } from "@/hooks/use-latest-request";
 
 interface SavedVariablesProps {
   addonsPath: string;
@@ -2396,6 +2397,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   const [esoRunning, setEsoRunning] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const editorDirtyRef = useRef(false);
+  const runLatestRequest = useLatestRequest();
 
   const installedFolders = useMemo(
     () => new Set(installedAddons.map((a) => a.folderName)),
@@ -2404,17 +2406,16 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
-    try {
-      const result = await invokeOrThrow<SavedVariableFile[]>("list_saved_variables", {
-        addonsPath,
-      });
-      setFiles(result);
-    } catch (e) {
-      toast.error(`Failed to load SavedVariables: ${getTauriErrorMessage(e)}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [addonsPath]);
+    await runLatestRequest(
+      () => invokeOrThrow<SavedVariableFile[]>("list_saved_variables", { addonsPath }),
+      {
+        onSuccess: setFiles,
+        onError: (error) =>
+          toast.error(`Failed to load SavedVariables: ${getTauriErrorMessage(error)}`),
+        onSettled: () => setLoading(false),
+      }
+    );
+  }, [addonsPath, runLatestRequest]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

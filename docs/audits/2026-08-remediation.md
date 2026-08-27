@@ -21,7 +21,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
 | F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
-| F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
+| F6 | in-progress | `fix/audit-f6-optimistic-sequencing` | - | - | D-F6-1 | pending | Frontend check; 496 tests | Sequenced optimistic settings/library state and latest-only SavedVariables refreshes implemented; reviews pending. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
@@ -56,6 +56,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Create retry by the same actor resumes the stored canonical create instead of returning duplicate. Success is acknowledged only after the KV detail step; an incomplete mirror returns a retryable failure while public detail reads use the DO and remain consistent with canonical lifecycle state.
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+### D-F6-1 — Persisted optimistic state tracks confirmed storage
+
+- Chosen: centralize optimistic setting and installed-pack reference mutations in a hook that assigns monotonically increasing operation IDs, composes functional updates against the latest visible value, and records every successful serialized store write as the rollback target. Only the newest failed operation may change UI or surface an error; rollback restores confirmed storage rather than inverting the submitted value or reinstating a captured array.
+- Settings hydration remains a confirmed rollback candidate while a user write is pending, but cannot replace the optimistic value and is ignored after any newer write confirms.
+- SavedVariables list refreshes use a separate latest-request sequence. Only the active request may apply files, errors, or loading completion; unmount invalidates outstanding requests.
+- Compatibility: no settings keys, persisted `installed_packs` shape, Tauri command arguments, or visible control structure changed.
+- Rollback: revert the F6 commit; persisted data remains readable because this change only alters frontend sequencing.
 
 ## Session Log
 
@@ -90,6 +97,15 @@ Verified findings:
 5. Account deletion leaves other users' vote records attached to removed pack IDs, so a reused ID can inherit votes.
 
 Wire contract verdict: OK. Bug-class sweep found the restore and account-deletion sites above.
+
+### 2026-08-26 — Codex F6
+
+- Active branch: `fix/audit-f6-optimistic-sequencing` in isolated worktree `Kalpa-wt-f6`, stacked on `fix/audit-w1-worker-consistency`.
+- Inventory: `Settings` mount hydration and direct optimistic persistence controls; `Packs` `installed_packs` hydration/install/removal; `SavedVariables.loadFiles` refresh application.
+- Failing-before evidence: focused Vitest run failed both new suites because the sequencing hooks did not exist. The tests cover late hydration after user intent, reverse-settled quick toggles, confirmed rollback after a newer failure, functional array rollback, reverse-settled refresh results, and stale refresh errors.
+- Passing-after evidence: focused 6/6 tests, full frontend 496/496 tests, and `npm run check` pass.
+- Decision: D-F6-1. No wire-format, persisted-shape, backend, Rust, Worker, or dependency changes.
+- Active work: required Luna review of failure feedback and Sol adversarial diff review before opening a stacked draft PR.
 
 ## Open Questions
 

@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
+import { useOptimisticSetting } from "@/hooks/use-optimistic-setting";
 import {
   ESO_RUNNING_SETTINGS_REFUSAL,
   esoIsRunningForSettingsWrite,
@@ -159,11 +160,19 @@ export function Packs({
   const [installSucceeded, setInstallSucceeded] = useState(false);
 
   // Installed packs library (persisted locally)
-  const [installedPackRefs, setInstalledPackRefs] = useState<InstalledPackRef[]>([]);
+  const {
+    value: installedPackRefs,
+    commit: commitInstalledPackRefs,
+    hydrate: hydrateInstalledPackRefs,
+  } = useOptimisticSetting<InstalledPackRef[]>(
+    [],
+    (refs) => setSetting("installed_packs", refs),
+    "Couldn't update your installed pack library."
+  );
 
   useEffect(() => {
-    getSetting<InstalledPackRef[]>("installed_packs", []).then(setInstalledPackRefs);
-  }, []);
+    void getSetting<InstalledPackRef[]>("installed_packs", []).then(hydrateInstalledPackRefs);
+  }, [hydrateInstalledPackRefs]);
 
   // When a pack is selected, pre-select all required addons
   useEffect(() => {
@@ -824,14 +833,12 @@ export function Packs({
         addonCount: selectedPack.addons.length,
         installedAt: new Date().toISOString(),
       };
-      // Build the next list outside the updater: setSetting is a side effect and
-      // the updater must stay pure, and its result decides whether the library
-      // entry actually survives a restart.
-      const updated = [ref, ...installedPackRefs.filter((r) => r.packId !== ref.packId)];
-      setInstalledPackRefs(updated);
-      if (!(await setSetting("installed_packs", updated))) {
-        toast.warning("Couldn't save this pack to your installed library.");
-      }
+      // Functional sequencing composes with any still-pending library change;
+      // the persistence hook owns the side effect and confirmed rollback state.
+      void commitInstalledPackRefs((current) => [
+        ref,
+        ...current.filter((installed) => installed.packId !== ref.packId),
+      ]);
     }
 
     onRefresh();
@@ -1213,14 +1220,9 @@ export function Packs({
                     onLoadMore={() => loadMyPacks(myPacksPage + 1)}
                     installedPackRefs={installedPackRefs}
                     onRemoveInstalledRef={(packId) => {
-                      const updated = installedPackRefs.filter((r) => r.packId !== packId);
-                      setInstalledPackRefs(updated);
-                      void setSetting("installed_packs", updated).then((ok) => {
-                        if (!ok) {
-                          setInstalledPackRefs(installedPackRefs);
-                          toast.error("Couldn't update your installed pack library.");
-                        }
-                      });
+                      void commitInstalledPackRefs((current) =>
+                        current.filter((installed) => installed.packId !== packId)
+                      );
                     }}
                     onEdit={(pack) => {
                       handleStartEditing(pack);
