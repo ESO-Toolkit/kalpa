@@ -8,10 +8,11 @@ import {
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
-import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
+import { redactAnonymousPack } from "./redact";
 import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+import { reconcileD1, recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
 export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
@@ -24,12 +25,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   const isPublished = (pack.status ?? "published") === "published";
   try {
     if (isPublished) {
-      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
-        esouiId: a.esouiId,
-        name: a.name,
-        required: a.required,
-        note: a.note,
-      })));
+      const row = toD1PackRow(pack);
       await env.ROSTER_HUB_DB
         .prepare(
           `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
@@ -45,21 +41,21 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
              updated_at = datetime('now')`,
         )
         .bind(
-          pack.id,
-          pack.author_id,
+          row.id,
+          row.author_id,
           // The D1 mirror feeds the ESO Toolkit website; never hand it the
           // real display name of an anonymous pack's author. author_id stays
           // for ownership joins but is not rendered there.
-          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
-          pack.is_anonymous ? 1 : 0,
-          pack.title,
-          pack.description,
-          pack.pack_type,
-          addonsJson,
+          row.author_name,
+          row.is_anonymous,
+          row.title,
+          row.description,
+          row.pack_type,
+          row.addons,
           // Inserting a literal 0 here (and omitting vote_count from the
           // upsert) froze the website's counters at zero and reset them on
           // every author edit.
-          pack.vote_count ?? 0,
+          row.vote_count,
         )
         .run();
 
@@ -79,6 +75,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
     }
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
+    await recordD1MirrorFailure(env, isPublished ? "upsert" : "delete", pack.id, err);
   }
 }
 
@@ -96,6 +93,7 @@ async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promi
       .run();
   } catch (err) {
     console.error(`D1 vote_count sync failed [${id}]:`, err);
+    await recordD1MirrorFailure(env, "vote-count", id, err);
   }
 }
 
@@ -1485,6 +1483,11 @@ export default {
       } catch (writeErr) {
         console.error("Failed to record backup:last_error:", writeErr);
       }
+    }
+    try {
+      await reconcileD1(env);
+    } catch (err) {
+      console.error("D1 reconciliation failed unexpectedly:", err);
     }
   },
 } satisfies ExportedHandler<Env>;

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, Pack, PackIndex, VoteRecord } from "./types";
 import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
+import { recordD1MirrorFailure } from "./d1-reconcile";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -77,6 +78,11 @@ export interface WitnessAdoption {
   already_present: string[];
   tombstoned: string[];
   unavailable: string[];
+}
+
+export interface ReconciliationAuthority {
+  packs: Pack[];
+  tombstones: string[];
 }
 
 /** Serializes mutations while migrating authority from KV to DO storage. */
@@ -376,6 +382,19 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
+  async getReconciliationState(): Promise<ReconciliationAuthority> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const packs = await this.loadPacks();
+      const entries = await this.ctx.storage.list<string>({ prefix: TOMBSTONE_PREFIX });
+      return {
+        packs,
+        tombstones: [...entries.keys()]
+          .map((key) => key.slice(TOMBSTONE_PREFIX.length))
+          .sort(),
+      };
+    });
+  }
+
   async migrationParity(witnessIds: string[]): Promise<MigrationParity> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const kv = await this.readKvIndex();
@@ -589,7 +608,9 @@ export class PackIndexDO extends DurableObject<Env> {
       // Local/preview namespaces may bind an empty D1 database. There is no
       // external row to reconcile in that case; production's shared database
       // has both tables and every other failure remains journaled for retry.
-      return error instanceof Error && error.message.includes("no such table");
+      if (error instanceof Error && error.message.includes("no such table")) return true;
+      await recordD1MirrorFailure(this.env, "delete", id, error);
+      return false;
     }
   }
 
