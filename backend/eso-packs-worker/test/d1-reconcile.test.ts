@@ -33,6 +33,7 @@ function fakeEnv(
     mode?: string;
     failMutation?: number;
     d1ReadError?: Error;
+    currentLifecycle?: string;
   } = {}
 ) {
   const writes = new Map<string, string>(),
@@ -67,7 +68,23 @@ function fakeEnv(
     getReconciliationState: options.authorityError
       ? vi.fn().mockRejectedValue(options.authorityError)
       : vi.fn().mockResolvedValue(options.authority ?? { packs: [], tombstones: [] }),
-    reconcileDeleteD1: vi.fn().mockResolvedValue(true),
+    reconcileWriteD1: vi
+      .fn()
+      .mockImplementation(
+        async (_id: string, expectedLifecycle: string, writePack: boolean, writeTags: boolean) => {
+          if (options.currentLifecycle && options.currentLifecycle !== expectedLifecycle) {
+            return { upserted: false, tags_replaced: false };
+          }
+          mutations++;
+          if (options.failMutation === mutations) throw new Error("partial D1 failure");
+          return { upserted: writePack, tags_replaced: writeTags };
+        }
+      ),
+    reconcileDeleteD1: vi.fn().mockImplementation(async () => {
+      mutations++;
+      if (options.failMutation === mutations) throw new Error("partial D1 failure");
+      return true;
+    }),
   };
   const env = {
     D1_RECONCILIATION_MODE: options.mode,
@@ -114,6 +131,17 @@ describe("D1 reconciliation", () => {
     const result = await reconcileD1(fixture.env);
     expect(result.applied).toMatchObject({ upserts: 1, tag_replacements: 1 });
   });
+  it("does not apply a stale write plan across slug reuse", async () => {
+    const old = makePack("reused-write", { tags: ["old"] });
+    const fixture = fakeEnv({
+      authority: { packs: [old], tombstones: [] },
+      mode: "apply",
+      currentLifecycle: "2026-08-27T00:00:00.000Z",
+    });
+    const result = await reconcileD1(fixture.env);
+    expect(result.applied).toEqual({ upserts: 0, tag_replacements: 0, deletes: 0, total: 0 });
+    expect(fixture.stub.reconcileWriteD1).toHaveBeenCalledWith(old.id, old.created_at, true, true);
+  });
   it("plans deletion only for a proven-owned zombie", () => {
     const zombie = row(makePack("zombie"));
     expect(
@@ -142,6 +170,21 @@ describe("D1 reconciliation", () => {
     expect(
       buildD1ReconciliationPlan({ packs: [draft], tombstones: [] }, [row(draft)], []).deletes
     ).toEqual(["draft"]);
+  });
+  it("removes tag-only orphans for an authoritative draft", async () => {
+    const draft = makePack("draft-tags", { status: "draft" });
+    const fixture = fakeEnv({
+      authority: { packs: [draft], tombstones: [] },
+      tags: [
+        { pack_id: draft.id, tag: "pvp" },
+        { pack_id: "unowned-draft-tag", tag: "pve" },
+      ],
+      mode: "apply",
+    });
+    const result = await reconcileD1(fixture.env);
+    expect(result.planned.deletes).toBe(1);
+    expect(result.applied.deletes).toBe(1);
+    expect(result.unowned_extra).toBe(1);
   });
   it("supports valid empty authority", async () => {
     const fixture = fakeEnv({
@@ -262,6 +305,62 @@ describe("D1 reconciliation", () => {
     expect(result.stage).toBe("plan-rejected");
     expect(result.limit_hit).toBe(expected);
     expect(fixture.mutations).toBe(0);
+  });
+  it.each([
+    {
+      name: "delete cap",
+      build: () => {
+        const packs = Array.from({ length: 300 }, (_, i) => makePack(`ok-live-${i}`));
+        const zombies = Array.from({ length: 25 }, (_, i) => makePack(`ok-dead-${i}`));
+        return {
+          authority: { packs, tombstones: zombies.map(({ id }) => id) },
+          rows: [...packs, ...zombies].map(row),
+        };
+      },
+    },
+    {
+      name: "empty-authority delete cap",
+      build: () => {
+        const zombies = Array.from({ length: 5 }, (_, i) => makePack(`ok-empty-${i}`));
+        return {
+          authority: { packs: [], tombstones: zombies.map(({ id }) => id) },
+          rows: zombies.map(row),
+        };
+      },
+    },
+    {
+      name: "delete ratio threshold",
+      build: () => {
+        const packs = Array.from({ length: 50 }, (_, i) => makePack(`ok-ratio-live-${i}`));
+        const zombies = Array.from({ length: 5 }, (_, i) => makePack(`ok-ratio-dead-${i}`));
+        return {
+          authority: { packs, tombstones: zombies.map(({ id }) => id) },
+          rows: [...packs, ...zombies].map(row),
+        };
+      },
+    },
+    {
+      name: "total cap",
+      build: () => {
+        const packs = Array.from({ length: 75 }, (_, i) => makePack(`ok-total-${i}`));
+        return { authority: { packs, tombstones: [] }, rows: [] };
+      },
+    },
+    {
+      name: "tag replacement cap",
+      build: () => {
+        const packs = Array.from({ length: 100 }, (_, i) =>
+          makePack(`ok-tag-${i}`, { tags: ["pvp"] })
+        );
+        return { authority: { packs, tombstones: [] }, rows: packs.map(row) };
+      },
+    },
+  ])("accepts the exact $name", async ({ build }) => {
+    const fixture = fakeEnv({ ...build(), mode: "apply" });
+    const result = await reconcileD1(fixture.env);
+    expect(result.stage).toBe("complete");
+    expect(result.limit_hit).toBeUndefined();
+    expect(result.applied.total).toBe(result.planned.total);
   });
   it("records durable partial failure state", async () => {
     const fixture = fakeEnv({

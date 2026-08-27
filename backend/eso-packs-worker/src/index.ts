@@ -79,24 +79,6 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   }
 }
 
-/**
- * Mirror a counter bump into D1. The vote endpoint goes through the DO rather
- * than d1UpsertPack, so without this the website's vote counts never move.
- * Best-effort, like the other D1 writes.
- */
-async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  try {
-    await env.ROSTER_HUB_DB
-      .prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
-      .bind(voteCount, id)
-      .run();
-  } catch (err) {
-    console.error(`D1 vote_count sync failed [${id}]:`, err);
-    await recordD1MirrorFailure(env, "vote-count", id, err);
-  }
-}
-
 const PACKS_PER_PAGE = 20;
 
 function json(
@@ -420,7 +402,6 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   }
 
   await invalidatePackListCache(url);
-
   return json(request, { pack: added.pack }, 201);
 }
 
@@ -484,8 +465,6 @@ async function handleUpdatePack(
   const updated = result.pack;
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, updated);
-
   return json(request, { pack: updated });
 }
 
@@ -585,7 +564,6 @@ async function handleVotePack(
   await invalidatePackListCache(url);
 
   const voteCount = updated.vote_count;
-  await d1UpdateVoteCount(env, id, voteCount);
 
   const response: VoteResponse = { voted, voteCount };
   return json(request, response);

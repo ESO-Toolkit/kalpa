@@ -290,6 +290,24 @@ describe("PackIndexDO authoritative mutations", () => {
     },
   );
 
+  it("rejects a reconciliation write from an earlier slug lifecycle", async () => {
+    const oldPack = makePack("w2-reused-write");
+    const newPack = makePack(oldPack.id, {
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [oldPack] });
+    await index.removePack(oldPack.id);
+    await index.addPack(newPack);
+
+    expect(await index.reconcileWriteD1(oldPack.id, oldPack.created_at, true, true)).toEqual({
+      upserted: false,
+      tags_replaced: false,
+    });
+    expect(await index.getPack(oldPack.id)).toMatchObject({ created_at: newPack.created_at });
+  });
+
   it("preserves packs created while a restore page is being applied", async () => {
     const restored = makePack("w1-restored", { title: "Old title" });
     const concurrent = makePack("w1-concurrent");

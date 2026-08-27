@@ -108,8 +108,9 @@ export function buildD1ReconciliationPlan(
   // parent pack row is already gone. Reconcile those only with the same durable
   // ownership proof used for pack-row zombies.
   for (const { pack_id: id } of d1Tags) {
-    if (expected.has(id)) continue;
-    if (owned.has(id)) deletes.add(id);
+    const pack = expected.get(id);
+    if (pack?.status === "published") continue;
+    if (pack || owned.has(id)) deletes.add(id);
     else unowned.add(id);
   }
   return {
@@ -226,40 +227,6 @@ function initial(resolved: { value: Mode; invalid?: string }): D1ReconciliationR
     unowned_extra: 0,
   };
 }
-async function upsert(env: Env, pack: Pack): Promise<void> {
-  const r = toD1PackRow(pack);
-  await env
-    .ROSTER_HUB_DB!.prepare(
-      `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-    ON CONFLICT(id) DO UPDATE SET author_id=excluded.author_id, author_name=excluded.author_name,
-    is_anonymous=excluded.is_anonymous, title=excluded.title, description=excluded.description,
-    pack_type=excluded.pack_type, addons=excluded.addons, vote_count=excluded.vote_count,
-    updated_at=datetime('now')`
-    )
-    .bind(
-      r.id,
-      r.author_id,
-      r.author_name,
-      r.is_anonymous,
-      r.title,
-      r.description,
-      r.pack_type,
-      r.addons,
-      r.vote_count
-    )
-    .run();
-}
-async function replaceTags(env: Env, pack: Pack): Promise<void> {
-  await env.ROSTER_HUB_DB!.batch([
-    env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-    ...pack.tags.map((tag) =>
-      env
-        .ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)")
-        .bind(pack.id, tag)
-    ),
-  ]);
-}
 export async function reconcileD1(env: Env): Promise<D1ReconciliationResult> {
   const resolved = mode(env.D1_RECONCILIATION_MODE),
     result = initial(resolved);
@@ -314,14 +281,25 @@ export async function reconcileD1(env: Env): Promise<D1ReconciliationResult> {
   if (resolved.value === "apply") {
     try {
       for (const pack of plan.upserts) {
-        await upsert(env, pack);
-        result.applied.upserts++;
-        result.applied.total++;
+        const replace = plan.tag_replacements.some(({ id }) => id === pack.id);
+        const applied = await stub.reconcileWriteD1(pack.id, pack.created_at, true, replace);
+        if (applied.upserted) {
+          result.applied.upserts++;
+          result.applied.total++;
+        }
+        if (applied.tags_replaced) {
+          result.applied.tag_replacements++;
+          result.applied.total++;
+        }
       }
+      const upsertIds = new Set(plan.upserts.map(({ id }) => id));
       for (const pack of plan.tag_replacements) {
-        await replaceTags(env, pack);
-        result.applied.tag_replacements++;
-        result.applied.total++;
+        if (upsertIds.has(pack.id)) continue;
+        const applied = await stub.reconcileWriteD1(pack.id, pack.created_at, false, true);
+        if (applied.tags_replaced) {
+          result.applied.tag_replacements++;
+          result.applied.total++;
+        }
       }
       for (const id of plan.deletes) {
         if (await stub.reconcileDeleteD1(id)) {
