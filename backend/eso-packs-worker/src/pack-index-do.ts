@@ -395,6 +395,22 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
+  /** Recheck liveness and remove an obsolete D1 row under the same lifecycle
+   * gate as create/update. This closes the check-then-delete window where a
+   * reused slug could otherwise be published between an RPC check and D1 I/O. */
+  async reconcileDeleteD1(id: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const current = await this.ctx.storage.get<Pack>(this.packKey(id));
+      if (current?.status === "published" || !this.env.ROSTER_HUB_DB) return false;
+      await this.env.ROSTER_HUB_DB.batch([
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+      ]);
+      return true;
+    });
+  }
+
   async migrationParity(witnessIds: string[]): Promise<MigrationParity> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const kv = await this.readKvIndex();

@@ -67,7 +67,7 @@ function fakeEnv(
     getReconciliationState: options.authorityError
       ? vi.fn().mockRejectedValue(options.authorityError)
       : vi.fn().mockResolvedValue(options.authority ?? { packs: [], tombstones: [] }),
-    getPack: vi.fn().mockResolvedValue(null),
+    reconcileDeleteD1: vi.fn().mockResolvedValue(true),
   };
   const env = {
     D1_RECONCILIATION_MODE: options.mode,
@@ -106,6 +106,14 @@ describe("D1 reconciliation", () => {
     expect(plan.upserts.map((item) => item.id)).toEqual(["missing"]);
     expect(plan.tag_replacements.map((item) => item.id)).toEqual(["missing"]);
   });
+  it("applies restoration for a missing authoritative pack", async () => {
+    const fixture = fakeEnv({
+      authority: { packs: [makePack("missing-apply", { tags: ["pvp"] })], tombstones: [] },
+      mode: "apply",
+    });
+    const result = await reconcileD1(fixture.env);
+    expect(result.applied).toMatchObject({ upserts: 1, tag_replacements: 1 });
+  });
   it("plans deletion only for a proven-owned zombie", () => {
     const zombie = row(makePack("zombie"));
     expect(
@@ -114,6 +122,20 @@ describe("D1 reconciliation", () => {
     const unowned = buildD1ReconciliationPlan({ packs: [], tombstones: [] }, [zombie], []);
     expect(unowned.deletes).toEqual([]);
     expect(unowned.unowned_extra).toEqual(["zombie"]);
+  });
+  it("removes owned tag-only zombies but leaves unowned tags untouched", async () => {
+    const fixture = fakeEnv({
+      authority: { packs: [], tombstones: ["owned-tag-zombie"] },
+      tags: [
+        { pack_id: "owned-tag-zombie", tag: "pvp" },
+        { pack_id: "unowned-tag", tag: "pve" },
+      ],
+      mode: "apply",
+    });
+    const result = await reconcileD1(fixture.env);
+    expect(result.planned.deletes).toBe(1);
+    expect(result.applied.deletes).toBe(1);
+    expect(result.unowned_extra).toBe(1);
   });
   it("plans removal of a draft still mirrored in D1", () => {
     const draft = makePack("draft", { status: "draft" });
@@ -131,10 +153,19 @@ describe("D1 reconciliation", () => {
     expect(result.stage).toBe("complete");
     expect(result.planned.deletes).toBe(1);
     expect(result.applied.deletes).toBe(1);
+    expect(fixture.stub.reconcileDeleteD1).toHaveBeenCalledWith("zombie");
   });
   it("prepares no D1 SQL when authority read fails", async () => {
     const fixture = fakeEnv({ authorityError: new Error("DO unavailable"), mode: "apply" });
     expect((await reconcileD1(fixture.env)).stage).toBe("authority");
+    expect(fixture.sql).toEqual([]);
+    expect(fixture.mutations).toBe(0);
+  });
+  it("fails authority validation closed for an unknown pack status", async () => {
+    const malformed = { ...makePack("malformed-status"), status: "archived" } as unknown as Pack;
+    const fixture = fakeEnv({ authority: { packs: [malformed], tombstones: [] }, mode: "apply" });
+    const result = await reconcileD1(fixture.env);
+    expect(result.stage).toBe("authority");
     expect(fixture.sql).toEqual([]);
     expect(fixture.mutations).toBe(0);
   });
@@ -164,6 +195,72 @@ describe("D1 reconciliation", () => {
     const result = await reconcileD1(fixture.env);
     expect(result.stage).toBe("plan-rejected");
     expect(result.limit_hit).toBe("upserts");
+    expect(fixture.mutations).toBe(0);
+  });
+  it.each([
+    {
+      name: "delete cap",
+      expected: "deletes",
+      build: () => {
+        const packs = Array.from({ length: 300 }, (_, i) => makePack(`live-${i}`));
+        const zombies = Array.from({ length: 26 }, (_, i) => makePack(`dead-${i}`));
+        return {
+          authority: { packs, tombstones: zombies.map(({ id }) => id) },
+          rows: [...packs, ...zombies].map(row),
+        };
+      },
+    },
+    {
+      name: "empty-authority delete cap",
+      expected: "empty-authority-deletes",
+      build: () => {
+        const zombies = Array.from({ length: 6 }, (_, i) => makePack(`empty-dead-${i}`));
+        return {
+          authority: { packs: [], tombstones: zombies.map(({ id }) => id) },
+          rows: zombies.map(row),
+        };
+      },
+    },
+    {
+      name: "delete ratio",
+      expected: "delete-ratio",
+      build: () => {
+        const packs = Array.from({ length: 50 }, (_, i) => makePack(`ratio-live-${i}`));
+        const zombies = Array.from({ length: 6 }, (_, i) => makePack(`ratio-dead-${i}`));
+        return {
+          authority: { packs, tombstones: zombies.map(({ id }) => id) },
+          rows: [...packs, ...zombies].map(row),
+        };
+      },
+    },
+    {
+      name: "total cap",
+      expected: "total",
+      build: () => {
+        const missing = Array.from({ length: 75 }, (_, i) => makePack(`total-missing-${i}`));
+        const stale = makePack("total-stale");
+        return {
+          authority: { packs: [...missing, stale], tombstones: [] },
+          rows: [{ ...row(stale), title: "Old title" }],
+        };
+      },
+    },
+    {
+      name: "tag replacement cap",
+      expected: "tag-replacements",
+      build: () => {
+        const packs = Array.from({ length: 101 }, (_, i) =>
+          makePack(`tag-stale-${i}`, { tags: ["pvp"] })
+        );
+        return { authority: { packs, tombstones: [] }, rows: packs.map(row) };
+      },
+    },
+  ])("rejects the entire plan at $name plus one", async ({ expected, build }) => {
+    const data = build();
+    const fixture = fakeEnv({ ...data, mode: "apply" });
+    const result = await reconcileD1(fixture.env);
+    expect(result.stage).toBe("plan-rejected");
+    expect(result.limit_hit).toBe(expected);
     expect(fixture.mutations).toBe(0);
   });
   it("records durable partial failure state", async () => {

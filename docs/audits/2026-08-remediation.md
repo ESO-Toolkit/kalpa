@@ -5,7 +5,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
-| W2 | in-progress | `fix/audit-w2-d1-reconciliation` | pending | - | D-W2-1 | pending | Worker check; 181 tests | Dry-run by default; deletion-capable code must remain unmerged pending explicit maintainer approval. |
+| W2 | in-progress | `fix/audit-w2-d1-reconciliation` | pending | - | D-W2-1 | REVISE; verified findings addressed | Worker check; 189 tests; Wrangler dry-run | Dry-run by default; deletion-capable code must remain unmerged pending explicit maintainer approval. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
@@ -81,8 +81,9 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Active branch: `fix/audit-w2-d1-reconciliation`, stacked on W1.
 - Failing-before evidence: the focused regression suite failed to import the intentionally absent `src/d1-reconcile.ts` module.
 - Implemented: durable inline mirror breadcrumbs; canonical DO reconciliation state with tombstones; explicit-only mode handling; authority/D1 read fail-closed behavior; ownership-gated deterministic planning; mutation and ratio caps; idempotent upsert/tag/delete apply order; per-delete authority recheck; independent scheduled invocation; dry-run production default.
-- Tests: focused missing-pack, owned/unowned zombie, valid empty authority, authority failure, D1 read failure, mode, safety cap, partial failure breadcrumb, draft removal, inline breadcrumb, and SQL-table whitelist coverage. Worker check and 181 tests pass after reconstructing and rerunning from scratch following an ENOSPC interruption.
-- Blocker: deletion-capable reconciliation must not merge without explicit maintainer approval. Exact next action is Sol read-only review, resolution of verified findings, full Worker gates, then a draft stacked PR.
+- Sol review: REVISE. Verified that unknown authority statuses could be interpreted as deletion and tag-only zombies were omitted. Fixed with full authority-shape/status validation and tag-ID planning. Added all requested boundary-plus-one cap tests. A further executor sweep moved the final liveness check plus D1 deletion into the DO lifecycle gate so slug reuse cannot cross a check-then-delete window.
+- Tests: focused missing-pack restore, owned/unowned pack and tag-only zombies, valid empty authority, malformed/failed authority, D1 read failure, mode, every safety cap, partial failure breadcrumb, draft removal, inline breadcrumb, and SQL-table whitelist coverage. Worker check, 189 tests, and Wrangler dry-run pass after reconstructing and rerunning from scratch following an ENOSPC interruption; Worker name remains `kalpa-pack-hub` and no real deploy ran.
+- Blocker: deletion-capable reconciliation must not merge without explicit maintainer approval. Exact next action is the single Sol follow-up, then a draft stacked PR if no verified blocker remains.
 
 ### 2026-08-26 — Codex
 

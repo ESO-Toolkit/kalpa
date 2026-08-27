@@ -98,17 +98,25 @@ export function buildD1ReconciliationPlan(
     if (!actual || !rowsEqual(actual, toD1PackRow(pack))) upserts.push(pack);
     if (!actual || !sameTags(tags.get(pack.id) ?? [], pack.tags)) replacements.push(pack);
   }
-  const unowned: string[] = [];
+  const unowned = new Set<string>();
   for (const { id } of d1Rows) {
     if (expected.has(id)) continue;
     if (owned.has(id)) deletes.add(id);
-    else unowned.push(id);
+    else unowned.add(id);
+  }
+  // Tags may survive a partially successful historical delete even when their
+  // parent pack row is already gone. Reconcile those only with the same durable
+  // ownership proof used for pack-row zombies.
+  for (const { pack_id: id } of d1Tags) {
+    if (expected.has(id)) continue;
+    if (owned.has(id)) deletes.add(id);
+    else unowned.add(id);
   }
   return {
     upserts,
     tag_replacements: replacements,
     deletes: [...deletes].sort(),
-    unowned_extra: unowned.sort(),
+    unowned_extra: [...unowned].sort(),
   };
 }
 
@@ -137,12 +145,40 @@ function validateAuthority(value: unknown): ReconciliationAuthority {
   const result = value as Partial<ReconciliationAuthority>;
   if (!Array.isArray(result.packs) || !Array.isArray(result.tombstones))
     throw new Error("Authority result is incomplete");
-  if (
-    result.packs.some(
-      (pack) => !pack || typeof pack.id !== "string" || !pack.id || typeof pack.status !== "string"
-    )
-  )
-    throw new Error("Authority returned a malformed pack");
+  const ids = new Set<string>();
+  for (const pack of result.packs) {
+    if (
+      !pack ||
+      typeof pack.id !== "string" ||
+      !pack.id ||
+      ids.has(pack.id) ||
+      typeof pack.title !== "string" ||
+      typeof pack.description !== "string" ||
+      !["addon-pack", "build-pack", "roster-pack"].includes(pack.pack_type) ||
+      typeof pack.author_id !== "string" ||
+      typeof pack.author_name !== "string" ||
+      typeof pack.is_anonymous !== "boolean" ||
+      !Array.isArray(pack.addons) ||
+      pack.addons.some(
+        (addon) =>
+          !addon ||
+          typeof addon.esouiId !== "number" ||
+          typeof addon.name !== "string" ||
+          typeof addon.required !== "boolean" ||
+          (addon.note !== undefined && typeof addon.note !== "string")
+      ) ||
+      !Array.isArray(pack.tags) ||
+      pack.tags.some((tag) => typeof tag !== "string") ||
+      typeof pack.vote_count !== "number" ||
+      typeof pack.install_count !== "number" ||
+      typeof pack.created_at !== "string" ||
+      typeof pack.updated_at !== "string" ||
+      (pack.status !== "draft" && pack.status !== "published")
+    ) {
+      throw new Error("Authority returned a malformed pack");
+    }
+    ids.add(pack.id);
+  }
   if (result.tombstones.some((id) => typeof id !== "string" || !id))
     throw new Error("Authority returned a malformed tombstone");
   return result as ReconciliationAuthority;
@@ -224,13 +260,6 @@ async function replaceTags(env: Env, pack: Pack): Promise<void> {
     ),
   ]);
 }
-async function remove(env: Env, id: string): Promise<void> {
-  await env.ROSTER_HUB_DB!.batch([
-    env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
-    env.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id = ?").bind(id),
-  ]);
-}
-
 export async function reconcileD1(env: Env): Promise<D1ReconciliationResult> {
   const resolved = mode(env.D1_RECONCILIATION_MODE),
     result = initial(resolved);
@@ -295,11 +324,10 @@ export async function reconcileD1(env: Env): Promise<D1ReconciliationResult> {
         result.applied.total++;
       }
       for (const id of plan.deletes) {
-        const current = await stub.getPack(id);
-        if (current?.status === "published") continue;
-        await remove(env, id);
-        result.applied.deletes++;
-        result.applied.total++;
+        if (await stub.reconcileDeleteD1(id)) {
+          result.applied.deletes++;
+          result.applied.total++;
+        }
       }
     } catch (error) {
       result.stage = "apply";
