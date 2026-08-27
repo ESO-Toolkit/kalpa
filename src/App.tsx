@@ -59,6 +59,10 @@ import {
 } from "@/lib/removal-queue";
 import { isModKey, isWindows } from "@/lib/platform";
 import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
+import {
+  countUpdatesWithoutProtectedEditsBaseline,
+  PROTECTED_EDITS_UNAVAILABLE,
+} from "@/lib/protected-edits";
 import type {
   AddonManifest,
   AuthUser,
@@ -222,6 +226,7 @@ function App() {
   const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
+  const addonsRef = useRef<AddonManifest[]>([]);
   const viewModeRef = useRef<ViewMode>("installed");
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
@@ -429,6 +434,7 @@ function App() {
       // succeeds — the list shows an addon that no longer exists.
       const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path);
 
+      addonsRef.current = visible;
       setAddons(visible);
       if (selectedAddonRef.current) {
         setSelectedAddon(reconcileSelectedAddon(selectedAddonRef.current, visible));
@@ -439,6 +445,7 @@ function App() {
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
+      addonsRef.current = [];
       setAddons([]);
       setSelectedFolders(new Set());
     } finally {
@@ -669,8 +676,16 @@ function App() {
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
         void refreshUploaderIntroDetection();
         // Scan (disk) and update check (metadata + network) touch different
-        // state and locks, so run them concurrently instead of in series.
-        await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, autoUpdate, false)]);
+        // state and locks, so run them concurrently unless auto-update needs
+        // scan-derived Protected Edits coverage first.
+        if (autoUpdate) {
+          // Auto-update needs the scan's Protected Edits coverage before it may
+          // disclose risk and begin mutation.
+          await scanAddons(savedPath);
+          await checkForUpdates(savedPath, true, false);
+        } else {
+          await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, false, false)]);
+        }
         void runAutoLink(savedPath);
         // Populate knownInstances so the Settings instance switcher works for
         // returning users. Fire-and-forget — does not block startup.
@@ -1094,6 +1109,10 @@ function App() {
     async (folderName: string) => {
       const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
       if (!ur) return;
+      const addon = addonsRef.current.find((candidate) => candidate.folderName === folderName);
+      if (addon?.hasProtectedEditsBaseline !== true) {
+        toast.warning(PROTECTED_EDITS_UNAVAILABLE);
+      }
       if (!(await ensureEsoNotBlocking())) return;
       try {
         const result = await invokeOrThrow<InstallResult>("update_addon", {
@@ -1407,6 +1426,20 @@ function App() {
       // guard takes over below.
       const latch = batchLatchRef.current;
       if (!latch.tryEnterPreflight()) return;
+
+      const unavailableCount = countUpdatesWithoutProtectedEditsBaseline(
+        updates,
+        addonsRef.current
+      );
+      if (unavailableCount > 0) {
+        toast.warning(
+          `Protected Edits unavailable for ${unavailableCount} addon${unavailableCount === 1 ? "" : "s"}.`,
+          {
+            description:
+              "No trusted file baseline exists, so Kalpa cannot detect which files you changed. Updating may overwrite those edits.",
+          }
+        );
+      }
 
       if (!(await ensureEsoNotBlocking())) {
         latch.abortPreflight();

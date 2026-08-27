@@ -23,6 +23,7 @@ import { getDependencyPolicy } from "@/lib/dependency-policy";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
+import { PROTECTED_EDITS_UNAVAILABLE } from "@/lib/protected-edits";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-react";
@@ -267,6 +268,12 @@ function AddonDetailBase({
         folderName: addon.folderName,
         esouiId: addon.esouiId,
       });
+
+      // Trust the just-completed preflight over scan-time UI state: the baseline
+      // may have been removed or become invalid since the addon list loaded.
+      if (!report.hasHashBaseline) {
+        toast.warning(PROTECTED_EDITS_UNAVAILABLE);
+      }
 
       if (report.conflicts.length > 0) {
         const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
