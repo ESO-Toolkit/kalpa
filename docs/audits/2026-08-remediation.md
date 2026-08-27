@@ -10,9 +10,9 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
-| R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
-| R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
-| R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
+| R4 | design-done | - | - | - | D-R4-1 | - | - | Fable design complete (`consultations/r4-fable.md`). Implementation not started. **Must land before R5.** |
+| R5 | design-done | - | - | - | D-R5-1 | - | - | Fable design complete (`consultations/r5-fable.md`). Implementation not started. Sequence **after R4**. |
+| R6 | design-done | - | - | - | D-R6-1 | - | - | Fable design complete (`consultations/r6-fable.md`). Implementation not started. Stacks on P0-A1 **and** P0-A2; cannot merge independently. |
 | R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
 | R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
 | R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
@@ -57,6 +57,35 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
 
+### D-R4-1 — Separately tracked siblings keep their identity; parents record provenance
+
+- Full record: `docs/audits/consultations/r4-fable.md` and `r4-fable-decision.md`.
+- Chosen: add `AddonMetadata.bundled_by: Vec<u32>` (mirrors the existing `HashManifest.esoui_ids` precedent, `#[serde(default)]` so old files round-trip) and a new `metadata::record_bundled_folder` primitive holding the ownership rule. Because `metadata.rs` is `#[path]`-included by Slint, the rule itself is written once.
+  - If an existing entry has a nonzero `esoui_id` that differs from the installing parent, it is **separately tracked**: keep `esoui_id`, `download_url`, `esoui_last_update` and `tags`, add the parent to `bundled_by`, and set `installed_version` from the on-disk manifest. The files really were overwritten, so metadata must state what is actually installed — this is the master prompt's "do not blindly preserve stale version metadata" clause.
+  - Otherwise the folder is **genuinely bundled**: `esoui_id = 0`, parent URL, `bundled_by = {parent}`.
+- Update checks keep their existing `esoui_id == 0 -> skip` condition, so a separately tracked sibling stays checked. A bundled-older sibling now reports the older version and its own update offers the upgrade back: a visible, user-fixable downgrade instead of a silent one.
+- Determinism fix: `installer.rs` returns its folder set **sorted**, and `determine_primary_folder` prefers a folder already tracked under this id (so an update cannot flip the primary), then exact title match, then longest containment, then sorted-first. Today the source is a `HashSet` and the fallback is `.first()`, so which folder gets demoted can differ between runs.
+- Migration for users already demoted: `is_bundled_secondary` (`commands.rs:4053`) currently keys on `esoui_id == 0` plus a shared `download_url`, which makes demotion permanent. It is relaxed to also require `bundled_by.is_empty()`, plus a conservative one-time heal that re-links only when the on-disk manifest version equals the ESOUI version; anything else is surfaced in the unlinked-addons list rather than guessed.
+- Rejected: preserving a nonzero id inside `record_install_ext` alone (no signal distinguishes "primary passing a real id" from "sibling passing 0"); and skipping or refusing the bundled install (many ESOUI addons legitimately vendor their libraries, so blocking installs breaks normal use).
+
+### D-R5-1 — Folder-qualify the transport, keep per-folder storage keys
+
+- Full record: `docs/audits/consultations/r5-fable.md` and `r5-fable-decision.md`.
+- Inventory corrected the finding's shape: sibling **storage already works** (`record_hashes_with_zip_baseline` writes a `.kalpa-hashes/<Folder>.json` per folder, and the file browser already flags sibling edits). What is single-folder-scoped is the **conflict pipeline** — `build_conflict_report` takes one `folder_name`. So a modified sibling file has a baseline, is displayed as modified, and is then silently overwritten on update with no prompt and no backup.
+- Chosen design C: every string that **crosses a folder boundary** (Tauri/Slint wire, `PendingUpdate`, decisions, skip set) becomes `Folder/relative/path`; every string that **lives inside a folder** (`HashManifest.files`, backup paths, classification input) stays bare. This meets the boundary that already exists — the skip-key layer is folder-qualified today and `installer.rs:425` already tolerates both shapes — so there is **zero storage migration**.
+- New `hash_zip_entries_by_folder` returns a `ZipHashSet` of per-folder maps plus a single `flat_wrap` flag, and `ZipHashSet::zip_entry_name` becomes the one place the flat-archive divergence is encoded. `hash_zip_entries(zip, folder)` stays as a wrapper so existing call sites compile unchanged.
+- `ConflictReport` gains `folders: Vec<String>`; field names are unchanged but `relative_path` **values** become qualified, so the frontend must land in lockstep.
+- Note `file_hashes.rs:912` `hash_zip_ignores_other_folders` asserts `hashes.len() == 1` for a two-folder ZIP: it encodes the bug and must be rewritten, not preserved.
+
+### D-R6-1 — Per-folder staged merge, tombstone swap, journal-backed recovery
+
+- Full record: `docs/audits/consultations/r6-fable.md` and `r6-fable-decision.md`. The master prompt forbids an ad hoc directory swap without this review.
+- Chosen "C-lite": stage each top-level folder as a **merge** of fresh ZIP bytes plus a residual copy of every live file the archive does not cover, then swap with a tombstone under an on-disk journal. The residual copy is exactly what keep-mine, upstream-removed and user-added files require, and peak disk is new-version + residual rather than 2x the addon.
+- Everything a crash can leave lives under one `<addons_dir>/.kalpa-staging/<txn>/` directory, so scanning needs one exclusion rule and recovery needs one directory listing. The whole transaction runs under the P0-A2 lock, with recovery first under the same lock, so no new process-wide statics are introduced (they would be per-process, and the two binaries can run concurrently).
+- Baselines are computed against the merged stage image and promoted **only after** a successful swap, which is what breaks the corruption chain: today a crash leaves a truncated file that the next scan records as a user edit (`file_hashes.rs:472`) and that keep-mine then blesses with the upstream hash (`file_hashes.rs:653`).
+- **New issue surfaced by this review:** nothing currently validates a ZIP's top-level folder name against the `.kalpa-` reserved prefix, so an archive whose top folder is `.kalpa-hashes` or `.kalpa-backups` writes straight into Kalpa's own state directories. The design adds that rejection alongside the existing single-path-component check.
+- Supersedes `installer.rs:951` `cancel_midway_preserves_pre_existing_addon_files`, which currently asserts the in-place semantics ("no file is removed, only some are overwritten") as a requirement.
+
 ## Session Log
 
 ### 2026-08-27 — W1 twice-reject escalation
@@ -92,6 +121,15 @@ Verified findings:
 Wire contract verdict: OK. Bug-class sweep found the restore and account-deletion sites above.
 
 ## Open Questions
+
+
+- R4: the dependency-install paths currently stamp one `esoui_id` onto every extracted folder, so a multi-folder dependency update-checks N times. The chosen model makes it check once. That is an install-outcome change and needs explicit sign-off.
+- R4: the demoted-user heal lives in `auto_link`, which **only the main app has** — the Slint sidecar has no equivalent. Slint-only users stay demoted until they open the main app once. Porting `auto_link` to Slint is a separate, larger task.
+- R5: conflict wire values change meaning (bare -> folder-qualified) **without a field rename**, so a stale frontend bundle or Tauri/Slint skew would mis-route silently. Decide whether to accept monorepo lockstep or rename the field to `qualifiedPath` and take the churn.
+- R5 must be sequenced **after** R4: a sibling that is also separately tracked has its manifest rewritten with the installing addon's id, so ownership precedence has to be settled first.
+- R6: addon folders that are symlinks or junctions (developers pointing `AddOns/Foo` at a git checkout). A swap replaces the link with a real directory. Recommendation is to refuse with an explanatory message rather than silently fall back to the legacy in-place path. Needs a decision.
+- R6: directory rename on Windows fails if any file inside is open without `FILE_SHARE_DELETE`. Behaviour becomes a clean refusal instead of a half-overwrite, which is strictly better, but users will see a **new error** where they previously saw a silently corrupting success. Needs the CFA-style explanatory message and sign-off.
+- R6 stacks on both P0-A1 and P0-A2 and cannot merge independently.
 
 - W2: maintainer approval is required before merging any reconciliation path that can delete rows from shared D1.
 - W1: decide whether moving vote-record authority from KV/in-memory memo into DO storage belongs in W1 or W3. The current W1 code prevents resurrection but retains the pre-existing eviction/double-toggle limitation for later hardening.
