@@ -24,7 +24,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
-| H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
+| H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
@@ -81,6 +81,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fable reaccepted D-W3-1 after two verified Sol revisions. It clarified that rejected/aborted streams fail as invalid JSON, decoding happens only after bounded byte assembly, and viewer-bearing responses explicitly emit `max-age=0` and vary on `Authorization` and `Origin`.
 - The 5,000-slot claim ring is deliberately bounded idempotence: an identity may recount inside one hour only after 5,000 newer distinct claims evict it. Rotating `ADMIN_API_KEY` can likewise admit one extra count per identity until old claims expire; both are acceptable for a display counter and are not exact billing semantics.
 
+### D-H3-1 — Worker package version is an independent sentinel
+
+- Chosen: keep the private Pack Hub Worker at the non-release sentinel `0.0.0` in `package.json` and both npm lockfile fields. Its deployment workflow is triggered by Worker-path pushes to `main`; neither Wrangler, the runtime, health checks, nor the desktop wire client consumes this metadata. Desktop tags and `check:versions` separately own the six app version fields.
+- Enforced: `npm run check:version-policy` rejects any value other than `0.0.0` in the three npm-owned Worker fields. It runs inside Worker `npm run check`, so both pull-request CI and the pre-deploy workflow execute it.
+- Rejected: synchronizing the Worker to each desktop tag. That would imply shared release ownership which the independent deployment pipeline does not provide, and would manufacture version changes unrelated to Worker deployments.
+- Compatibility: no Worker runtime, response shape, D1 schema, Wrangler configuration, desktop release field, or deployment trigger changed. Rollback is a normal code revert; it does not alter deployed state or persisted data.
+
 ## Session Log
 
 ### 2026-08-27 — W1 twice-reject escalation
@@ -99,6 +106,15 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Focused body/list/CORS tests pass 146/146; full Worker tests pass 230/230; Worker check, Wrangler dry-run, name guard, and `git diff --check` pass. Repository search found no in-repo consumer of removed health detail fields; the deploy workflow reads only `status` and `kv`. No real deployment, merge, authority flip, schema change, or H3 version decision occurred.
 - Fresh Sol review: `REVISE`. It verified that list and detail routes chose their anonymous public TTL from failed `viewerId` resolution rather than the presence of an authentication attempt, so a transient ESO Logs failure could cache a redacted/no-vote fallback for a bearer token after recovery. Fixed by permitting anonymous TTLs only when the request has no `Authorization` header. Added both regressions plus the requested oversized W2 adjudication/no-authority-mutation case; full Worker tests now pass 233/233 and all Worker gates remain green.
 - Sol follow-up after those corrections: `APPROVE`. Findings: none. Missing tests: none. Wire contract: OK. Bug-class propagation sweep: CLEAN. W3 is technically ready on its refreshed W2 base but remains draft; no deployment or merge was performed.
+### 2026-08-26 — Codex H3
+
+- Active branch: `fix/audit-h3-worker-version-policy`, stacked on W3.
+- Evidence and decision: the Worker is private and independently auto-deployed on Worker-path changes; desktop releases are tag-triggered, and the root release/version gate intentionally owns only six desktop fields. Repository history synchronized the Worker through beta.1 but left it unchanged for seventeen later desktop releases. No runtime, release artifact, Wrangler configuration, or health check consumes the Worker package version. Chose D-H3-1 rather than forced desktop parity.
+- Failing-before evidence: after adding the exact policy gate, `npm run check:version-policy` reported stale `0.1.0-beta.1` values in Worker `package.json`, the lockfile top level, and `packages[""]`.
+- Implemented: used `npm version 0.0.0 --no-git-tag-version` to update all npm-owned fields and added the policy check to Worker `npm run check`, which is already invoked by both PR CI and `deploy-worker.yml` before deployment.
+- Sol review: APPROVE, with no findings or missing tests; wire contract OK and the propagated package/version, lock, CI, deploy, release, changelog, and runtime sweep was clean. No follow-up was required.
+- Tests: Worker check, production dependency audit, 218/218 tests, and Wrangler dry-run pass; root check, 490/490 tests, and all six desktop version fields pass. Worker name remains `kalpa-pack-hub`; no runtime code, schema, real deployment, release, or merge occurred.
+- Handoff: pushed the branch and opened draft stacked PR [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) targeting `fix/audit-w3-worker-hardening`.
 
 ### 2026-08-26 — Codex W3
 
