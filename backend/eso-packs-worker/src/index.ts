@@ -894,7 +894,12 @@ async function handleScheduled(env: Env): Promise<void> {
   const packBodies: Record<string, Pack> = Object.fromEntries(
     index.packs.map((p): [string, Pack] => [p.id, p]),
   );
-  const votes = await listAllVotes(env);
+  const livePackIds = new Set(index.packs.map(({ id }) => id));
+  const votes = Object.fromEntries(
+    Object.entries(await listAllVotes(env)).filter(([, vote]) =>
+      livePackIds.has(vote.packId),
+    ),
+  );
 
   // Drop anyone who asked to be deleted, at WRITE time.
   //
@@ -1179,7 +1184,10 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
 
   const packs = Object.values(packBodies);
   const votes = snapshot.votes ?? {};
-  const voteRecords = Object.values(votes);
+  const restorablePackIds = new Set(Object.keys(packBodies));
+  const voteRecords = Object.values(votes).filter((record) =>
+    restorablePackIds.has(record.packId),
+  );
 
   // One flat, deterministically ordered work list so a cursor means the same
   // position on every call against the same snapshot.
@@ -1383,6 +1391,14 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   const userId = String(user.id);
 
+  // Publish the privacy tombstone before any deletion work. A scheduled backup
+  // may already hold stale pack/vote reads; filtering at write time sees this
+  // marker regardless of whether account cleanup or backup serialization wins
+  // the race.
+  await env.ESO_PACKS.put(deletedUserKey(userId), new Date().toISOString(), {
+    expirationTtl: DELETED_USER_TTL_SECONDS,
+  });
+
   // 1. Find and delete all user's packs.
   //
   // The DO is the authority here, not our own index read: it runs unconditionally
@@ -1437,17 +1453,7 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
     await invalidatePackListCache(url);
   }
 
-  // 4. Tombstone the user BEFORE scrubbing the backup.
-  //
-  // Ordering matters here and only here: a scheduled backup holding a read from
-  // before this request can still write after the scrub below, and the tombstone
-  // is what stops it republishing them (see `dropDeletedUsers`). Writing it
-  // first means even a cron that lands between these two lines is covered.
-  await env.ESO_PACKS.put(deletedUserKey(userId), new Date().toISOString(), {
-    expirationTtl: DELETED_USER_TTL_SECONDS,
-  });
-
-  // 5. Scrub them from the one backup key that never expires. The dated
+  // 4. Scrub them from the one backup key that never expires. The dated
   // snapshots keep their 90-day TTL and age out on their own.
   await purgeUserFromLatestBackup(env, userId);
 

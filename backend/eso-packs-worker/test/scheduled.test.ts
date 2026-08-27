@@ -129,4 +129,28 @@ describe("scheduled backup", () => {
 
     await e.ESO_PACKS.delete("deleted:9001");
   });
+
+  it("does not back up votes whose pack is no longer live", async () => {
+    await e.ESO_PACKS.delete(`backup:${today}`);
+    await e.ESO_PACKS.delete("backup:meta");
+    const live = makePack("live-vote-owner");
+    await putPackIndex({ packs: [live] });
+    await putVote(e, live.id, "live-voter");
+    await putVote(e, "tombstoned-pack", "orphan-voter");
+
+    const ctrl = createScheduledController({
+      scheduledTime: new Date(),
+      cron: "0 0 * * *",
+    });
+    const ctx = createExecutionContext();
+    await worker.scheduled(ctrl, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const snapshot = await e.ESO_PACKS.get<{
+      votes: Record<string, { packId: string }>;
+    }>("backup:latest", "json");
+    expect(Object.values(snapshot!.votes).map(({ packId }) => packId)).toEqual([live.id]);
+    await e.ESO_PACKS.delete("vote:tombstoned-pack:orphan-voter");
+    await e.ESO_PACKS.delete("user-votes:orphan-voter:tombstoned-pack");
+  });
 });

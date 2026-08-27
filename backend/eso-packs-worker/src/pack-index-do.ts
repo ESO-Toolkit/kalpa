@@ -252,16 +252,11 @@ export class PackIndexDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.loadPacks();
       const stored = await this.ctx.storage.get<Pack>(this.packKey(id));
-      if (stored || await this.ctx.storage.get<string>(this.tombstoneKey(id))) {
-        return stored ?? null;
-      }
-      const detail = await this.env.ESO_PACKS.get<Pack>(`pack:${id}`, {
-        type: "json",
-        cacheTtl: 30,
-      });
-      if (!detail || detail.id !== id) return null;
-      await this.ctx.storage.put(this.packKey(id), detail);
-      return detail;
+      // Never auto-adopt an orphan detail key. Restore pages and failed legacy
+      // deletes can leave a valid-looking body outside the live index; only
+      // shadow index reconciliation or the adjudicated admin adoption endpoint
+      // may make one canonical.
+      return stored ?? null;
     });
   }
 
@@ -586,6 +581,18 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async finishCreate(operation: PendingOperation): Promise<boolean> {
     operation.attempts++;
+    const canonical = await this.ctx.storage.get<Pack>(this.packKey(operation.packId));
+    if (!canonical || canonical.created_at !== operation.lifecycle) {
+      await this.ctx.storage.delete(this.operationKey(operation.id));
+      if (await this.ctx.storage.get<string>(this.pendingKey(operation.packId)) === operation.id) {
+        await this.ctx.storage.delete(this.pendingKey(operation.packId));
+      }
+      return false;
+    }
+    // An update may land while a create is waiting for its first KV mirror.
+    // Resume from canonical state, never the create-time body captured by the
+    // journal entry.
+    operation.pack = canonical;
     if (!operation.kvDetailDone) {
       try {
         await this.env.ESO_PACKS.put(

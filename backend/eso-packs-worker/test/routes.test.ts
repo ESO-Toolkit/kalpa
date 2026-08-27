@@ -429,7 +429,7 @@ describe("POST /packs", () => {
 
 describe("GET /packs/:id", () => {
   it("returns a pack", async () => {
-    await putPack(e, makePack("get-test"));
+    await putPackIndex(e, { packs: [makePack("get-test")] });
     const res = await call(new Request(`${BASE}/packs/get-test`));
     expect(res.status).toBe(200);
     const body = await res.json<{ pack: { id: string } }>();
@@ -442,7 +442,7 @@ describe("GET /packs/:id", () => {
   });
 
   it("hides draft pack from unauthenticated user", async () => {
-    await putPack(e, makePack("draft-test", { status: "draft" }));
+    await putPackIndex(e, { packs: [makePack("draft-test", { status: "draft" })] });
 
     fetchSpy.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -455,13 +455,13 @@ describe("GET /packs/:id", () => {
   });
 
   it("shows draft pack to authenticated user", async () => {
-    await putPack(e, makePack("draft-visible", { status: "draft" }));
+    await putPackIndex(e, { packs: [makePack("draft-visible", { status: "draft" })] });
     const res = await call(authedRequest(`${BASE}/packs/draft-visible`));
     expect(res.status).toBe(200);
   });
 
   it("reports user_voted for a signed-in viewer who already voted", async () => {
-    await putPack(e, makePack("voted-detail"));
+    await putPackIndex(e, { packs: [makePack("voted-detail")] });
     await putVote(e, "voted-detail", String(TEST_USER.id));
 
     const res = await call(authedRequest(`${BASE}/packs/voted-detail`));
@@ -472,14 +472,14 @@ describe("GET /packs/:id", () => {
   });
 
   it("reports user_voted false for a signed-in viewer who has not voted", async () => {
-    await putPack(e, makePack("unvoted-detail"));
+    await putPackIndex(e, { packs: [makePack("unvoted-detail")] });
     const res = await call(authedRequest(`${BASE}/packs/unvoted-detail`));
     const body = await res.json<{ pack: { user_voted: boolean } }>();
     expect(body.pack.user_voted).toBe(false);
   });
 
   it("omits user_voted for anonymous viewers and stays cacheable", async () => {
-    await putPack(e, makePack("anon-detail"));
+    await putPackIndex(e, { packs: [makePack("anon-detail")] });
     const res = await call(new Request(`${BASE}/packs/anon-detail`));
     const body = await res.json<{ pack: Record<string, unknown> }>();
     expect(body.pack.user_voted).toBeUndefined();
@@ -748,7 +748,7 @@ describe("POST /packs/:id/vote", () => {
   });
 
   it("requires auth", async () => {
-    await putPack(e, makePack("noauth-vote"));
+    await putPackIndex(e, { packs: [makePack("noauth-vote")] });
 
     fetchSpy.mockImplementation((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -761,7 +761,7 @@ describe("POST /packs/:id/vote", () => {
   });
 
   it("404s on a draft pack instead of revealing it via 401", async () => {
-    await putPack(e, makePack("draft-vote", { status: "draft" }));
+    await putPackIndex(e, { packs: [makePack("draft-vote", { status: "draft" })] });
 
     const anonymous = await call(new Request(`${BASE}/packs/draft-vote/vote`, { method: "POST" }));
     expect(anonymous.status).toBe(404);
@@ -918,6 +918,32 @@ describe("POST /admin/restore", () => {
     expect(res.status).toBe(404);
   });
 
+  it("does not replay a vote for a pack absent from the snapshot corpus", async () => {
+    const live = makePack("restore-live-vote");
+    const orphanPackId = "restore-deleted-vote";
+    const orphanUserId = "restore-orphan-voter";
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs: [live],
+        packBodies: { [live.id]: live },
+        votes: {
+          [`${orphanPackId}:${orphanUserId}`]: {
+            packId: orphanPackId,
+            userId: orphanUserId,
+            votedAt: "2026-08-27T00:00:00.000Z",
+          },
+        },
+      }),
+    );
+
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }));
+    expect(res.status).toBe(200);
+    expect(await e.ESO_PACKS.get(`vote:${orphanPackId}:${orphanUserId}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`user-votes:${orphanUserId}:${orphanPackId}`)).toBeNull();
+  });
+
   it("restores packs and index from a backup snapshot", async () => {
     const pack = makePack("restore-me");
     const snapshot = {
@@ -1000,6 +1026,10 @@ describe("POST /admin/restore", () => {
     expect(midIndex?.packs ?? []).toHaveLength(0);
     expect(await e.ESO_PACKS.get(`pack:${packs[0]!.id}`)).toBeTruthy();
     expect(await e.ESO_PACKS.get(`pack:${packs[4]!.id}`)).toBeNull();
+    expect((await call(new Request(`${BASE}/packs/${packs[0]!.id}`))).status).toBe(404);
+    expect(
+      await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).getPack(packs[0]!.id),
+    ).toBeNull();
 
     let cursor: number | null = firstBody.cursor;
     let token = firstBody.token;
@@ -1366,25 +1396,17 @@ describe("POST /admin/restore", () => {
     // deleted outright, so a regression that stopped clamping real pages passed
     // here and would have failed only during a production restore.
     //
-    // Votes rather than packs because they are the cheapest record the work list
-    // accepts — one `restoreVote` each, no pack body, no D1 tag batch — which
-    // keeps a 301-record snapshot fast enough for a unit suite.
+    // Pack records are required because restore deliberately rejects orphan
+    // votes whose pack is absent from the snapshot corpus.
     const overCap = RESTORE_MAX_PAGE_SIZE + 1;
-    const votes: Record<string, unknown> = {};
-    for (let i = 0; i < overCap; i++) {
-      votes[`cap-pack-${i}:cap-user-${i}`] = {
-        packId: `cap-pack-${i}`,
-        userId: `cap-user-${i}`,
-        votedAt: "2026-06-01T00:00:00.000Z",
-      };
-    }
+    const packs = Array.from({ length: overCap }, (_, i) => makePack(`cap-pack-${i}`));
     await e.ESO_PACKS.put(
       "backup:latest",
       JSON.stringify({
         created_at: "2026-06-01T00:00:00.000Z",
-        packs: [],
-        packBodies: {},
-        votes,
+        packs,
+        packBodies: Object.fromEntries(packs.map((pack) => [pack.id, pack])),
+        votes: {},
       })
     );
 
@@ -1415,26 +1437,14 @@ describe("POST /admin/restore", () => {
       SUBREQUEST_CEILING - SUBREQUEST_RESERVE
     );
 
-    // Clean up after ourselves. This case really does restore 300 votes, and
-    // `restoreVote` writes TWO keys each — `vote:` and the `user-votes:` index —
-    // so leaving them behind would seed 600 keys that any later case listing
-    // votes or snapshotting the corpus would silently inherit. This file has no
-    // per-test storage isolation; the previous version of this test inherited
-    // another case's snapshot, which is the same class of problem pointing the
-    // other way.
+    // Clean up the restored page so later full-corpus tests stay isolated.
     await Promise.all(
       Array.from({ length: RESTORE_MAX_PAGE_SIZE }, (_, i) =>
-        Promise.all([
-          e.ESO_PACKS.delete(`vote:cap-pack-${i}:cap-user-${i}`),
-          e.ESO_PACKS.delete(`user-votes:cap-user-${i}:cap-pack-${i}`),
-        ])
+        e.ESO_PACKS.delete(`pack:cap-pack-${i}`)
       )
     );
     await e.ESO_PACKS.delete("backup:latest");
-    // 30s, not the 5s default: this case restores 300 vote records for real and
-    // then deletes the 600 keys they wrote. That is the price of proving the
-    // clamp through the endpoint instead of asserting arithmetic, and the suite
-    // is already known to flake against a 5s budget on CI.
+    // 30s, not the 5s default: this case restores 300 pack records for real.
   }, 30_000);
 
   it("restores an empty snapshot without tripping the cursor guard", async () => {
@@ -1535,6 +1545,26 @@ describe("DELETE /account", () => {
   it("rejects without a bearer token", async () => {
     const res = await call(new Request(`${BASE}/account`, { method: "DELETE" }));
     expect(res.status).toBe(401);
+  });
+
+  it("publishes the backup tombstone before deleting canonical packs", async () => {
+    const mine = makePack("account-ordering");
+    await putPackIndex(e, { packs: [mine] });
+    const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
+    let releaseTombstone: (() => void) | undefined;
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockImplementation(async (key, value, options) => {
+      if (key === `deleted:${TEST_USER.id}`) {
+        await new Promise<void>((resolve) => { releaseTombstone = resolve; });
+      }
+      return originalPut(key, value, options);
+    });
+
+    const deleting = call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+    await vi.waitFor(() => expect(releaseTombstone).toBeTypeOf("function"));
+    expect((await getCanonicalIndex(e)).packs.map(({ id }) => id)).toContain(mine.id);
+    releaseTombstone!();
+    expect((await deleting).status).toBe(200);
+    put.mockRestore();
   });
 
   it("scrubs the deleting user from the non-expiring backup:latest snapshot", async () => {

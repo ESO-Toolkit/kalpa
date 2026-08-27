@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { runDurableObjectAlarm } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { putPack, putVote } from "../src/kv";
 import type { Env, Pack } from "../src/types";
@@ -83,6 +84,30 @@ describe("PackIndexDO authoritative mutations", () => {
       created_at: pack.created_at,
     });
     expect((await packIndex().getIndex()).packs.filter(({ id }) => id === pack.id)).toHaveLength(1);
+  });
+
+  it("retries a pending create from the latest canonical body", async () => {
+    const pack = makePack("w1-create-retry-latest");
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValueOnce(
+      new Error("injected initial detail put failure"),
+    );
+    expect(await packIndex().addPack(pack, 25)).toMatchObject({ reason: "retry" });
+    put.mockRestore();
+
+    const updated = {
+      ...pack,
+      title: "Updated while create pending",
+      updated_at: "2026-08-27T01:00:00.000Z",
+    };
+    expect(await packIndex().updatePack(pack.id, updated, pack.author_id)).toMatchObject({
+      status: "ok",
+    });
+    expect(await runDurableObjectAlarm(packIndex())).toBe(true);
+
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json")).toMatchObject({
+      title: updated.title,
+      updated_at: updated.updated_at,
+    });
   });
 
   it("resumes KV detail cleanup when delete is retried after mirror failure", async () => {
@@ -260,6 +285,8 @@ describe("PackIndexDO authoritative mutations", () => {
   it("explicitly adopts an independently propagated detail witness", async () => {
     const pack = makePack("w1-detail-witness");
     await putPack(e, pack);
+
+    expect(await packIndex().getPack(pack.id)).toBeNull();
 
     expect(await packIndex().adoptWitnesses([pack.id])).toMatchObject({
       adopted: [pack.id],
