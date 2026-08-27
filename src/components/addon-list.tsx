@@ -503,9 +503,17 @@ function AddonListBase({
         e.preventDefault();
         onSelect(addons[addons.length - 1]!);
         rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
+      } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+        e.preventDefault();
+        if (currentIndex >= 0) {
+          const addon = addons[currentIndex]!;
+          const row = document.getElementById(`addon-${addon.folderName}`);
+          const rect = (row ?? e.currentTarget).getBoundingClientRect();
+          handleRightClick(addon, { x: rect.left + 24, y: rect.top + 24 });
+        }
       }
     },
-    [addons, selectedAddon, onSelect, rowVirtualizer]
+    [addons, selectedAddon, onSelect, rowVirtualizer, handleRightClick]
   );
 
   return (
@@ -828,7 +836,14 @@ function AddonListBase({
       </AnimatePresence>
 
       {ctxMenu && ctxMenuItems.length > 0 && (
-        <ContextMenu items={ctxMenuItems} position={ctxMenu.pos} onClose={() => setCtxMenu(null)} />
+        <ContextMenu
+          items={ctxMenuItems}
+          position={ctxMenu.pos}
+          onClose={() => {
+            setCtxMenu(null);
+            scrollContainerRef.current?.focus();
+          }}
+        />
       )}
     </div>
   );

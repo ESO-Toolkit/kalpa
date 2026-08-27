@@ -14,3 +14,11 @@ export function countUpdatesWithoutProtectedEditsBaseline(
   );
   return updates.filter((update) => !protectedFolders.has(update.folderName)).length;
 }
+
+export function shouldPublishProtectedEditsCoverage(
+  startedGeneration: number,
+  currentGeneration: number,
+  pathStillCurrent: boolean
+): boolean {
+  return startedGeneration === currentGeneration && pathStillCurrent;
+}

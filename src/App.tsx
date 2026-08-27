@@ -59,7 +59,10 @@ import {
 } from "@/lib/removal-queue";
 import { isModKey, isWindows } from "@/lib/platform";
 import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
-import { countUpdatesWithoutProtectedEditsBaseline } from "@/lib/protected-edits";
+import {
+  countUpdatesWithoutProtectedEditsBaseline,
+  shouldPublishProtectedEditsCoverage,
+} from "@/lib/protected-edits";
 import type {
   AddonManifest,
   AuthUser,
@@ -1403,6 +1406,17 @@ function App() {
       const coverage = await invokeResult<AddonManifest[]>("scan_installed_addons", {
         addonsPath: path,
       });
+      if (
+        !shouldPublishProtectedEditsCoverage(
+          switchGen,
+          pathSwitchGenRef.current,
+          sameAddonsFolder(path, addonsPathRef.current)
+        )
+      ) {
+        latch.abortPreflight();
+        toast.info("AddOns folder changed — the update was not started.");
+        return;
+      }
       const currentAddons = coverage.ok
         ? hidePendingRemovals(coverage.data, pendingRemovalsRef.current, path)
         : [];
