@@ -20,7 +20,7 @@ export { PackIndexDO } from "./pack-index-do";
 // directly to roster-hub-db (D1) so every KV mutation is atomically
 // mirrored — no async sync, no reconciliation, no deployment ordering.
 
-async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
+export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;
   const isPublished = (pack.status ?? "published") === "published";
   try {
@@ -31,6 +31,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
           `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
+             author_id = excluded.author_id,
              title = excluded.title,
              description = excluded.description,
              pack_type = excluded.pack_type,
@@ -668,12 +669,17 @@ async function packDetailWitnessIds(env: Env): Promise<string[]> {
   return ids;
 }
 
-async function migrationWitnessIds(env: Env): Promise<string[]> {
+export async function migrationWitnessIds(
+  env: Env,
+  unownedD1Ids: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
   const ids = new Set(await packDetailWitnessIds(env));
 
   if (env.ROSTER_HUB_DB) {
     const rows = await env.ROSTER_HUB_DB.prepare("SELECT id FROM packs").all<{ id: string }>();
-    for (const row of rows.results) if (row.id) ids.add(row.id);
+    for (const row of rows.results) {
+      if (row.id && !unownedD1Ids.has(row.id)) ids.add(row.id);
+    }
   }
 
   // Dated snapshots deliberately retain deleted data for 90 days, so treating
@@ -703,12 +709,30 @@ async function handleMigrationParity(request: Request, env: Env): Promise<Respon
 async function handleMigrationAuthority(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) return unauthorized(request);
   let authority: "kv" | "do";
+  let unownedD1Ids = new Set<string>();
   try {
-    const body = (await request.json()) as { authority?: unknown };
+    const body = (await request.json()) as {
+      authority?: unknown;
+      unowned_d1_ids?: unknown;
+    };
     if (body.authority !== "kv" && body.authority !== "do") {
       return badRequest(request, [{ field: "authority", message: 'authority must be "kv" or "do"' }]);
     }
+    if (
+      body.unowned_d1_ids !== undefined &&
+      (!Array.isArray(body.unowned_d1_ids) ||
+        body.unowned_d1_ids.length > 100 ||
+        body.unowned_d1_ids.some(
+          (id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id),
+        ))
+    ) {
+      return badRequest(request, [{
+        field: "unowned_d1_ids",
+        message: "unowned_d1_ids must contain at most 100 valid, manually adjudicated ids",
+      }]);
+    }
     authority = body.authority;
+    unownedD1Ids = new Set((body.unowned_d1_ids ?? []) as string[]);
   } catch {
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
@@ -716,7 +740,7 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
   try {
     const result = await getPackIndexDO(env).setAuthority(
       authority,
-      await migrationWitnessIds(env),
+      await migrationWitnessIds(env, unownedD1Ids),
     );
     return result.ok
       ? json(request, result.parity)

@@ -8,6 +8,7 @@ import {
 } from "../src/d1-reconcile";
 import type { Env, Pack } from "../src/types";
 import { makePack } from "./helpers";
+import { d1UpsertPack, migrationWitnessIds } from "../src/index";
 
 function row(pack: Pack): D1PackRow {
   return {
@@ -282,6 +283,21 @@ describe("D1 reconciliation", () => {
     expect(fixture.sql).toEqual([]);
     expect(fixture.mutations).toBe(0);
   });
+  it.each([
+    ["invalid id", makePack("bad id")],
+    [
+      "non-finite addon id",
+      makePack("bad-addon", {
+        addons: [{ esouiId: Number.NaN, name: "Addon", required: true }],
+      }),
+    ],
+  ])("fails authority validation closed for %s", async (_name, malformed) => {
+    const fixture = fakeEnv({ authority: { packs: [malformed], tombstones: [] }, mode: "apply" });
+    const result = await reconcileD1(fixture.env);
+    expect(result.stage).toBe("authority");
+    expect(fixture.sql).toEqual([]);
+    expect(fixture.mutations).toBe(0);
+  });
   it("performs no mutation when D1 read fails", async () => {
     const fixture = fakeEnv({
       authority: { packs: [], tombstones: ["zombie"] },
@@ -456,5 +472,36 @@ describe("D1 reconciliation", () => {
     expect(fixture.sql.length).toBeGreaterThan(0);
     expect(fixture.sql.every((statement) => /\b(?:packs|pack_tags)\b/.test(statement))).toBe(true);
     expect(fixture.sql.join(" ")).not.toContain("users");
+  });
+
+  it("allows an operator to exclude adjudicated shared-D1 rows from migration witnesses", async () => {
+    const env = {
+      ESO_PACKS: {
+        list: vi.fn().mockResolvedValue({ keys: [], list_complete: true }),
+        get: vi.fn().mockResolvedValue(null),
+      },
+      ROSTER_HUB_DB: {
+        prepare: vi.fn().mockReturnValue({
+          all: vi.fn().mockResolvedValue({ results: [{ id: "pack-hub" }, { id: "website" }] }),
+        }),
+      },
+    } as unknown as Env;
+    expect(await migrationWitnessIds(env, new Set(["website"]))).toEqual(["pack-hub"]);
+  });
+
+  it("updates D1 author ownership when restore upserts an existing id", async () => {
+    const sql: string[] = [];
+    const env = {
+      ESO_PACKS: { put: vi.fn() },
+      ROSTER_HUB_DB: {
+        prepare: vi.fn().mockImplementation((statement: string) => {
+          sql.push(statement);
+          return { bind: () => ({ run: vi.fn().mockResolvedValue({ success: true }) }) };
+        }),
+        batch: vi.fn().mockResolvedValue([]),
+      },
+    } as unknown as Env;
+    await d1UpsertPack(env, makePack("restored-owner", { author_id: "new-owner" }));
+    expect(sql[0]).toContain("author_id = excluded.author_id");
   });
 });

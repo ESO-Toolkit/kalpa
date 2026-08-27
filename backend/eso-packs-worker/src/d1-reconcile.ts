@@ -1,5 +1,6 @@
 import { ANONYMOUS_AUTHOR_NAME } from "./redact";
 import type { Env, Pack } from "./types";
+import { validatePack } from "./validate";
 
 const LIMITS = {
   corpus: 2_000,
@@ -177,6 +178,7 @@ function validateAuthority(value: unknown): ReconciliationAuthority {
   for (const pack of result.packs) {
     if (
       !pack ||
+      validatePack(pack).length > 0 ||
       typeof pack.id !== "string" ||
       !pack.id ||
       ids.has(pack.id) ||
@@ -184,7 +186,11 @@ function validateAuthority(value: unknown): ReconciliationAuthority {
       typeof pack.description !== "string" ||
       !["addon-pack", "build-pack", "roster-pack"].includes(pack.pack_type) ||
       typeof pack.author_id !== "string" ||
+      !pack.author_id ||
+      pack.author_id.length > 100 ||
       typeof pack.author_name !== "string" ||
+      !pack.author_name ||
+      pack.author_name.length > 100 ||
       typeof pack.is_anonymous !== "boolean" ||
       !Array.isArray(pack.addons) ||
       pack.addons.some(
@@ -197,17 +203,25 @@ function validateAuthority(value: unknown): ReconciliationAuthority {
       ) ||
       !Array.isArray(pack.tags) ||
       pack.tags.some((tag) => typeof tag !== "string") ||
-      typeof pack.vote_count !== "number" ||
-      typeof pack.install_count !== "number" ||
+      !Number.isInteger(pack.vote_count) ||
+      pack.vote_count < 0 ||
+      !Number.isInteger(pack.install_count) ||
+      pack.install_count < 0 ||
       typeof pack.created_at !== "string" ||
+      Number.isNaN(Date.parse(pack.created_at)) ||
       typeof pack.updated_at !== "string" ||
+      Number.isNaN(Date.parse(pack.updated_at)) ||
       (pack.status !== "draft" && pack.status !== "published")
     ) {
       throw new Error("Authority returned a malformed pack");
     }
     ids.add(pack.id);
   }
-  if (result.tombstones.some((id) => typeof id !== "string" || !id))
+  if (
+    result.tombstones.some(
+      (id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id)
+    )
+  )
     throw new Error("Authority returned a malformed tombstone");
   return result as ReconciliationAuthority;
 }
