@@ -438,6 +438,18 @@ fn resolve_transitive_deps(
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
 ) -> ResolvedDeps {
+    resolve_transitive_deps_with(addons_dir, installed_folders, store, try_install_dep)
+}
+
+fn resolve_transitive_deps_with<F>(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    mut install_dep: F,
+) -> ResolvedDeps
+where
+    F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
+{
     let mut all_installed = build_installed_set(addons_dir);
 
     let mut installed_deps: Vec<String> = Vec::new();
@@ -469,7 +481,7 @@ fn resolve_transitive_deps(
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            match try_install_dep(dep_name, addons_dir, store) {
+            match install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
                     for f in &dep_folders {
                         // Only mark an extracted folder as installed if it is
@@ -484,8 +496,12 @@ fn resolve_transitive_deps(
                     }
                     installed_deps.push(dep_name.clone());
                 }
-                Err("not_found") => skipped_deps.push(dep_name.clone()),
-                Err(_) => failed_deps.push(dep_name.clone()),
+                Err(reason) => record_dependency_failure(
+                    dep_name,
+                    &reason,
+                    &mut failed_deps,
+                    &mut skipped_deps,
+                ),
             }
         }
 
@@ -507,30 +523,101 @@ fn try_install_dep(
     dep_name: &str,
     addons_dir: &Path,
     store: &mut metadata::MetadataStore,
-) -> Result<Vec<String>, &'static str> {
+) -> Result<Vec<String>, String> {
     let dep_id = if let Some(meta) = store.addons.get(dep_name) {
         meta.esoui_id
     } else {
         match esoui::search_addon_by_name(dep_name) {
             Ok(Some(id)) => id,
-            Ok(None) => return Err("not_found"),
-            Err(_) => return Err("search_failed"),
+            Ok(None) => return Err("not_found".to_string()),
+            Err(_) => return Err("search_failed".to_string()),
         }
     };
-    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
+    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed".to_string())?;
     let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
-        .map_err(|_| "download_failed")?;
-    let dep_folders =
-        installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
+        .map_err(|_| "download_failed".to_string())?;
+    let dep_folders = installer::extract_addon_zip(dep_tmp.path(), addons_dir)?;
 
     file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|_| "hash_record_failed")?;
+        .map_err(|_| "hash_record_failed".to_string())?;
 
     for f in &dep_folders {
         let dep_version = read_local_version(addons_dir, f);
         metadata::record_install(store, f, dep_id, &dep_version, &dep_info.download_url);
     }
     Ok(dep_folders)
+}
+
+fn dependency_failure(dep_name: &str, reason: &str) -> String {
+    format!("{dep_name}: {reason}")
+}
+
+fn record_dependency_failure(
+    dep_name: &str,
+    reason: &str,
+    failed_deps: &mut Vec<String>,
+    skipped_deps: &mut Vec<String>,
+) {
+    if reason == "not_found" {
+        skipped_deps.push(dep_name.to_string());
+    } else {
+        failed_deps.push(dependency_failure(dep_name, reason));
+    }
+}
+
+fn install_selected_dependencies_with<F>(
+    addons_dir: &Path,
+    names: &[String],
+    store: &mut metadata::MetadataStore,
+    mut install_dep: F,
+) -> InstallResult
+where
+    F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
+{
+    let mut installed_folders: Vec<String> = Vec::new();
+    let mut installed_deps: Vec<String> = Vec::new();
+    let mut failed_deps: Vec<String> = Vec::new();
+    let mut skipped_deps: Vec<String> = Vec::new();
+
+    for (i, dep_name) in names.iter().enumerate() {
+        // Same inter-request delay the transitive resolver uses, so a long
+        // accepted list is no harsher on ESOUI than auto-resolution.
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        match install_dep(dep_name, addons_dir, store) {
+            Ok(dep_folders) => {
+                for folder in &dep_folders {
+                    if !installed_folders.contains(folder) {
+                        installed_folders.push(folder.clone());
+                    }
+                }
+                installed_deps.push(dep_name.clone());
+            }
+            Err(reason) => {
+                record_dependency_failure(dep_name, &reason, &mut failed_deps, &mut skipped_deps)
+            }
+        }
+    }
+
+    // A library's own libraries are an implementation detail: resolve them
+    // transitively rather than prompting again. Guarded so a fully-failed
+    // selection skips the whole-folder disk walk.
+    if !installed_folders.is_empty() {
+        let resolved =
+            resolve_transitive_deps_with(addons_dir, &installed_folders, store, &mut install_dep);
+        installed_deps.extend(resolved.installed_deps);
+        failed_deps.extend(resolved.failed_deps);
+        skipped_deps.extend(resolved.skipped_deps);
+    }
+
+    InstallResult {
+        installed_folders,
+        installed_deps,
+        failed_deps,
+        skipped_deps,
+        pending_deps: Vec::new(),
+    }
 }
 
 /// Normalize an addon folder or dependency name for matching.
@@ -1660,50 +1747,10 @@ pub async fn install_selected_dependencies(
             .map_err(|_| "Internal metadata lock error".to_string())?;
         let mut store = metadata::load_metadata(&addons_dir);
 
-        let mut installed_folders: Vec<String> = Vec::new();
-        let mut installed_deps: Vec<String> = Vec::new();
-        let mut failed_deps: Vec<String> = Vec::new();
-        let mut skipped_deps: Vec<String> = Vec::new();
-
-        for (i, dep_name) in names.iter().enumerate() {
-            // Same inter-request delay the transitive resolver uses, so a long
-            // accepted list is no harsher on ESOUI than auto-resolution.
-            if i > 0 {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            match try_install_dep(dep_name, &addons_dir, &mut store) {
-                Ok(dep_folders) => {
-                    for f in &dep_folders {
-                        if !installed_folders.contains(f) {
-                            installed_folders.push(f.clone());
-                        }
-                    }
-                    installed_deps.push(dep_name.clone());
-                }
-                Err("not_found") => skipped_deps.push(dep_name.clone()),
-                Err(_) => failed_deps.push(dep_name.clone()),
-            }
-        }
-
-        // A library's own libraries are an implementation detail: resolve them
-        // transitively rather than prompting again while the lock is held.
-        // Guarded so a fully-failed selection skips the whole-folder disk walk.
-        if !installed_folders.is_empty() {
-            let resolved = resolve_transitive_deps(&addons_dir, &installed_folders, &mut store);
-            installed_deps.extend(resolved.installed_deps);
-            failed_deps.extend(resolved.failed_deps);
-            skipped_deps.extend(resolved.skipped_deps);
-        }
-
+        let result =
+            install_selected_dependencies_with(&addons_dir, &names, &mut store, try_install_dep);
         metadata::save_metadata(&addons_dir, &store)?;
-
-        Ok(InstallResult {
-            installed_folders,
-            installed_deps,
-            failed_deps,
-            skipped_deps,
-            pending_deps: Vec::new(),
-        })
+        Ok(result)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -11102,6 +11149,65 @@ mod tests {
             enabled_addons: names.iter().map(|s| s.to_string()).collect(),
             created_at: String::new(),
         }
+    }
+
+    fn write_reserved_dependency_zip(path: &Path) {
+        use std::io::Write;
+
+        let file = fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                ".KALPA-STAGING. /Victim.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"-- must never be extracted").unwrap();
+        archive.finish().unwrap();
+    }
+
+    #[test]
+    fn auto_dependency_result_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        write_dep_addon(&addons_dir, "AddonA", "LibReserved", "");
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_dependency_zip(&zip_path);
+        let mut store = metadata::MetadataStore::default();
+
+        let result = resolve_transitive_deps_with(
+            &addons_dir,
+            &["AddonA".to_string()],
+            &mut store,
+            |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+        );
+
+        assert_eq!(result.failed_deps.len(), 1);
+        assert!(result.failed_deps[0].starts_with("LibReserved: "));
+        assert!(result.failed_deps[0].contains("Kalpa's own state folder"));
+        assert!(result.failed_deps[0].contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn selected_dependency_result_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_dependency_zip(&zip_path);
+        let mut store = metadata::MetadataStore::default();
+
+        let result = install_selected_dependencies_with(
+            &addons_dir,
+            &["LibReserved".to_string()],
+            &mut store,
+            |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+        );
+
+        assert!(result.skipped_deps.is_empty());
+        assert!(result.failed_deps[0].contains("Kalpa's own state folder"));
+        assert!(result.failed_deps[0].contains(".KALPA-STAGING. "));
     }
 
     #[test]

@@ -13379,6 +13379,23 @@ fn native_resolve_transitive_deps(
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
 ) -> NativeImportResult {
+    native_resolve_transitive_deps_with(
+        addons_dir,
+        installed_folders,
+        store,
+        native_try_install_dep,
+    )
+}
+
+fn native_resolve_transitive_deps_with<F>(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    mut install_dep: F,
+) -> NativeImportResult
+where
+    F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
+{
     let mut all_installed = native_build_installed_set(addons_dir);
     let mut result = NativeImportResult::default();
     let mut folders_to_scan = installed_folders.to_vec();
@@ -13408,7 +13425,7 @@ fn native_resolve_transitive_deps(
             if index > 0 {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            match native_try_install_dep(dep_name, addons_dir, store) {
+            match install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
                     for folder in &dep_folders {
                         if find_manifest(addons_dir, folder).is_some() {
@@ -13423,8 +13440,10 @@ fn native_resolve_transitive_deps(
                     }
                     result.installed.push(dep_name.clone());
                 }
-                Err("not_found") => result.skipped.push(dep_name.clone()),
-                Err(_) => result.failed.push(dep_name.clone()),
+                Err(reason) if reason == "not_found" => result.skipped.push(dep_name.clone()),
+                Err(reason) => result
+                    .failed
+                    .push(native_dependency_failure(dep_name, &reason)),
             }
         }
 
@@ -13438,23 +13457,40 @@ fn native_try_install_dep(
     dep_name: &str,
     addons_dir: &Path,
     store: &mut metadata::MetadataStore,
-) -> Result<Vec<String>, &'static str> {
+) -> Result<Vec<String>, String> {
     let dep_id = if let Some(meta) = store.addons.get(dep_name) {
         meta.esoui_id
     } else {
         match esoui::search_addon_by_name(dep_name) {
             Ok(Some(id)) => id,
-            Ok(None) => return Err("not_found"),
-            Err(_) => return Err("search_failed"),
+            Ok(None) => return Err("not_found".to_string()),
+            Err(_) => return Err("search_failed".to_string()),
         }
     };
-    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
-    let dep_zip =
-        esoui::download_addon(&dep_info.download_url, None).map_err(|_| "download_failed")?;
-    let dep_folders =
-        installer::extract_addon_zip(dep_zip.path(), addons_dir).map_err(|_| "extract_failed")?;
+    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed".to_string())?;
+    let dep_zip = esoui::download_addon(&dep_info.download_url, None)
+        .map_err(|_| "download_failed".to_string())?;
+    native_finish_dependency_install(
+        dep_name,
+        addons_dir,
+        store,
+        dep_id,
+        &dep_info,
+        dep_zip.path(),
+    )
+}
+
+fn native_finish_dependency_install(
+    _dep_name: &str,
+    addons_dir: &Path,
+    store: &mut metadata::MetadataStore,
+    dep_id: u32,
+    dep_info: &esoui::EsouiAddonInfo,
+    zip_path: &Path,
+) -> Result<Vec<String>, String> {
+    let dep_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
     file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|_| "hash_record_failed")?;
+        .map_err(|_| "hash_record_failed".to_string())?;
 
     for folder in &dep_folders {
         let version = read_local_version(addons_dir, folder);
@@ -13464,6 +13500,23 @@ fn native_try_install_dep(
     Ok(dep_folders)
 }
 
+fn native_dependency_failure(dep_name: &str, reason: &str) -> String {
+    format!("{dep_name}: {reason}")
+}
+
+fn native_dependency_error_message(dep_name: &str, reason: &str) -> String {
+    match reason {
+        "not_found" => format!("{dep_name} was not found on ESOUI."),
+        "search_failed" => format!("Could not search ESOUI for {dep_name}."),
+        "fetch_failed" => format!("Could not read {dep_name} on ESOUI."),
+        "download_failed" => format!("Could not download {dep_name}."),
+        "hash_record_failed" => {
+            format!("Installed {dep_name}, but could not record its file hashes.")
+        }
+        other => format!("Could not install {dep_name}: {other}"),
+    }
+}
+
 /// Install one missing dependency by name and record it, the same way the
 /// update paths do. This is what the detail pane's dependency "Install" button
 /// runs — the row must only change once the library is really on disk.
@@ -13471,19 +13524,15 @@ fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Vec<
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     let installed = native_try_install_dep(dep_name, addons_dir, &mut store);
-    let folders = installed.map_err(|reason| match reason {
-        "not_found" => format!("{dep_name} was not found on ESOUI."),
-        "search_failed" => format!("Could not search ESOUI for {dep_name}."),
-        "fetch_failed" => format!("Could not read {dep_name} on ESOUI."),
-        "download_failed" => format!("Could not download {dep_name}."),
-        "extract_failed" => format!("Could not extract {dep_name}."),
-        "hash_record_failed" => {
-            format!("Installed {dep_name}, but could not record its file hashes.")
-        }
-        other => format!("Could not install {dep_name} ({other})."),
-    })?;
-    let _ = native_resolve_transitive_deps(addons_dir, &folders, &mut store);
+    let folders = installed.map_err(|reason| native_dependency_error_message(dep_name, &reason))?;
+    let resolved = native_resolve_transitive_deps(addons_dir, &folders, &mut store);
     metadata::save_metadata(addons_dir, &store)?;
+    if !resolved.failed.is_empty() {
+        return Err(format!(
+            "Installed {dep_name}, but dependency installation failed: {}",
+            resolved.failed.join("; ")
+        ));
+    }
     Ok(folders)
 }
 
@@ -13531,6 +13580,17 @@ fn import_addon_list_json(
     addons_dir: &Path,
     json_data: &str,
 ) -> Result<NativeImportResult, String> {
+    import_addon_list_json_with(addons_dir, json_data, import_addon_entry_blocking)
+}
+
+fn import_addon_list_json_with<F>(
+    addons_dir: &Path,
+    json_data: &str,
+    mut import_entry: F,
+) -> Result<NativeImportResult, String>
+where
+    F: FnMut(&Path, &ExportEntry) -> Result<(), String>,
+{
     let export = serde_json::from_str::<ExportData>(json_data)
         .map_err(|error| format!("Invalid addon list export: {error}"))?;
     let mut result = NativeImportResult::default();
@@ -13546,9 +13606,11 @@ fn import_addon_list_json(
             continue;
         }
 
-        match import_addon_entry_blocking(addons_dir, &entry) {
+        match import_entry(addons_dir, &entry) {
             Ok(()) => result.installed.push(entry.folder_name),
-            Err(_) => result.failed.push(entry.folder_name),
+            Err(error) => result
+                .failed
+                .push(format!("{}: {error}", entry.folder_name)),
         }
     }
 
@@ -13570,12 +13632,17 @@ fn import_addon_entry_blocking(addons_dir: &Path, entry: &ExportEntry) -> Result
 }
 
 fn import_result_summary(result: &NativeImportResult) -> String {
-    format!(
+    let summary = format!(
         "Import complete: {} installed, {} skipped, {} failed.",
         result.installed.len(),
         result.skipped.len(),
         result.failed.len()
-    )
+    );
+    if result.failed.is_empty() {
+        summary
+    } else {
+        format!("{summary} Failed: {}", result.failed.join("; "))
+    }
 }
 
 fn write_clipboard_text(text: String) -> Result<(), String> {
@@ -22522,6 +22589,109 @@ CombatMetrics_SavedVariables = {
             .expect("start lua file");
         archive.write_all(lua.as_bytes()).expect("write lua file");
         archive.finish().expect("finish test zip");
+    }
+
+    fn write_reserved_state_zip(path: &Path) {
+        let file = fs::File::create(path).expect("create reserved-state zip");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                ".KALPA-STAGING. /Victim.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start reserved entry");
+        archive
+            .write_all(b"-- must never be extracted")
+            .expect("write reserved entry");
+        archive.finish().expect("finish reserved-state zip");
+    }
+
+    #[test]
+    fn native_direct_dependency_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_state_zip(&zip_path);
+        let info = esoui::EsouiAddonInfo {
+            id: 42,
+            title: "LibReserved".to_string(),
+            version: "1".to_string(),
+            download_url: "https://example.invalid/reserved.zip".to_string(),
+            updated: String::new(),
+            checksum: String::new(),
+        };
+        let mut store = metadata::MetadataStore::default();
+
+        let refusal = native_finish_dependency_install(
+            "LibReserved",
+            &addons_dir,
+            &mut store,
+            info.id,
+            &info,
+            &zip_path,
+        )
+        .unwrap_err();
+        let surfaced = native_dependency_error_message("LibReserved", &refusal);
+
+        assert!(surfaced.contains("Kalpa's own state folder"));
+        assert!(surfaced.contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn native_transitive_dependency_result_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("AddonA");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(
+            addon_dir.join("AddonA.txt"),
+            "## Title: AddonA\n## DependsOn: LibReserved\n",
+        )
+        .unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_state_zip(&zip_path);
+        let mut store = metadata::MetadataStore::default();
+
+        let result = native_resolve_transitive_deps_with(
+            &addons_dir,
+            &["AddonA".to_string()],
+            &mut store,
+            |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+        );
+
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0].starts_with("LibReserved: "));
+        assert!(result.failed[0].contains("Kalpa's own state folder"));
+        assert!(result.failed[0].contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn addon_list_import_summary_includes_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_state_zip(&zip_path);
+        let json = serde_json::json!({
+            "version": 1,
+            "addons": [{
+                "esouiId": 42,
+                "folderName": "LibReserved",
+                "version": "1"
+            }]
+        })
+        .to_string();
+
+        let result = import_addon_list_json_with(&addons_dir, &json, |destination, _| {
+            installer::extract_addon_zip(&zip_path, destination).map(|_| ())
+        })
+        .unwrap();
+        let summary = import_result_summary(&result);
+
+        assert!(result.failed[0].starts_with("LibReserved: "));
+        assert!(summary.contains("Kalpa's own state folder"));
+        assert!(summary.contains(".KALPA-STAGING. "));
     }
 
     fn sample_native_hub_pack(addons: serde_json::Value) -> NativeHubPack {
