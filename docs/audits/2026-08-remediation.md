@@ -22,7 +22,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
-| H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
+| H1 | pr-open | `fix/audit-h1-release-copy` | [#384](https://github.com/ESO-Toolkit/kalpa/pull/384) (draft, stacked on W1) | - | D-H1-1 | REVISE follow-up; all verified findings addressed | Release/Discord 16; frontend 490; check; versions | Generates exact tagged CHANGELOG copy; no tag, release, merge, or deployment. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
@@ -56,6 +56,12 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Create retry by the same actor resumes the stored canonical create instead of returning duplicate. Success is acknowledged only after the KV detail step; an incomplete mirror returns a retryable failure while public detail reads use the DO and remain consistent with canonical lifecycle state.
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+### D-H1-1 — CHANGELOG is the release-copy authority
+
+- Chosen: a dependency-free Node generator selects the exact tagged `CHANGELOG.md` section, fails closed for missing, empty, malformed, or duplicate targets, and supplies the complete established release body to `tauri-action` through multiline `GITHUB_OUTPUT`. `Unreleased` is accepted only when explicitly requested for local preview/testing.
+- Markdown compatibility: content-owned trailing reference definitions are retained using CommonMark-style case-insensitive, whitespace-normalized labels; unrelated global changelog definitions are excluded. The existing `## Changed:` shape remains compatible with the Discord announcement helper.
+- Rejected: leaving per-release prose in shared workflow YAML, because it can silently publish the previous release's text. Rejected: permissive fallback to `Unreleased` or generic copy for a missing tagged section, because a release should stop rather than publish unmatched notes.
+- Scope: install, verification, known-issues, draft/publish, updater-manifest, application runtime, and Discord delivery behavior are unchanged. Rollback is a normal commit revert to the prior hand-maintained YAML body.
 
 ## Session Log
 
@@ -78,6 +84,15 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Handoff: pushed `fix/audit-w1-worker-consistency` and opened PR [#369](https://github.com/ESO-Toolkit/kalpa/pull/369). All three GitHub CI jobs pass. No merge or deployment was performed; unrelated local `Cargo.toml` and theme-directory changes remain excluded.
 - Blockers: no implementation or CI blockers remain. Maintainer approval is still required because merge auto-deploys the Worker shadow phase. The authority flip remains a separate operator step after soak/parity checks.
 - Exact next action: maintainer reviews and merges PR #369 after accepting the shadow-mode rollback caveat, then monitors the production parity/authority-flip runbook.
+
+### 2026-08-26 — Codex (H1)
+
+- Active branch: `fix/audit-h1-release-copy`, isolated worktree, stacked on `fix/audit-w1-worker-consistency`.
+- Completed: inventoried release, changelog, version, and Discord workflows; captured the missing-generator failure before implementation; added exact version/explicit `Unreleased` parsing and fail-closed validation; generated the stable release body around matching changelog copy; removed only redundant release-specific YAML text; updated CI and release instructions.
+- Sol: initial `REVISE` found stripped trailing content-owned reference definitions. The required follow-up `REVISE` found case/whitespace normalization gaps. Both were reproduced, fixed, and covered; follow-up wire contract was `OK` and bug-class sweep was `CLEAN`. See `docs/audits/consultations/h1-sol.md`.
+- Gates: release/Discord Node tests 16/16; root Vitest 37 files/490 tests; `npm run check`; `npm run check:versions` (6/6); beta.18 generator preview; `git diff --check`.
+- Handoff: pushed the branch and opened draft stacked PR [#384](https://github.com/ESO-Toolkit/kalpa/pull/384). No tag, release, merge, or deployment was performed.
+- Exact next action: land W1 first, retarget PR #384 to `main`, confirm CI remains green, then mark it ready for maintainer review.
 
 ### Sol review 1 — REVISE
 
