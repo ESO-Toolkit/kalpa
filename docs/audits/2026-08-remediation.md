@@ -7,7 +7,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
-| P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | pending | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
+| P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
@@ -87,7 +87,8 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Tests: added uniqueness, owner-only cleanup, failed-publish cleanup, concurrent complete/parseable JSON, primary/backup recovery, concurrent pack export, import/editor completeness, and native fallback staging regressions. Root checks pass (`npm run check`; 37 files/490 tests). Main Rust strict clippy, format, and tests pass (814 passed, 17 ignored); Slint strict clippy, format, and tests pass (760 passed, 15 ignored). Native Slint and Tauri debug builds pass with Cargo outputs on `B:\codex-build\kalpa-p0a1-target`. The destructive sandbox passes 3/3.
 - Sol review: initial `REVISE` identified four remaining fixed replacement writers in `commands.rs` (Pack Hub SavedVariables import, addon editor, native settings fallback, and pack export). All four, plus the profile mirror found in the same sweep, were migrated and covered by regressions. Required follow-up verdict: `APPROVE`; no findings, no missing tests, wire contract OK, bug-class sweep clean.
 - Safety: an ENOSPC event invalidated earlier partial evidence; source diffs were inspected for truncation, `safe_migration.rs` was restored from HEAD, disk capacity was recovered, and every required gate was rerun from scratch. Existing Roaming/Local app state was moved aside and restored around the destructive sandbox. Fresh sandbox outputs are preserved at `C:\Users\brayd\AppData\Roaming\com.kalpa.desktop.codex-p0a1-sandbox-output-20260826` and `C:\Users\brayd\AppData\Local\com.kalpa.desktop.codex-p0a1-sandbox-output-20260826`.
-- Blockers: none. No merge was performed.
+- Handoff: pushed the branch and opened stacked draft PR [#380](https://github.com/ESO-Toolkit/kalpa/pull/380). No merge was performed.
+- Blockers: none.
 - Exact next action: review and merge the stacked P0-A1 draft after W1, then begin P0-A2 from D-P0-1 with a fresh Fable consultation before choosing the lock dependency/API.
 
 ### 2026-08-26 — Codex
