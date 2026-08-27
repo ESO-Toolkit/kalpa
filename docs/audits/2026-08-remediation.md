@@ -19,7 +19,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
 | F2 | todo | - | - | - | - | - | Uploader log-directory sequencing. |
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
-| F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
+| F4 | pr-open | `fix/audit-f4-logout-invalidation` | [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) (draft, stacked on F1) | - | D-F4-1 | APPROVE | Focused 1 test; pack sequencing 4 tests; frontend check; 494 tests | Successful logout invalidates every private-list page request before clearing signed-in state; no wire/persisted-data change. |
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
@@ -63,7 +63,21 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Rejected: independent per-source IDs, because a request from one source could still overwrite the other source. Rejected: guarding only successful results, because stale failures and cleanup could still replace the active operation's error/loading state.
 - Compatibility: no wire-format, persisted-data, dependency, or visible UI changes. Rollback is a normal code revert with no data action.
 
+### D-F4-1 — Successful logout invalidates the private-list lifecycle
+
+- Chosen: after `auth_logout` succeeds, advance the existing `loadMyPacksSeqRef` before publishing signed-out state and clearing My Packs data/loading flags. The loader's existing success, error, and cleanup guards then reject every pre-logout page request.
+- Rejected: clearing state without advancing the sequence, because a late authenticated result remains current and can repopulate it. Rejected: invalidating before `auth_logout` succeeds, because a failed logout leaves the user authenticated and should preserve the current private view.
+- Compatibility: no wire-format, persisted-data, dependency, backend, or visible UI change. Rollback is a normal code revert with no data action.
+
 ## Session Log
+
+### 2026-08-26 — Codex (F4)
+
+- Active branch: `fix/audit-f4-logout-invalidation`; draft stacked PR [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) targets `fix/audit-f1-import-sequencing`.
+- Completed: reproduced a deferred authenticated My Packs request repopulating state after successful logout; implemented D-F4-1 by invalidating the shared private-list sequence before clearing signed-out state. The focused regression passes 1/1, related pack sequencing tests pass 4/4, `npm run check` passes, and `npm test` passes 39 files/494 tests.
+- Review: required local read-only Sol review returned `APPROVE` with no findings, no missing tests, wire contract OK, and a clean authenticated-private-load bug-class sweep. No follow-up review was required.
+- Blockers: no F4 implementation blockers. The PR remains draft and stacked until its F1 base is available in the integration history.
+- Exact next action: monitor PR CI, then mark #374 ready after base-branch sequencing is confirmed; do not merge from this worktree.
 
 ### 2026-08-26 — Codex (F1)
 
