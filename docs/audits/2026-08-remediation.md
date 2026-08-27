@@ -15,7 +15,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
 | R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
 | R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
-| R9 | in-progress | `fix/audit-r9-downloaded-version` | pending | - | not required | REVISE → REVISE; all verified findings addressed | 810 Rust; 490 frontend; clippy/fmt/check green | Persist checksum-bound filedetails version and invalidate stale update observations only after an applied update. |
+| R9 | pr-open | `fix/audit-r9-downloaded-version` | [#376](https://github.com/ESO-Toolkit/kalpa/pull/376) (draft, stacked) | - | not required | REVISE → REVISE; all verified findings addressed | 810 Rust; 490 frontend; clippy/fmt/check green | Persist checksum-bound filedetails version and invalidate stale update observations only after an applied update. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
 | F2 | todo | - | - | - | - | - | Uploader log-directory sequencing. |
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
@@ -84,7 +84,8 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Implemented: all single, legacy batch, streaming batch, and deferred-conflict update paths now carry the checksum-bound filedetails version through hashing and metadata. Successful applied updates discard the stale filelist observation only after metadata persists; failed and zero-success batches retain it.
 - Verification: Rust clippy fix, fmt, clippy all targets with warnings denied, 810 tests (17 ignored), and fmt check pass. Frontend typecheck/lint/Prettier and 490 tests pass. No Slint sidecar gate was required because no shared sidecar module changed.
 - Review: Fable and Luna were not required. Initial Sol review found the stale filelist phantom-loop path; follow-up Sol review found legacy zero-success cache invalidation. Both verified findings and requested regressions are addressed; the one-follow-up limit was observed.
-- Exact next action: open the draft stacked PR, record its URL here, and wait for the base PR before final review/merge. No merge is performed in this session.
+- Handoff: pushed the branch and opened draft stacked PR [#376](https://github.com/ESO-Toolkit/kalpa/pull/376) against `fix/audit-w1-worker-consistency`. No merge was performed.
+- Exact next action: wait for base PR #369, then review/merge #376 after its required checks are green.
 
 ### R9 Sol review — initial REVISE
 
