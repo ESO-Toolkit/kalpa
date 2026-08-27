@@ -430,7 +430,7 @@ export function UploaderWorkspace({
 
   const loadLogs = useCallback(
     async (dir: string) => {
-      if (logsDirRef.current !== dir) return;
+      if (logsDirRef.current !== dir) return null;
       const operationId = ++loadLogsSeqRef.current;
       const isCurrent = () => loadLogsSeqRef.current === operationId && logsDirRef.current === dir;
       setListLoading(true);
@@ -445,14 +445,16 @@ export function UploaderWorkspace({
         if (sel && !files.some((f) => f.path === sel)) {
           clearSelection();
         }
+        return files;
       } catch (e) {
-        if (!isCurrent()) return;
+        if (!isCurrent()) return null;
         const msg = getTauriErrorMessage(e);
         // Record the failure so the empty state can show the real reason instead
         // of "No log files found"; also clear any stale list from a prior folder.
         setListError(msg);
         setLogs([]);
         toast.error(`Couldn't list logs: ${msg}`);
+        return null;
       } finally {
         if (isCurrent()) setListLoading(false);
       }
@@ -765,7 +767,7 @@ export function UploaderWorkspace({
   }, [deleteTarget, restoreLog, logsDir, loadLogs, clearSelection]);
 
   const handleSelectLog = useCallback(
-    async (path: string) => {
+    async (path: string, freshLog?: LogFileInfo) => {
       // The slice picker is keyed on the selected log, so switching while it is
       // cutting or uploading would remount it and abandon a batch that is still
       // writing multi-GB files — with no UI left to report what happened.
@@ -776,7 +778,7 @@ export function UploaderWorkspace({
       // Guard against a slow scan of a previously-selected log resolving after a
       // newer selection and overwriting its results.
       const token = ++selectTokenRef.current;
-      const log = logs.find((l) => l.path === path);
+      const log = freshLog ?? logs.find((l) => l.path === path);
       const deferFullScan = (log?.sizeBytes ?? 0) > DEFER_FULL_PREFLIGHT_BYTES;
       selectedLogRef.current = path;
       setSelectedLog(path);
@@ -865,10 +867,20 @@ export function UploaderWorkspace({
       try {
         const imported = await invokeOrThrow<string>("uploader_import_log", { srcPath });
         if (logsDirRef.current !== activeDirectory) return;
-        if (activeDirectory) await loadLogs(activeDirectory);
+        const refreshedLogs = activeDirectory ? await loadLogs(activeDirectory) : null;
         if (logsDirRef.current !== activeDirectory) return;
-        await handleSelectLog(imported);
-        toast.success("Log added — scanning it now.");
+        const importedLog = refreshedLogs?.find((log) => log.path === imported);
+        if (!refreshedLogs) return;
+        if (!importedLog) {
+          toast.success("Log added, but it isn't in this folder.");
+          return;
+        }
+        await handleSelectLog(imported, importedLog);
+        toast.success(
+          importedLog.sizeBytes > DEFER_FULL_PREFLIGHT_BYTES
+            ? "Log added — full scan deferred."
+            : "Log added — scanning it now."
+        );
       } catch (e) {
         toast.error(`Couldn't add that log: ${getTauriErrorMessage(e)}`);
       } finally {
