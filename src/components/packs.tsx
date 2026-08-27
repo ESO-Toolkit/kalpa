@@ -128,6 +128,7 @@ export function Packs({
     AddonSettings
   > | null>(null);
   const [applyingSettings, setApplyingSettings] = useState(false);
+  const importOperationSeqRef = useRef(0);
 
   // Export state
   const [exportIncludeSettings, setExportIncludeSettings] = useState(false);
@@ -529,32 +530,40 @@ export function Packs({
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return;
 
+    const operationId = ++importOperationSeqRef.current;
     setResolvingCode(true);
     setImportError(null);
     setImportedPack(null);
     setImportedFileSettings(null);
     try {
       const pack = await invokeOrThrow<SharedPack>("resolve_share_code", { code: trimmed });
+      if (operationId !== importOperationSeqRef.current) return;
       setImportedPack(pack);
     } catch (e) {
+      if (operationId !== importOperationSeqRef.current) return;
       setImportError(getTauriErrorMessage(e));
     } finally {
-      setResolvingCode(false);
+      if (operationId === importOperationSeqRef.current) {
+        setResolvingCode(false);
+      }
     }
   }, []);
 
   const handleImportFile = async () => {
+    const operationId = ++importOperationSeqRef.current;
+    setResolvingCode(false);
     const path = await openFileDialog({
       filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
       multiple: false,
     });
-    if (!path) return;
+    if (!path || operationId !== importOperationSeqRef.current) return;
 
     setImportError(null);
     setImportedPack(null);
     setImportedFileSettings(null);
     try {
       const result = await invokeOrThrow<EsoPackFile>("import_pack_file", { path });
+      if (operationId !== importOperationSeqRef.current) return;
       setImportedPack({
         title: result.pack.title,
         description: result.pack.description,
@@ -565,10 +574,11 @@ export function Packs({
         sharedAt: result.sharedAt,
         expiresAt: "",
       });
-      if (result.settings && Object.keys(result.settings).length > 0) {
-        setImportedFileSettings(result.settings);
-      }
+      setImportedFileSettings(
+        result.settings && Object.keys(result.settings).length > 0 ? result.settings : null
+      );
     } catch (e) {
+      if (operationId !== importOperationSeqRef.current) return;
       setImportError(getTauriErrorMessage(e));
     }
   };
@@ -1115,6 +1125,8 @@ export function Packs({
                           }
                           applyingSettings={applyingSettings}
                           onClear={() => {
+                            ++importOperationSeqRef.current;
+                            setResolvingCode(false);
                             setImportedPack(null);
                             setImportedFileSettings(null);
                             setImportError(null);
