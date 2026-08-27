@@ -102,17 +102,20 @@ pub struct PendingUpdate {
     /// Publication marker from the filedetails response that produced the
     /// pending ZIP. Zero means this pending entry predates marker tracking.
     pub artifact_last_update: u64,
-    /// The downloaded ZIP's hash/signature map, computed once during conflict
-    /// detection (`build_conflict_report`) and reused as the post-extraction
-    /// baseline so the apply step doesn't re-decompress and re-hash the whole
-    /// archive a second time. Empty only for entries created before this field
-    /// existed or via paths that didn't compute it; the apply step falls back to
-    /// hashing the ZIP in that case.
+    /// Every folder the downloaded ZIP writes, each with its own hash map,
+    /// computed once during conflict detection (`build_conflict_report`) and
+    /// reused as the post-extraction baseline so the apply step doesn't
+    /// re-decompress and re-hash the whole archive a second time. Empty only
+    /// for entries created via paths that didn't compute it; the apply step
+    /// falls back to hashing the ZIP in that case.
     ///
-    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map (and
-    /// the apply step's reuse of this map) is a refcount bump rather than a deep
-    /// copy of a many-entry hash map.
-    pub zip_hashes: Arc<HashMap<String, String>>,
+    /// Archive-wide rather than primary-only: the apply step has to re-derive
+    /// the classification for every folder, or a sibling edited while the user
+    /// was deliberating would be overwritten unnoticed.
+    ///
+    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map is
+    /// a refcount bump rather than a deep copy.
+    pub zip_hashes: Arc<crate::file_hashes::ZipHashSet>,
 }
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);

@@ -757,7 +757,10 @@ struct NativePendingConflict {
     conflicts: Vec<String>,
     decisions: HashMap<String, i32>,
     zip_path: PathBuf,
-    zip_hashes: HashMap<String, String>,
+    /// Every folder the archive writes. Archive-wide, like the Tauri app:
+    /// the apply step re-derives the classification for all of them, or a
+    /// sibling edited during deliberation is overwritten unnoticed.
+    zip_hashes: file_hashes::ZipHashSet,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -13486,31 +13489,34 @@ fn apply_native_pending_conflict_files_blocking(
     kept_files.sort();
     kept_files.dedup();
 
-    if !files_to_backup.is_empty() {
-        let from_version = file_hashes::load_hash_manifest(addons_dir, &pending.folder_name)
+    // Backups live under `.kalpa-backups/<folder>/`, and each folder records
+    // its own installed version, so group first rather than labelling a
+    // sibling's backup with the primary's "from" version.
+    for (backup_folder, files) in file_hashes::group_by_folder(&files_to_backup) {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &backup_folder)
             .map(|manifest| manifest.installed_version)
             .unwrap_or_default();
         edit_backups::backup_user_files(
             addons_dir,
-            &pending.folder_name,
-            &files_to_backup,
+            &backup_folder,
+            &files,
             &from_version,
             &pending.update_version,
         )?;
     }
 
-    let skip_files = kept_files
-        .iter()
-        .map(|path| format!("{}/{}", pending.folder_name, path))
-        .collect::<HashSet<_>>();
+    // Kept paths are already folder-qualified, the shape the extractor matches
+    // on. Prepending the primary folder is what let a kept sibling file be
+    // overwritten anyway.
+    let skip_files = kept_files.iter().cloned().collect::<HashSet<_>>();
 
-    let zip_hashes = if pending.zip_hashes.is_empty() {
-        file_hashes::hash_zip_entries(&pending.zip_path, &pending.folder_name)?
+    let zip_hashes = if pending.zip_hashes.folders.is_empty() {
+        file_hashes::hash_zip_entries_by_folder(&pending.zip_path)?
     } else {
         pending.zip_hashes.clone()
     };
     let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
-    let empty_overrides = HashMap::new();
+    let empty_overrides = BTreeMap::new();
     let installed_folders = installer::install_addon_zip_selective_with_hashes(
         &pending.zip_path,
         addons_dir,
@@ -13518,7 +13524,6 @@ fn apply_native_pending_conflict_files_blocking(
         installer::ExtractHooks::NONE,
         pending.esoui_id,
         &pending.update_version,
-        &pending.folder_name,
         hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
@@ -13716,13 +13721,11 @@ fn apply_native_single_addon_update(
     if !report.conflicts.is_empty() && conflict_policy == 2 {
         backup_native_conflicting_files(addons_dir, target, remote_version, &report.conflicts)?;
     }
-    let skip_files = kept_files
-        .iter()
-        .map(|path| format!("{}/{}", target.folder_name, path))
-        .collect::<HashSet<_>>();
+    // Already folder-qualified; see the pending-conflict path.
+    let skip_files = kept_files.iter().cloned().collect::<HashSet<_>>();
 
     let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
-    let empty_overrides = HashMap::new();
+    let empty_overrides = BTreeMap::new();
     let installed_folders = installer::install_addon_zip_selective_with_hashes(
         zip.path(),
         addons_dir,
@@ -13730,7 +13733,6 @@ fn apply_native_single_addon_update(
         installer::ExtractHooks::NONE,
         target.esoui_id,
         remote_version,
-        &target.folder_name,
         hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
@@ -13769,36 +13771,54 @@ fn native_kept_files_for_policy(
     Some(kept_files)
 }
 
+/// Back up conflicting files before a policy-driven overwrite.
+///
+/// Conflicts are folder-qualified and can span several folders, so they are
+/// grouped first. Passing them through under the primary folder would build
+/// paths like `MainAddon/LibFoo/init.lua`, which exist nowhere: the backup
+/// would silently find nothing and the edits would be overwritten unprotected.
 fn backup_native_conflicting_files(
     addons_dir: &Path,
-    target: &NativeAddonUpdateTarget,
+    _target: &NativeAddonUpdateTarget,
     remote_version: &str,
     conflicts: &[String],
 ) -> Result<(), String> {
-    let from_version = file_hashes::load_hash_manifest(addons_dir, &target.folder_name)
-        .map(|manifest| manifest.installed_version)
-        .unwrap_or_default();
-    edit_backups::backup_user_files(
-        addons_dir,
-        &target.folder_name,
-        conflicts,
-        &from_version,
-        remote_version,
-    )
+    for (folder, files) in file_hashes::group_by_folder(conflicts) {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &folder)
+            .map(|manifest| manifest.installed_version)
+            .unwrap_or_default();
+        edit_backups::backup_user_files(
+            addons_dir,
+            &folder,
+            &files,
+            &from_version,
+            remote_version,
+        )?;
+    }
+    Ok(())
 }
 
+/// Upstream hashes for kept-mine files, grouped by folder.
+///
+/// Mirrors the Tauri app's `build_hash_overrides`. Grouped because hash
+/// manifests are per folder, and kept files can now come from any folder the
+/// archive touches rather than only the primary.
 fn native_hash_overrides(
     kept_files: &[String],
-    zip_hashes: &HashMap<String, String>,
-) -> Option<HashMap<String, String>> {
-    let overrides = kept_files
-        .iter()
-        .filter_map(|path| {
-            zip_hashes
-                .get(path)
-                .map(|hash| (path.clone(), hash.clone()))
-        })
-        .collect::<HashMap<_, _>>();
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Option<BTreeMap<String, HashMap<String, String>>> {
+    let mut overrides: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    for key in kept_files {
+        let Some((folder, relative)) = file_hashes::split_qualified(key) else {
+            continue;
+        };
+        if let Some(hash) = zip_hashes.folders.get(folder).and_then(|m| m.get(relative)) {
+            overrides
+                .entry(folder.to_string())
+                .or_default()
+                .insert(relative.to_string(), hash.clone());
+        }
+    }
     (!overrides.is_empty()).then_some(overrides)
 }
 
@@ -13820,42 +13840,53 @@ fn remove_stale_native_metadata(
     }
 }
 
+/// Mirror of the Tauri app's `build_conflict_report`.
+///
+/// Covers every folder the archive writes. Classifying only the primary meant
+/// a modified file in a bundled sibling was overwritten with no prompt and no
+/// backup, even though it had a baseline and was shown as modified.
+///
+/// Emitted paths are folder-qualified, matching the wire contract and the
+/// selective-extraction skip keys.
 fn build_native_conflict_report(
     addons_dir: &Path,
-    folder_name: &str,
+    _folder_name: &str,
     zip_path: &Path,
-) -> Result<(NativeConflictReport, HashMap<String, String>), String> {
-    let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
-    let addon_path = addons_dir.join(folder_name);
-    let disk_hashes = if stored.is_some() && addon_path.is_dir() {
-        file_hashes::compute_addon_hashes(&addon_path)?
-    } else {
-        HashMap::new()
-    };
-    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
-    let stored_files = stored.as_ref().map(|manifest| &manifest.files);
+) -> Result<(NativeConflictReport, file_hashes::ZipHashSet), String> {
+    let zip_hashes = file_hashes::hash_zip_entries_by_folder(zip_path)?;
 
     let mut safe_file_count = 0;
     let mut auto_kept_files = Vec::new();
     let mut conflicts = Vec::new();
 
-    for (relative_path, zip_hash) in &zip_hashes {
-        let stored_hash = stored_files.and_then(|files| files.get(relative_path));
-        let disk_hash = disk_hashes.get(relative_path);
-        let user_modified = match (stored_hash, disk_hash) {
-            (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
-            (Some(_), None) => true,
-            (None, _) => false,
+    for (folder, folder_hashes) in &zip_hashes.folders {
+        let stored = file_hashes::load_hash_manifest(addons_dir, folder);
+        let addon_path = addons_dir.join(folder);
+        let disk_hashes = if stored.is_some() && addon_path.is_dir() {
+            file_hashes::compute_addon_hashes(&addon_path)?
+        } else {
+            HashMap::new()
         };
-        let upstream_changed = match stored_hash {
-            Some(stored) => stored != zip_hash,
-            None => true,
-        };
+        let stored_files = stored.as_ref().map(|manifest| &manifest.files);
 
-        match (user_modified, upstream_changed) {
-            (false, _) => safe_file_count += 1,
-            (true, false) => auto_kept_files.push(relative_path.clone()),
-            (true, true) => conflicts.push(relative_path.clone()),
+        for (relative_path, zip_hash) in folder_hashes {
+            let stored_hash = stored_files.and_then(|files| files.get(relative_path));
+            let disk_hash = disk_hashes.get(relative_path);
+            let user_modified = match (stored_hash, disk_hash) {
+                (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            let upstream_changed = match stored_hash {
+                Some(stored) => stored != zip_hash,
+                None => true,
+            };
+
+            match (user_modified, upstream_changed) {
+                (false, _) => safe_file_count += 1,
+                (true, false) => auto_kept_files.push(file_hashes::qualify(folder, relative_path)),
+                (true, true) => conflicts.push(file_hashes::qualify(folder, relative_path)),
+            }
         }
     }
 
@@ -23800,7 +23831,9 @@ CombatMetrics_SavedVariables = {
         let (report, _) =
             build_native_conflict_report(root, folder, &zip_path).expect("build report");
 
-        assert_eq!(report.conflicts, vec!["main.lua".to_string()]);
+        // Folder-qualified now: an archive can write several folders, so a
+        // bare path would be ambiguous between them.
+        assert_eq!(report.conflicts, vec![format!("{folder}/main.lua")]);
         assert!(report.auto_kept_files.is_empty());
 
         let _ = fs::remove_dir_all(root);
@@ -23829,7 +23862,7 @@ CombatMetrics_SavedVariables = {
             build_native_conflict_report(root, folder, &zip_path).expect("build report");
 
         assert!(report.conflicts.is_empty());
-        assert_eq!(report.auto_kept_files, vec!["main.lua".to_string()]);
+        assert_eq!(report.auto_kept_files, vec![format!("{folder}/main.lua")]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -23930,7 +23963,8 @@ CombatMetrics_SavedVariables = {
     ) -> NativePendingConflict {
         let (report, zip_hashes) =
             build_native_conflict_report(root, folder, zip_path).expect("build report");
-        assert_eq!(report.conflicts, vec!["main.lua".to_string()]);
+        let qualified = format!("{folder}/main.lua");
+        assert_eq!(report.conflicts, vec![qualified.clone()]);
 
         NativePendingConflict {
             folder_name: folder.to_string(),
@@ -23941,7 +23975,7 @@ CombatMetrics_SavedVariables = {
             safe_file_count: report.safe_file_count,
             auto_kept_files: report.auto_kept_files,
             conflicts: report.conflicts,
-            decisions: HashMap::from([("main.lua".to_string(), decision)]),
+            decisions: HashMap::from([(qualified, decision)]),
             zip_path: zip_path.to_path_buf(),
             zip_hashes,
         }

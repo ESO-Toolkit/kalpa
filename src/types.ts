@@ -602,6 +602,13 @@ export interface AuthUser {
 // ── Protected Edits types ──────────────────────────────────────────────
 
 export interface FileConflict {
+  /**
+   * Folder-qualified path, `Folder/relative/path.lua`.
+   *
+   * An archive can write several top-level folders, so a bare path is
+   * ambiguous: two bundled siblings shipping `init.lua` would collide in the
+   * decisions map and in the backup and diff lookups.
+   */
   relativePath: string;
   userHash: string;
   upstreamHash: string;
@@ -609,9 +616,14 @@ export interface FileConflict {
 
 export interface ConflictReport {
   sessionId: string;
+  /** The archive primary. Not the only folder the report covers. */
   folderName: string;
+  /** Every top-level folder this archive writes, sorted. */
+  folders: string[];
   updateVersion: string;
+  /** Folder-qualified paths; see {@link FileConflict.relativePath}. */
   safeFiles: string[];
+  /** Folder-qualified paths; see {@link FileConflict.relativePath}. */
   autoKeptFiles: string[];
   conflicts: FileConflict[];
   hasHashBaseline: boolean;

@@ -1,5 +1,5 @@
 use crate::install_txn::InstallTransaction;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -131,7 +131,6 @@ pub fn install_addon_zip_with_hashes(
         Some(HashBaseline {
             esoui_id,
             version,
-            override_folder: None,
             overrides: None,
         }),
     )
@@ -145,8 +144,7 @@ pub fn install_addon_zip_selective_with_hashes(
     hooks: ExtractHooks,
     esoui_id: u32,
     version: &str,
-    primary_folder: &str,
-    overrides: &HashMap<String, String>,
+    overrides: &BTreeMap<String, HashMap<String, String>>,
 ) -> Result<Vec<String>, String> {
     extract_with_rollback(
         zip_path,
@@ -156,7 +154,6 @@ pub fn install_addon_zip_selective_with_hashes(
         Some(HashBaseline {
             esoui_id,
             version,
-            override_folder: Some(primary_folder),
             overrides: Some(overrides),
         }),
     )
@@ -165,8 +162,7 @@ pub fn install_addon_zip_selective_with_hashes(
 struct HashBaseline<'a> {
     esoui_id: u32,
     version: &'a str,
-    override_folder: Option<&'a str>,
-    overrides: Option<&'a HashMap<String, String>>,
+    overrides: Option<&'a BTreeMap<String, HashMap<String, String>>>,
 }
 
 /// Shared extraction driver: recover abandoned work, extract into an isolated
@@ -243,14 +239,15 @@ fn manifests_to_bytes(
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut serialized = Vec::with_capacity(manifests.len());
     for manifest in &mut manifests {
-        if baseline.override_folder == Some(manifest.addon_folder.as_str()) {
-            if let Some(overrides) = baseline.overrides {
+        if let Some(overrides) = baseline
+            .overrides
+            .and_then(|all| all.get(&manifest.addon_folder))
+        {
                 for (path, hash) in overrides {
                     manifest.files.insert(path.clone(), hash.clone());
                 }
                 manifest.modified_files = overrides.keys().cloned().collect();
                 manifest.modified_files.sort();
-            }
         }
         let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|e| format!("Failed to encode hash baseline: {e}"))?;
