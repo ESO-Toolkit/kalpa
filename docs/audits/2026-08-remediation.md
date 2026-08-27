@@ -21,7 +21,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
 | F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
-| F6 | pr-ready | `fix/audit-f6-optimistic-sequencing` | pending | - | D-F6-1; Luna PASS | REVISE follow-up; no findings, requested tests addressed | Frontend check; 500 tests | Sequenced optimistic settings/library state and latest-only SavedVariables file/character refreshes implemented. |
+| F6 | pr-open | `fix/audit-f6-optimistic-sequencing` | [#377](https://github.com/ESO-Toolkit/kalpa/pull/377) (draft, stacked) | - | D-F6-1; Luna PASS | REVISE follow-up; no findings, requested tests addressed | Frontend check; 500 tests | Sequenced optimistic settings/library state and latest-only SavedVariables file/character refreshes implemented. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
@@ -108,7 +108,7 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - Luna review: `PASS`. `TOKEN_VIOLATIONS: None`; `ACCESSIBILITY: None`; `STATE_FEEDBACK: None`; `RESPONSIVE_BEHAVIOR: None`.
 - Sol review: `REVISE`. Verified that `list_characters` still ran outside the latest-request/unmount guard and could apply path-A character state after a path-B switch. Addressed with an independent latest/unmount request gate. Added the requested unmount, late-hydration failure rollback, and pre-settlement functional-array composition tests. Focused 9/9 tests, full frontend 499/499 tests, and `npm run check` pass.
 - Sol follow-up: `REVISE` with no implementation findings, `WIRE_CONTRACT: OK`, and `BUG_CLASS_SWEEP: CLEAN`. It requested a rejected-after-unmount assertion and a late hydration value distinct from the constructor default. Both tests were strengthened; focused 10/10 tests, full frontend 500/500 tests, and `npm run check` pass. The one prescribed follow-up review is complete.
-- Active work: push and open the stacked draft PR targeting `fix/audit-w1-worker-consistency`.
+- Handoff: pushed the branch and opened draft PR [#377](https://github.com/ESO-Toolkit/kalpa/pull/377), stacked on `fix/audit-w1-worker-consistency`. Awaiting GitHub CI; do not merge the stack out of order.
 
 ## Open Questions
 
