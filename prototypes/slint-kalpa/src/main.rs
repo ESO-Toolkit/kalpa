@@ -1189,9 +1189,9 @@ enum NativeShellLock {
     Held(#[allow(dead_code)] native_boot::AuthorityGuard),
     /// Another sidecar already holds the lock.
     AlreadyRunning,
-    /// The lock could not be evaluated (IO error); run unguarded rather than
-    /// refusing to start over a bookkeeping failure.
-    Unavailable,
+    /// The lock could not be evaluated (IO error); fail closed so this process
+    /// can never acknowledge readiness without exclusive writer authority.
+    Unavailable(String),
 }
 
 fn acquire_native_shell_lock() -> NativeShellLock {
@@ -1207,7 +1207,7 @@ fn acquire_native_shell_lock() -> NativeShellLock {
         Ok(native_boot::AuthorityClaim::AlreadyHeld) => NativeShellLock::AlreadyRunning,
         Err(error) => {
             eprintln!("[native-shell] authority lock unavailable: {error}");
-            NativeShellLock::Unavailable
+            NativeShellLock::Unavailable(error)
         }
     }
 }
@@ -1251,21 +1251,35 @@ fn main() -> Result<(), slint::PlatformError> {
     // while the shell is up) must not stack another full window. The running
     // instance is living proof native mode works, so this activation also
     // acknowledges the boot marker before bowing out.
-    let _instance_lock = match acquire_native_shell_lock() {
+    let handoff_launch_id = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (initial_authority, handoff_pending) = match acquire_native_shell_lock() {
         NativeShellLock::AlreadyRunning => {
             let native_is_active = std::env::var_os("KALPA_NATIVE_STATE_DIR")
                 .map(PathBuf::from)
                 .map(|dir| native_boot::native_authority_is_active(&dir))
                 .unwrap_or(false);
-            if native_is_active {
+            if !native_is_active && handoff_launch_id.is_some() {
+                // The WebView parent deliberately retains authority until this
+                // child's event loop proves ready. Construct hidden, acknowledge,
+                // then acquire/show after the parent releases.
+                (None, true)
+            } else if native_is_active {
                 confirm_native_boot_ready();
+                return Ok(());
             } else {
                 eprintln!("[native-shell] WebView retains UI authority; rejecting sidecar");
+                return Ok(());
             }
+        }
+        NativeShellLock::Unavailable(error) => {
+            eprintln!("[native-shell] refusing unguarded startup: {error}");
             return Ok(());
         }
-        held_or_unavailable => held_or_unavailable,
+        NativeShellLock::Held(guard) => (Some(guard), false),
     };
+    let authority_guard = Rc::new(RefCell::new(initial_authority));
 
     let render_config = native_render_config();
 
@@ -1350,20 +1364,23 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     start_native_app_update_check(ui.as_weak(), true);
     let shutdown_timer = slint::Timer::default();
-    if let (Some(state_dir), NativeShellLock::Held(guard)) = (
-        std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from),
-        &_instance_lock,
-    ) {
-        let launch_id = guard.launch_id().to_string();
+    if let Some(state_dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
+        let shutdown_authority = authority_guard.clone();
         shutdown_timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(50),
             move || {
-                if native_boot::shutdown_requested(&state_dir, &launch_id) {
-                    eprintln!(
-                        "[native-shell] releasing UI authority launch_id={launch_id} for WebView"
-                    );
-                    let _ = slint::quit_event_loop();
+                let launch_id = shutdown_authority
+                    .borrow()
+                    .as_ref()
+                    .map(|guard| guard.launch_id().to_string());
+                if let Some(launch_id) = launch_id {
+                    if native_boot::shutdown_requested(&state_dir, &launch_id) {
+                        eprintln!(
+                            "[native-shell] releasing UI authority launch_id={launch_id} for WebView"
+                        );
+                        let _ = slint::quit_event_loop();
+                    }
                 }
             },
         );
@@ -1372,8 +1389,57 @@ fn main() -> Result<(), slint::PlatformError> {
     // acknowledge the launcher's boot marker so future launches keep native
     // mode. Anything that dies before this line leaves the marker in place,
     // and the next kalpa.exe start falls back to the WebView UI.
-    slint::Timer::single_shot(Duration::ZERO, confirm_native_boot_ready);
-    let result = ui.run();
+    if handoff_pending {
+        let state_dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+            .map(PathBuf::from)
+            .expect("handoff launch has a native state directory");
+        let launch_id = handoff_launch_id.expect("handoff launch has an ID");
+        let handoff_ui = ui.as_weak();
+        let handoff_authority = authority_guard.clone();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            match native_boot::signal_ready(&state_dir, &launch_id) {
+                Ok(true) => eprintln!("[native-shell] event loop ready launch_id={launch_id}"),
+                Ok(false) => {
+                    eprintln!("[native-shell] rejected stale launch_id={launch_id}");
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[native-shell] failed to acknowledge launch_id={launch_id}: {error}"
+                    );
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+            }
+            match native_boot::claim_after_ready_release(
+                &state_dir,
+                &launch_id,
+                native_boot::READY_TIMEOUT,
+            ) {
+                Ok(guard) => {
+                    *handoff_authority.borrow_mut() = Some(guard);
+                    if let Some(ui) = handoff_ui.upgrade() {
+                        if let Err(error) = ui.show() {
+                            eprintln!("[native-shell] failed to show ready UI: {error}");
+                            let _ = slint::quit_event_loop();
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[native-shell] authority transfer failed: {error}");
+                    let _ = slint::quit_event_loop();
+                }
+            }
+        });
+    } else {
+        slint::Timer::single_shot(Duration::ZERO, confirm_native_boot_ready);
+    }
+    let result = if handoff_pending {
+        slint::run_event_loop()
+    } else {
+        ui.run()
+    };
     shutdown_timer.stop();
     // The sign-in WebView2 window is a separate process; close it with the shell
     // instead of leaving an orphaned login on screen.
@@ -18175,6 +18241,21 @@ fn return_to_webview_shell(
         ));
     }
 
+    let state_dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "native state directory was not provided".to_string())?;
+    let pending_path = native_boot::pending_path(&state_dir);
+    let _pending_guard = transaction_lock::acquire(
+        &pending_path,
+        transaction_lock::LockOptions {
+            timeout: native_boot::READY_TIMEOUT,
+            cancel: None,
+        },
+    )
+    .map_err(|error| format!("Could not serialize WebView handoff: {error}"))?;
+    let launch_id = native_boot::new_launch_id();
+    native_boot::prepare(&state_dir, &launch_id)?;
+
     let mut command = std::process::Command::new(&exe);
     // Children inherit this process's environment, and THIS process may itself
     // carry KALPA_START_* from the launch that created it. Clear every re-entry
@@ -18185,10 +18266,13 @@ fn return_to_webview_shell(
         "KALPA_START_LOG_UPLOADER",
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
+        native_boot::LAUNCH_ID_ENV,
+        native_boot::WEBVIEW_LAUNCH_ID_ENV,
     ] {
         command.env_remove(stale);
     }
     command.env("KALPA_FORCE_WEBVIEW", "1");
+    command.env(native_boot::WEBVIEW_LAUNCH_ID_ENV, &launch_id);
     if start_app_update {
         command.env("KALPA_START_APP_UPDATE", "1");
     }
@@ -18202,10 +18286,48 @@ fn return_to_webview_shell(
         command.env("KALPA_START_PACK_HUB_ID", pack_id);
     }
 
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("failed to launch webview shell: {error}"))
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(format!("failed to launch webview shell: {error}"));
+        }
+    };
+    eprintln!("[native-shell] waiting for WebView ready launch_id={launch_id}");
+    let outcome = native_boot::wait_for_ready(
+        &state_dir,
+        &launch_id,
+        native_boot::READY_TIMEOUT,
+        || match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "[native-shell] WebView exited before ready launch_id={launch_id} status={status}"
+                );
+                Ok(native_boot::ChildState::Exited)
+            }
+            Ok(None) => Ok(native_boot::ChildState::Running),
+            Err(error) => Err(format!("failed to inspect WebView handoff: {error}")),
+        },
+    );
+    native_boot::clear_owned(&state_dir, &launch_id);
+    match outcome? {
+        native_boot::WaitOutcome::Ready => {
+            eprintln!("[native-shell] WebView ready launch_id={launch_id}; releasing native UI");
+            Ok(())
+        }
+        native_boot::WaitOutcome::ChildExited => {
+            Err("WebView exited before reporting that its runtime was ready.".to_string())
+        }
+        native_boot::WaitOutcome::TimedOut => {
+            eprintln!(
+                "[native-shell] WebView ready timeout launch_id={launch_id}; keeping native UI"
+            );
+            if child.kill().is_ok() {
+                let _ = child.wait();
+            }
+            Err("WebView timed out before its runtime was ready.".to_string())
+        }
+    }
 }
 
 fn open_url(url: &str) {

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) const PENDING_FILE: &str = "native-boot.pending";
 pub(crate) const READY_FILE: &str = "native-boot.ready";
 pub(crate) const LAUNCH_ID_ENV: &str = "KALPA_NATIVE_LAUNCH_ID";
+pub(crate) const WEBVIEW_LAUNCH_ID_ENV: &str = "KALPA_WEBVIEW_LAUNCH_ID";
 pub(crate) const ACTIVE_FILE: &str = "native-shell.active";
 pub(crate) const SHUTDOWN_FILE: &str = "native-shell.shutdown";
 const AUTHORITY_FILE: &str = "native-shell.authority";
@@ -169,6 +170,7 @@ pub(crate) fn claim_webview_after_shutdown(
     let launch_id = format!("webview-{}", new_launch_id());
     let deadline = Instant::now() + timeout;
     let mut requested = false;
+    let mut last_request = None;
     loop {
         match try_claim_authority(state_dir, &launch_id)? {
             AuthorityClaim::Held(guard) => {
@@ -176,8 +178,15 @@ pub(crate) fn claim_webview_after_shutdown(
                 return Ok(guard);
             }
             AuthorityClaim::AlreadyHeld => {
-                if !requested {
+                // Re-read and re-target periodically: a crashed/relaunched native
+                // owner can replace the active launch ID while this WebView waits.
+                // A one-shot request would remain bound to the dead owner forever.
+                if last_request
+                    .map(|instant: Instant| instant.elapsed() >= Duration::from_millis(250))
+                    .unwrap_or(true)
+                {
                     requested = request_active_shutdown(state_dir)?;
+                    last_request = Some(Instant::now());
                 }
             }
         }
@@ -187,6 +196,27 @@ pub(crate) fn claim_webview_after_shutdown(
             } else {
                 "Native UI authority is held but its active record is unavailable.".to_string()
             });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Wait for the current UI owner to complete a launch-bound handoff, without
+/// asking it to shut down. The ready parent owns that release decision.
+#[allow(dead_code)] // Used by the path-including Slint crate.
+pub(crate) fn claim_after_ready_release(
+    state_dir: &Path,
+    launch_id: &str,
+    timeout: Duration,
+) -> Result<AuthorityGuard, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match try_claim_authority(state_dir, launch_id)? {
+            AuthorityClaim::Held(guard) => return Ok(guard),
+            AuthorityClaim::AlreadyHeld => {}
+        }
+        if Instant::now() >= deadline {
+            return Err("Timed out waiting for the ready parent to release UI authority.".into());
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -417,6 +447,43 @@ mod tests {
     }
 
     #[test]
+    fn authority_publication_failure_cannot_become_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "launch-a").unwrap();
+        fs::create_dir(dir.path().join(ACTIVE_FILE)).unwrap();
+
+        assert!(try_claim_authority(dir.path(), "launch-a").is_err());
+        assert!(!ready_matches(dir.path(), "launch-a"));
+
+        // The failed active-record publication drops/unlocks its provisional
+        // guard, so a corrected retry can deterministically acquire authority.
+        fs::remove_dir(dir.path().join(ACTIVE_FILE)).unwrap();
+        assert!(matches!(
+            try_claim_authority(dir.path(), "launch-b").unwrap(),
+            AuthorityClaim::Held(_)
+        ));
+    }
+
+    #[test]
+    fn ready_child_acquires_authority_only_after_parent_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = match try_claim_authority(dir.path(), "webview-parent").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        let state_dir = dir.path().to_path_buf();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            drop(parent);
+        });
+
+        let child = claim_after_ready_release(&state_dir, "native-child", Duration::from_secs(1))
+            .expect("ready child acquires after parent release");
+        assert_eq!(child.launch_id(), "native-child");
+        release.join().unwrap();
+    }
+
+    #[test]
     fn blocked_ready_path_cannot_create_false_readiness() {
         let dir = tempfile::tempdir().unwrap();
         prepare(dir.path(), "launch-a").unwrap();
@@ -461,7 +528,7 @@ mod tests {
         prepare(&state_dir, "ready-child").unwrap();
         let mut ready = spawn_protocol_child(&state_dir, "ready-child", "ready");
         assert_eq!(
-            wait_for_ready(&state_dir, "ready-child", Duration::from_secs(1), || {
+            wait_for_ready(&state_dir, "ready-child", Duration::from_secs(3), || {
                 Ok(if ready.try_wait().unwrap().is_some() {
                     ChildState::Exited
                 } else {

@@ -9978,6 +9978,8 @@ const NATIVE_BOOT_FAILED: &str = "native-boot-failed";
 
 static WEBVIEW_AUTHORITY: OnceLock<Mutex<Option<crate::native_boot::AuthorityGuard>>> =
     OnceLock::new();
+static NATIVE_HANDOFF_ACTIVE: AtomicBool = AtomicBool::new(false);
+static NATIVE_HANDOFF_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGuard>> {
     WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
@@ -9998,6 +10000,42 @@ pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), Stri
     Ok(())
 }
 
+/// Preserve an activation in the still-live WebView instead of letting an
+/// in-flight native handoff exit underneath it.
+pub(crate) fn cancel_native_handoff_for_activation() -> bool {
+    if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
+        NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+        eprintln!("[native-shell] cancelling handoff for incoming activation");
+        true
+    } else {
+        false
+    }
+}
+
+/// Complete the reverse handoff only after the WebView page/runtime is live.
+/// Called by the main-window finished-load callback while the window is hidden.
+pub(crate) fn complete_webview_handoff(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(launch_id) = std::env::var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let state_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    if !crate::native_boot::signal_ready(&state_dir, &launch_id)? {
+        return Err(format!(
+            "WebView handoff launch ID was rejected: {launch_id}"
+        ));
+    }
+    eprintln!("[native-shell] WebView runtime ready launch_id={launch_id}");
+    claim_webview_authority(app)?;
+    std::env::remove_var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV);
+    Ok(())
+}
+
 fn release_webview_authority() {
     if let Ok(mut guard) = webview_authority().lock() {
         guard.take();
@@ -10008,6 +10046,7 @@ fn launch_native_shell_process(
     exe_path: &Path,
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(), String> {
     let state_dir = app_data_dir.ok_or_else(|| {
         "Native performance UI requires an application state directory.".to_string()
@@ -10063,21 +10102,34 @@ fn launch_native_shell_process(
     };
 
     eprintln!("[native-shell] waiting for ready launch_id={launch_id}");
+    let mut cancelled = false;
     let outcome = crate::native_boot::wait_for_ready(
         &state_dir,
         &launch_id,
         crate::native_boot::READY_TIMEOUT,
-        || match child.try_wait() {
-            Ok(Some(status)) => {
-                eprintln!(
+        || {
+            if cancel
+                .map(|flag| flag.load(Ordering::SeqCst))
+                .unwrap_or(false)
+            {
+                cancelled = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("[native-shell] launch cancelled before ready launch_id={launch_id}");
+                return Ok(crate::native_boot::ChildState::Exited);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!(
                     "[native-shell] child exited before ready launch_id={launch_id} status={status}"
                 );
-                Ok(crate::native_boot::ChildState::Exited)
+                    Ok(crate::native_boot::ChildState::Exited)
+                }
+                Ok(None) => Ok(crate::native_boot::ChildState::Running),
+                Err(error) => Err(format!(
+                    "Failed to inspect native performance UI launch {launch_id}: {error}"
+                )),
             }
-            Ok(None) => Ok(crate::native_boot::ChildState::Running),
-            Err(error) => Err(format!(
-                "Failed to inspect native performance UI launch {launch_id}: {error}"
-            )),
         },
     );
     crate::native_boot::clear_owned(&state_dir, &launch_id);
@@ -10085,6 +10137,9 @@ fn launch_native_shell_process(
         crate::native_boot::WaitOutcome::Ready => {
             eprintln!("[native-shell] ready launch_id={launch_id}");
             Ok(())
+        }
+        crate::native_boot::WaitOutcome::ChildExited if cancelled => {
+            Err("Native handoff was cancelled to preserve an incoming activation.".to_string())
         }
         crate::native_boot::WaitOutcome::ChildExited => Err(
             "Native performance UI exited before reporting that its event loop was ready."
@@ -10406,17 +10461,29 @@ pub fn try_launch_native_performance_mode_on_startup(
                 );
                 return Ok(Some(marker));
             }
-            Ok(_stale_guard) => {}
+            Ok(stale_guard) => {
+                // Keep the launch guard through cleanup so a rapid relaunch
+                // cannot publish a fresh marker between classification and remove.
+                revert_performance_mode_to_webview(&settings_path);
+                let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+                let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+                let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+                drop(stale_guard);
+                eprintln!(
+                    "[native-shell] stale pending launch found; reverting to the WebView UI."
+                );
+                return Ok(None);
+            }
             Err(error) => {
                 eprintln!("[native-shell] pending launch state unreadable: {error}; falling back");
+                // Without the launch guard we cannot prove the marker still
+                // belongs to the stale launch. Preserve it rather than racing a
+                // new owner; disabling native mode keeps subsequent boots safe.
+                revert_performance_mode_to_webview(&settings_path);
+                let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+                return Err(format!("Could not inspect stale native launch: {error}"));
             }
         }
-        revert_performance_mode_to_webview(&settings_path);
-        let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
-        let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
-        let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
-        eprintln!("[native-shell] stale pending launch found; reverting to the WebView UI.");
-        return Ok(None);
     }
 
     if !native_performance_mode_enabled_from_path(&settings_path)? {
@@ -10441,8 +10508,9 @@ pub fn try_launch_native_performance_mode_on_startup(
         &exe_path,
         Some(app_data_dir.clone()),
         std::env::current_exe().ok(),
+        None,
     ) {
-        // The sidecar could not even spawn (or died <200ms in): revert NOW so
+        // The sidecar could not spawn, exited, or timed out before readiness:
         // this launch continues into the webview and the next one doesn't
         // retry a known-broken native mode.
         revert_performance_mode_to_webview(&settings_path);
@@ -10462,24 +10530,32 @@ pub async fn launch_native_performance_mode(
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
-    release_webview_authority();
-    let launch_result = tokio::task::spawn_blocking(move || {
-        launch_native_shell_process(&launch_path, app_data_dir, webview_exe)
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let task_result = tokio::task::spawn_blocking(move || {
+        launch_native_shell_process(
+            &launch_path,
+            app_data_dir,
+            webview_exe,
+            Some(&NATIVE_HANDOFF_CANCELLED),
+        )
     })
-    .await
-    .map_err(|error| format!("Task failed: {error}"))?;
-    if let Err(error) = launch_result {
-        return match claim_webview_authority(&app) {
-            Ok(()) => Err(error),
-            Err(restore_error) => Err(format!(
-                "{error} WebView authority recovery also failed: {restore_error}"
-            )),
-        };
+    .await;
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    let launch_result = task_result
+        .map_err(|error| format!("Native handoff task failed: {error}"))
+        .and_then(|result| result);
+    let cancelled = NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst);
+    launch_result?;
+
+    if cancelled {
+        return Err("Native handoff was cancelled to preserve an incoming activation.".to_string());
     }
 
     // The blocking launcher returns only after the matching child has executed
     // a callback on Slint's live event loop. Every failure keeps this WebView
     // process authoritative and visible.
+    release_webview_authority();
     app.exit(0);
 
     Ok(NativePerformanceLaunch {
@@ -12633,4 +12709,16 @@ mod tests {
         // `required` defaults to true when the worker omits it.
         assert!(pack.addons[0].required);
     }
+}
+#[test]
+fn incoming_activation_cancels_only_an_active_native_handoff() {
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    assert!(!cancel_native_handoff_for_activation());
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    assert!(cancel_native_handoff_for_activation());
+    assert!(NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst));
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
 }

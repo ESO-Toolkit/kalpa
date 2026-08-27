@@ -503,10 +503,16 @@ pub fn run() {
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             {
+                if let Err(error) = commands::complete_webview_handoff(webview.app_handle()) {
+                    eprintln!("Failed to complete WebView handoff: {error}");
+                    webview.app_handle().exit(1);
+                    return;
+                }
                 reveal_initial_main_window(webview.app_handle(), "page load finished");
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            commands::cancel_native_handoff_for_activation();
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
                 webview_power::on_shown(app); // resume before showing (flash-free)
@@ -582,12 +588,20 @@ pub fn run() {
             // owns the cross-process UI-authority lock. For a deep-link launch,
             // this requests an observable native shutdown and waits for its OS
             // lock to be released before showing the WebView.
-            if let Err(error) = commands::claim_webview_authority(app.handle()) {
-                eprintln!("Failed to acquire WebView UI authority: {error}");
-                return Err(std::io::Error::other(error).into());
+            let reverse_handoff = std::env::var_os(native_boot::WEBVIEW_LAUNCH_ID_ENV).is_some();
+            if !reverse_handoff {
+                if let Err(error) = commands::claim_webview_authority(app.handle()) {
+                    eprintln!("Failed to acquire WebView UI authority: {error}");
+                    return Err(std::io::Error::other(error).into());
+                }
             }
 
-            schedule_initial_main_window_watchdog(app.handle());
+            // A reverse-handoff child must never reveal on the ordinary timeout:
+            // the still-visible Slint parent retains authority until page-ready.
+            // If page load hangs, the parent kills this hidden child and stays up.
+            if !reverse_handoff {
+                schedule_initial_main_window_watchdog(app.handle());
+            }
 
             // Consume the sidecar's re-entry flags, then scrub them from this
             // process's environment: children (including a sidecar launched by
