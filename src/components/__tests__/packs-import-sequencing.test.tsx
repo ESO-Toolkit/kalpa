@@ -57,12 +57,14 @@ vi.mock("../pack-import", () => ({
     hasSettings: boolean;
     onResolveCode: (code: string) => void;
     onImportFile: () => void;
+    onImportModeChange?: () => void;
   }) => (
     <div>
       <output data-testid="import-title">{props.importedPack?.title ?? "none"}</output>
       <output data-testid="has-settings">{String(props.hasSettings)}</output>
       <button onClick={() => props.onResolveCode("ABC123")}>resolve share</button>
       <button onClick={props.onImportFile}>import file</button>
+      <button onClick={props.onImportModeChange}>switch method</button>
     </div>
   ),
 }));
@@ -176,6 +178,23 @@ describe("pack import source sequencing", () => {
 
     await act(async () => file.resolve(filePack));
     expect(screen.getByTestId("import-title")).toHaveTextContent("Share pack");
+    expect(screen.getByTestId("has-settings")).toHaveTextContent("false");
+  });
+
+  it("invalidates a file import when the user switches import methods", async () => {
+    const file = deferred<EsoPackFile>();
+    mocks.invoke.mockImplementation((command: string) => {
+      if (command === "list_packs") return Promise.resolve({ packs: [], page: 1, sort: "votes" });
+      if (command === "import_pack_file") return file.promise;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderPacks();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    fireEvent.click(screen.getByRole("button", { name: "import file" }));
+    fireEvent.click(screen.getByRole("button", { name: "switch method" }));
+
+    await act(async () => file.resolve(filePack));
+    expect(screen.getByTestId("import-title")).toHaveTextContent("none");
     expect(screen.getByTestId("has-settings")).toHaveTextContent("false");
   });
 });

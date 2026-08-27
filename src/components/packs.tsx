@@ -583,6 +583,12 @@ export function Packs({
     }
   };
 
+  const handleImportModeChange = useCallback(() => {
+    ++importOperationSeqRef.current;
+    setResolvingCode(false);
+    setImportError(null);
+  }, []);
+
   // Auto-resolve share code from deep link
   useEffect(() => {
     if (initialShareCode) {
@@ -1119,6 +1125,7 @@ export function Packs({
                           importedPackAddonsToInstall={importedPackAddonsToInstall}
                           onResolveCode={handleResolveShareCode}
                           onImportFile={handleImportFile}
+                          onImportModeChange={handleImportModeChange}
                           onInstall={handleInstallImportedPack}
                           hasSettings={
                             !!importedFileSettings && Object.keys(importedFileSettings).length > 0
