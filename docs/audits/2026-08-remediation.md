@@ -108,7 +108,7 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - Luna review: `PASS`. `TOKEN_VIOLATIONS: None`; `ACCESSIBILITY: None`; `STATE_FEEDBACK: None`; `RESPONSIVE_BEHAVIOR: None`.
 - Sol review: `REVISE`. Verified that `list_characters` still ran outside the latest-request/unmount guard and could apply path-A character state after a path-B switch. Addressed with an independent latest/unmount request gate. Added the requested unmount, late-hydration failure rollback, and pre-settlement functional-array composition tests. Focused 9/9 tests, full frontend 499/499 tests, and `npm run check` pass.
 - Sol follow-up: `REVISE` with no implementation findings, `WIRE_CONTRACT: OK`, and `BUG_CLASS_SWEEP: CLEAN`. It requested a rejected-after-unmount assertion and a late hydration value distinct from the constructor default. Both tests were strengthened; focused 10/10 tests, full frontend 500/500 tests, and `npm run check` pass. The one prescribed follow-up review is complete.
-- Handoff: pushed the branch and opened draft PR [#377](https://github.com/ESO-Toolkit/kalpa/pull/377), stacked on `fix/audit-w1-worker-consistency`. Awaiting GitHub CI; do not merge the stack out of order.
+- Handoff: pushed the branch and opened draft PR [#377](https://github.com/ESO-Toolkit/kalpa/pull/377), stacked on `fix/audit-w1-worker-consistency`. The CI workflow listens only to PRs targeting `main`, so this stacked draft has no remote checks until it is retargeted after W1 merges; local frontend gates are green. Do not merge the stack out of order.
 
 ## Open Questions
 
