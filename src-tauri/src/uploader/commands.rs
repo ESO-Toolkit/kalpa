@@ -1432,8 +1432,8 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
-            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
-            // blocking thread instead of the async executor. build_evidence stays
+            // Extraction re-parses the vetted prefix (up to the native size cap), so run
+            // it on a blocking thread instead of the async executor. build_evidence stays
             // synchronous here so it can still ride back in the record + UploadDispatch.
             let build_evidence = if use_native {
                 match report.as_ref() {
