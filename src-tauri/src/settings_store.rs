@@ -62,7 +62,8 @@ const LOAD_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Infix for per-write staging files: `settings.json.tmp-<pid>-<n>-<nonce>`. Staging
 /// names are unique so a crashed write's leftover is never the name a later write
-/// reuses (no clobber), and recovery can recognise and clear them all.
+/// reuses (no clobber). Recovery recognises but does not remove them because one
+/// may belong to a concurrently running sidecar.
 /// Where a corrupt primary is set aside for inspection.
 const QUARANTINE_SUFFIX: &str = ".corrupt";
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
