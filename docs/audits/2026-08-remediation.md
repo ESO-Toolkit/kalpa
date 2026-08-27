@@ -26,7 +26,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
-| H5 | in-progress | `fix/audit-h5-branch-pruning-proposal` | pending | - | D-H5-1 | APPROVE after one follow-up | `npm run check`; `git diff --check`; freshness guard | 54 evidence-backed candidates proposed; no branches deleted. |
+| H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) (draft) | - | D-H5-1 | APPROVE after one follow-up | `npm run check`; `git diff --check`; freshness guard | 54 evidence-backed candidates proposed; no branches deleted. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
 ## Decisions
@@ -74,9 +74,10 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Safety: no local or remote branch was deleted, and no branch tip or worktree was moved.
 - Reviews: initial Sol verdict `REVISE` after concurrent H1 PR #384 made the snapshot stale. Refreshed H1 and H3 state, added a mandatory freshness guard, and clarified protection/worktree-counterpart handling. The single follow-up verdict was `APPROVE` with exact count and candidate-set parity.
 - Verification: `npm run check` and `git diff --check` pass after installing locked dependencies in the isolated worktree.
-- Active work: final freshness guard and draft PR creation.
+- Handoff: the final freshness guard matched the proposal exactly, then draft PR [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) was opened against W1.
+- Active work: maintainer review of the proposal only; no cleanup is authorized by this PR.
 - Blockers: none for the proposal. A final pre-PR freshness guard must remain clean; any later cleanup requires explicit maintainer approval naming the branches and another fresh guard recheck.
-- Exact next action: run the final freshness guard, push this branch, and open a draft PR stacked on W1.
+- Exact next action: maintainer reviews the 54 proposed candidates and explicitly approves all or a named subset, after which a separate cleanup operation must rerun every guard.
 
 ### 2026-08-26 — Codex
 
