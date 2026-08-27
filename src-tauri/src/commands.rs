@@ -10161,8 +10161,10 @@ fn launch_native_shell_process(
             }
         },
     );
-    let existing_native_ready = crate::native_boot::ready_matches(&state_dir, &launch_id)
-        && crate::native_boot::live_native_authority_exists(&state_dir);
+    // Positive proof of a live owner is the held OS lock alone. Conjoining the
+    // child's `ready` marker would make duplicate acceptance depend on a file
+    // publication the duplicate child may fail to complete.
+    let existing_native_ready = crate::native_boot::live_native_authority_exists(&state_dir);
     crate::native_boot::clear_owned(&state_dir, &launch_id);
     match outcome? {
         crate::native_boot::WaitOutcome::Ready => {
@@ -10525,6 +10527,16 @@ pub fn try_launch_native_performance_mode_on_startup(
 
     if !native_performance_mode_enabled_from_path(&settings_path)? {
         return Ok(None);
+    }
+
+    // A live sidecar already holds UI authority, so this launch is a duplicate
+    // activation. The OS lock is positive proof of a live owner, so exit here
+    // without spawning a child at all. Requiring the duplicate child to publish
+    // `ready` instead would let a transient publication failure revert the
+    // user's setting and shut down the sidecar they are already using.
+    if crate::native_boot::live_native_authority_exists(&app_data_dir) {
+        eprintln!("[native-shell] live native owner holds authority; exiting duplicate");
+        return Ok(Some(crate::native_boot::authority_path(&app_data_dir)));
     }
 
     // Resolve failure = the sidecar is missing entirely (broken or partial

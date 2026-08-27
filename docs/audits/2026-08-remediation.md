@@ -9,7 +9,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
 | P0-A2 | pr-open | `fix/audit-p0-a2-cross-process-locking` | [#388](https://github.com/ESO-Toolkit/kalpa/pull/388) (draft) | - | D-P0-A2 | REVISE; verified finding fixed; follow-up APPROVE | Root 490; Rust 828 passed/18 ignored; Slint 777 passed/16 ignored; native build; Tauri build; sandbox 3/3 | Shared bounded cross-process RMW locking; stacked on P0-A1. |
-| P0-A3 | pr-open | `fix/audit-p0-a3-sidecar-handshake` | [#389](https://github.com/ESO-Toolkit/kalpa/pull/389) (draft) | - | D-P0-1 | pending | Rust 842 passed/18 ignored; Slint 790 passed/16 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Native sidecar ready handshake; stacked on P0-A2. Final Fable P0 review and `test:e2e:sandbox` still outstanding before merge. |
+| P0-A3 | pr-open | `fix/audit-p0-a3-sidecar-handshake` | [#389](https://github.com/ESO-Toolkit/kalpa/pull/389) (draft) | - | D-P0-1; final P0 review D-P0-A3-FINAL | pending (Sol) | Rust 844 passed/18 ignored; Slint 791 passed/16 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Native sidecar ready handshake; stacked on P0-A2. Final Fable P0 review returned one blocker, now fixed. `test:e2e:sandbox` still outstanding. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
@@ -76,6 +76,18 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
 
+### D-P0-A3-FINAL — Duplicate detection keys on the OS lock, never on a published marker
+
+- Context: the master prompt requires a final Fable review of the P0 lane before P0-A3 merges. The consultation is `docs/audits/consultations/p0-final-fable.md`. The verdict was that A3 is sound on its main paths, with one blocker.
+- **Blocker (verified against the code before adoption, per the advisor protocol).** Duplicate-launch acceptance required the duplicate *child* to publish `native-boot.ready`. The child (`prototypes/slint-kalpa/src/main.rs`, `confirm_native_boot_ready`) only logs a `signal_ready` failure and exits anyway. The parent then saw `ChildExited` with `existing_native_ready == false`, returned `Err`, and `try_launch_native_performance_mode_on_startup` ran `revert_performance_mode_to_webview` plus the `NATIVE_BOOT_FAILED` note. `lib.rs` then booted the WebView, which calls `claim_webview_authority` and therefore `request_active_shutdown`. Net effect: a transient file-publication failure flipped the user's native-performance-mode setting off **and** shut down the sidecar they were actively using. That violates the acceptance criterion "duplicate sidecars are rejected without resetting user settings incorrectly".
+- Chosen: treat the held OS authority lock as the sole positive proof of a live owner.
+  1. `try_launch_native_performance_mode_on_startup` now exits a duplicate activation via `live_native_authority_exists` *before spawning any child*, placed after the settings gate so a user who disabled native mode still gets the WebView. No settings write, no marker churn, no child round-trip.
+  2. The parent's `ChildExited` acceptance arm drops the `ready_matches &&` conjunct. The lock alone proves liveness; the marker only ever proved the child once reached readiness.
+- Rejected: keeping the `ready` conjunct as belt-and-braces. It cannot be a *safety* addition, because the only thing it can do is turn a live-owner duplicate into a spurious failure that reverts settings and kills the sidecar.
+- Safety of the drop is pinned by `a_crashed_child_that_published_ready_is_not_a_live_owner`: a real child process claims authority, publishes `ready`, then `process::exit`s without unwinding. Afterwards `ready_matches` is still true while `live_native_authority_exists` is false, because only the kernel released the lock. `a_live_owner_is_detected_across_processes` covers the positive case cross-process.
+- Also adopted (Fable item 2b): `native_boot::write_record` now retries the *whole* `atomic_write` up to 3 times at 100ms spacing and logs `raw_os_error`. Retrying the rename in place cannot clear a scanner holding the staging file; only a fresh `create_new` staging path escapes it. This keeps the handshake independent of the shared publisher's rename budget.
+- Deferred (Fable item 2a): widening `atomic_file::rename_with_retries` to geometric backoff and adding `ERROR_USER_MAPPED_FILE` (1224) to `is_transient_rename_error`. That is P0-A1's file and #380 is already Sol-approved, so it is tracked in Open Questions rather than changed from the A3 branch.
+
 ## Session Log
 
 ### 2026-08-27 — W1 twice-reject escalation
@@ -95,13 +107,16 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Gates: Rust 842 passed/18 ignored; Slint 790 passed/16 ignored; `cargo clippy --all-targets -- -D warnings` clean on both crates; `cargo fmt --check` clean on both; `npm run build:native-slint` succeeds. The unrelated `src-tauri/Cargo.toml` CRLF phantom (empty numstat) remains excluded, as in prior sessions.
 - **Outstanding before merge**: the master prompt's required final Fable P0 review, and `npm run test:e2e:sandbox`. The sandbox gate was deliberately not run unattended — it only isolates the AddOns folder and would empty the developer's real manifest-cache database.
 
-### Cross-lane finding — `transaction_lock` two-process test is flaky under load
+### Cross-lane finding — two P0-A2 concurrency tests are flaky under full-suite load
 
 - `transaction_lock::tests::two_process_read_modify_write_has_no_lost_updates` (added by P0-A2) failed once during a full Slint-suite run: the helper panicked on `atomic_file::atomic_write(...).unwrap()` at `transaction_lock.rs:350`.
 - It is not a P0-A3 regression — P0-A3 does not touch `transaction_lock.rs` or `atomic_file.rs`, and the same test passed in the main crate on the same tree.
 - Reproduction profile: 5/5 pass in isolation, 3/3 subsequent full-suite runs pass, 1 failure observed in the first full-suite run. Intermittent and load-dependent.
 - The failure is in the *rename*, not the lock: the lock timeout was already raised to 10s for this test, and the panic is on the atomic publish. `atomic_file::rename_with_retries` allows `RENAME_ATTEMPTS = 5` at `RENAME_BACKOFF = 40ms`, a total budget of ~200ms — plausibly exhausted when an antivirus scanner or the search indexer holds the freshly created staging file under heavy parallel load.
 - Not yet confirmed as a production defect, but the same ~200ms budget is used by `settings_store::rename_with_retries` on the real settings write path, so it is worth triaging against P0-A1 rather than only de-flaking the test. Recorded here so it is neither lost nor misattributed to P0-A3.
+- **Update after the P0-A3 fix round.** A second, different test in the same family also failed once under full-suite load: `tests::concurrent_native_settings_writers_preserve_both_keys` (Slint `main.rs:19968`), where a `persist_addons_path_to_settings_path` call returned `Err` from one of two concurrent writer threads. It passes 8/8 in isolation. Its exact mechanism was **not** captured, so it is not claimed to be the same rename failure; it could equally be an A2 lock timeout.
+- What is established: two independent A2 concurrency tests fail intermittently, only under full-suite parallel load, and one of the two was definitively inside `atomic_write`'s rename. `persist_addons_path_to_settings_path` is the real settings write path rather than a test-only harness, so this is worth root-causing rather than de-flaking.
+- Recommended next step: Fable item 2a against P0-A1, plus logging `raw_os_error` on rename failure so the next occurrence names the code. `native_boot::write_record` already does.
 
 ### 2026-08-26 — Codex (P0-A2)
 
@@ -153,6 +168,8 @@ Verified findings:
 Wire contract verdict: OK. Bug-class sweep found the restore and account-deletion sites above.
 
 ## Open Questions
+
+- P0-A1: adopt Fable item 2a, widening the rename budget from ~200ms (`RENAME_ATTEMPTS = 5` at a flat 40ms) to a bounded geometric backoff of roughly 2.5s, and adding `ERROR_USER_MAPPED_FILE` (1224) to `is_transient_rename_error`. Two P0-A2 concurrency tests flake under load and one was definitively in the rename. The same budget serves the real `settings.json` write path in both binaries, so the trade is bounded extra latency against a hard failure. Needs a maintainer decision on acceptable worst-case settings-save latency.
 
 - W2: maintainer approval is required before merging any reconciliation path that can delete rows from shared D1.
 - W1: decide whether moving vote-record authority from KV/in-memory memo into DO storage belongs in W1 or W3. The current W1 code prevents resurrection but retains the pre-existing eviction/double-toggle limitation for later hardening.

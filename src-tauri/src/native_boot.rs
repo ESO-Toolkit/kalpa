@@ -22,6 +22,10 @@ pub(crate) const WEBVIEW_LAUNCH_ID_ENV: &str = "KALPA_WEBVIEW_LAUNCH_ID";
 pub(crate) const ACTIVE_FILE: &str = "native-shell.active";
 pub(crate) const SHUTDOWN_FILE: &str = "native-shell.shutdown";
 const AUTHORITY_FILE: &str = "native-shell.authority";
+/// A boot record is republished from a fresh staging path on failure; see
+/// `write_record`. Bounded so a genuinely unwritable state dir still fails.
+const PUBLISH_ATTEMPTS: usize = 3;
+const PUBLISH_BACKOFF: Duration = Duration::from_millis(100);
 #[allow(dead_code)] // Used by the Tauri crate; this file is also path-included by Slint.
 pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -79,6 +83,11 @@ pub(crate) fn pending_path(state_dir: &Path) -> PathBuf {
 
 pub(crate) fn ready_path(state_dir: &Path) -> PathBuf {
     state_dir.join(READY_FILE)
+}
+
+#[allow(dead_code)] // Used by the Tauri parent crate.
+pub(crate) fn authority_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(AUTHORITY_FILE)
 }
 
 pub(crate) fn new_launch_id() -> String {
@@ -346,11 +355,36 @@ fn clear_record_if_owned(path: &Path, launch_id: &str) {
     }
 }
 
+/// Publish a boot record, retrying the *whole* atomic write rather than just
+/// the rename. A scanner or indexer holding the freshly created staging file
+/// cannot be waited out in place; only a new `create_new` staging path escapes
+/// it, so the handshake does not inherit the publisher's rename budget.
 fn write_record(path: &Path, record: &BootRecord) -> Result<(), String> {
     let bytes = serde_json::to_vec(record)
         .map_err(|error| format!("Could not encode native boot record: {error}"))?;
-    crate::atomic_file::atomic_write(path, &bytes)
-        .map_err(|error| format!("Could not publish {}: {error}", path.display()))
+    let mut last = None;
+    for attempt in 0..PUBLISH_ATTEMPTS {
+        match crate::atomic_file::atomic_write(path, &bytes) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                eprintln!(
+                    "[native-shell] publish attempt {} for {} failed: {error} (os error {:?})",
+                    attempt + 1,
+                    path.display(),
+                    error.raw_os_error()
+                );
+                last = Some(error);
+                if attempt + 1 < PUBLISH_ATTEMPTS {
+                    std::thread::sleep(PUBLISH_BACKOFF);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "Could not publish {}: {}",
+        path.display(),
+        last.expect("publish loop records a failure before exhausting attempts")
+    ))
 }
 
 #[cfg(test)]
@@ -541,6 +575,23 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(2));
             }
             "crash" => std::process::exit(91),
+            // Claim UI authority, prove readiness, then die without unwinding.
+            // `process::exit` runs no destructors, so only the kernel releases
+            // the lock - exactly what a real crash leaves behind.
+            "authority-ready-crash" => match try_claim_authority(&state_dir, &launch_id).unwrap() {
+                AuthorityClaim::Held(_guard) => {
+                    assert!(signal_ready(&state_dir, &launch_id).unwrap());
+                    std::process::exit(92);
+                }
+                AuthorityClaim::AlreadyHeld => std::process::exit(93),
+            },
+            "authority-hold" => match try_claim_authority(&state_dir, &launch_id).unwrap() {
+                AuthorityClaim::Held(_guard) => {
+                    assert!(signal_ready(&state_dir, &launch_id).unwrap());
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+                AuthorityClaim::AlreadyHeld => std::process::exit(93),
+            },
             "hang" => std::thread::sleep(Duration::from_secs(2)),
             _ => panic!("unknown child mode"),
         }
@@ -554,6 +605,44 @@ mod tests {
             .env(LAUNCH_ID_ENV, launch_id)
             .spawn()
             .unwrap()
+    }
+
+    /// Duplicate acceptance keys on the held OS lock alone. These two tests are
+    /// why the `ready_matches` conjunct was safe to drop: a published marker
+    /// proves the child *reached* readiness, never that it is still alive.
+    #[test]
+    fn a_live_owner_is_detected_across_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "live-owner").unwrap();
+        let mut child = spawn_protocol_child(&state_dir, "live-owner", "authority-hold");
+        let outcome = wait_for_ready(&state_dir, "live-owner", Duration::from_secs(10), || {
+            Ok(if child.try_wait().unwrap().is_some() {
+                ChildState::Exited
+            } else {
+                ChildState::Running
+            })
+        })
+        .unwrap();
+        assert_eq!(outcome, WaitOutcome::Ready);
+        assert!(live_native_authority_exists(&state_dir));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_crashed_child_that_published_ready_is_not_a_live_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "crash-after-ready").unwrap();
+        let mut child =
+            spawn_protocol_child(&state_dir, "crash-after-ready", "authority-ready-crash");
+        assert_eq!(child.wait().unwrap().code(), Some(92));
+        // It really did publish readiness before dying...
+        assert!(ready_matches(&state_dir, "crash-after-ready"));
+        // ...but the kernel released its authority lock, so it is not a live
+        // owner and must never be accepted as one.
+        assert!(!live_native_authority_exists(&state_dir));
     }
 
     #[test]
