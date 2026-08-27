@@ -8,7 +8,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
-| P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
+| P0-A2 | pr-open | `fix/audit-p0-a2-cross-process-locking` | [#388](https://github.com/ESO-Toolkit/kalpa/pull/388) (draft) | - | D-P0-A2 | REVISE; verified finding fixed; follow-up APPROVE | Root 490; Rust 828 passed/18 ignored; Slint 777 passed/16 ignored; native build; Tauri build; sandbox 3/3 | Shared bounded cross-process RMW locking; stacked on P0-A1. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
@@ -30,6 +30,15 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
 ## Decisions
+
+### D-P0-A2 — Shared `fs4` transaction locks with canonical target identity
+
+- Chosen after the required fresh Fable consultation: one path-included `transaction_lock.rs` shared by Tauri and Slint, using `fs4` 1.1.0 exclusive OS locks on persistent sibling `.<name>.kalpa.lock` files. Cargo added `fs4` with its `sync` feature to both crates and `dunce` to Slint; generated lockfiles were not hand-edited. The dependencies compile on the supported Windows/Linux targets and introduced no new Cargo advisories.
+- Identity and ordering: make targets absolute, canonicalize the nearest existing ancestor, append unresolved components, normalize Windows verbatim prefixes/case for comparison, then sort and deduplicate multi-lock requests. Multi-lock acquisition uses one total deadline and drops partially acquired guards on failure.
+- Ownership and behavior: lock-file bytes have no authority and lock files are never removed as stale. The open file handle owns the OS lock, so RAII and process death release it. Interactive acquisition polls every 25 ms for at most 2 seconds and returns structured, user-visible timeout, cancellation, or I/O errors.
+- Lock scope: retain useful in-process mutexes and consistently acquire local mutexes before OS locks. Gather/network/archive/scan/profile-apply/UI-callback work stays outside; only the short reload → merge → P0-A1 atomic publish transaction is locked.
+- Settings compatibility: Tauri sends and merges exact changed entries. Slint compares each full UI callback snapshot with its last local baseline, reloads the current disk object under the shared lock, and applies only locally changed fields. Existing aliases are canonicalized only when their logical control changes. JSON schema, persisted keys, Tauri command shapes, and frontend wire contracts remain unchanged.
+- Scope boundary and rollback: locks coordinate Kalpa's Tauri and Slint writers on local supported filesystems; arbitrary external writers and remote/network filesystem semantics are not claimed. P0-A3 launch readiness remains separate. Reverting the P0-A2 commits removes coordination without requiring a data migration; persistent empty lock files are harmless.
 
 ### D-P0-1 — One shared atomic publisher, separate transaction locks and launch protocol
 
@@ -77,6 +86,19 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+
+### 2026-08-26 — Codex (P0-A2)
+
+- Active branch: `fix/audit-p0-a2-cross-process-locking`, stacked on `fix/audit-p0-a1-atomic-writer`.
+- Design: completed the fresh read-only Fable consultation and recorded D-P0-A2. Fable selected shared `fs4` try-locks with canonical sibling lock identities, deterministic multi-lock ordering, one bounded deadline, persistent non-authoritative lock files, and local-mutex → OS-lock ordering.
+- Failing-before evidence: the real two-process counter regression encoded the prior read/sleep/write protocol, where both writers could observe the same value and one complete atomic publication replaced the other. Additional test-first cases covered a blocked contender timing out, owner termination releasing the lock, opposite lock request order, partial-acquisition cancellation, aliases, and fresh missing parents.
+- Implementation: added the shared lock helper to both crates; wrapped metadata, settings, and profile RMW transactions; preserved the P0-A1 atomic writer; kept profile apply and other long work outside locks; and added bounded actionable error reporting. Tauri settings now merge exact frontend entries into freshly reloaded disk state and refresh the plugin cache. Slint narrow helpers merge under lock.
+- Sol review: initial `REVISE` found that Slint's unrelated settings callback still wrote a stale full snapshot, serializing rather than preventing a cross-shell lost update. The writer now tracks a local baseline and applies only changed fields to the latest locked disk object. Exact newer-Tauri-field and two-snapshot independent-change races were added. The single required follow-up returned `APPROVE`, no findings, no missing tests, wire contract OK.
+- Verification: root checks pass (`npm run check`; 37 files/490 tests; `npm audit --omit=dev` reports 0 vulnerabilities). Main Rust strict clippy, format, and tests pass (828 passed, 18 ignored); Slint strict clippy, format, and tests pass (777 passed, 16 ignored). The native Slint release build, Tauri debug build, and destructive sandbox pass (3/3). One first full Slint run saw an older 20-write stress test hit the intentional 2-second timeout under parallel contention; its isolated rerun and the complete rerun both passed. Cargo audit reports only the repository's existing transitive advisory baseline, with none attributable to `fs4` or `dunce`.
+- Safety: Cargo test/build outputs used `B:\codex-build\kalpa-p0a2-target`; the unmodified native sidecar script used its required repository-local artifact path. The first sandbox exposed a fresh-install missing-parent lock-path bug, which was fixed and regression-tested. The final sandbox moved aside and restored both Roaming and Local app state, each confirmed restored.
+- Handoff: pushed the branch and opened stacked draft PR [#388](https://github.com/ESO-Toolkit/kalpa/pull/388). No merge was performed.
+- Blockers: none.
+- Exact next action: review P0-A2 while P0-A1 lands, then mark the stacked PR ready once its base is mergeable.
 
 ### 2026-08-26 — Codex (P0-A1)
 
