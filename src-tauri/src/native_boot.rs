@@ -156,6 +156,13 @@ pub(crate) fn native_authority_is_active(state_dir: &Path) -> bool {
 }
 
 #[allow(dead_code)] // Used by the path-including Slint crate.
+pub(crate) fn webview_authority_is_active(state_dir: &Path) -> bool {
+    read_record(&state_dir.join(ACTIVE_FILE))
+        .map(|record| record.launch_id.starts_with("webview-"))
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)] // Used by the path-including Slint crate.
 pub(crate) fn shutdown_requested(state_dir: &Path, launch_id: &str) -> bool {
     read_record(&state_dir.join(SHUTDOWN_FILE))
         .map(|record| record.launch_id == launch_id)

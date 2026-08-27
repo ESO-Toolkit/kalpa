@@ -1256,16 +1256,21 @@ fn main() -> Result<(), slint::PlatformError> {
         .filter(|value| !value.trim().is_empty());
     let (initial_authority, handoff_pending) = match acquire_native_shell_lock() {
         NativeShellLock::AlreadyRunning => {
-            let native_is_active = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+            let active_kind = std::env::var_os("KALPA_NATIVE_STATE_DIR")
                 .map(PathBuf::from)
-                .map(|dir| native_boot::native_authority_is_active(&dir))
-                .unwrap_or(false);
-            if !native_is_active && handoff_launch_id.is_some() {
+                .map(|dir| {
+                    (
+                        native_boot::native_authority_is_active(&dir),
+                        native_boot::webview_authority_is_active(&dir),
+                    )
+                })
+                .unwrap_or((false, false));
+            if active_kind.1 && handoff_launch_id.is_some() {
                 // The WebView parent deliberately retains authority until this
                 // child's event loop proves ready. Construct hidden, acknowledge,
                 // then acquire/show after the parent releases.
                 (None, true)
-            } else if native_is_active {
+            } else if active_kind.0 {
                 confirm_native_boot_ready();
                 return Ok(());
             } else {
