@@ -70,7 +70,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 ### 2026-08-26 — Codex (H5)
 
 - Active branch: `fix/audit-h5-branch-pruning-proposal` (stacked on W1).
-- Completed: refreshed and pruned stale remote-tracking refs; inventoried 129 local and 110 remote branches against `origin/main`; correlated open PRs and worktree attachments; classified 54 safe candidates, 75 retain refs, and 110 needs-human-review refs in `2026-08-h5-branch-pruning-proposal.md`. Refreshed the snapshot after concurrent H1 PR #384 and the H3 worktree appeared.
+- Completed: refreshed and pruned stale remote-tracking refs; inventoried 129 local and 111 remote branches against `origin/main`; correlated open PRs and worktree attachments; classified 54 safe candidates, 76 retain refs, and 110 needs-human-review refs in `2026-08-h5-branch-pruning-proposal.md`. Refreshed the snapshot after concurrent H1 PR #384, the H3 worktree, and this published H5 branch appeared.
 - Safety: no local or remote branch was deleted, and no branch tip or worktree was moved.
 - Reviews: initial Sol verdict `REVISE` after concurrent H1 PR #384 made the snapshot stale. Refreshed H1 and H3 state, added a mandatory freshness guard, and clarified protection/worktree-counterpart handling. The single follow-up verdict was `APPROVE` with exact count and candidate-set parity.
 - Verification: `npm run check` and `git diff --check` pass after installing locked dependencies in the isolated worktree.

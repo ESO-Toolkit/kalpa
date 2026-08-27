@@ -1,6 +1,6 @@
 # H5 Branch-Pruning Proposal
 
-Snapshot: 2026-08-26 22:19 (America/Los_Angeles)  
+Snapshot: 2026-08-26 22:26 (America/Los_Angeles)  
 Comparison base: `origin/main` at `3ff99839`  
 Scope: local branches and `origin/*` remote-tracking branches after `git fetch origin --prune`
 
@@ -33,8 +33,8 @@ gh pr list --state open --limit 500 --json number,headRefName,baseRefName,isDraf
 | Scope | Safe candidate | Retain | Needs human review | Total |
 |---|---:|---:|---:|---:|
 | Local | 37 | 41 | 51 | 129 |
-| Remote | 17 | 34 | 59 | 110 |
-| Combined refs | 54 | 75 | 110 | 239 |
+| Remote | 17 | 35 | 59 | 111 |
+| Combined refs | 54 | 76 | 110 | 240 |
 
 `origin/HEAD` is symbolic and excluded from the remote total. A local and remote ref with the same name are separate proposed actions and therefore counted separately.
 
@@ -114,7 +114,7 @@ Retain every branch in these groups regardless of merge appearance:
 - Open PR heads: PRs #365-#384 that remain open, including every active audit stack and the four active Dependabot branches.
 - Worktree attached: `chore/release-v0.1.0-beta.8`, `feat/addon-list-sort-options`, `feat/companion-sidecar-forward`, `feat/custom-themes`, `feat/uploader-header-history`, `feat/uploader-tier0`, `fix/audit-h1-release-copy`, `fix/audit-h2-theme-provenance`, `fix/audit-h3-worker-version-policy`, `fix/audit-h4-claude-structure-tree`, `fix/audit-p0-a1-atomic-writer`, `fix/audit-p0-a2-cross-process-locking`, `fix/audit-r8-protected-edits-disclosure`, `fix/audit-w2-d1-reconciliation`, `fix/audit-w3-worker-hardening`, `fix/backup-hardening`, `fix/batch-controls-discover-tab`, `fix/dep-install-transitive-resolution`, `fix/slint-native-ui-polish`, `fix/slow-large-addon-update`, `fix/uploader-audit-findings`, `perf/runtime-cpu-memory`, `spike/native-live`, `t3code/evaluate-skia-visual-memory`, `worktree-audit-faster-logging`, `worktree-fix-1`, `worktree-fix-4`, `worktree-log-uploader-log-tweak`, `worktree-merge`, and `worktree-webview-optimize`.
 
-Some names belong to more than one group. The totals de-duplicate them by scope. Remote `fix/audit-h1-release-copy` is retained for both its local worktree counterpart and open draft PR #384.
+Some names belong to more than one group. The totals de-duplicate them by scope. Remote `fix/audit-h1-release-copy` is retained for both its local worktree counterpart and open draft PR #384. Remote `fix/audit-h5-branch-pruning-proposal` is retained as the current worktree's remote counterpart after publishing this proposal branch.
 
 ## Needs human review
 
