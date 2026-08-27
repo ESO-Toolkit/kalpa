@@ -9971,22 +9971,58 @@ fn resolve_native_shell_executable(app: &tauri::AppHandle) -> Result<PathBuf, St
     resolve_native_shell_executable_from(explicit, current_exe, resource_dir, current_dir)
 }
 
-/// Name of the "a native boot is in flight and not yet confirmed" marker in
-/// the app data dir. Written just before spawning the sidecar; deleted by the
-/// sidecar once its event loop is up. A surviving marker on the NEXT launch
-/// means the last native boot died before showing a window — the startup gate
-/// then reverts to the WebView UI instead of crash-looping with no UI at all.
-const NATIVE_BOOT_PENDING: &str = "native-boot.pending";
 /// One-shot note the fallback leaves for the WebView frontend so it can tell
 /// the user native mode was turned off (read + cleared by
 /// [`native_boot_failure_pending`]).
 const NATIVE_BOOT_FAILED: &str = "native-boot-failed";
+
+static WEBVIEW_AUTHORITY: OnceLock<Mutex<Option<crate::native_boot::AuthorityGuard>>> =
+    OnceLock::new();
+
+fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGuard>> {
+    WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), String> {
+    let state_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    let guard = crate::native_boot::claim_webview_after_shutdown(
+        &state_dir,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    *webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())? = Some(guard);
+    Ok(())
+}
+
+fn release_webview_authority() {
+    if let Ok(mut guard) = webview_authority().lock() {
+        guard.take();
+    }
+}
 
 fn launch_native_shell_process(
     exe_path: &Path,
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
 ) -> Result<(), String> {
+    let state_dir = app_data_dir.ok_or_else(|| {
+        "Native performance UI requires an application state directory.".to_string()
+    })?;
+    let pending_path = crate::native_boot::pending_path(&state_dir);
+    let _pending_guard = crate::transaction_lock::acquire(
+        &pending_path,
+        crate::transaction_lock::LockOptions {
+            timeout: crate::native_boot::READY_TIMEOUT,
+            cancel: None,
+        },
+    )
+    .map_err(|error| format!("Could not serialize native launch: {error}"))?;
+    let launch_id = crate::native_boot::new_launch_id();
+    crate::native_boot::prepare(&state_dir, &launch_id)?;
     let (render_preset, render_backend) = native_shell_render_config();
     let mut command = std::process::Command::new(exe_path);
     // This process may itself carry re-entry flags from the launch that
@@ -9998,6 +10034,7 @@ fn launch_native_shell_process(
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
         "KALPA_FORCE_WEBVIEW",
+        crate::native_boot::LAUNCH_ID_ENV,
         // Slint reads this one itself. We pass KALPA_SLINT_BACKEND explicitly
         // below and the sidecar prefers it, but leaving an inherited value in
         // the child's environment means the renderer it ends up on is not
@@ -10009,31 +10046,62 @@ fn launch_native_shell_process(
     command
         .env("KALPA_RENDER_PRESET", render_preset)
         .env("KALPA_SLINT_BACKEND", render_backend)
-        .env("KALPA_NATIVE_AUTO_PLACE", "0");
+        .env("KALPA_NATIVE_AUTO_PLACE", "0")
+        .env(crate::native_boot::LAUNCH_ID_ENV, &launch_id)
+        .env("KALPA_NATIVE_STATE_DIR", &state_dir);
 
-    if let Some(path) = &app_data_dir {
-        command.env("KALPA_NATIVE_STATE_DIR", path);
-        // Boot handshake: the sidecar deletes this once its UI is really up.
-        let _ = fs::create_dir_all(path);
-        let _ = fs::write(path.join(NATIVE_BOOT_PENDING), b"1");
-    }
     if let Some(path) = webview_exe {
         command.env("KALPA_WEBVIEW_EXE", path);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Failed to launch native performance UI: {error}"))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(format!("Failed to launch native performance UI: {error}"));
+        }
+    };
 
-    std::thread::sleep(Duration::from_millis(200));
-    match child.try_wait() {
-        Ok(Some(status)) => Err(format!(
-            "Native performance UI exited immediately: {status}"
-        )),
-        Ok(None) => Ok(()),
-        Err(error) => Err(format!(
-            "Failed to verify native performance UI launch: {error}"
-        )),
+    eprintln!("[native-shell] waiting for ready launch_id={launch_id}");
+    let outcome = crate::native_boot::wait_for_ready(
+        &state_dir,
+        &launch_id,
+        crate::native_boot::READY_TIMEOUT,
+        || match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "[native-shell] child exited before ready launch_id={launch_id} status={status}"
+                );
+                Ok(crate::native_boot::ChildState::Exited)
+            }
+            Ok(None) => Ok(crate::native_boot::ChildState::Running),
+            Err(error) => Err(format!(
+                "Failed to inspect native performance UI launch {launch_id}: {error}"
+            )),
+        },
+    );
+    crate::native_boot::clear_owned(&state_dir, &launch_id);
+    match outcome? {
+        crate::native_boot::WaitOutcome::Ready => {
+            eprintln!("[native-shell] ready launch_id={launch_id}");
+            Ok(())
+        }
+        crate::native_boot::WaitOutcome::ChildExited => Err(
+            "Native performance UI exited before reporting that its event loop was ready."
+                .to_string(),
+        ),
+        crate::native_boot::WaitOutcome::TimedOut => {
+            eprintln!("[native-shell] ready timeout launch_id={launch_id}; keeping WebView");
+            match child.kill() {
+                Ok(()) => {
+                    let _ = child.wait();
+                }
+                Err(error) => eprintln!(
+                    "[native-shell] failed to terminate timed-out launch_id={launch_id}: {error}"
+                ),
+            }
+            Err("Native performance UI timed out before its event loop was ready.".to_string())
+        }
     }
 }
 
@@ -10319,33 +10387,36 @@ pub fn try_launch_native_performance_mode_on_startup(
         .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
     let settings_path = app_data_dir.join("settings.json");
 
-    // Boot-handshake check: a surviving marker means the LAST native launch
-    // spawned a sidecar that died before its UI came up (GPU/driver failure,
-    // panic during state load, AV interference). Without this, the user is
-    // locked in a windowless crash loop that even reinstalling doesn't clear
-    // (app data survives uninstall). A young marker (<10s) is a boot still in
-    // flight — another activation racing the sidecar's startup — and proceeds
-    // native; the sidecar's single-instance lock collapses the duplicate.
-    let marker = app_data_dir.join(NATIVE_BOOT_PENDING);
-    if let Ok(meta) = fs::metadata(&marker) {
-        let stale = meta
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .map(|age| age > Duration::from_secs(10))
-            // An unreadable mtime counts as stale: failing into the webview is
-            // always recoverable, a crash loop is not.
-            .unwrap_or(true);
-        if stale {
-            revert_performance_mode_to_webview(&settings_path);
-            let _ = fs::remove_file(&marker);
-            let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
-            eprintln!(
-                "Native performance UI never finished starting last launch; \
-                 reverting to the WebView UI."
-            );
-            return Ok(None);
+    // A surviving marker whose fs4 launch guard is free belongs to an abandoned
+    // launch and triggers the existing crash-loop fallback. If the guard is
+    // held, another parent is actively waiting for its matching child; this
+    // duplicate activation exits without changing the user's setting or marker.
+    if crate::native_boot::has_pending(&app_data_dir) {
+        let marker = crate::native_boot::pending_path(&app_data_dir);
+        match crate::transaction_lock::acquire(
+            &marker,
+            crate::transaction_lock::LockOptions {
+                timeout: Duration::ZERO,
+                cancel: None,
+            },
+        ) {
+            Err(crate::transaction_lock::LockError::Timeout { .. }) => {
+                eprintln!(
+                    "[native-shell] another launcher is awaiting readiness; exiting duplicate"
+                );
+                return Ok(Some(marker));
+            }
+            Ok(_stale_guard) => {}
+            Err(error) => {
+                eprintln!("[native-shell] pending launch state unreadable: {error}; falling back");
+            }
         }
+        revert_performance_mode_to_webview(&settings_path);
+        let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+        let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+        eprintln!("[native-shell] stale pending launch found; reverting to the WebView UI.");
+        return Ok(None);
     }
 
     if !native_performance_mode_enabled_from_path(&settings_path)? {
@@ -10375,7 +10446,8 @@ pub fn try_launch_native_performance_mode_on_startup(
         // this launch continues into the webview and the next one doesn't
         // retry a known-broken native mode.
         revert_performance_mode_to_webview(&settings_path);
-        let _ = fs::remove_file(app_data_dir.join(NATIVE_BOOT_PENDING));
+        let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
         let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
         return Err(error);
     }
@@ -10390,19 +10462,25 @@ pub async fn launch_native_performance_mode(
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
-    tokio::task::spawn_blocking(move || {
+    release_webview_authority();
+    let launch_result = tokio::task::spawn_blocking(move || {
         launch_native_shell_process(&launch_path, app_data_dir, webview_exe)
     })
     .await
-    .map_err(|error| format!("Task failed: {error}"))??;
+    .map_err(|error| format!("Task failed: {error}"))?;
+    if let Err(error) = launch_result {
+        return match claim_webview_authority(&app) {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(format!(
+                "{error} WebView authority recovery also failed: {restore_error}"
+            )),
+        };
+    }
 
-    let exit_app = app.clone();
-    std::thread::spawn(move || {
-        // Free the WebView process after the Slint shell has spawned; keeping both
-        // alive would defeat the memory-mode toggle.
-        std::thread::sleep(Duration::from_millis(300));
-        exit_app.exit(0);
-    });
+    // The blocking launcher returns only after the matching child has executed
+    // a callback on Slint's live event loop. Every failure keeps this WebView
+    // process authoritative and visible.
+    app.exit(0);
 
     Ok(NativePerformanceLaunch {
         exe_path: exe_path.to_string_lossy().into_owned(),

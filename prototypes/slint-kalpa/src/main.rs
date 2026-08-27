@@ -33,6 +33,8 @@ mod manifest;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/metadata.rs"]
 mod metadata;
+#[path = "../../../src-tauri/src/native_boot.rs"]
+mod native_boot;
 
 #[allow(dead_code)]
 mod commands {
@@ -1184,7 +1186,7 @@ enum NativeShellLock {
     /// This process holds the lock; keep the handle alive for the process
     /// lifetime (the OS releases it on ANY exit, including crashes, so no
     /// stale-lock sweeping is ever needed).
-    Held(#[allow(dead_code)] std::fs::File),
+    Held(#[allow(dead_code)] native_boot::AuthorityGuard),
     /// Another sidecar already holds the lock.
     AlreadyRunning,
     /// The lock could not be evaluated (IO error); run unguarded rather than
@@ -1196,40 +1198,41 @@ fn acquire_native_shell_lock() -> NativeShellLock {
     let dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("native-shell.lock");
-    #[cfg(windows)]
-    let attempt = {
-        use std::os::windows::fs::OpenOptionsExt;
-        // share_mode(0): while this handle lives, any second open fails with
-        // ERROR_SHARING_VIOLATION — the exact "already running" signal.
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .share_mode(0)
-            .open(&path)
-    };
-    #[cfg(not(windows))]
-    let attempt = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path);
-    match attempt {
-        Ok(file) => NativeShellLock::Held(file),
-        Err(error) if error.raw_os_error() == Some(32) => NativeShellLock::AlreadyRunning,
-        Err(_) => NativeShellLock::Unavailable,
+    let launch_id = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(native_boot::new_launch_id);
+    match native_boot::try_claim_authority(&dir, &launch_id) {
+        Ok(native_boot::AuthorityClaim::Held(guard)) => NativeShellLock::Held(guard),
+        Ok(native_boot::AuthorityClaim::AlreadyHeld) => NativeShellLock::AlreadyRunning,
+        Err(error) => {
+            eprintln!("[native-shell] authority lock unavailable: {error}");
+            NativeShellLock::Unavailable
+        }
     }
 }
 
-/// The launcher (kalpa.exe) writes `native-boot.pending` into the state dir
-/// before exiting in favor of this process. Deleting it is the "native mode
-/// booted OK" acknowledgement: if this process dies before its event loop
-/// starts, the marker survives and the next kalpa.exe launch auto-falls back
-/// to the WebView UI instead of crash-looping with no window at all.
-fn confirm_native_boot_marker() {
-    if let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
-        let _ = std::fs::remove_file(dir.join("native-boot.pending"));
+/// Publish the matching half of the launcher's `native-boot.pending` record.
+/// This callback runs from Slint's event loop, so construction/show failures
+/// leave the pending record for the parent to handle without false readiness.
+fn confirm_native_boot_ready() {
+    let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) else {
+        eprintln!("[native-shell] no state directory; cannot acknowledge readiness");
+        return;
+    };
+    let Some(launch_id) = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("[native-shell] no launch ID; running without a parent handshake");
+        return;
+    };
+    match native_boot::signal_ready(&dir, &launch_id) {
+        Ok(true) => eprintln!("[native-shell] event loop ready launch_id={launch_id}"),
+        Ok(false) => eprintln!("[native-shell] rejected stale launch_id={launch_id}"),
+        Err(error) => {
+            eprintln!("[native-shell] failed to acknowledge launch_id={launch_id}: {error}")
+        }
     }
 }
 
@@ -1250,7 +1253,15 @@ fn main() -> Result<(), slint::PlatformError> {
     // acknowledges the boot marker before bowing out.
     let _instance_lock = match acquire_native_shell_lock() {
         NativeShellLock::AlreadyRunning => {
-            confirm_native_boot_marker();
+            let native_is_active = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+                .map(PathBuf::from)
+                .map(|dir| native_boot::native_authority_is_active(&dir))
+                .unwrap_or(false);
+            if native_is_active {
+                confirm_native_boot_ready();
+            } else {
+                eprintln!("[native-shell] WebView retains UI authority; rejecting sidecar");
+            }
             return Ok(());
         }
         held_or_unavailable => held_or_unavailable,
@@ -1338,12 +1349,32 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_open_migration();
     }
     start_native_app_update_check(ui.as_weak(), true);
+    let shutdown_timer = slint::Timer::default();
+    if let (Some(state_dir), NativeShellLock::Held(guard)) = (
+        std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from),
+        &_instance_lock,
+    ) {
+        let launch_id = guard.launch_id().to_string();
+        shutdown_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(50),
+            move || {
+                if native_boot::shutdown_requested(&state_dir, &launch_id) {
+                    eprintln!(
+                        "[native-shell] releasing UI authority launch_id={launch_id} for WebView"
+                    );
+                    let _ = slint::quit_event_loop();
+                }
+            },
+        );
+    }
     // Everything is constructed and the event loop is about to take over:
     // acknowledge the launcher's boot marker so future launches keep native
     // mode. Anything that dies before this line leaves the marker in place,
     // and the next kalpa.exe start falls back to the WebView UI.
-    confirm_native_boot_marker();
+    slint::Timer::single_shot(Duration::ZERO, confirm_native_boot_ready);
     let result = ui.run();
+    shutdown_timer.stop();
     // The sign-in WebView2 window is a separate process; close it with the shell
     // instead of leaving an orphaned login on screen.
     kill_login_subprocess();

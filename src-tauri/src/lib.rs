@@ -13,6 +13,7 @@ mod installer;
 mod manifest;
 mod manifest_cache;
 mod metadata;
+mod native_boot;
 pub mod platform;
 mod safe_migration;
 mod saved_variables;
@@ -575,6 +576,15 @@ pub fn run() {
                         eprintln!("Failed to start native performance UI: {error}");
                     }
                 }
+            }
+
+            // The WebView cannot become active while the native shell still
+            // owns the cross-process UI-authority lock. For a deep-link launch,
+            // this requests an observable native shutdown and waits for its OS
+            // lock to be released before showing the WebView.
+            if let Err(error) = commands::claim_webview_authority(app.handle()) {
+                eprintln!("Failed to acquire WebView UI authority: {error}");
+                return Err(std::io::Error::other(error).into());
             }
 
             schedule_initial_main_window_watchdog(app.handle());

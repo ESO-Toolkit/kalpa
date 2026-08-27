@@ -1,0 +1,507 @@
+//! Launch-ID-bound readiness protocol for the native Slint shell.
+//!
+//! `native-boot.pending` remains the recovery anchor, but it now names one
+//! launch.  A child can acknowledge only that launch by publishing the same
+//! identity to `native-boot.ready`.  The parent never treats elapsed time or a
+//! marker left by another launch as proof that the child is usable.
+
+use fs4::{FileExt, TryLockError};
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::RandomState;
+use std::fs;
+use std::fs::{File, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub(crate) const PENDING_FILE: &str = "native-boot.pending";
+pub(crate) const READY_FILE: &str = "native-boot.ready";
+pub(crate) const LAUNCH_ID_ENV: &str = "KALPA_NATIVE_LAUNCH_ID";
+pub(crate) const ACTIVE_FILE: &str = "native-shell.active";
+pub(crate) const SHUTDOWN_FILE: &str = "native-shell.shutdown";
+const AUTHORITY_FILE: &str = "native-shell.authority";
+#[allow(dead_code)] // Used by the Tauri crate; this file is also path-included by Slint.
+pub(crate) const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+static LAUNCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(crate) struct BootRecord {
+    pub launch_id: String,
+    pub parent_pid: u32,
+}
+
+#[allow(dead_code)] // Parent-only; shared source also compiles in the child crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChildState {
+    Running,
+    Exited,
+}
+
+#[allow(dead_code)] // Parent-only; shared source also compiles in the child crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaitOutcome {
+    Ready,
+    ChildExited,
+    TimedOut,
+}
+
+pub(crate) enum AuthorityClaim {
+    Held(AuthorityGuard),
+    AlreadyHeld,
+}
+
+pub(crate) struct AuthorityGuard {
+    file: File,
+    launch_id: String,
+    state_dir: PathBuf,
+}
+
+impl AuthorityGuard {
+    #[allow(dead_code)] // Used by the path-including Slint crate.
+    pub(crate) fn launch_id(&self) -> &str {
+        &self.launch_id
+    }
+}
+
+impl Drop for AuthorityGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+        clear_record_if_owned(&self.state_dir.join(ACTIVE_FILE), &self.launch_id);
+    }
+}
+
+pub(crate) fn pending_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(PENDING_FILE)
+}
+
+pub(crate) fn ready_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(READY_FILE)
+}
+
+pub(crate) fn new_launch_id() -> String {
+    let counter = LAUNCH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut first = RandomState::new().build_hasher();
+    first.write_u128(clock);
+    first.write_u64(counter);
+    first.write_u32(std::process::id());
+    let mut second = RandomState::new().build_hasher();
+    second.write_u64(first.finish());
+    second.write_u128(clock.rotate_left(37));
+    second.write_u64(counter.rotate_left(19));
+    format!("{:016x}{:016x}", first.finish(), second.finish())
+}
+
+pub(crate) fn try_claim_authority(
+    state_dir: &Path,
+    launch_id: &str,
+) -> Result<AuthorityClaim, String> {
+    fs::create_dir_all(state_dir)
+        .map_err(|error| format!("Could not create native state directory: {error}"))?;
+    let path = state_dir.join(AUTHORITY_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("Could not open native UI authority lock: {error}"))?;
+    match FileExt::try_lock(&file) {
+        Ok(()) => {
+            let guard = AuthorityGuard {
+                file,
+                launch_id: launch_id.to_string(),
+                state_dir: state_dir.to_path_buf(),
+            };
+            write_record(
+                &state_dir.join(ACTIVE_FILE),
+                &BootRecord {
+                    launch_id: launch_id.to_string(),
+                    parent_pid: std::process::id(),
+                },
+            )?;
+            let _ = fs::remove_file(state_dir.join(SHUTDOWN_FILE));
+            Ok(AuthorityClaim::Held(guard))
+        }
+        Err(TryLockError::WouldBlock) => Ok(AuthorityClaim::AlreadyHeld),
+        Err(TryLockError::Error(error)) => {
+            Err(format!("Could not acquire native UI authority: {error}"))
+        }
+    }
+}
+
+pub(crate) fn request_active_shutdown(state_dir: &Path) -> Result<bool, String> {
+    let Some(active) = read_record(&state_dir.join(ACTIVE_FILE)) else {
+        return Ok(false);
+    };
+    write_record(&state_dir.join(SHUTDOWN_FILE), &active)?;
+    eprintln!(
+        "[native-shell] requested authority release launch_id={}",
+        active.launch_id
+    );
+    Ok(true)
+}
+
+#[allow(dead_code)] // Used by the path-including Slint crate.
+pub(crate) fn native_authority_is_active(state_dir: &Path) -> bool {
+    read_record(&state_dir.join(ACTIVE_FILE))
+        .map(|record| !record.launch_id.starts_with("webview-"))
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)] // Used by the path-including Slint crate.
+pub(crate) fn shutdown_requested(state_dir: &Path, launch_id: &str) -> bool {
+    read_record(&state_dir.join(SHUTDOWN_FILE))
+        .map(|record| record.launch_id == launch_id)
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)] // Used by the Tauri crate; this file is also path-included by Slint.
+pub(crate) fn claim_webview_after_shutdown(
+    state_dir: &Path,
+    timeout: Duration,
+) -> Result<AuthorityGuard, String> {
+    let launch_id = format!("webview-{}", new_launch_id());
+    let deadline = Instant::now() + timeout;
+    let mut requested = false;
+    loop {
+        match try_claim_authority(state_dir, &launch_id)? {
+            AuthorityClaim::Held(guard) => {
+                eprintln!("[native-shell] WebView acquired UI authority");
+                return Ok(guard);
+            }
+            AuthorityClaim::AlreadyHeld => {
+                if !requested {
+                    requested = request_active_shutdown(state_dir)?;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(if requested {
+                "Timed out waiting for the native shell to release UI authority.".to_string()
+            } else {
+                "Native UI authority is held but its active record is unavailable.".to_string()
+            });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[allow(dead_code)] // Used by the Tauri parent crate.
+pub(crate) fn prepare(state_dir: &Path, launch_id: &str) -> Result<(), String> {
+    fs::create_dir_all(state_dir)
+        .map_err(|error| format!("Could not create native state directory: {error}"))?;
+    let _ = fs::remove_file(ready_path(state_dir));
+    write_record(
+        &pending_path(state_dir),
+        &BootRecord {
+            launch_id: launch_id.to_string(),
+            parent_pid: std::process::id(),
+        },
+    )
+}
+
+#[allow(dead_code)] // Used by the path-including Slint crate.
+pub(crate) fn signal_ready(state_dir: &Path, launch_id: &str) -> Result<bool, String> {
+    let Some(pending) = read_record(&pending_path(state_dir)) else {
+        return Ok(false);
+    };
+    if pending.launch_id != launch_id {
+        return Ok(false);
+    }
+    write_record(&ready_path(state_dir), &pending)?;
+    Ok(true)
+}
+
+#[allow(dead_code)] // Used by the Tauri parent crate.
+pub(crate) fn ready_matches(state_dir: &Path, launch_id: &str) -> bool {
+    read_record(&ready_path(state_dir))
+        .map(|record| record.launch_id == launch_id)
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)] // Used by the Tauri parent crate.
+pub(crate) fn clear_owned(state_dir: &Path, launch_id: &str) {
+    for path in [pending_path(state_dir), ready_path(state_dir)] {
+        if read_record(&path)
+            .map(|record| record.launch_id == launch_id)
+            .unwrap_or(false)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[allow(dead_code)] // Used by the Tauri crate; this file is also path-included by Slint.
+pub(crate) fn has_pending(state_dir: &Path) -> bool {
+    pending_path(state_dir).is_file()
+}
+
+#[allow(dead_code)] // Used by the Tauri parent crate.
+pub(crate) fn wait_for_ready(
+    state_dir: &Path,
+    launch_id: &str,
+    timeout: Duration,
+    mut child_state: impl FnMut() -> Result<ChildState, String>,
+) -> Result<WaitOutcome, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if ready_matches(state_dir, launch_id) {
+            return Ok(if child_state()? == ChildState::Running {
+                WaitOutcome::Ready
+            } else {
+                WaitOutcome::ChildExited
+            });
+        }
+        if child_state()? == ChildState::Exited {
+            return Ok(WaitOutcome::ChildExited);
+        }
+        if Instant::now() >= deadline {
+            return Ok(WaitOutcome::TimedOut);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn read_record(path: &Path) -> Option<BootRecord> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn clear_record_if_owned(path: &Path, launch_id: &str) {
+    if read_record(path)
+        .map(|record| record.launch_id == launch_id)
+        .unwrap_or(false)
+    {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn write_record(path: &Path, record: &BootRecord) -> Result<(), String> {
+    let bytes = serde_json::to_vec(record)
+        .map_err(|error| format!("Could not encode native boot record: {error}"))?;
+    crate::atomic_file::atomic_write(path, &bytes)
+        .map_err(|error| format!("Could not publish {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn matching_child_ready_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "launch-a").unwrap();
+        assert!(signal_ready(dir.path(), "launch-a").unwrap());
+        assert_eq!(
+            wait_for_ready(dir.path(), "launch-a", Duration::ZERO, || Ok(
+                ChildState::Running
+            ))
+            .unwrap(),
+            WaitOutcome::Ready
+        );
+    }
+
+    #[test]
+    fn stale_or_wrong_ready_marker_cannot_confirm_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "old-launch").unwrap();
+        signal_ready(dir.path(), "old-launch").unwrap();
+        prepare(dir.path(), "new-launch").unwrap();
+        write_record(
+            &ready_path(dir.path()),
+            &BootRecord {
+                launch_id: "old-launch".into(),
+                parent_pid: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wait_for_ready(dir.path(), "new-launch", Duration::ZERO, || Ok(
+                ChildState::Running
+            ))
+            .unwrap(),
+            WaitOutcome::TimedOut
+        );
+        assert!(!signal_ready(dir.path(), "old-launch").unwrap());
+    }
+
+    #[test]
+    fn child_exit_wins_before_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "launch-a").unwrap();
+        assert_eq!(
+            wait_for_ready(dir.path(), "launch-a", Duration::from_secs(1), || Ok(
+                ChildState::Exited
+            ))
+            .unwrap(),
+            WaitOutcome::ChildExited
+        );
+    }
+
+    #[test]
+    fn timeout_is_bounded_and_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "launch-a").unwrap();
+        let probes = AtomicUsize::new(0);
+        assert_eq!(
+            wait_for_ready(dir.path(), "launch-a", Duration::from_millis(30), || {
+                probes.fetch_add(1, Ordering::Relaxed);
+                Ok(ChildState::Running)
+            })
+            .unwrap(),
+            WaitOutcome::TimedOut
+        );
+        assert!(probes.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn rapid_relaunch_cleanup_never_removes_new_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "first").unwrap();
+        prepare(dir.path(), "second").unwrap();
+        clear_owned(dir.path(), "first");
+        assert_eq!(
+            read_record(&pending_path(dir.path())).unwrap().launch_id,
+            "second"
+        );
+    }
+
+    #[test]
+    fn ready_marker_does_not_hide_a_child_that_already_exited() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "launch-a").unwrap();
+        signal_ready(dir.path(), "launch-a").unwrap();
+        assert_eq!(
+            wait_for_ready(dir.path(), "launch-a", Duration::from_secs(1), || Ok(
+                ChildState::Exited
+            ))
+            .unwrap(),
+            WaitOutcome::ChildExited
+        );
+    }
+
+    #[test]
+    fn authority_shutdown_is_bound_to_the_active_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = match try_claim_authority(dir.path(), "native-a").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        assert!(native_authority_is_active(dir.path()));
+        assert!(request_active_shutdown(dir.path()).unwrap());
+        assert!(shutdown_requested(dir.path(), "native-a"));
+        assert!(!shutdown_requested(dir.path(), "native-b"));
+        assert!(matches!(
+            try_claim_authority(dir.path(), "webview-b").unwrap(),
+            AuthorityClaim::AlreadyHeld
+        ));
+        drop(guard);
+        assert!(matches!(
+            try_claim_authority(dir.path(), "webview-b").unwrap(),
+            AuthorityClaim::Held(_)
+        ));
+    }
+
+    #[test]
+    fn invalid_or_unwritable_state_fails_closed() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(prepare(file.path(), "launch-a").is_err());
+    }
+
+    #[test]
+    fn blocked_ready_path_cannot_create_false_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(dir.path(), "launch-a").unwrap();
+        fs::create_dir(ready_path(dir.path())).unwrap();
+        assert!(signal_ready(dir.path(), "launch-a").is_err());
+        assert!(!ready_matches(dir.path(), "launch-a"));
+    }
+
+    #[test]
+    fn child_process_helper() {
+        let Ok(mode) = std::env::var("KALPA_BOOT_TEST_CHILD") else {
+            return;
+        };
+        let state_dir = PathBuf::from(std::env::var_os("KALPA_NATIVE_STATE_DIR").unwrap());
+        let launch_id = std::env::var(LAUNCH_ID_ENV).unwrap();
+        match mode.as_str() {
+            "ready" => {
+                assert!(signal_ready(&state_dir, &launch_id).unwrap());
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            "crash" => std::process::exit(91),
+            "hang" => std::thread::sleep(Duration::from_secs(2)),
+            _ => panic!("unknown child mode"),
+        }
+    }
+
+    fn spawn_protocol_child(state_dir: &Path, launch_id: &str, mode: &str) -> std::process::Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "native_boot::tests::child_process_helper"])
+            .env("KALPA_BOOT_TEST_CHILD", mode)
+            .env("KALPA_NATIVE_STATE_DIR", state_dir)
+            .env(LAUNCH_ID_ENV, launch_id)
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn real_child_success_exit_and_timeout_are_distinguished() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state with spaces");
+
+        prepare(&state_dir, "ready-child").unwrap();
+        let mut ready = spawn_protocol_child(&state_dir, "ready-child", "ready");
+        assert_eq!(
+            wait_for_ready(&state_dir, "ready-child", Duration::from_secs(1), || {
+                Ok(if ready.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::Ready
+        );
+        ready.kill().unwrap();
+        ready.wait().unwrap();
+
+        prepare(&state_dir, "crashed-child").unwrap();
+        let mut crashed = spawn_protocol_child(&state_dir, "crashed-child", "crash");
+        assert_eq!(
+            wait_for_ready(&state_dir, "crashed-child", Duration::from_secs(1), || Ok(
+                if crashed.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                }
+            ))
+            .unwrap(),
+            WaitOutcome::ChildExited
+        );
+
+        prepare(&state_dir, "hung-child").unwrap();
+        let mut hung = spawn_protocol_child(&state_dir, "hung-child", "hang");
+        assert_eq!(
+            wait_for_ready(&state_dir, "hung-child", Duration::from_millis(75), || Ok(
+                if hung.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                }
+            ))
+            .unwrap(),
+            WaitOutcome::TimedOut
+        );
+        hung.kill().unwrap();
+        hung.wait().unwrap();
+    }
+}
