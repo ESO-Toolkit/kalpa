@@ -9,7 +9,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
 | P0-A2 | pr-open | `fix/audit-p0-a2-cross-process-locking` | [#388](https://github.com/ESO-Toolkit/kalpa/pull/388) (draft) | - | D-P0-A2 | REVISE; verified finding fixed; follow-up APPROVE | Root 490; Rust 828 passed/18 ignored; Slint 777 passed/16 ignored; native build; Tauri build; sandbox 3/3 | Shared bounded cross-process RMW locking; stacked on P0-A1. |
-| P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
+| P0-A3 | pr-open | `fix/audit-p0-a3-sidecar-handshake` | [#389](https://github.com/ESO-Toolkit/kalpa/pull/389) (draft) | - | D-P0-1 | pending | Rust 842 passed/18 ignored; Slint 790 passed/16 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Native sidecar ready handshake; stacked on P0-A2. Final Fable P0 review and `test:e2e:sandbox` still outstanding before merge. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
