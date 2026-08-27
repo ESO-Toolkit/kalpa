@@ -25,7 +25,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
-| H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
+| H4 | in-progress | `fix/audit-h4-claude-structure-tree` | - | - | not required | pending | Path inventory; docs formatting pending | Update `CLAUDE.md` structure tree from current tracked paths only. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
@@ -67,6 +67,18 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+
+### 2026-08-26 — Codex (H4)
+
+- Active branch: `fix/audit-h4-claude-structure-tree`, stacked on `fix/audit-w1-worker-consistency`.
+- Scope: H4 only. Inventory tracked paths and update the `CLAUDE.md` project tree for the existing `animate-ui`, frontend test, E2E, and Worker test directories.
+- Test-first note: a failing runtime regression test is mechanically inapplicable to a documentation-only inventory correction. Before editing, `rg --files` established that the directories exist while the `CLAUDE.md` project tree contained none of the `animate-ui`, `__tests__`, `e2e`, or Worker `test` paths.
+- Active work: documentation formatting, Sol review, commit, and draft stacked PR.
+- Blockers: none.
+- Completed: updated both maintained project trees from tracked paths, passed documentation gates, addressed the verified README sweep finding, and opened draft PR [#382](https://github.com/ESO-Toolkit/kalpa/pull/382).
+- Sol follow-up: `APPROVE`; no findings or missing tests, wire contract OK, and bug-class sweep clean.
+- Blockers: none.
+- Exact next action: review and merge stacked draft PR #382 after its W1 base is accepted.
 
 ### 2026-08-26 — Codex
 
