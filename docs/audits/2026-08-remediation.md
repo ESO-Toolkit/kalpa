@@ -13,7 +13,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
-| R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
+| R7 | pr-open | `fix/audit-r7-build-evidence-bound` | [#372](https://github.com/ESO-Toolkit/kalpa/pull/372) (draft) | - | - | APPROVE | Focused 1; evidence 16; frontend 490; Rust 808 | D-R7-1: one-shot evidence uses the encoder's exact `scanned_len` byte bound; stacked on W1. |
 | R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
 | R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
@@ -67,6 +67,14 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### 2026-08-26 — Codex (R7)
+
+- Active branch: `fix/audit-r7-build-evidence-bound`, stacked on `fix/audit-w1-worker-consistency`.
+- Failing-before evidence: after preflight captured the vetted prefix length, appending a second player caused unbounded build-evidence extraction to return two players instead of the uploaded prefix's one.
+- Implemented D-R7-1: one-shot native evidence now reads through `scanned_len` only, using a byte-limited reader; the separate live-stream evidence path remains unchanged because it has no one-shot preflight bound.
+- Verification: append-after-scan/UTF-8 regression passes; build-evidence suite 16/16; root check passes; frontend tests 490/490; Rust clippy-fix, formatting, strict clippy, 808 tests (17 ignored), and fmt-check pass. Slint gates were not applicable because no shared or Slint module changed.
+- Sol: `APPROVE`; no findings or missing tests, wire contract OK, bug-class sweep clean.
+- Handoff: pushed commit `5dd53bd5` and opened draft stacked PR [#372](https://github.com/ESO-Toolkit/kalpa/pull/372). No merge or deployment was performed.
 
 ### 2026-08-26 — Codex
 
