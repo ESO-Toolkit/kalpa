@@ -2682,6 +2682,30 @@ fn unprotected_update_count(models: &AddonModels) -> usize {
         .count()
 }
 
+fn unprotected_target_count(addons_root: &Path, targets: &[NativeAddonUpdateTarget]) -> usize {
+    targets
+        .iter()
+        .filter(|target| {
+            file_hashes::load_hash_manifest(addons_root, &target.folder_name).is_none()
+        })
+        .count()
+}
+
+fn update_start_message(targets: &[NativeAddonUpdateTarget], unprotected: usize) -> String {
+    if unprotected > 0 {
+        format!(
+            "Protected Edits unavailable for {unprotected} addon{}: no trusted file baseline exists, so Kalpa cannot detect changed files. Updating may overwrite edits.",
+            if unprotected == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Applying {} addon update{}...",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )
+    }
+}
+
 fn native_update_targets(models: &AddonModels) -> Vec<NativeAddonUpdateTarget> {
     let all = models.all.borrow();
     let selected_count = all.iter().filter(|addon| addon.selected).count();
@@ -10619,11 +10643,9 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 let eso_running = addon_write_eso_running_warning_active(&ui);
                 ui.set_checking_updates(true);
-                let message = format!(
-                    "Applying {} safe addon update{}...",
-                    targets.len(),
-                    if targets.len() == 1 { "" } else { "s" }
-                );
+                let unprotected = unprotected_target_count(&addons_root, &targets);
+                ui.set_unprotected_update_count(unprotected as i32);
+                let message = update_start_message(&targets, unprotected);
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -10996,13 +11018,24 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_checking_updates(true);
+        let targets = vec![target];
+        let unprotected = unprotected_target_count(&addons_root, &targets);
+        ui.set_unprotected_update_count(unprotected as i32);
         ui.set_status_error_message(
-            addon_write_status_message(format!("Updating {}...", addon.title), eso_running).into(),
+            addon_write_status_message(
+                if unprotected > 0 {
+                    update_start_message(&targets, unprotected)
+                } else {
+                    format!("Updating {}...", addon.title)
+                },
+                eso_running,
+            )
+            .into(),
         );
         start_native_addon_update_apply(
             ui.as_weak(),
             addons_root,
-            vec![target],
+            targets,
             ui.get_settings_conflict_policy().clamp(0, 2),
             eso_running,
         );
@@ -22300,6 +22333,23 @@ CombatMetrics_SavedVariables = {
         assert_eq!(addons[1].state, 1);
         assert_eq!(addons[1].badge.as_str(), "Update");
         assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
+    }
+
+    #[test]
+    fn native_update_start_copy_discloses_missing_baseline_without_claiming_safety() {
+        let targets = vec![NativeAddonUpdateTarget {
+            folder_name: "MigratedAddon".to_string(),
+            esoui_id: 42,
+        }];
+
+        let disclosed = update_start_message(&targets, 1);
+        assert!(disclosed.contains("Protected Edits unavailable"));
+        assert!(disclosed.contains("no trusted file baseline"));
+        assert!(!disclosed.to_ascii_lowercase().contains("safe"));
+
+        let covered = update_start_message(&targets, 0);
+        assert_eq!(covered, "Applying 1 addon update...");
+        assert!(!covered.to_ascii_lowercase().contains("safe"));
     }
 
     #[test]

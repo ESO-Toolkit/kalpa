@@ -364,7 +364,7 @@ function AddonListBase({
 
     if (hasUpdate && onUpdateAddon) {
       items.push({
-        label: "Update",
+        label: "Review Update",
         icon: RefreshCw,
         onClick: () => onUpdateAddon(addon.folderName),
         disabled: isOffline,
