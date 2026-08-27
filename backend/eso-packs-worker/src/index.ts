@@ -149,6 +149,7 @@ function slugify(title: string): string {
 
 // ── GET /packs ─────────────────────────────────────────────────────
 async function handleListPacks(request: Request, env: Env, url: URL): Promise<Response> {
+  const hasAuthorization = request.headers.has("Authorization");
   const hasFilters =
     url.searchParams.has("type") ||
     url.searchParams.has("tag") ||
@@ -259,12 +260,13 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     request,
     { packs: visible, page, sort },
     200,
-    isDefaultView && viewerId === undefined ? 30 : 0,
+    isDefaultView && !hasAuthorization ? 30 : 0,
   );
 }
 
 // ── GET /packs/:id ─────────────────────────────────────────────────
 async function handleGetPack(request: Request, env: Env, id: string): Promise<Response> {
+  const hasAuthorization = request.headers.has("Authorization");
   const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
@@ -286,9 +288,16 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     return json(request, { pack: view }, 200, 0);
   }
 
-  // Anonymous viewer: the redacted pack is identical for everyone, so it stays
-  // safe to cache.
-  return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
+  // Only a request that did not attempt authentication is safely anonymous.
+  // A transient identity-provider failure must not cache a redacted fallback
+  // for a bearer token that may validate on its next request.
+  return json(
+    request,
+    { pack: redactAnonymousPack(pack) },
+    200,
+    hasAuthorization ? 0 : 300,
+    "public",
+  );
 }
 
 // ── POST /packs ────────────────────────────────────────────────────

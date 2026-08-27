@@ -275,6 +275,16 @@ describe("GET /packs", () => {
     expect(body.packs[0].user_voted).toBeUndefined();
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=30");
   });
+
+  it("does not cache an anonymous fallback for a failed bearer lookup", async () => {
+    await putPackIndex(e, { packs: [makePack("list-auth-outage")] });
+    fetchSpy.mockResolvedValueOnce(esoLogsUnauthorized());
+
+    const res = await call(authedRequest(`${BASE}/packs`));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+  });
 });
 
 // ── POST /packs ───────────────────────────────────────────────────
@@ -522,6 +532,16 @@ describe("GET /packs/:id", () => {
     const body = await res.json<{ pack: Record<string, unknown> }>();
     expect(body.pack.user_voted).toBeUndefined();
     expect(res.headers.get("Cache-Control")).toContain("max-age=300");
+  });
+
+  it("does not cache redacted detail after a failed bearer lookup", async () => {
+    await putPack(e, makePack("detail-auth-outage"));
+    fetchSpy.mockResolvedValueOnce(esoLogsUnauthorized());
+
+    const res = await call(authedRequest(`${BASE}/packs/detail-auth-outage`));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
   });
 });
 
@@ -1020,6 +1040,24 @@ describe("POST /admin/seed", () => {
 // ── POST /admin/restore ─────────────────────────────────────────────
 
 describe("POST /admin/migration/authority", () => {
+  it("rejects an oversized adjudication without changing authority", async () => {
+    const index = packIndexForTest();
+    await index.setAuthority("kv", []);
+    const body = JSON.stringify({
+      authority: "do",
+      unowned_d1_ids: Array.from({ length: 100 }, (_, i) => `website-${i}`),
+      padding: "x".repeat(256_000),
+    });
+
+    const res = await call(apiKeyRequest(`${BASE}/admin/migration/authority`, {
+      method: "POST",
+      body,
+    }));
+
+    expect(res.status).toBe(413);
+    expect((await index.getReconciliationState()).authority).toBe("kv");
+  });
+
   it("requires explicit adjudication before ignoring a shared-D1-only witness", async () => {
     await e.ROSTER_HUB_DB!.prepare(
       "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, author_id TEXT, author_name TEXT, is_anonymous INTEGER, title TEXT, description TEXT, pack_type TEXT, addons TEXT, vote_count INTEGER, created_at TEXT, updated_at TEXT)"
