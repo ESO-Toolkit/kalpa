@@ -243,6 +243,29 @@ describe("GET /packs", () => {
 // ── POST /packs ───────────────────────────────────────────────────
 
 describe("POST /packs", () => {
+  it("returns retryable 503 and resumes the same create after a KV mirror failure", async () => {
+    const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValueOnce(
+      new Error("injected route detail put failure"),
+    );
+    const request = () => authedRequest(`${BASE}/packs`, {
+      method: "POST",
+      body: JSON.stringify(validPackBody({ id: "w1-route-create-retry" })),
+    });
+
+    const first = await call(request());
+    expect(first.status).toBe(503);
+    expect(first.headers.get("Retry-After")).toBe("5");
+    const canonical = await getCanonicalIndex(e);
+    const createdAt = canonical.packs.find(({ id }) => id === "w1-route-create-retry")!.created_at;
+    put.mockImplementation(originalPut);
+
+    const retry = await call(request());
+    expect(retry.status).toBe(201);
+    const body = await retry.json<{ pack: { created_at: string } }>();
+    expect(body.pack.created_at).toBe(createdAt);
+  });
+
   it("creates a pack with auth", async () => {
     // Reset index so prior tests' packs don't trigger the 25-pack-per-user limit
     await putPackIndex(e, { packs: [] });
@@ -521,7 +544,7 @@ describe("anonymous pack redaction", () => {
   });
 
   it("redacts an anonymous pack's detail for unauthenticated callers and keeps it cacheable", async () => {
-    await putPack(e, anon());
+    await putPackIndex(e, { packs: [anon()] });
     const res = await call(new Request(`${BASE}/packs/anon-pack`));
     expect(res.status).toBe(200);
     const body = await res.json<{
@@ -533,7 +556,7 @@ describe("anonymous pack redaction", () => {
   });
 
   it("returns real fields to the author on detail, uncached", async () => {
-    await putPack(e, anon());
+    await putPackIndex(e, { packs: [anon()] });
     const res = await call(authedRequest(`${BASE}/packs/anon-pack`));
     expect(res.status).toBe(200);
     const body = await res.json<{
@@ -626,6 +649,29 @@ describe("PUT /packs/:id", () => {
 // ── DELETE /packs/:id ─────────────────────────────────────────────
 
 describe("DELETE /packs/:id", () => {
+  it("returns retryable 503 and resumes detail cleanup after delete commits", async () => {
+    const pack = makePack("w1-route-delete-retry");
+    await putPackIndex(e, { packs: [pack] });
+    const originalDelete = e.ESO_PACKS.delete.bind(e.ESO_PACKS);
+    const remove = vi.spyOn(e.ESO_PACKS, "delete").mockRejectedValueOnce(
+      new Error("injected route detail delete failure"),
+    );
+
+    const first = await call(
+      authedRequest(`${BASE}/packs/${pack.id}`, { method: "DELETE" }),
+    );
+    expect(first.status).toBe(503);
+    expect(first.headers.get("Retry-After")).toBe("5");
+    expect((await call(new Request(`${BASE}/packs/${pack.id}`))).status).toBe(404);
+    remove.mockImplementation(originalDelete);
+
+    const retry = await call(
+      authedRequest(`${BASE}/packs/${pack.id}`, { method: "DELETE" }),
+    );
+    expect(retry.status).toBe(200);
+    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
+  });
+
   it("deletes own pack", async () => {
     const pack = makePack("delete-me");
     await putPack(e, pack);

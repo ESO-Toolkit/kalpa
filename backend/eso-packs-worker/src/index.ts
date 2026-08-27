@@ -1,6 +1,5 @@
 import type { Env, Pack, PackType, PackStatus, PackView, VoteRecord, VoteResponse } from "./types";
 import {
-  getPack,
   getPackIndex,
   putPack,
   getVotedPackIds,
@@ -320,7 +319,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
 // ── GET /packs/:id ─────────────────────────────────────────────────
 async function handleGetPack(request: Request, env: Env, id: string): Promise<Response> {
-  const pack = await getPack(env, id);
+  const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
   }
@@ -410,6 +409,11 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     if (added.reason === "duplicate") {
       return json(request, { error: "A pack with this id already exists" }, 409);
     }
+    if (added.reason === "retry") {
+      const response = json(request, { error: "Pack creation is still being committed" }, 503);
+      response.headers.set("Retry-After", "5");
+      return response;
+    }
     return json(
       request,
       { error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.` },
@@ -418,9 +422,8 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   }
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, pack);
 
-  return json(request, { pack }, 201);
+  return json(request, { pack: added.pack }, 201);
 }
 
 // ── PUT /packs/:id ─────────────────────────────────────────────────
@@ -505,6 +508,11 @@ async function handleDeletePack(
   if (removed === "forbidden") {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
+  if (removed === "retry") {
+    const response = json(request, { error: "Pack deletion is still being committed" }, 503);
+    response.headers.set("Retry-After", "5");
+    return response;
+  }
   await invalidatePackListCache(url);
 
   return json(request, { ok: true });
@@ -542,7 +550,7 @@ async function handleVotePack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  const pack = await getPack(env, id);
+  const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
   }
@@ -590,7 +598,7 @@ async function handleInstallPack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  const pack = await getPack(env, id);
+  const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
   }

@@ -4,7 +4,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
-| W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (ready) | - | D-W1-1, D-W1-2 | REVISE; all verified findings addressed | Worker check; 170 tests; Wrangler dry-run; CI green (Windows/Linux/macOS) | Merge-ready; no real deployment. Merge auto-deploys the shadow phase. |
+| W1 | in-progress | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE twice; four additional review findings open | Worker check; 170 tests; Wrangler dry-run; CI green (superseded) | Fable reconsulted; implementing journaled lifecycle transitions and DO-authoritative detail reads. |
 | W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
@@ -49,7 +49,20 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Rejected: all dated backups as live witnesses. Their intentional 90-day retention includes deleted packs and would make parity impossible; only a post-deploy `backup:latest` represents the current corpus.
 - Rollback: shadow-mode mutations deliberately do not rewrite the full KV index, so rolling back to old code can omit post-deploy creates from listings even though their detail and D1 rows survive. Any rollback after this deployment therefore requires a verified backup/DO export restore; changing the flag alone is not a reconciliation strategy.
 
+### D-W1-3 — Journal lifecycle transitions and serve detail from DO authority
+
+- Chosen after the twice-reject Fable reconsultation: commit canonical lifecycle state together with a deterministic operation journal and per-pack pending marker, then resume idempotent KV vote/detail, D1, and full-index effects on retry and by Durable Object alarm.
+- Delete commits the tombstone before destructive cleanup, so partial vote cleanup cannot coexist with a live pack. Same-owner retry resumes pending cleanup; slug reuse is refused until the old lifecycle finishes.
+- Create retry by the same actor resumes the stored canonical create instead of returning duplicate. Success is acknowledged only after the KV detail step; an incomplete mirror returns a retryable failure while public detail reads use the DO and remain consistent with canonical lifecycle state.
+- Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
+- Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+
 ## Session Log
+
+### 2026-08-27 — W1 twice-reject escalation
+
+- PR #369 was returned to draft after review identified four additional correctness failures: stale KV versions can be frozen by ID-only shadow merging; partial vote cleanup can corrupt a still-live pack; a failed KV detail deletion is not retryable after the DO tombstone commits; and a failed KV detail write leaves a committed create that retries as a duplicate.
+- Per the twice-reject rule, W1 is blocked and implementation is paused while Fable is reconsulted with both prior Sol reviews and the new review evidence.
 
 ### 2026-08-26 — Codex
 

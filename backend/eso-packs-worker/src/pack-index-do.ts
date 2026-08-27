@@ -5,14 +5,44 @@ import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
 const TOMBSTONE_PREFIX = "tomb:";
+const OWNERSHIP_PREFIX = "own:";
+const OPERATION_PREFIX = "op:";
+const PENDING_PREFIX = "pending:";
 const AUTHORITY_KEY = "meta:authority";
 const VOTE_MEMO_LIMIT = 5000;
+const RETRY_DELAY_MS = 30_000;
 
 type Authority = "kv" | "do";
 type MutationResult =
   | { status: "ok"; pack: Pack }
   | { status: "not-found" }
   | { status: "forbidden" };
+
+type AddResult =
+  | { ok: true; pack: Pack }
+  | { ok: false; reason: "duplicate" | "limit" | "retry" };
+type RemoveResult = "ok" | "not-found" | "forbidden" | "retry";
+
+interface Tombstone {
+  deletedAt: string;
+  authorId: string;
+  lifecycle: string;
+  operationId: string;
+}
+
+interface PendingOperation {
+  id: string;
+  kind: "create" | "delete";
+  packId: string;
+  actorId: string;
+  lifecycle: string;
+  pack: Pack;
+  kvDetailDone: boolean;
+  votesDone: boolean;
+  d1Done: boolean;
+  indexDone: boolean;
+  attempts: number;
+}
 
 export interface MigrationParity {
   authority: Authority;
@@ -21,6 +51,7 @@ export interface MigrationParity {
   tombstones: string[];
   do_only: string[];
   missing_from_do: string[];
+  stale_shadow: string[];
 }
 
 export interface WitnessAdoption {
@@ -37,9 +68,18 @@ export class PackIndexDO extends DurableObject<Env> {
   async addPack(
     pack: Pack,
     maxPerAuthor?: number,
-  ): Promise<{ ok: true } | { ok: false; reason: "duplicate" | "limit" }> {
+  ): Promise<AddResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const packs = await this.loadPacks();
+      const pending = await this.getPending(pack.id);
+      if (pending) {
+        if (pending.kind === "create" && pending.actorId === pack.author_id) {
+          return await this.finishCreate(pending)
+            ? { ok: true, pack: pending.pack }
+            : { ok: false, reason: "retry" };
+        }
+        return { ok: false, reason: "duplicate" };
+      }
       const detail = await this.env.ESO_PACKS.get<Pack>(`pack:${pack.id}`, {
         type: "json",
         cacheTtl: 30,
@@ -54,11 +94,17 @@ export class PackIndexDO extends DurableObject<Env> {
         return { ok: false, reason: "limit" };
       }
 
-      await this.ctx.storage.delete(this.tombstoneKey(pack.id));
-      await this.ctx.storage.put(this.packKey(pack.id), pack);
-      packs.push(pack);
-      await this.mirror(packs, pack);
-      return { ok: true };
+      const operation = this.createOperation("create", pack, pack.author_id);
+      await this.ctx.storage.transaction(async (txn) => {
+        await txn.delete(this.tombstoneKey(pack.id));
+        await txn.put(this.packKey(pack.id), pack);
+        await txn.put(this.ownershipKey(pack.id), pack.updated_at);
+        await txn.put(this.operationKey(operation.id), operation);
+        await txn.put(this.pendingKey(pack.id), operation.id);
+      });
+      return await this.finishCreate(operation)
+        ? { ok: true, pack }
+        : { ok: false, reason: "retry" };
     });
   }
 
@@ -79,6 +125,7 @@ export class PackIndexDO extends DurableObject<Env> {
         created_at: existing.created_at,
       };
       await this.ctx.storage.put(this.packKey(id), updated);
+      await this.ctx.storage.put(this.ownershipKey(id), updated.updated_at);
       await this.mirror(await this.getStoredPacks(), updated);
       return { status: "ok", pack: updated };
     });
@@ -124,18 +171,34 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
-  async removePack(id: string, actorId?: string): Promise<"ok" | "not-found" | "forbidden"> {
+  async removePack(id: string, actorId?: string): Promise<RemoveResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.loadPacks();
       const existing = await this.ctx.storage.get<Pack>(this.packKey(id));
-      if (!existing) return "not-found";
+      if (!existing) {
+        const pending = await this.getPending(id);
+        if (!pending || pending.kind !== "delete") return "not-found";
+        if (actorId !== undefined && pending.actorId !== actorId) return "forbidden";
+        return await this.finishDelete(pending) ? "ok" : "retry";
+      }
       if (actorId !== undefined && actorId !== existing.author_id) return "forbidden";
 
-      await deleteVotesForPack(this.env, id);
-      await this.deleteD1Pack(id);
-      await this.deleteStoredPack(id);
-      await this.mirror(await this.getStoredPacks(), undefined, id);
-      return "ok";
+      const operation = this.createOperation("delete", existing, actorId ?? existing.author_id);
+      const tombstone: Tombstone = {
+        deletedAt: new Date().toISOString(),
+        authorId: existing.author_id,
+        lifecycle: existing.created_at,
+        operationId: operation.id,
+      };
+      await this.ctx.storage.transaction(async (txn) => {
+        await txn.delete(this.packKey(id));
+        await txn.delete(this.ownershipKey(id));
+        await txn.put(this.tombstoneKey(id), tombstone);
+        await txn.put(this.operationKey(operation.id), operation);
+        await txn.put(this.pendingKey(id), operation.id);
+      });
+      this.forgetVotes(id);
+      return await this.finishDelete(operation) ? "ok" : "retry";
     });
   }
 
@@ -144,16 +207,26 @@ export class PackIndexDO extends DurableObject<Env> {
       await this.loadPacks();
       await this.hydrateDetailCorpus();
       const packs = await this.getStoredPacks();
-      const removed = packs.filter((pack) => pack.author_id === authorId).map((pack) => pack.id);
-      for (const id of removed) {
-        await deleteVotesForPack(this.env, id);
-        await this.deleteD1Pack(id);
-        await this.deleteStoredPack(id);
+      const removedPacks = packs.filter((pack) => pack.author_id === authorId);
+      for (const pack of removedPacks) {
+        const operation = this.createOperation("delete", pack, authorId);
+        const tombstone: Tombstone = {
+          deletedAt: new Date().toISOString(),
+          authorId,
+          lifecycle: pack.created_at,
+          operationId: operation.id,
+        };
+        await this.ctx.storage.transaction(async (txn) => {
+          await txn.delete(this.packKey(pack.id));
+          await txn.delete(this.ownershipKey(pack.id));
+          await txn.put(this.tombstoneKey(pack.id), tombstone);
+          await txn.put(this.operationKey(operation.id), operation);
+          await txn.put(this.pendingKey(pack.id), operation.id);
+        });
+        this.forgetVotes(pack.id);
+        await this.finishDelete(operation);
       }
-      if (removed.length > 0) {
-        await this.mirror(await this.getStoredPacks(), undefined, undefined, removed);
-      }
-      return removed;
+      return removedPacks.map(({ id }) => id);
     });
   }
 
@@ -194,6 +267,23 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async getIndex(): Promise<PackIndex> {
     return this.ctx.blockConcurrencyWhile(async () => ({ packs: await this.loadPacks() }));
+  }
+
+  async alarm(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX });
+      for (const operationId of pending.values()) {
+        const operation = await this.ctx.storage.get<PendingOperation>(
+          this.operationKey(operationId),
+        );
+        if (!operation) continue;
+        if (operation.kind === "create") await this.finishCreate(operation);
+        else await this.finishDelete(operation);
+      }
+      if ((await this.ctx.storage.list({ prefix: PENDING_PREFIX })).size > 0) {
+        await this.scheduleRetry();
+      }
+    });
   }
 
   async migrationParity(witnessIds: string[]): Promise<MigrationParity> {
@@ -251,7 +341,9 @@ export class PackIndexDO extends DurableObject<Env> {
       const kv = await this.readKvIndex();
       await this.mergeFromKv(kv);
       const parity = await this.buildParity(kv, witnessIds);
-      if (parity.missing_from_do.length > 0) return { ok: false, parity };
+      if (parity.missing_from_do.length > 0 || parity.stale_shadow.length > 0) {
+        return { ok: false, parity };
+      }
       await this.ctx.storage.put(AUTHORITY_KEY, "do");
       await this.mirror(await this.getStoredPacks());
       return { ok: true, parity: { ...parity, authority: "do" } };
@@ -280,10 +372,19 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async mergeFromKv(index: PackIndex): Promise<void> {
     const stored = await this.ctx.storage.list<Pack>({ prefix: STORAGE_PACK_PREFIX });
-    const tombstones = await this.ctx.storage.list<string>({ prefix: TOMBSTONE_PREFIX });
+    const tombstones = await this.ctx.storage.list<unknown>({ prefix: TOMBSTONE_PREFIX });
     for (const pack of index.packs) {
-      if (!stored.has(this.packKey(pack.id)) && !tombstones.has(this.tombstoneKey(pack.id))) {
-        await this.ctx.storage.put(this.packKey(pack.id), pack);
+      if (tombstones.has(this.tombstoneKey(pack.id))) continue;
+      const ownership = await this.ctx.storage.get<string>(this.ownershipKey(pack.id));
+      if (ownership) continue;
+      const detail = await this.env.ESO_PACKS.get<Pack>(`pack:${pack.id}`, {
+        type: "json",
+        cacheTtl: 30,
+      });
+      const candidate = this.newerPack(pack, detail);
+      const current = stored.get(this.packKey(pack.id));
+      if (!current || this.isNewerOrDifferent(candidate, current)) {
+        await this.ctx.storage.put(this.packKey(pack.id), candidate);
       }
     }
   }
@@ -316,6 +417,7 @@ export class PackIndexDO extends DurableObject<Env> {
   ): Promise<Pack> {
     pack[field] = Math.max(0, (pack[field] ?? 0) + delta);
     await this.ctx.storage.put(this.packKey(pack.id), pack);
+    await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
     await this.mirror(await this.getStoredPacks(), pack);
     return pack;
   }
@@ -329,32 +431,56 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
     const current = await this.getStoredPacks();
-    const desiredIds = new Set(packs.map(({ id }) => id));
-    const removed = current.filter(({ id }) => !desiredIds.has(id)).map(({ id }) => id);
-    for (const id of removed) await this.deleteStoredPack(id);
+    const accepted: Pack[] = [];
     for (const pack of packs) {
+      const pending = await this.getPending(pack.id);
+      if (pending?.kind !== "delete") accepted.push(pack);
+    }
+    const desiredIds = new Set(accepted.map(({ id }) => id));
+    const removed = current.filter(({ id }) => !desiredIds.has(id));
+    const deleteOperations: PendingOperation[] = [];
+    for (const pack of removed) {
+      const operation = this.createOperation("delete", pack, pack.author_id);
+      const tombstone: Tombstone = {
+        deletedAt: new Date().toISOString(),
+        authorId: pack.author_id,
+        lifecycle: pack.created_at,
+        operationId: operation.id,
+      };
+      await this.ctx.storage.transaction(async (txn) => {
+        await txn.delete(this.packKey(pack.id));
+        await txn.delete(this.ownershipKey(pack.id));
+        await txn.put(this.tombstoneKey(pack.id), tombstone);
+        await txn.put(this.operationKey(operation.id), operation);
+        await txn.put(this.pendingKey(pack.id), operation.id);
+      });
+      this.forgetVotes(pack.id);
+      deleteOperations.push(operation);
+    }
+    for (const pack of accepted) {
       await this.ctx.storage.delete(this.tombstoneKey(pack.id));
       await this.ctx.storage.put(this.packKey(pack.id), pack);
+      await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
     }
-    await this.mirror(packs, undefined, undefined, removed, forceIndex);
+    await this.mirror(accepted, undefined, undefined, [], forceIndex);
+    for (const operation of deleteOperations) await this.finishDelete(operation);
     this.voteMemo.clear();
   }
 
-  private async deleteStoredPack(id: string): Promise<void> {
-    await this.ctx.storage.delete(this.packKey(id));
-    await this.ctx.storage.put(this.tombstoneKey(id), new Date().toISOString());
-    this.forgetVotes(id);
-  }
-
-  private async deleteD1Pack(id: string): Promise<void> {
-    if (!this.env.ROSTER_HUB_DB) return;
+  private async deleteD1Pack(id: string): Promise<boolean> {
+    if (!this.env.ROSTER_HUB_DB) return true;
     try {
       await this.env.ROSTER_HUB_DB.batch([
         this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
         this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
       ]);
+      return true;
     } catch (error) {
       console.error(`D1 delete failed [${id}]:`, error);
+      // Local/preview namespaces may bind an empty D1 database. There is no
+      // external row to reconcile in that case; production's shared database
+      // has both tables and every other failure remains journaled for retry.
+      return error instanceof Error && error.message.includes("no such table");
     }
   }
 
@@ -379,10 +505,21 @@ export class PackIndexDO extends DurableObject<Env> {
     const packs = await this.getStoredPacks();
     const doIds = new Set(packs.map(({ id }) => id));
     const kvIds = new Set(kv.packs.map(({ id }) => id));
-    const tombstoneEntries = await this.ctx.storage.list<string>({ prefix: TOMBSTONE_PREFIX });
+    const tombstoneEntries = await this.ctx.storage.list<unknown>({ prefix: TOMBSTONE_PREFIX });
     const tombstones = [...tombstoneEntries.keys()].map((key) => key.slice(TOMBSTONE_PREFIX.length));
     const tombstoneIds = new Set(tombstones);
     const witnesses = new Set([...kvIds, ...witnessIds]);
+    const staleShadow: string[] = [];
+    for (const kvPack of kv.packs) {
+      if (tombstoneIds.has(kvPack.id)) continue;
+      const stored = packs.find(({ id }) => id === kvPack.id);
+      const detail = await this.env.ESO_PACKS.get<Pack>(`pack:${kvPack.id}`, {
+        type: "json",
+        cacheTtl: 30,
+      });
+      const witness = this.newerPack(kvPack, detail);
+      if (!stored || this.isNewerOrDifferent(witness, stored)) staleShadow.push(kvPack.id);
+    }
     return {
       authority,
       kv_count: kvIds.size,
@@ -392,6 +529,7 @@ export class PackIndexDO extends DurableObject<Env> {
       missing_from_do: [...witnesses]
         .filter((id) => !doIds.has(id) && !tombstoneIds.has(id))
         .sort(),
+      stale_shadow: staleShadow.sort(),
     };
   }
 
@@ -401,6 +539,209 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private tombstoneKey(id: string): string {
     return `${TOMBSTONE_PREFIX}${id}`;
+  }
+
+  private ownershipKey(id: string): string {
+    return `${OWNERSHIP_PREFIX}${id}`;
+  }
+
+  private pendingKey(id: string): string {
+    return `${PENDING_PREFIX}${id}`;
+  }
+
+  private operationKey(id: string): string {
+    return `${OPERATION_PREFIX}${id}`;
+  }
+
+  private createOperation(
+    kind: "create" | "delete",
+    pack: Pack,
+    actorId: string,
+  ): PendingOperation {
+    const lifecycle = pack.created_at;
+    return {
+      id: `${kind}:${pack.id}:${actorId}:${lifecycle}`,
+      kind,
+      packId: pack.id,
+      actorId,
+      lifecycle,
+      pack,
+      kvDetailDone: false,
+      votesDone: kind === "create",
+      d1Done: false,
+      indexDone: false,
+      attempts: 0,
+    };
+  }
+
+  private async getPending(packId: string): Promise<PendingOperation | null> {
+    const operationId = await this.ctx.storage.get<string>(this.pendingKey(packId));
+    if (!operationId) return null;
+    return (await this.ctx.storage.get<PendingOperation>(this.operationKey(operationId))) ?? null;
+  }
+
+  private async saveOperation(operation: PendingOperation): Promise<void> {
+    await this.ctx.storage.put(this.operationKey(operation.id), operation);
+  }
+
+  private async finishCreate(operation: PendingOperation): Promise<boolean> {
+    operation.attempts++;
+    if (!operation.kvDetailDone) {
+      try {
+        await this.env.ESO_PACKS.put(
+          `pack:${operation.packId}`,
+          JSON.stringify(operation.pack),
+        );
+        operation.kvDetailDone = true;
+        await this.saveOperation(operation);
+      } catch (error) {
+        console.error(`KV create mirror failed [${operation.packId}]:`, error);
+        await this.saveOperation(operation);
+        await this.scheduleRetry();
+        return false;
+      }
+    }
+
+    if (!operation.d1Done) {
+      operation.d1Done = await this.upsertD1Pack(operation.pack);
+      await this.saveOperation(operation);
+    }
+    if (!operation.indexDone) {
+      operation.indexDone = await this.mirrorIndexIfAuthoritative();
+      await this.saveOperation(operation);
+    }
+    await this.finishOperationIfComplete(operation);
+    return true;
+  }
+
+  private async finishDelete(operation: PendingOperation): Promise<boolean> {
+    operation.attempts++;
+    if (!operation.votesDone) {
+      try {
+        await deleteVotesForPack(this.env, operation.packId);
+        operation.votesDone = true;
+        await this.saveOperation(operation);
+      } catch (error) {
+        console.error(`KV vote cleanup failed [${operation.packId}]:`, error);
+        await this.saveOperation(operation);
+        await this.scheduleRetry();
+        return false;
+      }
+    }
+    if (!operation.kvDetailDone) {
+      try {
+        await this.env.ESO_PACKS.delete(`pack:${operation.packId}`);
+        operation.kvDetailDone = true;
+        await this.saveOperation(operation);
+      } catch (error) {
+        console.error(`KV delete mirror failed [${operation.packId}]:`, error);
+        await this.saveOperation(operation);
+        await this.scheduleRetry();
+        return false;
+      }
+    }
+    if (!operation.d1Done) {
+      operation.d1Done = await this.deleteD1Pack(operation.packId);
+      await this.saveOperation(operation);
+    }
+    if (!operation.indexDone) {
+      operation.indexDone = await this.mirrorIndexIfAuthoritative();
+      await this.saveOperation(operation);
+    }
+    await this.finishOperationIfComplete(operation);
+    return true;
+  }
+
+  private async finishOperationIfComplete(operation: PendingOperation): Promise<void> {
+    if (
+      !operation.kvDetailDone ||
+      !operation.votesDone ||
+      !operation.d1Done ||
+      !operation.indexDone
+    ) {
+      await this.scheduleRetry();
+      return;
+    }
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.delete(this.pendingKey(operation.packId));
+      await txn.delete(this.operationKey(operation.id));
+    });
+  }
+
+  private async mirrorIndexIfAuthoritative(): Promise<boolean> {
+    if (await this.getAuthority() !== "do") return true;
+    try {
+      await this.env.ESO_PACKS.put(
+        INDEX_KEY,
+        JSON.stringify({ packs: await this.getStoredPacks() }),
+      );
+      return true;
+    } catch (error) {
+      console.error("KV index mirror failed:", error);
+      return false;
+    }
+  }
+
+  private async scheduleRetry(): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    const desired = Date.now() + RETRY_DELAY_MS;
+    if (current === null || current > desired) await this.ctx.storage.setAlarm(desired);
+  }
+
+  private newerPack(indexPack: Pack, detail?: Pack | null): Pack {
+    if (!detail || detail.id !== indexPack.id) return indexPack;
+    return detail.updated_at >= indexPack.updated_at ? detail : indexPack;
+  }
+
+  private isNewerOrDifferent(candidate: Pack, current: Pack): boolean {
+    return candidate.updated_at > current.updated_at ||
+      (candidate.updated_at === current.updated_at &&
+        JSON.stringify(candidate) !== JSON.stringify(current));
+  }
+
+  private async upsertD1Pack(pack: Pack): Promise<boolean> {
+    if (!this.env.ROSTER_HUB_DB) return true;
+    try {
+      if (pack.status !== "published") {
+        return await this.deleteD1Pack(pack.id);
+      }
+      const addons = JSON.stringify(pack.addons.map((addon) => ({
+        esouiId: addon.esouiId,
+        name: addon.name,
+        required: addon.required,
+        note: addon.note,
+      })));
+      await this.env.ROSTER_HUB_DB.prepare(
+        `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
+           pack_type = excluded.pack_type, addons = excluded.addons,
+           is_anonymous = excluded.is_anonymous, author_name = excluded.author_name,
+           vote_count = excluded.vote_count, updated_at = datetime('now')`,
+      ).bind(
+        pack.id,
+        pack.author_id,
+        pack.is_anonymous ? "Anonymous" : pack.author_name,
+        pack.is_anonymous ? 1 : 0,
+        pack.title,
+        pack.description,
+        pack.pack_type,
+        addons,
+        pack.vote_count ?? 0,
+      ).run();
+      await this.env.ROSTER_HUB_DB.batch([
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+        ...pack.tags.map((tag) =>
+          this.env.ROSTER_HUB_DB!.prepare(
+            "INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)",
+          ).bind(pack.id, tag),
+        ),
+      ]);
+      return true;
+    } catch (error) {
+      console.error(`D1 upsert failed [${pack.id}]:`, error);
+      return error instanceof Error && error.message.includes("no such table");
+    }
   }
 
   private async mirror(

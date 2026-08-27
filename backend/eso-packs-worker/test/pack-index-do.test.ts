@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { putPack, putVote } from "../src/kv";
 import type { Env, Pack } from "../src/types";
 import { makePack } from "./helpers";
@@ -46,6 +46,87 @@ describe("PackIndexDO authoritative mutations", () => {
     expect((await packIndex().getIndex()).packs).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: delayed.id })]),
     );
+  });
+
+  it("refreshes an unowned stale shadow record from the newer detail body", async () => {
+    const stale = makePack("w1-shadow-version", {
+      title: "Stale index title",
+      updated_at: "2026-08-26T00:00:00.000Z",
+    });
+    const fresh = {
+      ...stale,
+      title: "Fresh detail title",
+      updated_at: "2026-08-26T01:00:00.000Z",
+    };
+    await e.ESO_PACKS.put("index:packs", JSON.stringify({ packs: [stale] }));
+    await putPack(e, fresh);
+
+    expect(await packIndex().getPack(stale.id)).toMatchObject({
+      title: "Fresh detail title",
+      updated_at: fresh.updated_at,
+    });
+  });
+
+  it("resumes a create after its first KV detail mirror fails", async () => {
+    const pack = makePack("w1-create-retry");
+    const put = vi.spyOn(e.ESO_PACKS, "put");
+    put.mockRejectedValueOnce(new Error("injected detail put failure"));
+
+    expect(await packIndex().addPack(pack, 25)).toMatchObject({
+      ok: false,
+      reason: "retry",
+    });
+    put.mockRestore();
+
+    expect(await packIndex().addPack({ ...pack }, 25)).toMatchObject({ ok: true });
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json")).toMatchObject({
+      created_at: pack.created_at,
+    });
+    expect((await packIndex().getIndex()).packs.filter(({ id }) => id === pack.id)).toHaveLength(1);
+  });
+
+  it("resumes KV detail cleanup when delete is retried after mirror failure", async () => {
+    const pack = makePack("w1-delete-retry");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await putPack(e, pack);
+    const remove = vi.spyOn(e.ESO_PACKS, "delete");
+    remove.mockRejectedValueOnce(new Error("injected detail delete failure"));
+
+    expect(await index.removePack(pack.id, pack.author_id)).toBe("retry");
+    remove.mockRestore();
+
+    expect(await index.getPack(pack.id)).toBeNull();
+    expect(await index.removePack(pack.id, pack.author_id)).toBe("ok");
+    expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
+  });
+
+  it("tombstones before resumable vote cleanup can partially fail", async () => {
+    const pack = makePack("w1-vote-cleanup-retry", { vote_count: 3 });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await putPack(e, pack);
+    for (const user of ["one", "two", "three"]) await putVote(e, pack.id, user);
+
+    const originalDelete = e.ESO_PACKS.delete.bind(e.ESO_PACKS);
+    let voteDeletes = 0;
+    const remove = vi.spyOn(e.ESO_PACKS, "delete").mockImplementation(async (key) => {
+      if (key.startsWith(`vote:${pack.id}:`) && ++voteDeletes === 2) {
+        throw new Error("injected second vote delete failure");
+      }
+      return originalDelete(key);
+    });
+
+    expect(await index.removePack(pack.id, pack.author_id)).toBe("retry");
+    expect(await index.getPack(pack.id)).toBeNull();
+    expect((await index.getIndex()).packs.some(({ id }) => id === pack.id)).toBe(false);
+    remove.mockRestore();
+
+    expect(await index.removePack(pack.id, pack.author_id)).toBe("ok");
+    for (const user of ["one", "two", "three"]) {
+      expect(await e.ESO_PACKS.get(`vote:${pack.id}:${user}`)).toBeNull();
+      expect(await e.ESO_PACKS.get(`user-votes:${user}:${pack.id}`)).toBeNull();
+    }
   });
 
   it("does not resurrect a deleted pack when a vote carries a stale detail body", async () => {
