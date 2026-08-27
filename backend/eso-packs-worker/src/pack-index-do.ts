@@ -12,6 +12,8 @@ const PENDING_PREFIX = "pending:";
 const DIRTY_MIRROR_PREFIX = "dirty:";
 const DELETED_AUTHOR_PREFIX = "deleted-author:";
 const AUTHORITY_KEY = "meta:authority";
+const RECONCILIATION_LEASE_KEY = "meta:d1-reconciliation-lease";
+const RECONCILIATION_LEASE_MS = 48 * 60 * 60 * 1000;
 const VOTE_MEMO_LIMIT = 5000;
 const RETRY_DELAY_MS = 30_000;
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
@@ -81,8 +83,14 @@ export interface WitnessAdoption {
 }
 
 export interface ReconciliationAuthority {
+  authority: Authority;
   packs: Pack[];
   tombstones: string[];
+}
+
+interface ReconciliationLease {
+  token: string;
+  expires_at: number;
 }
 
 /** Serializes mutations while migrating authority from KV to DO storage. */
@@ -386,13 +394,35 @@ export class PackIndexDO extends DurableObject<Env> {
   async getReconciliationState(): Promise<ReconciliationAuthority> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const packs = await this.loadPacks();
+      const authority = await this.getAuthority();
       const entries = await this.ctx.storage.list<string>({ prefix: TOMBSTONE_PREFIX });
       return {
+        authority,
         packs,
         tombstones: [...entries.keys()]
           .map((key) => key.slice(TOMBSTONE_PREFIX.length))
           .sort(),
       };
+    });
+  }
+
+  async beginReconciliation(token: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = Date.now();
+      const current = await this.ctx.storage.get<ReconciliationLease>(RECONCILIATION_LEASE_KEY);
+      if (current && current.expires_at > now) return false;
+      await this.ctx.storage.put(RECONCILIATION_LEASE_KEY, {
+        token,
+        expires_at: now + RECONCILIATION_LEASE_MS,
+      } satisfies ReconciliationLease);
+      return true;
+    });
+  }
+
+  async endReconciliation(token: string): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.ctx.storage.get<ReconciliationLease>(RECONCILIATION_LEASE_KEY);
+      if (current?.token === token) await this.ctx.storage.delete(RECONCILIATION_LEASE_KEY);
     });
   }
 

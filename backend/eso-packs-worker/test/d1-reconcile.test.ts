@@ -26,7 +26,9 @@ function row(pack: Pack): D1PackRow {
 }
 function fakeEnv(
   options: {
-    authority?: ReconciliationAuthority;
+    authority?: Omit<ReconciliationAuthority, "authority"> & {
+      authority?: ReconciliationAuthority["authority"];
+    };
     authorityError?: Error;
     rows?: D1PackRow[];
     tags?: Array<{ pack_id: string; tag: string }>;
@@ -34,6 +36,7 @@ function fakeEnv(
     failMutation?: number;
     d1ReadError?: Error;
     currentLifecycle?: string;
+    beginResults?: boolean[];
   } = {}
 ) {
   const writes = new Map<string, string>(),
@@ -67,7 +70,12 @@ function fakeEnv(
   const stub = {
     getReconciliationState: options.authorityError
       ? vi.fn().mockRejectedValue(options.authorityError)
-      : vi.fn().mockResolvedValue(options.authority ?? { packs: [], tombstones: [] }),
+      : vi.fn().mockResolvedValue({
+          authority: "do",
+          packs: [],
+          tombstones: [],
+          ...options.authority,
+        }),
     reconcileWriteD1: vi
       .fn()
       .mockImplementation(
@@ -85,6 +93,10 @@ function fakeEnv(
       if (options.failMutation === mutations) throw new Error("partial D1 failure");
       return true;
     }),
+    beginReconciliation: vi
+      .fn()
+      .mockImplementation(async () => options.beginResults?.shift() ?? true),
+    endReconciliation: vi.fn().mockResolvedValue(undefined),
   };
   const env = {
     D1_RECONCILIATION_MODE: options.mode,
@@ -119,7 +131,11 @@ describe("D1 reconciliation", () => {
   });
   it("plans restoration for a missing authoritative pack", () => {
     const pack = makePack("missing", { tags: ["pvp"] });
-    const plan = buildD1ReconciliationPlan({ packs: [pack], tombstones: [] }, [], []);
+    const plan = buildD1ReconciliationPlan(
+      { authority: "do", packs: [pack], tombstones: [] },
+      [],
+      []
+    );
     expect(plan.upserts.map((item) => item.id)).toEqual(["missing"]);
     expect(plan.tag_replacements.map((item) => item.id)).toEqual(["missing"]);
   });
@@ -145,9 +161,17 @@ describe("D1 reconciliation", () => {
   it("plans deletion only for a proven-owned zombie", () => {
     const zombie = row(makePack("zombie"));
     expect(
-      buildD1ReconciliationPlan({ packs: [], tombstones: ["zombie"] }, [zombie], []).deletes
+      buildD1ReconciliationPlan(
+        { authority: "do", packs: [], tombstones: ["zombie"] },
+        [zombie],
+        []
+      ).deletes
     ).toEqual(["zombie"]);
-    const unowned = buildD1ReconciliationPlan({ packs: [], tombstones: [] }, [zombie], []);
+    const unowned = buildD1ReconciliationPlan(
+      { authority: "do", packs: [], tombstones: [] },
+      [zombie],
+      []
+    );
     expect(unowned.deletes).toEqual([]);
     expect(unowned.unowned_extra).toEqual(["zombie"]);
   });
@@ -168,7 +192,11 @@ describe("D1 reconciliation", () => {
   it("plans removal of a draft still mirrored in D1", () => {
     const draft = makePack("draft", { status: "draft" });
     expect(
-      buildD1ReconciliationPlan({ packs: [draft], tombstones: [] }, [row(draft)], []).deletes
+      buildD1ReconciliationPlan(
+        { authority: "do", packs: [draft], tombstones: [] },
+        [row(draft)],
+        []
+      ).deletes
     ).toEqual(["draft"]);
   });
   it("removes tag-only orphans for an authoritative draft", async () => {
@@ -197,6 +225,48 @@ describe("D1 reconciliation", () => {
     expect(result.planned.deletes).toBe(1);
     expect(result.applied.deletes).toBe(1);
     expect(fixture.stub.reconcileDeleteD1).toHaveBeenCalledWith("zombie");
+  });
+  it("retains deletion candidates while W1 authority is still shadowing KV", async () => {
+    const zombie = row(makePack("shadow-zombie"));
+    const fixture = fakeEnv({
+      authority: {
+        authority: "kv",
+        packs: [],
+        tombstones: [zombie.id],
+      } as ReconciliationAuthority,
+      rows: [zombie],
+      mode: "apply",
+    });
+    const result = await reconcileD1(fixture.env);
+    expect(result.planned.deletes).toBe(0);
+    expect(result.unowned_extra).toBe(1);
+    expect(result.applied.deletes).toBe(0);
+  });
+  it("rejects a D1 corpus above its read ceiling before planning", async () => {
+    const rows = Array.from({ length: 2_001 }, (_, i) => row(makePack(`d1-${i}`)));
+    const fixture = fakeEnv({ rows, mode: "apply" });
+    const result = await reconcileD1(fixture.env);
+    expect(result.stage).toBe("plan-rejected");
+    expect(result.limit_hit).toBe("d1-corpus");
+    expect(result.applied.total).toBe(0);
+  });
+  it("rejects a D1 tag corpus above its read ceiling before planning", async () => {
+    const tags = Array.from({ length: 20_001 }, (_, i) => ({
+      pack_id: `d1-tag-${i}`,
+      tag: "pvp",
+    }));
+    const fixture = fakeEnv({ tags, mode: "apply" });
+    const result = await reconcileD1(fixture.env);
+    expect(result.stage).toBe("plan-rejected");
+    expect(result.limit_hit).toBe("d1-tags");
+    expect(result.applied.total).toBe(0);
+  });
+  it("skips an overlapping reconciliation run", async () => {
+    const fixture = fakeEnv({ beginResults: [true, false], mode: "apply" });
+    const [first, second] = await Promise.all([reconcileD1(fixture.env), reconcileD1(fixture.env)]);
+    expect([first.stage, second.stage].sort()).toEqual(["complete", "skipped-overlap"]);
+    expect(fixture.stub.beginReconciliation).toHaveBeenCalledTimes(2);
+    expect(fixture.stub.endReconciliation).toHaveBeenCalledTimes(1);
   });
   it("prepares no D1 SQL when authority read fails", async () => {
     const fixture = fakeEnv({ authorityError: new Error("DO unavailable"), mode: "apply" });

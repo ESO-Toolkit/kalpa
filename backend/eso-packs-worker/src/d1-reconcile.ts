@@ -1,9 +1,18 @@
 import { ANONYMOUS_AUTHOR_NAME } from "./redact";
 import type { Env, Pack } from "./types";
 
-const LIMITS = { corpus: 2_000, upserts: 100, tags: 100, deletes: 25, emptyDeletes: 5, total: 150 };
+const LIMITS = {
+  corpus: 2_000,
+  d1Tags: 20_000,
+  upserts: 100,
+  tags: 100,
+  deletes: 25,
+  emptyDeletes: 5,
+  total: 150,
+};
 
 export interface ReconciliationAuthority {
+  authority: "kv" | "do";
   packs: Pack[];
   tombstones: string[];
 }
@@ -32,7 +41,15 @@ type Mode = "off" | "dry-run" | "apply";
 type Counts = { upserts: number; tag_replacements: number; deletes: number; total: number };
 export interface D1ReconciliationResult {
   at: string;
-  stage: "off" | "authority" | "d1-read" | "plan-rejected" | "apply" | "complete" | "no-d1";
+  stage:
+    | "off"
+    | "authority"
+    | "d1-read"
+    | "plan-rejected"
+    | "apply"
+    | "complete"
+    | "no-d1"
+    | "skipped-overlap";
   mode: Mode;
   mode_invalid?: string;
   authority_count: number;
@@ -113,6 +130,12 @@ export function buildD1ReconciliationPlan(
     if (pack || owned.has(id)) deletes.add(id);
     else unowned.add(id);
   }
+  // W1's shadow corpus is deliberately allowed to be incomplete while KV
+  // witnesses converge. Deletions are safe only after the DO authority flip.
+  if (authority.authority !== "do") {
+    for (const id of deletes) unowned.add(id);
+    deletes.clear();
+  }
   return {
     upserts,
     tag_replacements: replacements,
@@ -144,7 +167,11 @@ function validateAuthority(value: unknown): ReconciliationAuthority {
   if (!value || typeof value !== "object")
     throw new Error("Authority returned a non-object result");
   const result = value as Partial<ReconciliationAuthority>;
-  if (!Array.isArray(result.packs) || !Array.isArray(result.tombstones))
+  if (
+    (result.authority !== "kv" && result.authority !== "do") ||
+    !Array.isArray(result.packs) ||
+    !Array.isArray(result.tombstones)
+  )
     throw new Error("Authority result is incomplete");
   const ids = new Set<string>();
   for (const pack of result.packs) {
@@ -241,80 +268,111 @@ export async function reconcileD1(env: Env): Promise<D1ReconciliationResult> {
     return result;
   }
   const stub = env.PACK_INDEX.get(env.PACK_INDEX.idFromName("singleton"));
-  let authority: ReconciliationAuthority;
+  const leaseToken = crypto.randomUUID();
   try {
-    authority = validateAuthority(await stub.getReconciliationState());
-    result.authority_count = authority.packs.length;
-    if (authority.packs.length > LIMITS.corpus)
-      throw new Error(`Authority corpus exceeds ${LIMITS.corpus}`);
+    if (!(await stub.beginReconciliation(leaseToken))) {
+      result.stage = "skipped-overlap";
+      result.message = "Another reconciliation run holds the lease";
+      await breadcrumb(env, "d1-recon:last", result);
+      return result;
+    }
   } catch (error) {
     result.stage = "authority";
-    result.message = error instanceof Error ? error.message : String(error);
+    result.message = `Failed to acquire reconciliation lease: ${error instanceof Error ? error.message : String(error)}`;
     await breadcrumb(env, "d1-recon:last_error", result);
     return result;
   }
-  let rows: D1PackRow[], tags: D1TagRow[];
   try {
-    rows = (
-      await env.ROSTER_HUB_DB.prepare(
-        "SELECT id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count FROM packs"
-      ).all<D1PackRow>()
-    ).results;
-    tags = (await env.ROSTER_HUB_DB.prepare("SELECT pack_id, tag FROM pack_tags").all<D1TagRow>())
-      .results;
-    result.d1_count = rows.length;
-  } catch (error) {
-    result.stage = "d1-read";
-    result.message = error instanceof Error ? error.message : String(error);
-    await breadcrumb(env, "d1-recon:last_error", result);
-    return result;
-  }
-  const plan = buildD1ReconciliationPlan(authority, rows, tags);
-  result.planned = planCounts(plan);
-  result.unowned_extra = plan.unowned_extra.length;
-  result.limit_hit = limitHit(authority.packs.length, result.planned);
-  if (result.limit_hit) {
-    result.stage = "plan-rejected";
-    await breadcrumb(env, "d1-recon:last_error", result);
-    return result;
-  }
-  if (resolved.value === "apply") {
+    let authority: ReconciliationAuthority;
     try {
-      for (const pack of plan.upserts) {
-        const replace = plan.tag_replacements.some(({ id }) => id === pack.id);
-        const applied = await stub.reconcileWriteD1(pack.id, pack.created_at, true, replace);
-        if (applied.upserted) {
-          result.applied.upserts++;
-          result.applied.total++;
-        }
-        if (applied.tags_replaced) {
-          result.applied.tag_replacements++;
-          result.applied.total++;
-        }
-      }
-      const upsertIds = new Set(plan.upserts.map(({ id }) => id));
-      for (const pack of plan.tag_replacements) {
-        if (upsertIds.has(pack.id)) continue;
-        const applied = await stub.reconcileWriteD1(pack.id, pack.created_at, false, true);
-        if (applied.tags_replaced) {
-          result.applied.tag_replacements++;
-          result.applied.total++;
-        }
-      }
-      for (const id of plan.deletes) {
-        if (await stub.reconcileDeleteD1(id)) {
-          result.applied.deletes++;
-          result.applied.total++;
-        }
-      }
+      authority = validateAuthority(await stub.getReconciliationState());
+      result.authority_count = authority.packs.length;
+      if (authority.packs.length > LIMITS.corpus)
+        throw new Error(`Authority corpus exceeds ${LIMITS.corpus}`);
     } catch (error) {
-      result.stage = "apply";
+      result.stage = "authority";
       result.message = error instanceof Error ? error.message : String(error);
       await breadcrumb(env, "d1-recon:last_error", result);
       return result;
     }
+    let rows: D1PackRow[], tags: D1TagRow[];
+    try {
+      rows = (
+        await env.ROSTER_HUB_DB.prepare(
+          `SELECT id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count FROM packs LIMIT ${LIMITS.corpus + 1}`
+        ).all<D1PackRow>()
+      ).results;
+      tags = (
+        await env.ROSTER_HUB_DB.prepare(
+          `SELECT pack_id, tag FROM pack_tags LIMIT ${LIMITS.d1Tags + 1}`
+        ).all<D1TagRow>()
+      ).results;
+      result.d1_count = rows.length;
+    } catch (error) {
+      result.stage = "d1-read";
+      result.message = error instanceof Error ? error.message : String(error);
+      await breadcrumb(env, "d1-recon:last_error", result);
+      return result;
+    }
+    if (rows.length > LIMITS.corpus || tags.length > LIMITS.d1Tags) {
+      result.stage = "plan-rejected";
+      result.limit_hit = rows.length > LIMITS.corpus ? "d1-corpus" : "d1-tags";
+      await breadcrumb(env, "d1-recon:last_error", result);
+      return result;
+    }
+    const plan = buildD1ReconciliationPlan(authority, rows, tags);
+    result.planned = planCounts(plan);
+    result.unowned_extra = plan.unowned_extra.length;
+    result.limit_hit = limitHit(authority.packs.length, result.planned);
+    if (result.limit_hit) {
+      result.stage = "plan-rejected";
+      await breadcrumb(env, "d1-recon:last_error", result);
+      return result;
+    }
+    if (resolved.value === "apply") {
+      try {
+        for (const pack of plan.upserts) {
+          const replace = plan.tag_replacements.some(({ id }) => id === pack.id);
+          const applied = await stub.reconcileWriteD1(pack.id, pack.created_at, true, replace);
+          if (applied.upserted) {
+            result.applied.upserts++;
+            result.applied.total++;
+          }
+          if (applied.tags_replaced) {
+            result.applied.tag_replacements++;
+            result.applied.total++;
+          }
+        }
+        const upsertIds = new Set(plan.upserts.map(({ id }) => id));
+        for (const pack of plan.tag_replacements) {
+          if (upsertIds.has(pack.id)) continue;
+          const applied = await stub.reconcileWriteD1(pack.id, pack.created_at, false, true);
+          if (applied.tags_replaced) {
+            result.applied.tag_replacements++;
+            result.applied.total++;
+          }
+        }
+        for (const id of plan.deletes) {
+          if (await stub.reconcileDeleteD1(id)) {
+            result.applied.deletes++;
+            result.applied.total++;
+          }
+        }
+      } catch (error) {
+        result.stage = "apply";
+        result.message = error instanceof Error ? error.message : String(error);
+        await breadcrumb(env, "d1-recon:last_error", result);
+        return result;
+      }
+    }
+    result.stage = "complete";
+    await breadcrumb(env, "d1-recon:last", result);
+    return result;
+  } finally {
+    try {
+      await stub.endReconciliation(leaseToken);
+    } catch (error) {
+      console.error("Failed to release D1 reconciliation lease:", error);
+    }
   }
-  result.stage = "complete";
-  await breadcrumb(env, "d1-recon:last", result);
-  return result;
 }
