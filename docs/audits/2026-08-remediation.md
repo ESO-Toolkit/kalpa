@@ -27,7 +27,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
-| H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
+| H6 | ready | `fix/audit-h6-quick-xml-advisory` | pending | - | D-H6-1 | pending | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
 
 ## Decisions
 
@@ -67,6 +67,52 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### D-H6-1 — Adopt compatible upstream quick-xml fixes
+
+- Chosen: update the main lockfile to `plist` 1.10.0 and
+  `tauri-winrt-notification` 0.7.3, and the Slint lockfile to
+  `wayland-scanner` 0.31.11. These compatible upstream releases converge both
+  graphs on patched `quick-xml` 0.41.0 without changing direct dependency
+  requirements or application code.
+- Evidence before: `cargo audit` reported RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195 against main's `quick-xml` 0.37.5/0.39.4 and Slint's
+  0.39.4. Inverse trees traced the main edges through
+  `tauri-winrt-notification`/`notify-rust` and `plist`/Tauri, and the Slint edge
+  through `wayland-scanner`/Wayland UI crates.
+- Evidence after: the main audit reports zero vulnerabilities; the Slint audit
+  no longer reports either quick-xml advisory. Its three remaining advisories
+  are unrelated pre-existing findings in `crossbeam-epoch`, `h2`, and
+  `webbrowser` and are outside H6.
+- Rejected: retaining CI ignores. The upstream constraints that justified the
+  exception have moved, so suppression would now hide a fixable high-severity
+  dependency issue.
+- Compatibility and rollback: lockfile-only patch/minor transitive updates;
+  wire and persisted-data formats are unchanged. Revert this branch's commit to
+  restore the prior resolved graph and CI exceptions.
+
+## Session Log
+
+### 2026-08-26 — Codex (H6)
+
+- Active branch: `fix/audit-h6-quick-xml-advisory`, stacked on W1.
+- Finding: revisit the ignored RUSTSEC-2026-0194 and RUSTSEC-2026-0195
+  quick-xml advisories when upstream dependency constraints permit.
+- Toolchain: stable `rustc` 1.94.0, Cargo 1.94.0, cargo-audit 0.22.1.
+- Objective before/after reproduction replaces a code regression test for this
+  dependency-only finding: unignored audits and inverse trees identified three
+  vulnerable quick-xml edges; Cargo-resolved upstream updates converge both
+  lockfiles on quick-xml 0.41.0, clearing H6 from both audit reports.
+- Scope: only Cargo-resolved lockfiles, the obsolete CI suppressions, and this
+  tracker decision. No direct requirements, runtime code, wire formats, or
+  persisted data changed.
+- Gates: main clippy/fmt, strict all-targets clippy, 824 tests (807 passed, 17
+  ignored), and fmt check pass. Slint clippy/fmt, strict all-targets clippy, 770
+  tests (755 passed, 15 ignored), fmt check, and `npm run build:native-slint`
+  pass. Main `cargo audit` reports zero vulnerabilities; Slint no longer reports
+  either H6 advisory.
+- Active work: obtain Sol review and open a draft stacked PR.
+- Exact next action: commit the reviewed diff, invoke Sol, and address any
+  verified findings.
 
 ### 2026-08-26 — Codex
 
