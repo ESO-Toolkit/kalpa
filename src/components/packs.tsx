@@ -864,6 +864,10 @@ export function Packs({
     setLoggingOut(true);
     try {
       await invokeOrThrow("auth_logout");
+      // A private list request may still resolve after the authenticated session
+      // is gone. Invalidate every page load before clearing signed-in state so
+      // neither its result nor its cleanup can publish into the signed-out view.
+      loadMyPacksSeqRef.current++;
       onAuthChange(null);
       setMyPacks([]);
       setMyPacksPage(1);
