@@ -27,7 +27,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
-| H6 | ready | `fix/audit-h6-quick-xml-advisory` | pending | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
+| H6 | pr-open | `fix/audit-h6-quick-xml-advisory` | [#387](https://github.com/ESO-Toolkit/kalpa/pull/387) (draft, stacked on W1) | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
 
 ## Decisions
 
@@ -110,8 +110,9 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
   tests (755 passed, 15 ignored), fmt check, and `npm run build:native-slint`
   pass. Main `cargo audit` reports zero vulnerabilities; Slint no longer reports
   either H6 advisory.
-- Active work: open a draft stacked PR against W1.
-- Exact next action: push the reviewed commits and create the draft PR.
+- Active work: draft stacked PR #387 is ready for maintainer review after W1.
+- Exact next action: merge W1 first, then rebase or retarget #387 onto `main` and
+  require its remote checks before marking it ready.
 - Sol review: `REVISE`. Verified that `README.md` and `SECURITY.md` still
   described the removed quick-xml exceptions as current, and that Slint CI had
   no committed regression gate for its separate lockfile. Corrected both public
