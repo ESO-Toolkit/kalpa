@@ -40,15 +40,34 @@ function extractReleaseSection(changelog, releaseRef) {
   }
 
   const startIndex = matchingIndexes[0];
-  const nextBoundaryOffset = lines
-    .slice(startIndex + 1)
-    .findIndex((line) => /^## \[/.test(line) || /^\[[^\]]+\]:\s+\S/.test(line));
-  const endIndex = nextBoundaryOffset === -1 ? lines.length : startIndex + 1 + nextBoundaryOffset;
-  const section = lines
+  const nextReleaseOffset = lines.slice(startIndex + 1).findIndex((line) => /^## \[/.test(line));
+  const endIndex = nextReleaseOffset === -1 ? lines.length : startIndex + 1 + nextReleaseOffset;
+  const sectionLines = lines
     .slice(startIndex + 1, endIndex)
     .join("\n")
     .replace(/<!--[^]*?-->/g, "")
-    .trim();
+    .split("\n");
+  const trailingDefinitionsIndex = sectionLines.findIndex(
+    (line, index) =>
+      /^\[[^\]]+\]:\s+\S/.test(line) &&
+      sectionLines
+        .slice(index)
+        .every((candidate) => !candidate || /^\[[^\]]+\]:\s+\S/.test(candidate))
+  );
+  let contentLines = sectionLines;
+  if (trailingDefinitionsIndex !== -1) {
+    const mainLines = sectionLines.slice(0, trailingDefinitionsIndex);
+    while (mainLines.at(-1) === "") mainLines.pop();
+    const mainText = mainLines.join("\n");
+    const referencedDefinitions = sectionLines.slice(trailingDefinitionsIndex).filter((line) => {
+      const definition = /^\[([^\]]+)\]:\s+\S/.exec(line);
+      return definition && mainText.includes(`[${definition[1]}]`);
+    });
+    contentLines = referencedDefinitions.length
+      ? [...mainLines, "", ...referencedDefinitions]
+      : mainLines;
+  }
+  const section = contentLines.join("\n").trim();
 
   if (!section || /^_Nothing yet\._$/i.test(section)) {
     throw new Error(`Empty changelog section for ${releaseName}`);

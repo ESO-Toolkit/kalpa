@@ -51,6 +51,44 @@ test("does not include trailing changelog link definitions", () => {
   );
 });
 
+test("does not truncate content after a section-local link definition", () => {
+  assert.equal(
+    extractReleaseSection(
+      [
+        "## [1.0.0] — 2026-08-26",
+        "",
+        "- First [linked item][details].",
+        "",
+        "[details]: https://example.test/details",
+        "",
+        "- A later item must still ship.",
+        "",
+        "## [0.9.0] — 2026-08-20",
+        "",
+        "- Previous work.",
+      ].join("\n"),
+      "v1.0.0"
+    ),
+    [
+      "- First [linked item][details].",
+      "",
+      "[details]: https://example.test/details",
+      "",
+      "- A later item must still ship.",
+    ].join("\n")
+  );
+});
+
+test("retains a trailing link definition used by release copy", () => {
+  assert.equal(
+    extractReleaseSection(
+      "## [1.0.0] — 2026-08-26\n\n- Read the [details][notes].\n\n[notes]: https://example.test/notes",
+      "v1.0.0"
+    ),
+    "- Read the [details][notes].\n\n[notes]: https://example.test/notes"
+  );
+});
+
 test("selects Unreleased only when explicitly requested", () => {
   assert.equal(
     extractReleaseSection(changelog, "Unreleased"),
