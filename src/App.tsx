@@ -1099,9 +1099,9 @@ function App() {
         const result = await invokeOrThrow<InstallResult>("update_addon", {
           addonsPath,
           esouiId: ur.esouiId,
-          // Record the version the update CHECK compared against (the filelist
-          // string), not the one the filedetails endpoint reports. When the two
-          // sources disagree the addon otherwise stays permanently "outdated".
+          // Preserve the version observed by the check in the existing wire
+          // contract. The backend re-fetches filedetails, checksum-binds the
+          // artifact, and persists that fetched version if publication advanced.
           apiVersion: ur.remoteVersion,
           dependencyPolicy: await getDependencyPolicy(),
         });

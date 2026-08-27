@@ -1320,6 +1320,23 @@ pub fn refresh_filelist_cache() -> Result<(), String> {
     ensure_filelist_cache(true)
 }
 
+/// Drop a filelist observation after an update successfully installs an
+/// artifact described by a newer filedetails response. The next update check
+/// must fetch again instead of comparing the installed artifact against the
+/// stale pre-download filelist and offering a phantom update.
+pub fn invalidate_filelist_cache() {
+    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+/// Invalidate only when at least one update was actually applied. Batch paths
+/// can finish with zero successes and must preserve a still-valid observation.
+pub fn invalidate_filelist_cache_if_applied(applied: bool) {
+    if applied {
+        invalidate_filelist_cache();
+    }
+}
+
 /// Fetch the full ESOUI filelist and build a lookup map keyed by addon folder path.
 ///
 /// Single HTTP request returns ~4000 addons with all their folder paths,
@@ -1608,5 +1625,37 @@ mod tests {
     fn download_addon_rejects_http_esoui() {
         let result = download_addon("http://cdn.esoui.com/addon.zip", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn applied_update_invalidates_stale_filelist_observation() {
+        {
+            let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(FilelistCache {
+                entries: Vec::new(),
+                lookup: Arc::new(HashMap::new()),
+                fetched_at: Instant::now(),
+            });
+        }
+
+        assert!(cache_exists());
+        invalidate_filelist_cache();
+        assert!(!cache_exists());
+    }
+
+    #[test]
+    fn zero_applied_updates_preserve_filelist_observation() {
+        {
+            let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(FilelistCache {
+                entries: Vec::new(),
+                lookup: Arc::new(HashMap::new()),
+                fetched_at: Instant::now(),
+            });
+        }
+
+        invalidate_filelist_cache_if_applied(false);
+        assert!(cache_exists());
+        invalidate_filelist_cache();
     }
 }

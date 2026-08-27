@@ -15,7 +15,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
 | R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
 | R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
-| R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
+| R9 | in-progress | `fix/audit-r9-downloaded-version` | pending | - | not required | REVISE → REVISE; all verified findings addressed | 810 Rust; 490 frontend; clippy/fmt/check green | Persist checksum-bound filedetails version and invalidate stale update observations only after an applied update. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
 | F2 | todo | - | - | - | - | - | Uploader log-directory sequencing. |
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
@@ -67,6 +67,36 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### D-R9-1 — The fetched descriptor is artifact provenance
+
+- Chosen: persist the version from the same filedetails response that supplied the download URL and checksum. The frontend filelist version remains in the wire contract as the earlier observation that initiated the request, but it is not authoritative after the backend fetch.
+- Successful applied updates invalidate the in-memory filelist observation after metadata is durable, so the next check cannot compare the newly installed artifact against the stale observation. Zero-success batches preserve the cache.
+- Rejected: trusting the frontend-observed version. ESOUI can publish between check and download, which records the wrong version for the artifact actually fetched and creates a phantom update loop.
+- Rejected: ordering or normalizing opaque version strings. Artifact identity is established by the fetched descriptor/checksum tuple, not a guessed version ordering.
+- Compatibility and rollback: Tauri request/response fields and persisted metadata/hash schemas are unchanged. Rollback is a code revert; no migration or data rewrite is required.
+
+## Session Log
+
+### 2026-08-26 — Codex (R9)
+
+- Active branch: `fix/audit-r9-downloaded-version`, stacked on `fix/audit-w1-worker-consistency`.
+- Failing-before: the publish-race regression expected fetched `v2` but metadata selection returned stale observed `v1`. The follow-up zero-success regression initially failed to compile because conditional cache invalidation did not exist.
+- Implemented: all single, legacy batch, streaming batch, and deferred-conflict update paths now carry the checksum-bound filedetails version through hashing and metadata. Successful applied updates discard the stale filelist observation only after metadata persists; failed and zero-success batches retain it.
+- Verification: Rust clippy fix, fmt, clippy all targets with warnings denied, 810 tests (17 ignored), and fmt check pass. Frontend typecheck/lint/Prettier and 490 tests pass. No Slint sidecar gate was required because no shared sidecar module changed.
+- Review: Fable and Luna were not required. Initial Sol review found the stale filelist phantom-loop path; follow-up Sol review found legacy zero-success cache invalidation. Both verified findings and requested regressions are addressed; the one-follow-up limit was observed.
+- Exact next action: open the draft stacked PR, record its URL here, and wait for the base PR before final review/merge. No merge is performed in this session.
+
+### R9 Sol review — initial REVISE
+
+- Verified: after the backend installed a newly published descriptor, a cached pre-download filelist could immediately offer the old observed version again.
+- Resolution: invalidate the observation after successful metadata persistence and cover the applied-update cache transition.
+- Wire contract: OK. Bug-class sweep found no other artifact-version provenance sites.
+
+### R9 Sol follow-up — REVISE
+
+- Verified low finding: the registered legacy batch command invalidated the cache when every item failed and `completed` was empty.
+- Resolution: cache invalidation is conditional on at least one applied update; a zero-success regression proves the prior observation remains cached.
+- Wire contract: OK. No further Sol review was run, per the single-follow-up rule.
 
 ### 2026-08-26 — Codex
 

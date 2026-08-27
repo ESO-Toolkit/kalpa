@@ -2049,11 +2049,10 @@ fn update_addon_blocking(
     // Extract the downloaded ZIP
     let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
 
-    // Store the API version (from filelist.json) when available, since
-    // check_for_updates compares against the API version. Using the
-    // HTML-scraped version here caused perpetual "update available" when
-    // the two sources returned slightly different version strings.
-    let version = api_version.unwrap_or(&info.version);
+    // Store the version from the checksum-bound filedetails descriptor that
+    // supplied this artifact. The earlier filelist value is only an observation
+    // and may be stale if ESOUI publishes between check and download.
+    let version = downloaded_artifact_version(api_version.unwrap_or_default(), &info.version);
 
     file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
 
@@ -2084,7 +2083,7 @@ fn update_addon_blocking(
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -2103,6 +2102,28 @@ pub struct BatchUpdateEntry {
     pub esoui_id: u32,
     pub folder_name: String,
     pub api_version: String,
+}
+
+/// Choose the version persisted for an update after the backend has fetched the
+/// artifact descriptor. The fetched version and its checksum/download URL form
+/// one provenance tuple; the frontend value is only the earlier observation
+/// that caused the update request.
+fn downloaded_artifact_version<'a>(_observed_version: &str, fetched_version: &'a str) -> &'a str {
+    fetched_version
+}
+
+/// Persist metadata for an applied update, then discard the pre-download
+/// filelist observation. If filedetails advanced between check and download,
+/// the next check must fetch a current filelist rather than compare the newly
+/// installed version against the stale version that initiated this request.
+fn save_applied_update_metadata(
+    addons_dir: &Path,
+    store: &metadata::MetadataStore,
+    applied: bool,
+) -> Result<(), String> {
+    metadata::save_metadata(addons_dir, store)?;
+    esoui::invalidate_filelist_cache_if_applied(applied);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2200,11 +2221,13 @@ fn batch_download_addons(
                             total,
                         },
                     );
+                    let artifact_version =
+                        downloaded_artifact_version(&entry.api_version, &info.version).to_string();
                     BatchDownloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
-                        api_version: entry.api_version.clone(),
+                        api_version: artifact_version,
                         index: i,
                     }
                 });
@@ -2326,7 +2349,7 @@ fn batch_extract_and_record(
         }
     }
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, !completed.is_empty())?;
 
     Ok(BatchUpdateResult {
         completed,
@@ -2626,7 +2649,7 @@ pub async fn scan_batch_conflicts(
                     .enumerate()
                     .map(|(i, entry)| {
                         let result = fetch_and_download_with_retry(entry.esoui_id).and_then(
-                            |(tmp, _info)| {
+                            |(tmp, info)| {
                                 let _ = app_clone.emit(
                                     "batch-update-progress",
                                     BatchUpdateProgress {
@@ -2639,10 +2662,13 @@ pub async fn scan_batch_conflicts(
                                 let (_, kept_path) = tmp
                                     .keep()
                                     .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 Ok(Downloaded {
                                     kept_path,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
                                 })
                             },
                         );
@@ -2856,11 +2882,14 @@ pub async fn update_batch_with_decisions(
                     .for_each_with(tx, |tx, (i, entry)| {
                         let result =
                             fetch_and_download_with_retry(entry.esoui_id).map(|(zip, info)| {
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 StreamedDownload {
                                     zip,
                                     info,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
                                 }
                             });
                         let phase = if result.is_ok() {
@@ -3180,6 +3209,8 @@ fn extract_streamed_downloads(
             errors.insert(folder.clone(), reason.clone());
             failed.push(folder);
         }
+    } else if !completed.is_empty() {
+        esoui::invalidate_filelist_cache();
     }
 
     StreamingBatchResult {
@@ -3529,7 +3560,7 @@ fn update_with_decisions_inner(
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -10554,6 +10585,13 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn downloaded_artifact_version_uses_fetched_descriptor_after_publish_race() {
+        // The UI observed v1, then v2 was published before the backend fetched
+        // the descriptor and downloaded its checksum-bound artifact.
+        assert_eq!(downloaded_artifact_version("v1", "v2"), "v2");
     }
 
     #[test]
