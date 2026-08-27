@@ -12,7 +12,7 @@ use crate::{PendingDeepLink, PendingDeepLinkPayload};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -5760,6 +5760,16 @@ fn profile_store_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn profile_transaction_guard(
+    addons_dir: &std::path::Path,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire(
+        profiles_path(addons_dir),
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     load_profiles_with_mirror(
         addons_dir,
@@ -5781,6 +5791,8 @@ pub fn list_profiles(
     addons_path: String,
 ) -> Result<(Vec<AddonProfile>, Option<String>), String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let store = load_profiles(&addons_dir);
     Ok((store.profiles, store.active_profile))
 }
@@ -5834,6 +5846,7 @@ pub async fn create_profile(
         let enabled_addons = snapshot_enabled_addons(&addons_dir);
 
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
 
         if store.profiles.iter().any(|p| p.name == profile_name) {
@@ -6142,6 +6155,7 @@ pub async fn activate_profile(
     tokio::task::spawn_blocking(move || {
         let profile = {
             let _guard = profile_store_guard();
+            let _transaction = profile_transaction_guard(&addons_dir)?;
             let store = load_profiles(&addons_dir);
             store
                 .profiles
@@ -6158,6 +6172,7 @@ pub async fn activate_profile(
         // Re-load rather than writing the pre-apply snapshot back: a profile
         // created, renamed or deleted while the renames ran must survive.
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
@@ -6179,7 +6194,11 @@ pub async fn preview_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        let store = load_profiles(&addons_dir);
+        let store = {
+            let _guard = profile_store_guard();
+            let _transaction = profile_transaction_guard(&addons_dir)?;
+            load_profiles(&addons_dir)
+        };
         let profile = store
             .profiles
             .iter()
@@ -6208,6 +6227,7 @@ pub async fn update_profile(
         let enabled = snapshot_enabled_addons(&addons_dir);
 
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
 
         let profile = store
@@ -6238,6 +6258,7 @@ pub fn rename_profile(
     validate_name(&new_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let mut store = load_profiles(&addons_dir);
 
     if old_name == new_name {
@@ -6269,6 +6290,7 @@ pub fn delete_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let mut store = load_profiles(&addons_dir);
 
     store.profiles.retain(|p| p.name != profile_name);
@@ -9757,8 +9779,11 @@ pub fn update_tray_tooltip(
 /// instead of the plugin-store `save()` so writes are crash-safe (write-temp +
 /// fsync + atomic rename); see `settings_store`.
 #[tauri::command]
-pub async fn flush_settings(app: tauri::AppHandle) -> Result<(), String> {
-    crate::settings_store::flush(&app)
+pub async fn flush_settings(
+    app: tauri::AppHandle,
+    entries: BTreeMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    crate::settings_store::flush_entries(&app, entries)
 }
 
 /// Whether the settings store opened TAINTED (empty over an unreadable settings
@@ -10196,6 +10221,16 @@ fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String
 /// trap the user in a no-UI crash loop. Best-effort: an unreadable settings
 /// file simply leaves the gate to fail open into the webview next launch.
 fn revert_performance_mode_to_webview(settings_path: &Path) {
+    let _transaction = match crate::transaction_lock::acquire(
+        settings_path,
+        crate::transaction_lock::LockOptions::default(),
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("Could not lock settings while reverting native mode: {error}");
+            return;
+        }
+    };
     let Ok(content) = fs::read_to_string(settings_path) else {
         return;
     };

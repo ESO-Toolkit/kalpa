@@ -145,7 +145,7 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
       for (const [key, value] of Object.entries(entries)) {
         await store.set(key, value);
       }
-      await invoke("flush_settings");
+      await invoke("flush_settings", { entries });
       return true;
     } catch (err) {
       if (String(err).includes(STORE_RELOADED_SIGNAL)) {

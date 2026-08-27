@@ -78,7 +78,9 @@ describe("setSetting", () => {
       expect.objectContaining({ autoSave: false })
     );
     // Persistence is the atomic command, never the plugin's save().
-    expect(mockInvoke).toHaveBeenCalledWith("flush_settings");
+    expect(mockInvoke).toHaveBeenCalledWith("flush_settings", {
+      entries: { theme: "dark" },
+    });
   });
 
   it("handles set errors without throwing and reports failure", async () => {
@@ -123,7 +125,9 @@ describe("setSettings", () => {
     expect(backing.get("a")).toBe(1);
     expect(backing.get("b")).toBe("two");
     expect(mockInvoke).toHaveBeenCalledTimes(1);
-    expect(mockInvoke).toHaveBeenCalledWith("flush_settings");
+    expect(mockInvoke).toHaveBeenCalledWith("flush_settings", {
+      entries: { a: 1, b: "two" },
+    });
   });
 
   it("rolls the cache back to its pre-batch snapshot when the flush fails", async () => {

@@ -4,6 +4,8 @@ slint::include_modules!();
 
 #[path = "../../../src-tauri/src/atomic_file.rs"]
 mod atomic_file;
+#[path = "../../../src-tauri/src/transaction_lock.rs"]
+mod transaction_lock;
 
 #[path = "native_char_backup.rs"]
 mod char_backup;
@@ -14978,12 +14980,13 @@ fn persist_addons_path(addons_path: &str) -> Result<(), String> {
 }
 
 fn persist_addons_path_to_settings_path(path: &Path, addons_path: &str) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_ADDONS_PATH.to_string(),
-        serde_json::Value::String(addons_path.to_string()),
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_ADDONS_PATH.to_string(),
+            serde_json::Value::String(addons_path.to_string()),
+        );
+        Ok(())
+    })
 }
 
 fn read_installed_pack_refs() -> Vec<NativeInstalledPackRef> {
@@ -15022,13 +15025,14 @@ fn persist_installed_pack_refs_to_settings_path(
     path: &Path,
     refs: &[NativeInstalledPackRef],
 ) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_INSTALLED_PACKS.to_string(),
-        serde_json::to_value(normalize_installed_pack_refs(refs.to_vec()))
-            .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_INSTALLED_PACKS.to_string(),
+            serde_json::to_value(normalize_installed_pack_refs(refs.to_vec()))
+                .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
+        );
+        Ok(())
+    })
 }
 
 fn normalize_installed_pack_refs(refs: Vec<NativeInstalledPackRef>) -> Vec<NativeInstalledPackRef> {
@@ -18686,12 +18690,13 @@ fn persist_active_theme_id(theme_id: &str) {
 }
 
 fn persist_active_theme_id_to_settings_path(path: &Path, theme_id: &str) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_ACTIVE_THEME.to_string(),
-        serde_json::Value::String(theme_id.to_string()),
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_ACTIVE_THEME.to_string(),
+            serde_json::Value::String(theme_id.to_string()),
+        );
+        Ok(())
+    })
 }
 
 fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), String> {
@@ -18763,13 +18768,15 @@ fn persist_custom_themes_to_settings_path(
     path: &Path,
     custom_themes: &[CatalogTheme],
 ) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_CUSTOM_THEMES.to_string(),
-        serde_json::to_value(normalize_custom_themes(custom_themes.to_vec()))
-            .map_err(|error| format!("Failed to serialize production custom themes: {error}"))?,
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_CUSTOM_THEMES.to_string(),
+            serde_json::to_value(normalize_custom_themes(custom_themes.to_vec())).map_err(
+                |error| format!("Failed to serialize production custom themes: {error}"),
+            )?,
+        );
+        Ok(())
+    })
 }
 
 fn persist_custom_themes_to_path(
@@ -18831,6 +18838,18 @@ fn write_settings_store_object_to_path(
     write_string_atomic(path, &json)
 }
 
+fn update_settings_store_object_to_path<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let mut object = read_settings_store_object_from_path(path)?;
+    let result = mutate(&mut object)?;
+    write_settings_store_object_to_path(path, object)?;
+    Ok(result)
+}
+
 fn read_native_settings() -> NativeSettings {
     for path in native_settings_store_paths() {
         match read_native_settings_from_path(&path) {
@@ -18876,6 +18895,8 @@ fn persist_native_settings(settings: &NativeSettings) {
 }
 
 fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
     let mut settings = settings.clone();
     settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
     settings.uploader_region = settings.uploader_region.clamp(1, 2);
@@ -19643,6 +19664,50 @@ mod tests {
             Some("ask")
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_native_settings_writers_preserve_both_keys() {
+        let root = test_temp_dir("settings-concurrent-writers");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            for _ in 0..10 {
+                persist_addons_path_to_settings_path(&left_path, "D:/ESO/live/AddOns")?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok::<(), String>(())
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            for _ in 0..10 {
+                persist_active_theme_id_to_settings_path(&right_path, "apocrypha-ink")?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok::<(), String>(())
+        });
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let object = read_settings_store_object_from_path(&path).unwrap();
+        assert_eq!(
+            object
+                .get(STORE_KEY_ADDONS_PATH)
+                .and_then(serde_json::Value::as_str),
+            Some("D:/ESO/live/AddOns")
+        );
+        assert_eq!(
+            object
+                .get(STORE_KEY_ACTIVE_THEME)
+                .and_then(serde_json::Value::as_str),
+            Some("apocrypha-ink")
+        );
         let _ = fs::remove_dir_all(root);
     }
 

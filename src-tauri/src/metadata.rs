@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonMetadata {
     pub esoui_id: u32,
@@ -28,6 +28,13 @@ fn is_zero(v: &u64) -> bool {
 pub struct MetadataStore {
     pub version: u32,
     pub addons: HashMap<String, AddonMetadata>,
+    /// In-memory baseline used to turn a potentially long-running operation's
+    /// result into a short, lock-protected mutation against the latest disk
+    /// state. Never serialized; the persisted JSON shape is unchanged.
+    #[serde(skip)]
+    baseline_addons: Option<HashMap<String, AddonMetadata>>,
+    #[serde(skip)]
+    baseline_version: Option<u32>,
 }
 
 impl Default for MetadataStore {
@@ -35,6 +42,8 @@ impl Default for MetadataStore {
         Self {
             version: 1,
             addons: HashMap::new(),
+            baseline_addons: None,
+            baseline_version: None,
         }
     }
 }
@@ -197,11 +206,121 @@ pub fn format_timestamp(secs: u64) -> String {
 }
 
 pub fn load_metadata(addons_path: &Path) -> MetadataStore {
-    load_json_with_backup(&metadata_path(addons_path))
+    let path = metadata_path(addons_path);
+    let transaction =
+        crate::transaction_lock::acquire(&path, crate::transaction_lock::LockOptions::default());
+    let mut store: MetadataStore = match transaction {
+        Ok(_guard) => load_json_with_backup(&path),
+        Err(error) => {
+            // A timed-out read must not run recovery writes without ownership.
+            // Read committed primary/backup data only and leave recovery to a
+            // later lock holder.
+            eprintln!("Warning: {error}");
+            load_json_read_only(&path)
+        }
+    };
+    store.baseline_addons = Some(store.addons.clone());
+    store.baseline_version = Some(store.version);
+    store
+}
+
+fn load_json_read_only<T: DeserializeOwned + Default>(path: &Path) -> T {
+    for candidate in [path.to_path_buf(), path.with_extension("json.bak")] {
+        if let Ok(content) = fs::read_to_string(candidate) {
+            if let Ok(data) = serde_json::from_str(&content) {
+                return data;
+            }
+        }
+    }
+    T::default()
 }
 
 pub fn save_metadata(addons_path: &Path, store: &MetadataStore) -> Result<(), String> {
-    save_json_with_backup(&metadata_path(addons_path), store)
+    let path = metadata_path(addons_path);
+    let _transaction =
+        crate::transaction_lock::acquire(&path, crate::transaction_lock::LockOptions::default())
+            .map_err(|error| error.to_string())?;
+
+    let Some(baseline) = store.baseline_addons.as_ref() else {
+        return save_json_with_backup(&path, store);
+    };
+
+    // Expensive download/extract/hash work happens before this function. Under
+    // the OS lock, reload the latest store and apply only fields this caller
+    // changed from its baseline, then publish atomically. This makes the actual
+    // disk read -> mutate -> write transaction short while preserving unrelated
+    // changes made by the other shell during the long operation.
+    let mut latest: MetadataStore = load_json_with_backup(&path);
+    if store
+        .baseline_version
+        .is_some_and(|baseline| baseline != store.version)
+    {
+        latest.version = store.version;
+    }
+    let names: std::collections::HashSet<&String> =
+        baseline.keys().chain(store.addons.keys()).collect();
+    for name in names {
+        match (baseline.get(name), store.addons.get(name)) {
+            (Some(_before), None) => {
+                latest.addons.remove(name);
+            }
+            (None, Some(after)) => match latest.addons.entry(name.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(after.clone());
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    apply_changed_fields(entry.get_mut(), &empty_metadata(), after);
+                }
+            },
+            (Some(before), Some(after)) if before != after => {
+                let current = latest
+                    .addons
+                    .entry(name.clone())
+                    .or_insert_with(|| before.clone());
+                apply_changed_fields(current, before, after);
+            }
+            _ => {}
+        }
+    }
+    latest.baseline_addons = None;
+    latest.baseline_version = None;
+    save_json_with_backup(&path, &latest)
+}
+
+fn empty_metadata() -> AddonMetadata {
+    AddonMetadata {
+        esoui_id: 0,
+        installed_version: String::new(),
+        download_url: String::new(),
+        installed_at: String::new(),
+        tags: Vec::new(),
+        esoui_last_update: 0,
+    }
+}
+
+fn apply_changed_fields(
+    current: &mut AddonMetadata,
+    before: &AddonMetadata,
+    after: &AddonMetadata,
+) {
+    if before.esoui_id != after.esoui_id {
+        current.esoui_id = after.esoui_id;
+    }
+    if before.installed_version != after.installed_version {
+        current.installed_version = after.installed_version.clone();
+    }
+    if before.download_url != after.download_url {
+        current.download_url = after.download_url.clone();
+    }
+    if before.installed_at != after.installed_at {
+        current.installed_at = after.installed_at.clone();
+    }
+    if before.tags != after.tags {
+        current.tags = after.tags.clone();
+    }
+    if before.esoui_last_update != after.esoui_last_update {
+        current.esoui_last_update = after.esoui_last_update;
+    }
 }
 
 pub fn record_install(
@@ -571,6 +690,67 @@ mod tests {
             staging.exists(),
             "load must not claim another writer's staging"
         );
+    }
+
+    #[test]
+    fn concurrent_metadata_writers_preserve_distinct_addons() {
+        let dir = tempfile::tempdir().unwrap();
+        save_metadata(dir.path(), &MetadataStore::default()).unwrap();
+        let mut left = load_metadata(dir.path());
+        let mut right = load_metadata(dir.path());
+        record_install(&mut left, "Left", 1, "1", "left");
+        record_install(&mut right, "Right", 2, "1", "right");
+        let root_a = dir.path().to_path_buf();
+        let root_b = root_a.clone();
+        let a = std::thread::spawn(move || save_metadata(&root_a, &left));
+        let b = std::thread::spawn(move || save_metadata(&root_b, &right));
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+        let saved = load_metadata(dir.path());
+        assert!(saved.addons.contains_key("Left"));
+        assert!(saved.addons.contains_key("Right"));
+    }
+
+    #[test]
+    fn concurrent_metadata_writers_merge_independent_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut initial = MetadataStore::default();
+        record_install(&mut initial, "Addon", 1, "1", "url");
+        save_metadata(dir.path(), &initial).unwrap();
+        let mut tags = load_metadata(dir.path());
+        let mut version = load_metadata(dir.path());
+        tags.addons.get_mut("Addon").unwrap().tags = vec!["favorite".to_string()];
+        version.addons.get_mut("Addon").unwrap().installed_version = "2".to_string();
+        let root_a = dir.path().to_path_buf();
+        let root_b = root_a.clone();
+        let a = std::thread::spawn(move || save_metadata(&root_a, &tags));
+        let b = std::thread::spawn(move || save_metadata(&root_b, &version));
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+        let saved = load_metadata(dir.path());
+        assert_eq!(saved.addons["Addon"].tags, vec!["favorite".to_string()]);
+        assert_eq!(saved.addons["Addon"].installed_version, "2");
+    }
+
+    #[test]
+    fn concurrent_first_writers_merge_identity_and_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        save_metadata(dir.path(), &MetadataStore::default()).unwrap();
+        let mut install = load_metadata(dir.path());
+        let mut tags = load_metadata(dir.path());
+        record_install(&mut install, "Addon", 42, "1", "url");
+        let mut tagged = empty_metadata();
+        tagged.tags = vec!["favorite".to_string()];
+        tags.addons.insert("Addon".to_string(), tagged);
+        let root_a = dir.path().to_path_buf();
+        let root_b = root_a.clone();
+        let a = std::thread::spawn(move || save_metadata(&root_a, &install));
+        let b = std::thread::spawn(move || save_metadata(&root_b, &tags));
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+        let saved = load_metadata(dir.path());
+        assert_eq!(saved.addons["Addon"].esoui_id, 42);
+        assert_eq!(saved.addons["Addon"].tags, vec!["favorite".to_string()]);
     }
 
     #[test]
