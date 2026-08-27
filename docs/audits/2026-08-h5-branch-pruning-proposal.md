@@ -1,7 +1,9 @@
 # H5 Branch-Pruning Proposal
 
-Snapshot: 2026-08-26 22:26 (America/Los_Angeles)  
-Comparison base: `origin/main` at `3ff99839`  
+Snapshot: 2026-08-26 22:26 (America/Los_Angeles)
+
+Comparison base: `origin/main` at `3ff99839`
+
 Scope: local branches and `origin/*` remote-tracking branches after `git fetch origin --prune`
 
 This is a proposal only. No local branch, remote branch, worktree, commit, or branch tip was deleted or moved.
