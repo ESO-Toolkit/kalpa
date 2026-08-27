@@ -387,9 +387,11 @@ export function UploaderWorkspace({
   // invalidates every request issued for the previous path.
   const logsDirRef = useRef<string | null>(null);
   const loadLogsSeqRef = useRef(0);
+  const detectLogsSeqRef = useRef(0);
   const setActiveLogsDir = useCallback((dir: string | null) => {
     logsDirRef.current = dir;
     loadLogsSeqRef.current++;
+    detectLogsSeqRef.current++;
     setLogsDir(dir);
     setListLoading(false);
   }, []);
@@ -468,6 +470,7 @@ export function UploaderWorkspace({
         return;
       }
 
+      if (logsDirRef.current !== det.path) clearSelection();
       setActiveLogsDir(det.path);
       setLogs([]);
       setListError(null);
@@ -486,15 +489,18 @@ export function UploaderWorkspace({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const detectionOperationId = ++detectLogsSeqRef.current;
       try {
         const [det, tinfo] = await Promise.all([
           invokeOrThrow<LogPathDetection>("uploader_detect_path"),
           invokeOrThrow<TransportInfo>("uploader_transport_info"),
         ]);
         if (cancelled) return;
-        setDetection(det);
         setTransport(tinfo);
-        await applyDetectedLogs(det);
+        if (detectLogsSeqRef.current === detectionOperationId) {
+          setDetection(det);
+          await applyDetectedLogs(det);
+        }
       } catch (e) {
         if (!cancelled) toast.error(getTauriErrorMessage(e));
       }
@@ -629,7 +635,11 @@ export function UploaderWorkspace({
   const handleRefreshLogs = useCallback(async () => {
     if (!logsDir) {
       try {
+        const detectionOperationId = ++detectLogsSeqRef.current;
         const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
+        if (detectLogsSeqRef.current !== detectionOperationId || logsDirRef.current !== null) {
+          return;
+        }
         setDetection(det);
         await applyDetectedLogs(det);
       } catch (e) {
@@ -640,7 +650,15 @@ export function UploaderWorkspace({
 
     if (detection?.path === logsDir) {
       try {
+        const activeDirectory = logsDir;
+        const detectionOperationId = ++detectLogsSeqRef.current;
         const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
+        if (
+          detectLogsSeqRef.current !== detectionOperationId ||
+          logsDirRef.current !== activeDirectory
+        ) {
+          return;
+        }
         setDetection(det);
         await applyDetectedLogs(det);
       } catch (e) {
@@ -827,9 +845,12 @@ export function UploaderWorkspace({
         return;
       }
       setImporting(true);
+      const activeDirectory = logsDirRef.current;
       try {
         const imported = await invokeOrThrow<string>("uploader_import_log", { srcPath });
-        if (logsDir) await loadLogs(logsDir);
+        if (logsDirRef.current !== activeDirectory) return;
+        if (activeDirectory) await loadLogs(activeDirectory);
+        if (logsDirRef.current !== activeDirectory) return;
         await handleSelectLog(imported);
         toast.success("Log added — scanning it now.");
       } catch (e) {
@@ -838,7 +859,7 @@ export function UploaderWorkspace({
         setImporting(false);
       }
     },
-    [logsDir, loadLogs, handleSelectLog]
+    [loadLogs, handleSelectLog]
   );
 
   // Live mode has exactly one sensible target — the live Encounter.log ESO is writing
