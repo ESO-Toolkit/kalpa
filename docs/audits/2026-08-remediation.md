@@ -5,7 +5,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
-| W2 | in-progress | `fix/audit-w2-d1-reconciliation` | pending | - | D-W2-1 | REVISE twice; all verified findings addressed | Worker check; 197 tests; Wrangler dry-run | Dry-run by default; deletion-capable code must remain unmerged pending explicit maintainer approval. |
+| W2 | pr-open | `fix/audit-w2-d1-reconciliation` | [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) (draft) | - | D-W2-1 | REVISE twice; all verified findings addressed | Worker check; 197 tests; Wrangler dry-run | Stacked on W1; intentionally unmerged pending explicit approval for deletion-capable code. |
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
@@ -84,7 +84,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Sol review: REVISE. Verified that unknown authority statuses could be interpreted as deletion and tag-only zombies were omitted. Fixed with full authority-shape/status validation and tag-ID planning. Added all requested boundary-plus-one cap tests. A further executor sweep moved the final liveness check plus D1 deletion into the DO lifecycle gate so slug reuse cannot cross a check-then-delete window.
 - Sol follow-up: REVISE. Verified that planned upserts/tag replacements could cross delete-and-recreate outside the DO gate, and draft tag-only orphans were skipped. Addressed by routing reconciliation writes through a created-at lifecycle check inside the DO, moving ordinary create/update/vote D1 writes under the same serialized lifecycle, and planning draft tag-only deletion. Added exact-cap acceptance cases and stale-lifecycle regressions. The prompt permits one follow-up, so no third review was requested.
 - Tests: focused missing-pack restore, owned/unowned pack and tag-only zombies, valid empty authority, malformed/failed authority, D1 read failure, mode, both sides of every safety cap, partial failure breadcrumb, draft removal, stale slug lifecycle, inline breadcrumb, and SQL-table whitelist coverage. Worker check, 197 tests, and Wrangler dry-run pass after reconstructing and rerunning from scratch following an ENOSPC interruption; Worker name remains `kalpa-pack-hub` and no real deploy ran.
-- Blocker: deletion-capable reconciliation must not merge without explicit maintainer approval. Exact next action is a draft stacked PR for maintainer review and dry-run-only inspection.
+- Handoff: pushed the branch and opened draft stacked PR [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) targeting `fix/audit-w1-worker-consistency`. Deletion-capable reconciliation must not merge without explicit maintainer approval. Exact next action is maintainer review of the dry-run plan and ownership/limit evidence; enabling exact `apply` remains a separate later approval after soak.
 
 ### 2026-08-26 — Codex
 
