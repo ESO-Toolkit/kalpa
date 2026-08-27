@@ -10002,14 +10002,49 @@ pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), Stri
 
 /// Preserve an activation in the still-live WebView instead of letting an
 /// in-flight native handoff exit underneath it.
-pub(crate) fn cancel_native_handoff_for_activation() -> bool {
+pub(crate) fn cancel_native_handoff_for_activation(app: &tauri::AppHandle) -> Result<bool, String> {
     if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
         NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
         eprintln!("[native-shell] cancelling handoff for incoming activation");
-        true
+        let has_authority = webview_authority()
+            .lock()
+            .map_err(|_| "WebView authority state is unavailable.".to_string())?
+            .is_some();
+        if !has_authority {
+            // The child became ready and the command released authority, but
+            // ExitRequested has not committed yet. Reclaim before the callback
+            // reveals or emits into this WebView.
+            if let Err(error) = claim_webview_authority(app) {
+                NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
+        }
+        Ok(true)
     } else {
-        false
+        Ok(false)
     }
+}
+
+/// Atomically choose between committing the ready child or preserving an
+/// activation that raced the end of the wait. The callback and this function
+/// serialize on the authority mutex, closing the post-ready/pre-exit gap.
+fn commit_native_handoff_authority_release() -> Result<(), String> {
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst) {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        return Err("Native handoff was cancelled to preserve an incoming activation.".into());
+    }
+    authority.take();
+    Ok(())
+}
+
+pub(crate) fn finish_native_handoff_exit() -> bool {
+    if !NATIVE_HANDOFF_ACTIVE.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst)
 }
 
 /// Complete the reverse handoff only after the WebView page/runtime is live.
@@ -10034,12 +10069,6 @@ pub(crate) fn complete_webview_handoff(app: &tauri::AppHandle) -> Result<(), Str
     claim_webview_authority(app)?;
     std::env::remove_var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV);
     Ok(())
-}
-
-fn release_webview_authority() {
-    if let Ok(mut guard) = webview_authority().lock() {
-        guard.take();
-    }
 }
 
 fn launch_native_shell_process(
@@ -10132,6 +10161,8 @@ fn launch_native_shell_process(
             }
         },
     );
+    let existing_native_ready = crate::native_boot::ready_matches(&state_dir, &launch_id)
+        && crate::native_boot::live_native_authority_exists(&state_dir);
     crate::native_boot::clear_owned(&state_dir, &launch_id);
     match outcome? {
         crate::native_boot::WaitOutcome::Ready => {
@@ -10140,6 +10171,12 @@ fn launch_native_shell_process(
         }
         crate::native_boot::WaitOutcome::ChildExited if cancelled => {
             Err("Native handoff was cancelled to preserve an incoming activation.".to_string())
+        }
+        crate::native_boot::WaitOutcome::ChildExited if existing_native_ready => {
+            eprintln!(
+                "[native-shell] duplicate child acknowledged live native owner launch_id={launch_id}"
+            );
+            Ok(())
         }
         crate::native_boot::WaitOutcome::ChildExited => Err(
             "Native performance UI exited before reporting that its event loop was ready."
@@ -10541,21 +10578,19 @@ pub async fn launch_native_performance_mode(
         )
     })
     .await;
-    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
     let launch_result = task_result
         .map_err(|error| format!("Native handoff task failed: {error}"))
         .and_then(|result| result);
-    let cancelled = NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst);
-    launch_result?;
-
-    if cancelled {
-        return Err("Native handoff was cancelled to preserve an incoming activation.".to_string());
+    if let Err(error) = launch_result {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+        return Err(error);
     }
 
     // The blocking launcher returns only after the matching child has executed
     // a callback on Slint's live event loop. Every failure keeps this WebView
     // process authoritative and visible.
-    release_webview_authority();
+    commit_native_handoff_authority_release()?;
     app.exit(0);
 
     Ok(NativePerformanceLaunch {
@@ -12710,15 +12745,33 @@ mod tests {
         assert!(pack.addons[0].required);
     }
 }
+/// Both handoff atomics are process-global, so every case lives in one test.
+/// Splitting them would let the parallel test harness race the flags.
 #[test]
-fn incoming_activation_cancels_only_an_active_native_handoff() {
+fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
+    // Committing a cancelled handoff must refuse to release authority, so the
+    // still-live WebView keeps the activation instead of exiting underneath it.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(commit_native_handoff_authority_release().is_err());
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // ExitRequested outside any handoff must never be prevented.
     NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
     NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
-    assert!(!cancel_native_handoff_for_activation());
-    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!finish_native_handoff_exit());
 
+    // An uncancelled handoff commits: the exit proceeds and the flag clears.
     NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
-    assert!(cancel_native_handoff_for_activation());
-    assert!(NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst));
-    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    assert!(!finish_native_handoff_exit());
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // A handoff cancelled after the wait ended prevents the exit exactly once.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(finish_native_handoff_exit());
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!finish_native_handoff_exit());
 }

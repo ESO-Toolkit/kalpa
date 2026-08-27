@@ -162,6 +162,33 @@ pub(crate) fn webview_authority_is_active(state_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Positive proof that a native active record is backed by a live process
+/// holding the OS authority lock. A crash can leave `native-shell.active`
+/// behind, so the record alone is never sufficient for duplicate acceptance.
+#[allow(dead_code)] // Used by the Tauri parent crate.
+pub(crate) fn live_native_authority_exists(state_dir: &Path) -> bool {
+    if !native_authority_is_active(state_dir) {
+        return false;
+    }
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(state_dir.join(AUTHORITY_FILE))
+    else {
+        return false;
+    };
+    match FileExt::try_lock(&file) {
+        Err(TryLockError::WouldBlock) => true,
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            false
+        }
+        Err(TryLockError::Error(_)) => false,
+    }
+}
+
 #[allow(dead_code)] // Used by the path-including Slint crate.
 pub(crate) fn shutdown_requested(state_dir: &Path, launch_id: &str) -> bool {
     read_record(&state_dir.join(SHUTDOWN_FILE))
@@ -433,6 +460,7 @@ mod tests {
             AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
         };
         assert!(native_authority_is_active(dir.path()));
+        assert!(live_native_authority_exists(dir.path()));
         assert!(request_active_shutdown(dir.path()).unwrap());
         assert!(shutdown_requested(dir.path(), "native-a"));
         assert!(!shutdown_requested(dir.path(), "native-b"));
@@ -441,6 +469,7 @@ mod tests {
             AuthorityClaim::AlreadyHeld
         ));
         drop(guard);
+        assert!(!live_native_authority_exists(dir.path()));
         assert!(matches!(
             try_claim_authority(dir.path(), "webview-b").unwrap(),
             AuthorityClaim::Held(_)

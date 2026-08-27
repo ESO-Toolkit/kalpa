@@ -72,6 +72,13 @@ enum DeepLinkAction {
     InstallPack(String),
 }
 
+static REVERSE_HANDOFF_ACTIVATION: std::sync::OnceLock<Mutex<Option<DeepLinkAction>>> =
+    std::sync::OnceLock::new();
+
+fn reverse_handoff_activation() -> &'static Mutex<Option<DeepLinkAction>> {
+    REVERSE_HANDOFF_ACTIVATION.get_or_init(|| Mutex::new(None))
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingDeepLinkPayload {
@@ -509,10 +516,32 @@ pub fn run() {
                     return;
                 }
                 reveal_initial_main_window(webview.app_handle(), "page load finished");
+                if let Ok(mut buffered) = reverse_handoff_activation().lock() {
+                    if let Some(action) = buffered.take() {
+                        emit_deep_link(webview.app_handle(), &action);
+                    }
+                }
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            commands::cancel_native_handoff_for_activation();
+            // A reverse-handoff child remains hidden and non-authoritative until
+            // its first page load proves ready. Buffer an activation until the
+            // page-ready callback owns authority; never reveal/emit before then.
+            if std::env::var_os(native_boot::WEBVIEW_LAUNCH_ID_ENV).is_some() {
+                for arg in &argv {
+                    if let Some(action) = parse_deep_link(arg) {
+                        if let Ok(mut buffered) = reverse_handoff_activation().lock() {
+                            *buffered = Some(action);
+                        }
+                        break;
+                    }
+                }
+                return;
+            }
+            if let Err(error) = commands::cancel_native_handoff_for_activation(app) {
+                eprintln!("Failed to preserve activation during native handoff: {error}");
+                return;
+            }
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
                 webview_power::on_shown(app); // resume before showing (flash-free)
@@ -935,7 +964,12 @@ pub fn run() {
             // save), so detaching here neutralises that non-atomic write. Settings
             // are already persisted atomically on every write, so nothing is
             // flushed here. (Window close hides to tray and never reaches this.)
-            if let tauri::RunEvent::ExitRequested { .. } = &event {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if commands::finish_native_handoff_exit() {
+                    eprintln!("[native-shell] preventing exit for preserved activation");
+                    api.prevent_exit();
+                    return;
+                }
                 settings_store::detach_on_exit(app);
             }
             // On any real process exit, signal every native live session to stop so
