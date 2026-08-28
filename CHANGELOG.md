@@ -6,6 +6,19 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.19] — 2026-08-28
+
+A focused fix for addons updated outside Kalpa.
+
+### Bug Fixes
+
+- **Kalpa now recognizes addons updated by Minion or another external manager.**
+  Refreshing reconciles Kalpa's stored version when the selected live or PTS
+  AddOns folder contains the current ESOUI release. Minion records are matched
+  by addon ID, folder, and selected game root, preventing stale, duplicate, or
+  cross-root data from rewriting unrelated addon metadata.
+  ([#394](https://github.com/ESO-Toolkit/kalpa/pull/394))
+
 ## [0.1.0-beta.18] — 2026-08-23
 
 A focused security and dependency release. There are no feature changes.
@@ -599,7 +612,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...HEAD
+[0.1.0-beta.19]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...v0.1.0-beta.19
 [0.1.0-beta.18]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.17...v0.1.0-beta.18
 [0.1.0-beta.17]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...v0.1.0-beta.17
 [0.1.0-beta.16]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...v0.1.0-beta.16
