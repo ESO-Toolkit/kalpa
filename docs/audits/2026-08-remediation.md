@@ -10,7 +10,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
-| R4 | pr-open | `fix/audit-r4-sibling-ownership` | [#392](https://github.com/ESO-Toolkit/kalpa/pull/392) (draft) | - | D-R4-1 | pending | Rust 817 passed/17 ignored; Slint 763 passed/15 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Implements D-R4-1. Stacked on the design branch. Dependency update-check behaviour changes (see Open Questions) - flagged for review rather than pre-approved. **R5 sequences after this.** |
+| R4 | review-approved | `fix/audit-r4-sibling-ownership` | [#392](https://github.com/ESO-Toolkit/kalpa/pull/392) (draft) | - | D-R4-1 | APPROVE | Rust 820 passed/17 ignored; Slint 766 passed/15 ignored; clippy `-D warnings` both crates; fmt --check both; `npm run check`; native build | Implements D-R4-1. Removal now preserves successful disk deletion while reporting post-delete cleanup warnings, and Slint retains only folders that actually failed removal. Stacked on the design branch. **R5 sequences after this.** |
 | R5 | design-done | - | - | - | D-R5-1 | - | - | Fable design complete (`consultations/r5-fable.md`). Implementation not started. Sequence **after R4**. |
 | R6 | design-done | - | - | - | D-R6-1 | - | - | Fable design complete (`consultations/r6-fable.md`). Implementation not started. Stacks on P0-A1 **and** P0-A2; cannot merge independently. |
 | R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
@@ -87,6 +87,14 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Supersedes `installer.rs:951` `cancel_midway_preserves_pre_existing_addon_files`, which currently asserts the in-place semantics ("no file is removed, only some are overwritten") as a requirement.
 
 ## Session Log
+
+### 2026-08-28 — R4 removal-state review follow-up
+
+- A failed metadata/hash cleanup no longer converts an already successful on-disk removal into a failed removal. Cleanup is attempted comprehensively, metadata is persisted before hash cleanup, and warnings are returned through the Tauri wire contract and surfaced by the frontend.
+- Slint multi-folder removal now updates each successfully removed folder immediately, retains failed folders, and reports the exact failures instead of presenting an all-or-nothing result.
+- Added deterministic injected-operation regressions for partial removal and cleanup failures.
+- Gates: Rust 820 passed/17 ignored; Slint 766 passed/15 ignored; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean on both crates; `npm run check` and `git diff --check` pass.
+- Mandatory local Sol review (`gpt-5.5`, `xhigh`, read-only) returned exact `VERDICT: APPROVE`.
 
 ### 2026-08-27 — R4 implemented
 

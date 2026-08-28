@@ -92,6 +92,11 @@ export interface BatchRemoveResult {
   removed: string[];
   failed: string[];
   errors: Record<string, string>;
+  cleanupWarnings: Record<string, string>;
+}
+
+export interface RemoveAddonResult {
+  cleanupWarning: string | null;
 }
 
 export interface BatchTagResult {

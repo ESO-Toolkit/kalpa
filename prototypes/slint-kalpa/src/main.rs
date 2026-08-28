@@ -10636,13 +10636,17 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
 
             let mut removed = 0usize;
             let mut failed = Vec::new();
+            let mut cleanup_warnings = Vec::new();
             let eso_running = addon_write_eso_running_warning_active(&ui);
             for folder_name in selected_folders {
                 if let Some(addons_root) = disk_root_for_addon(&folder_name) {
                     match remove_addon_from_disk(&addons_root, &folder_name) {
-                        Ok(()) => {
+                        Ok(outcome) => {
                             remove_master_addon(&models, &folder_name);
                             removed += 1;
+                            if let Some(warning) = outcome.cleanup_warning {
+                                cleanup_warnings.push(format!("{folder_name}: {warning}"));
+                            }
                         }
                         Err(error) => failed.push(format!("{folder_name}: {error}")),
                     }
@@ -10653,7 +10657,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             }
 
             apply_addon_view(&ui, &models);
-            let message = if failed.is_empty() {
+            let mut message = if failed.is_empty() {
                 format!("Removed {removed} selected addons.")
             } else {
                 format!(
@@ -10662,6 +10666,12 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                     failed.join("; ")
                 )
             };
+            if !cleanup_warnings.is_empty() {
+                message.push_str(&format!(
+                    " Cleanup warnings: {}",
+                    cleanup_warnings.join("; ")
+                ));
+            }
             ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
         }
     });
@@ -10754,9 +10764,10 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let folder_name = addon.folder_name.to_string();
         let eso_running = addon_write_eso_running_warning_active(&ui);
+        let mut cleanup_warning = None;
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
-                Ok(()) => {}
+                Ok(outcome) => cleanup_warning = outcome.cleanup_warning,
                 Err(error) => {
                     ui.set_status_error_message(error.into());
                     return;
@@ -10766,9 +10777,11 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&models, &folder_name);
         apply_addon_view(&ui, &models);
-        ui.set_status_error_message(
-            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
-        );
+        let mut message = format!("Removed {folder_name}.");
+        if let Some(warning) = cleanup_warning {
+            message.push_str(&format!(" Cleanup warning: {warning}"));
+        }
+        ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
     });
 }
 
@@ -10933,9 +10946,10 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         let folder_name = addon.folder_name.to_string();
         let eso_running = addon_write_eso_running_warning_active(&ui);
+        let mut cleanup_warning = None;
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
-                Ok(()) => {}
+                Ok(outcome) => cleanup_warning = outcome.cleanup_warning,
                 Err(error) => {
                     ui.set_status_error_message(error.into());
                     return;
@@ -10945,9 +10959,11 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&remove_models, &folder_name);
         apply_addon_view(&ui, &remove_models);
-        ui.set_status_error_message(
-            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
-        );
+        let mut message = format!("Removed {folder_name}.");
+        if let Some(warning) = cleanup_warning {
+            message.push_str(&format!(" Cleanup warning: {warning}"));
+        }
+        ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
     });
 
     let update_addon_ui = ui.as_weak();
@@ -11066,11 +11082,15 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
         match remove_addon_from_disk(&addons_root, &dep_name) {
-            Ok(()) => {
+            Ok(outcome) => {
                 remove_master_addon(&models, &dep_name);
                 apply_addon_view(&ui, &models);
+                let mut message = format!("Removed {dep_name}.");
+                if let Some(warning) = outcome.cleanup_warning {
+                    message.push_str(&format!(" Cleanup warning: {warning}"));
+                }
                 ui.set_status_error_message(
-                    addon_write_status_message(format!("Removed {dep_name}."), eso_running).into(),
+                    addon_write_status_message(message, eso_running).into(),
                 );
             }
             Err(error) => {
@@ -12379,18 +12399,42 @@ fn wire_discover(
         let eso_running = addon_write_eso_running_warning_active(&ui);
 
         match remove_addons_by_esoui_id(&remove_models, &esoui_id) {
-            Ok(removed) => {
-                if let Ok(mut ids) = remove_ids.lock() {
-                    ids.remove(&esoui_id);
+            Ok(outcome) => {
+                let still_installed = remove_models
+                    .all
+                    .borrow()
+                    .iter()
+                    .any(|addon| addon.esoui_id.as_str() == esoui_id);
+                if !still_installed {
+                    if let Ok(mut ids) = remove_ids.lock() {
+                        ids.remove(&esoui_id);
+                    }
+                    mark_discover_uninstalled_model(&model, &esoui_id);
                 }
-                mark_discover_uninstalled_model(&model, &esoui_id);
                 apply_addon_view(&ui, &remove_models);
-                let message = format!(
+                let mut message = format!(
                     "Removed {} addon folder{} for ESOUI {}.",
-                    removed.len(),
-                    if removed.len() == 1 { "" } else { "s" },
+                    outcome.removed.len(),
+                    if outcome.removed.len() == 1 { "" } else { "s" },
                     esoui_id
                 );
+                if !outcome.cleanup_warnings.is_empty() {
+                    message.push_str(&format!(
+                        " Cleanup warnings: {}",
+                        outcome.cleanup_warnings.join("; ")
+                    ));
+                }
+                if !outcome.failures.is_empty() {
+                    message.push_str(&format!(
+                        " Failed to remove: {}",
+                        outcome
+                            .failures
+                            .iter()
+                            .map(|(folder, error)| format!("{folder}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -12451,7 +12495,31 @@ fn mark_discover_uninstalled_model(discover_model: &ModelRc<DiscoverEntry>, esou
     }
 }
 
-fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec<String>, String> {
+struct RemoveByEsouiOutcome {
+    removed: Vec<String>,
+    cleanup_warnings: Vec<String>,
+    failures: Vec<(String, String)>,
+}
+
+fn remove_addons_by_esoui_id(
+    models: &AddonModels,
+    esoui_id: &str,
+) -> Result<RemoveByEsouiOutcome, String> {
+    remove_addons_by_esoui_id_with(models, esoui_id, |folder_name| {
+        let Some(addons_root) = disk_root_for_addon(folder_name) else {
+            // Demo/mock rows have no configured disk folder but still need to
+            // leave the model when the user removes them.
+            return Ok(None);
+        };
+        remove_addon_from_disk(&addons_root, folder_name).map(|outcome| outcome.cleanup_warning)
+    })
+}
+
+fn remove_addons_by_esoui_id_with(
+    models: &AddonModels,
+    esoui_id: &str,
+    mut remove_from_disk: impl FnMut(&str) -> Result<Option<String>, String>,
+) -> Result<RemoveByEsouiOutcome, String> {
     let targets = models
         .all
         .borrow()
@@ -12464,17 +12532,29 @@ fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec
         return Err(format!("No installed addon found for ESOUI {esoui_id}."));
     }
 
+    let mut removed = Vec::new();
+    let mut cleanup_warnings = Vec::new();
+    let mut failures = Vec::new();
     for folder_name in &targets {
-        if let Some(addons_root) = disk_root_for_addon(folder_name) {
-            remove_addon_from_disk(&addons_root, folder_name)?;
+        match remove_from_disk(folder_name) {
+            Ok(warning) => {
+                if let Some(warning) = warning {
+                    cleanup_warnings.push(format!("{folder_name}: {warning}"));
+                }
+                remove_master_addon(models, folder_name);
+                removed.push(folder_name.clone());
+            }
+            Err(error) => {
+                failures.push((folder_name.clone(), error));
+            }
         }
     }
 
-    for folder_name in &targets {
-        remove_master_addon(models, folder_name);
-    }
-
-    Ok(targets)
+    Ok(RemoveByEsouiOutcome {
+        removed,
+        cleanup_warnings,
+        failures,
+    })
 }
 
 fn discover_installed_snapshot(installed_ids: &Arc<Mutex<BTreeSet<String>>>) -> BTreeSet<String> {
@@ -13802,7 +13882,14 @@ fn set_addon_disabled_on_disk(
     }
 }
 
-fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), String> {
+struct RemoveFromDiskOutcome {
+    cleanup_warning: Option<String>,
+}
+
+fn remove_addon_from_disk(
+    addons_root: &Path,
+    folder_name: &str,
+) -> Result<RemoveFromDiskOutcome, String> {
     validate_addon_folder_name(folder_name)?;
 
     let enabled_exists = addons_root.join(folder_name).is_dir();
@@ -13820,19 +13907,30 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     }
 
     // The folder is already deleted — removal has succeeded. Treat the kalpa.json
-    // metadata cleanup as best-effort so a transient lock (OneDrive/AV) or a CFA
-    // block doesn't report "Remove failed" for an addon that is actually gone.
+    // Cleanup failures are warnings so the UI does not retain a row for an
+    // addon folder that has already been removed.
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_root);
     let removed_id = store.addons.get(folder_name).map(|meta| meta.esoui_id);
     metadata::remove_entry(&mut store, folder_name);
     if let Some(id) = removed_id {
         metadata::forget_bundled_parent(&mut store, id);
-        let _ = file_hashes::forget_esoui_owner(addons_root, id);
     }
-    let _ = metadata::save_metadata(addons_root, &store);
-    let _ = save_prototype_tags(addons_root, folder_name, &[]);
-    Ok(())
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = metadata::save_metadata(addons_root, &store) {
+        cleanup_errors.push(error);
+    }
+    if let Some(id) = removed_id {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_root, id) {
+            cleanup_errors.push(error);
+        }
+    }
+    if let Err(error) = save_prototype_tags(addons_root, folder_name, &[]) {
+        cleanup_errors.push(error);
+    }
+    Ok(RemoveFromDiskOutcome {
+        cleanup_warning: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+    })
 }
 
 fn active_tag_ids(tags: &ModelRc<TagEntry>) -> Vec<String> {
@@ -21325,6 +21423,29 @@ mod tests {
     }
 
     #[test]
+    fn native_remove_reports_cleanup_warning_after_persisting_metadata() {
+        let root = test_temp_dir("native-remove-cleanup-warning");
+        fs::create_dir_all(root.join("AddonA")).expect("create addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(root, &store).expect("save metadata");
+        let hashes_dir = root.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).expect("create hashes directory");
+        fs::write(hashes_dir.join("Broken.json"), "not json").expect("write corrupt manifest");
+
+        let outcome = remove_addon_from_disk(root, "AddonA").expect("remove addon");
+
+        assert!(!root.join("AddonA").exists());
+        assert!(!metadata::load_metadata(root).addons.contains_key("AddonA"));
+        assert!(outcome
+            .cleanup_warning
+            .is_some_and(|warning| warning.contains("hash manifest")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn real_file_editor_reads_writes_nested_text_files() {
         let root = test_temp_dir("real-file-editor");
         let addon_dir = root.join("EditableAddon");
@@ -23760,15 +23881,17 @@ CombatMetrics_SavedVariables = {
             ),
         ]);
 
-        let removed = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
+        let outcome = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
 
         assert_eq!(
-            removed,
+            outcome.removed,
             vec![
                 "CombatMetrics".to_string(),
                 "CombatMetricsHelper".to_string()
             ]
         );
+        assert!(outcome.cleanup_warnings.is_empty());
+        assert!(outcome.failures.is_empty());
         assert!(!addons_root.join("CombatMetrics").exists());
         assert!(!addons_root.join("CombatMetricsHelper").exists());
         assert!(addons_root.join("OtherAddon").exists());
@@ -23786,6 +23909,103 @@ CombatMetrics_SavedVariables = {
             std::env::remove_var("KALPA_ADDONS_PATH");
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_addons_by_esoui_id_preserves_failed_folders_in_the_model() {
+        let models = test_addon_models(vec![
+            addon_entry(
+                "CombatMetrics",
+                "CombatMetrics",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Addon",
+                "3/3/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "CombatMetrics Helper",
+                "CombatMetricsHelper",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Library",
+                "3/3/2026",
+                "",
+                false,
+                true,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "Other Addon",
+                "OtherAddon",
+                "3520",
+                "Author",
+                "1.0.0",
+                "101048",
+                "Addon",
+                "4/1/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+        ]);
+
+        let outcome = remove_addons_by_esoui_id_with(&models, "1360", |folder_name| {
+            if folder_name == "CombatMetricsHelper" {
+                Err("folder is locked".to_string())
+            } else {
+                Ok(None)
+            }
+        })
+        .expect("remove matching addon folders");
+
+        assert_eq!(outcome.removed, vec!["CombatMetrics".to_string()]);
+        assert!(outcome.cleanup_warnings.is_empty());
+        assert_eq!(
+            outcome.failures,
+            vec![(
+                "CombatMetricsHelper".to_string(),
+                "folder is locked".to_string()
+            )]
+        );
+        assert_eq!(
+            models
+                .all
+                .borrow()
+                .iter()
+                .map(|addon| addon.folder_name.to_string())
+                .collect::<Vec<_>>(),
+            vec!["CombatMetricsHelper".to_string(), "OtherAddon".to_string()]
+        );
     }
 
     #[test]

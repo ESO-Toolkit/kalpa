@@ -1538,7 +1538,7 @@ pub async fn remove_addon(
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_name: String,
-) -> Result<(), String> {
+) -> Result<RemoveAddonResult, String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
@@ -1546,39 +1546,7 @@ pub async fn remove_addon(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-
-        // Remove both the enabled and disabled copies if they exist.
-        // If only one exists, remove that one. Handles the edge case where
-        // an external tool or reinstall left both Foo/ and Foo.disabled/.
-        let enabled_exists = addons_dir.join(&folder_name).is_dir();
-        let disabled_name = format!("{folder_name}.disabled");
-        let disabled_exists = addons_dir.join(&disabled_name).is_dir();
-
-        if enabled_exists {
-            installer::remove_addon(&addons_dir, &folder_name)?;
-        }
-        if disabled_exists {
-            installer::remove_addon(&addons_dir, &disabled_name)?;
-        }
-        if !enabled_exists && !disabled_exists {
-            return Err(format!("Addon folder not found: {folder_name}"));
-        }
-
-        // Clean up metadata
-        let mut store = metadata::load_metadata(&addons_dir);
-        // Anything this addon also shipped into keeps its own identity and its
-        // files; only the record that this addon wrote there goes away. The
-        // folders themselves stay on disk because other addons may declare a
-        // dependency on them.
-        let removed_id = store.addons.get(&folder_name).map(|m| m.esoui_id);
-        metadata::remove_entry(&mut store, &folder_name);
-        if let Some(id) = removed_id {
-            metadata::forget_bundled_parent(&mut store, id);
-            file_hashes::forget_esoui_owner(&addons_dir, id)?;
-        }
-        metadata::save_metadata(&addons_dir, &store)?;
-
-        Ok(())
+        remove_addon_from_disk(&addons_dir, &folder_name)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -4237,6 +4205,65 @@ pub struct BatchRemoveResult {
     pub removed: Vec<String>,
     pub failed: Vec<String>,
     pub errors: HashMap<String, String>,
+    pub cleanup_warnings: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAddonResult {
+    pub cleanup_warning: Option<String>,
+}
+
+fn remove_addon_from_disk(
+    addons_dir: &Path,
+    folder_name: &str,
+) -> Result<RemoveAddonResult, String> {
+    validate_name(folder_name)?;
+
+    // Remove both the enabled and disabled copies if they exist. If only one
+    // exists, remove that one. This also handles an external tool or reinstall
+    // leaving both Foo/ and Foo.disabled/ behind.
+    let enabled_exists = addons_dir.join(folder_name).is_dir();
+    let disabled_name = format!("{folder_name}.disabled");
+    let disabled_exists = addons_dir.join(&disabled_name).is_dir();
+
+    if enabled_exists {
+        installer::remove_addon(addons_dir, folder_name)?;
+    }
+    if disabled_exists {
+        installer::remove_addon(addons_dir, &disabled_name)?;
+    }
+    if !enabled_exists && !disabled_exists {
+        return Err(format!("Addon folder not found: {folder_name}"));
+    }
+
+    // The folder is already gone, so cleanup failures are warnings rather
+    // than removal failures. Returning an error here would make the
+    // optimistic frontend restore a row whose folder no longer exists.
+    let mut store = metadata::load_metadata(addons_dir);
+    // Anything this addon also shipped into keeps its own identity and its
+    // files; only the record that this addon wrote there goes away. The
+    // folders themselves stay on disk because other addons may declare a
+    // dependency on them.
+    let removed_id = store.addons.get(folder_name).map(|m| m.esoui_id);
+    metadata::remove_entry(&mut store, folder_name);
+    if let Some(id) = removed_id {
+        metadata::forget_bundled_parent(&mut store, id);
+    }
+
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = metadata::save_metadata(addons_dir, &store) {
+        cleanup_errors.push(error);
+    }
+    if let Some(id) = removed_id {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_dir, id) {
+            cleanup_errors.push(error);
+        }
+    }
+
+    Ok(RemoveAddonResult {
+        cleanup_warning: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+    })
 }
 
 fn batch_remove_addons_from_disk(
@@ -4247,6 +4274,7 @@ fn batch_remove_addons_from_disk(
     let mut removed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
+    let mut removed_ids: Vec<(String, u32)> = Vec::new();
 
     for name in folder_names {
         match installer::remove_addon(addons_dir, name) {
@@ -4255,7 +4283,7 @@ fn batch_remove_addons_from_disk(
                 metadata::remove_entry(&mut store, name);
                 if let Some(id) = removed_id {
                     metadata::forget_bundled_parent(&mut store, id);
-                    file_hashes::forget_esoui_owner(addons_dir, id)?;
+                    removed_ids.push((name.clone(), id));
                 }
                 removed.push(name.clone());
             }
@@ -4266,11 +4294,28 @@ fn batch_remove_addons_from_disk(
         }
     }
 
-    metadata::save_metadata(addons_dir, &store)?;
+    let mut cleanup_warnings = HashMap::new();
+    if let Err(error) = metadata::save_metadata(addons_dir, &store) {
+        for name in &removed {
+            cleanup_warnings.insert(name.clone(), error.clone());
+        }
+    }
+    for (name, id) in removed_ids {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_dir, id) {
+            cleanup_warnings
+                .entry(name)
+                .and_modify(|warning| {
+                    warning.push_str("; ");
+                    warning.push_str(&error);
+                })
+                .or_insert(error);
+        }
+    }
     Ok(BatchRemoveResult {
         removed,
         failed,
         errors,
+        cleanup_warnings,
     })
 }
 
@@ -11422,6 +11467,54 @@ mod tests {
                 .esoui_ids,
             vec![7, 9]
         );
+    }
+
+    #[test]
+    fn remove_reports_hash_cleanup_warning_after_persisting_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(addons_dir, &store).unwrap();
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        fs::write(hashes_dir.join("Broken.json"), "not json").unwrap();
+
+        let result = remove_addon_from_disk(addons_dir, "AddonA").unwrap();
+
+        assert!(!addons_dir.join("AddonA").exists());
+        assert!(!metadata::load_metadata(addons_dir)
+            .addons
+            .contains_key("AddonA"));
+        assert!(result
+            .cleanup_warning
+            .is_some_and(|warning| warning.contains("hash manifest")));
+    }
+
+    #[test]
+    fn batch_remove_preserves_success_result_when_hash_cleanup_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(addons_dir, &store).unwrap();
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        fs::write(hashes_dir.join("Broken.json"), "not json").unwrap();
+
+        let result = batch_remove_addons_from_disk(addons_dir, &["AddonA".to_string()]).unwrap();
+
+        assert_eq!(result.removed, vec!["AddonA"]);
+        assert!(result.failed.is_empty());
+        assert!(!addons_dir.join("AddonA").exists());
+        assert!(!metadata::load_metadata(addons_dir)
+            .addons
+            .contains_key("AddonA"));
+        assert!(result.cleanup_warnings["AddonA"].contains("hash manifest"));
     }
 
     fn profile_of(names: &[&str]) -> AddonProfile {
