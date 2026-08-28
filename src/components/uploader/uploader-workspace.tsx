@@ -114,6 +114,8 @@ type Mode = "manual" | "live";
 type HeaderPhase =
   "idle" | "scanning" | "ready" | "uploading" | "armed" | "live" | "attention" | "signedOut";
 
+type LogSelectionOutcome = "accepted" | "deferred" | "stale" | "blocked" | "error";
+
 const DEFAULT_OPTIONS: UploadOptions = {
   region: 1,
   guildId: null,
@@ -270,6 +272,7 @@ export function UploaderWorkspace({
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
+  const importTokenRef = useRef(0);
   // The log queued for deletion (drives the DeleteLogConfirm dialog); null = no
   // pending delete. `deleting` guards the confirm button while the move runs.
   const [deleteTarget, setDeleteTarget] = useState<LogFileInfo | null>(null);
@@ -389,7 +392,12 @@ export function UploaderWorkspace({
   const loadLogsSeqRef = useRef(0);
   const detectLogsSeqRef = useRef(0);
   const setActiveLogsDir = useCallback((dir: string | null) => {
+    const directoryChanged = logsDirRef.current !== dir;
     logsDirRef.current = dir;
+    if (directoryChanged) {
+      importTokenRef.current++;
+      setImporting(false);
+    }
     loadLogsSeqRef.current++;
     detectLogsSeqRef.current++;
     setLogsDir(dir);
@@ -767,17 +775,22 @@ export function UploaderWorkspace({
   }, [deleteTarget, restoreLog, logsDir, loadLogs, clearSelection]);
 
   const handleSelectLog = useCallback(
-    async (path: string, freshLog?: LogFileInfo) => {
+    async (path: string, freshLog?: LogFileInfo): Promise<LogSelectionOutcome> => {
       // The slice picker is keyed on the selected log, so switching while it is
       // cutting or uploading would remount it and abandon a batch that is still
       // writing multi-GB files — with no UI left to report what happened.
       if (slicePickerBusyRef.current) {
         toast.info("Finish or stop the current split before switching logs.");
-        return;
+        return "blocked";
       }
       // Guard against a slow scan of a previously-selected log resolving after a
       // newer selection and overwriting its results.
       const token = ++selectTokenRef.current;
+      const activeDirectory = logsDirRef.current;
+      const isCurrentSelection = () =>
+        selectTokenRef.current === token &&
+        logsDirRef.current === activeDirectory &&
+        selectedLogRef.current === path;
       const log = freshLog ?? logs.find((l) => l.path === path);
       const deferFullScan = (log?.sizeBytes ?? 0) > DEFER_FULL_PREFLIGHT_BYTES;
       selectedLogRef.current = path;
@@ -790,16 +803,16 @@ export function UploaderWorkspace({
       if (deferFullScan) {
         const sel = CSS.escape(path);
         setTimeout(() => {
-          if (selectTokenRef.current !== token) return;
+          if (!isCurrentSelection()) return;
           document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
         }, 0);
-        return;
+        return "deferred";
       }
       try {
         // A single preflight scan returns both the counts and (unless the log is
         // huge) the fight list — no second scan needed.
         const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
-        if (selectTokenRef.current !== token) return;
+        if (!isCurrentSelection()) return "stale";
         setPreflight(pre);
         setFights(pre.fights);
         setPreflightError(null);
@@ -807,21 +820,23 @@ export function UploaderWorkspace({
         // "Scanning" pill swap). Once this scan is still the current one, restore
         // focus to the selected row so keyboard users aren't stranded. Deferred a
         // tick so it runs after the post-setState re-render.
-        if (selectTokenRef.current === token) {
+        if (isCurrentSelection()) {
           const sel = CSS.escape(path);
           setTimeout(() => {
-            if (selectTokenRef.current !== token) return;
+            if (!isCurrentSelection()) return;
             document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
           }, 0);
         }
+        return "accepted";
       } catch (e) {
-        if (selectTokenRef.current !== token) return;
+        if (!isCurrentSelection()) return "stale";
         const message = getTauriErrorMessage(e);
         setPreflightError(message);
         setPreflightDeferred(true);
         toast.error(`Couldn't read that log: ${message}`);
+        return "error";
       } finally {
-        if (selectTokenRef.current === token) setScanning(false);
+        if (isCurrentSelection()) setScanning(false);
       }
     },
     [logs]
@@ -862,29 +877,35 @@ export function UploaderWorkspace({
         toast.error("Only .log files can be added.");
         return;
       }
+      const importToken = ++importTokenRef.current;
       setImporting(true);
       const activeDirectory = logsDirRef.current;
+      const isCurrentImport = () =>
+        importTokenRef.current === importToken && logsDirRef.current === activeDirectory;
       try {
         const imported = await invokeOrThrow<string>("uploader_import_log", { srcPath });
-        if (logsDirRef.current !== activeDirectory) return;
+        if (!isCurrentImport()) return;
         const refreshedLogs = activeDirectory ? await loadLogs(activeDirectory) : null;
-        if (logsDirRef.current !== activeDirectory) return;
+        if (!isCurrentImport()) return;
         const importedLog = refreshedLogs?.find((log) => log.path === imported);
         if (!refreshedLogs) return;
         if (!importedLog) {
-          toast.success("Log added, but it isn't in this folder.");
+          toast.info("Log added, but it isn't in this folder.");
           return;
         }
-        await handleSelectLog(imported, importedLog);
+        const selectionOutcome = await handleSelectLog(imported, importedLog);
+        if (!isCurrentImport() || selectedLogRef.current !== imported) return;
+        if (selectionOutcome !== "accepted" && selectionOutcome !== "deferred") return;
         toast.success(
           importedLog.sizeBytes > DEFER_FULL_PREFLIGHT_BYTES
             ? "Log added — full scan deferred."
             : "Log added — scanning it now."
         );
       } catch (e) {
+        if (!isCurrentImport()) return;
         toast.error(`Couldn't add that log: ${getTauriErrorMessage(e)}`);
       } finally {
-        setImporting(false);
+        if (isCurrentImport()) setImporting(false);
       }
     },
     [loadLogs, handleSelectLog]
