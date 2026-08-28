@@ -25,7 +25,7 @@ export const SUPPORT_ISSUES = [
     placeholder:
       "Which ESO installation should Kalpa be using, and what folder or addons are missing?",
     diagnosticNote:
-      "Kalpa included the detected ESO instance. Your full folder path remains hidden unless you opt in below.",
+      "Kalpa included the detected ESO instance. Local account names and the full folder path stay hidden.",
   },
   {
     id: "backups-data",
@@ -66,139 +66,220 @@ export interface SupportReportInput {
   checkingUpdates: boolean;
   addonsPath: string;
   instanceLabel: string | null;
-  includeAddonsPath: boolean;
   addons: AddonManifest[];
   updateResults: UpdateCheckResult[];
   lastError: string | null;
 }
 
+export interface SupportAttentionItem {
+  name: string;
+  folder: string;
+  currentVersion: string | null;
+  availableVersion: string | null;
+  missingDependencies: number;
+  outdatedDependencies: number;
+  modifiedFiles: number;
+}
+
+export interface SupportTicketPayload {
+  version: 1;
+  issueId: SupportIssueId;
+  description: string;
+  appVersion: string;
+  platform: string;
+  generatedAt: string;
+  connection: "online" | "offline";
+  updateState: "checking" | "complete";
+  instanceLabel: string;
+  diagnostics: {
+    addons: number;
+    libraries: number;
+    disabled: number;
+    checked: number;
+    updates: number;
+    dependencyWarnings: number;
+    modified: number;
+    lastError: string | null;
+    attention: SupportAttentionItem[];
+  };
+}
+
 export const SUPPORT_REPORT_MAX_LENGTH = 1950;
+export const SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH = 8192;
+export const SUPPORT_HANDOFF_URL = "https://esotk.com/kalpa/support";
+const MAX_ATTENTION_ITEMS = 12;
 
-function neutralizeMentions(value: string): string {
-  return value.replace(/@(everyone|here)/gi, "＠$1").replace(/<(@[!&]?\d+|#\d+)>/g, "<\u200b$1>");
+export function neutralizeDiscordMentions(value: string): string {
+  return value
+    .replace(/@(everyone|here)/gi, "@\u200b$1")
+    .replace(/<(?=(@[!&]?\d+|#\d+|t:\d+(?::[tTdDfFR])?|\/[^:>]{1,32}:\d+)>)/g, "<\u200b");
 }
 
-function cleanSingleLine(value: string, maxLength: number): string {
-  const clean = neutralizeMentions(value)
-    .replace(/\s*[\r\n]+\s*/g, " ")
-    .trim();
-  return clean.length <= maxLength ? clean : `${clean.slice(0, maxLength - 1)}…`;
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 3) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - 3)}...`;
 }
 
-function cleanMultiline(value: string, maxLength: number): string {
-  const clean = neutralizeMentions(value).replace(/\r\n?/g, "\n").trim();
-  return clean.length <= maxLength ? clean : `${clean.slice(0, maxLength - 1)}…`;
-}
-
-function pathPattern(path: string): RegExp | null {
-  const parts = path
+function redactSensitiveText(value: string, addonsPath: string): string {
+  let redacted = neutralizeDiscordMentions(value);
+  const escaped = addonsPath
     .trim()
     .split(/[\\/]+/)
     .filter(Boolean)
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  return parts.length > 0 ? new RegExp(parts.join("[\\\\/]+"), "gi") : null;
-}
-
-function redactHomeFolders(value: string, addonsPath: string): string {
-  let redacted = value;
-  const addonsPathPattern = pathPattern(addonsPath);
-  if (addonsPathPattern) redacted = redacted.replace(addonsPathPattern, "[AddOns folder]");
+  if (escaped.length > 0) {
+    redacted = redacted.replace(new RegExp(escaped.join("[\\\\/]+"), "gi"), "[AddOns folder]");
+  }
 
   return redacted
-    .replace(/([A-Za-z]:[\\/]+Users[\\/]+)[^\\/\s]+/gi, "$1[user]")
-    .replace(/([\\/]+Users[\\/]+)[^\\/\s]+/gi, "$1[user]")
-    .replace(/([\\/]+home[\\/]+)[^\\/\s]+/gi, "$1[user]");
+    .replace(
+      /(?:[A-Za-z]:[\\/]+Users|[\\/]+(?:Users|home))[\\/]+[^\s\\/]+(?:[\\/]+[^\s,;]+)*/gi,
+      "[local path]"
+    )
+    .replace(/\\\\[^\s\\/]+[\\/]+[^\s\\/]+(?:[\\/]+[^\s,;]+)*/g, "[local path]")
+    .replace(
+      /\b(authorization|bearer|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret)\b(?:\s*[:=]\s*|\s+)[^\s,;]{6,}|\b(token)\b(?:\s*[:=]\s*[^\s,;]+|\s+[A-Za-z0-9._~+/=-]{16,})/gi,
+      "$1$2 [redacted]"
+    )
+    .replace(/\b\d{17,20}\b/g, "[account-id]");
 }
 
-function issueLabel(issueId: SupportIssueId): string {
-  return SUPPORT_ISSUES.find((issue) => issue.id === issueId)?.label ?? "Something else";
+function cleanSingleLine(value: string, maxLength: number, addonsPath = ""): string {
+  const clean = redactSensitiveText(value, addonsPath)
+    .replace(/\s*[\r\n]+\s*/g, " ")
+    .trim();
+  return truncate(clean, maxLength);
 }
 
-function issueDiagnosticNote(issueId: SupportIssueId): string {
+function cleanMultiline(value: string, maxLength: number, addonsPath = ""): string {
+  const clean = redactSensitiveText(value, addonsPath).replace(/\r\n?/g, "\n").trim();
+  return truncate(clean, maxLength);
+}
+
+function boundedCount(value: number): number {
+  return Math.max(0, Math.min(9999, Math.trunc(Number.isFinite(value) ? value : 0)));
+}
+
+function issueDetails(issueId: SupportIssueId) {
   return (
-    SUPPORT_ISSUES.find((issue) => issue.id === issueId)?.diagnosticNote ??
-    "Kalpa included only general app and addon state."
+    SUPPORT_ISSUES.find((issue) => issue.id === issueId) ??
+    SUPPORT_ISSUES[SUPPORT_ISSUES.length - 1]!
   );
 }
 
-function formatAttentionLines(
-  addons: AddonManifest[],
-  updateResults: UpdateCheckResult[]
-): string[] {
-  const addonByFolder = new Map(addons.map((addon) => [addon.folderName, addon]));
-  const lines = new Map<string, string>();
+export function buildSupportTicketPayload(input: SupportReportInput): SupportTicketPayload {
+  const addonByFolder = new Map(input.addons.map((addon) => [addon.folderName, addon]));
+  const updateByFolder = new Map(input.updateResults.map((result) => [result.folderName, result]));
+  const folders = new Set<string>();
 
-  for (const result of updateResults.filter((item) => item.hasUpdate)) {
-    const addon = addonByFolder.get(result.folderName);
-    const name = addon?.title || result.folderName;
-    lines.set(
-      result.folderName,
-      `- ${name} (${result.folderName}): Kalpa sees ${result.currentVersion || "unknown"} → ${result.remoteVersion || "unknown"}`
-    );
+  for (const result of input.updateResults) {
+    if (result.hasUpdate) folders.add(result.folderName);
+  }
+  for (const addon of input.addons) {
+    if (
+      addon.missingDependencies.length > 0 ||
+      addon.outdatedDependencies.length > 0 ||
+      addon.modifiedFileCount > 0
+    ) {
+      folders.add(addon.folderName);
+    }
   }
 
-  for (const addon of addons) {
-    const details: string[] = [];
-    if (addon.missingDependencies.length > 0) {
-      details.push(`missing dependencies: ${addon.missingDependencies.join(", ")}`);
-    }
-    if (addon.outdatedDependencies.length > 0) {
-      details.push(`outdated dependencies: ${addon.outdatedDependencies.join(", ")}`);
-    }
-    if (addon.modifiedFileCount > 0) {
-      details.push(`${addon.modifiedFileCount} locally modified file(s)`);
-    }
-    if (details.length === 0) continue;
+  const attention = [...folders]
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, MAX_ATTENTION_ITEMS)
+    .map((folder): SupportAttentionItem => {
+      const addon = addonByFolder.get(folder);
+      const update = updateByFolder.get(folder);
+      return {
+        name: cleanSingleLine(addon?.title || folder, 80, input.addonsPath),
+        folder: cleanSingleLine(folder, 80, input.addonsPath),
+        currentVersion: update?.currentVersion
+          ? cleanSingleLine(update.currentVersion, 40, input.addonsPath)
+          : null,
+        availableVersion:
+          update?.hasUpdate && update.remoteVersion
+            ? cleanSingleLine(update.remoteVersion, 40, input.addonsPath)
+            : null,
+        missingDependencies: boundedCount(addon?.missingDependencies.length ?? 0),
+        outdatedDependencies: boundedCount(addon?.outdatedDependencies.length ?? 0),
+        modifiedFiles: boundedCount(addon?.modifiedFileCount ?? 0),
+      };
+    });
 
-    const existing = lines.get(addon.folderName);
-    const prefix = existing ?? `- ${addon.title || addon.folderName} (${addon.folderName})`;
-    lines.set(addon.folderName, `${prefix}; ${details.join("; ")}`);
-  }
-
-  return [...lines.values()].sort((a, b) => a.localeCompare(b));
+  return {
+    version: 1,
+    issueId: input.issueId,
+    description: cleanMultiline(input.description, 500, input.addonsPath),
+    appVersion: cleanSingleLine(input.appVersion || "unknown", 40, input.addonsPath),
+    platform: cleanSingleLine(input.platform || "unknown", 40, input.addonsPath),
+    generatedAt: input.generatedAt.toISOString(),
+    connection: input.isOffline ? "offline" : "online",
+    updateState: input.checkingUpdates ? "checking" : "complete",
+    instanceLabel: cleanSingleLine(
+      input.instanceLabel ?? "custom or not detected",
+      80,
+      input.addonsPath
+    ),
+    diagnostics: {
+      addons: boundedCount(input.addons.length),
+      libraries: boundedCount(input.addons.filter((addon) => addon.isLibrary).length),
+      disabled: boundedCount(input.addons.filter((addon) => addon.disabled).length),
+      checked: boundedCount(input.updateResults.length),
+      updates: boundedCount(input.updateResults.filter((result) => result.hasUpdate).length),
+      dependencyWarnings: boundedCount(
+        input.addons.filter((addon) => addon.missingDependencies.length > 0).length
+      ),
+      modified: boundedCount(input.addons.filter((addon) => addon.modifiedFileCount > 0).length),
+      lastError: input.lastError ? cleanSingleLine(input.lastError, 240, input.addonsPath) : null,
+      attention,
+    },
+  };
 }
 
-export function buildSupportReport(input: SupportReportInput): string {
-  const libraries = input.addons.filter((addon) => addon.isLibrary).length;
-  const disabled = input.addons.filter((addon) => addon.disabled).length;
-  const missingDependencies = input.addons.filter(
-    (addon) => addon.missingDependencies.length > 0
-  ).length;
-  const modified = input.addons.filter((addon) => addon.modifiedFileCount > 0).length;
-  const updates = input.updateResults.filter((result) => result.hasUpdate).length;
-  const attentionLines = formatAttentionLines(input.addons, input.updateResults);
-  const description = cleanMultiline(input.description, 500) || "No description provided.";
-  const lastError = input.lastError
-    ? cleanSingleLine(redactHomeFolders(input.lastError, input.addonsPath), 240)
-    : "None recorded";
+function renderAttention(item: SupportAttentionItem): string {
+  const details: string[] = [];
+  if (item.availableVersion) {
+    details.push(`Kalpa sees ${item.currentVersion ?? "unknown"} -> ${item.availableVersion}`);
+  }
+  if (item.missingDependencies > 0) {
+    details.push(`${item.missingDependencies} missing dependency warning(s)`);
+  }
+  if (item.outdatedDependencies > 0) {
+    details.push(`${item.outdatedDependencies} outdated dependency warning(s)`);
+  }
+  if (item.modifiedFiles > 0) details.push(`${item.modifiedFiles} locally modified file(s)`);
+  return `- ${item.name} (${item.folder}): ${details.join("; ") || "needs attention"}`;
+}
 
-  const prefix = [
+export function renderSupportReport(payload: SupportTicketPayload): string {
+  const issue = issueDetails(payload.issueId);
+  const d = payload.diagnostics;
+  const heading = [
     "# Kalpa support request",
     "",
-    `**Issue:** ${issueLabel(input.issueId)}`,
+    `**Issue:** ${issue.label}`,
     "",
     "**What happened**",
-    description,
+  ];
+  const diagnostics = [
     "",
     "## Automatic diagnostics",
-    `- Generated: ${input.generatedAt.toISOString()}`,
-    `- Kalpa version: ${cleanSingleLine(input.appVersion || "unknown", 40)}`,
-    `- Platform: ${cleanSingleLine(input.platform, 40)}`,
-    `- Connection: ${input.isOffline ? "offline" : "online"}`,
-    `- ESO instance: ${cleanSingleLine(input.instanceLabel ?? "custom or not detected", 80)}`,
-    `- AddOns folder: ${
-      input.includeAddonsPath
-        ? cleanSingleLine(input.addonsPath || "not configured", 300)
-        : "hidden by user"
-    }`,
-    `- Scan summary: ${input.addons.length} addon(s), ${libraries} librar${libraries === 1 ? "y" : "ies"}, ${disabled} disabled`,
-    `- Dependency warnings: ${missingDependencies} addon(s)`,
-    `- Locally modified: ${modified} addon(s)`,
-    `- Update check: ${input.checkingUpdates ? "in progress" : `${input.updateResults.length} checked, ${updates} update(s) reported`}`,
-    `- Last app message: ${lastError}`,
+    `- Generated: ${payload.generatedAt}`,
+    `- Kalpa version: ${payload.appVersion}`,
+    `- Platform: ${payload.platform}`,
+    `- Connection: ${payload.connection}`,
+    `- ESO instance: ${payload.instanceLabel}`,
+    "- AddOns folder: hidden (local account names and full paths are never shared)",
+    `- Scan summary: ${d.addons} addon(s), ${d.libraries} libraries, ${d.disabled} disabled`,
+    `- Dependency warnings: ${d.dependencyWarnings} addon(s)`,
+    `- Locally modified: ${d.modified} addon(s)`,
+    `- Update check: ${payload.updateState === "checking" ? "in progress" : `${d.checked} checked, ${d.updates} update(s) reported`}`,
+    `- Last app message: ${d.lastError ?? "None recorded"}`,
     "",
     "## What Kalpa collected for this issue",
-    issueDiagnosticNote(input.issueId),
+    issue.diagnosticNote,
     "",
     "## Addons needing attention",
   ];
@@ -207,38 +288,55 @@ export function buildSupportReport(input: SupportReportInput): string {
     "## Privacy note",
     "This report does not include SavedVariables, account IDs, access tokens, or file contents.",
   ];
+  const items = payload.diagnostics.attention.map(renderAttention);
+  const noneOrOmitted =
+    items.length > 0
+      ? `- ${items.length} item(s) omitted to keep the report within Discord's limit`
+      : "- None detected automatically";
+  const assemble = (description: string, attention: string[]) =>
+    neutralizeDiscordMentions(
+      [...heading, description, ...diagnostics, ...attention, ...suffix].join("\n")
+    );
 
-  if (attentionLines.length === 0) {
-    return [...prefix, "- None detected automatically", ...suffix]
-      .map((line) => neutralizeMentions(line))
-      .join("\n");
-  }
-
+  const desiredDescription = payload.description || "No description provided.";
+  const fixed = assemble("", [noneOrOmitted]);
+  const description = truncate(
+    desiredDescription,
+    Math.max(0, SUPPORT_REPORT_MAX_LENGTH - fixed.length)
+  );
   const included: string[] = [];
-  for (const line of attentionLines) {
-    const candidate = cleanSingleLine(line, 180);
-    const omitted = attentionLines.length - included.length - 1;
-    const omissionLine = omitted > 0 ? `- …and ${omitted} more item(s)` : null;
-    const next = [
-      ...prefix,
+
+  for (const item of items) {
+    const candidate = truncate(item, 180);
+    const remaining = items.length - included.length - 1;
+    const attention = [
       ...included,
       candidate,
-      ...(omissionLine ? [omissionLine] : []),
-      ...suffix,
-    ]
-      .map((item) => neutralizeMentions(item))
-      .join("\n");
-    if (next.length > SUPPORT_REPORT_MAX_LENGTH) break;
+      ...(remaining > 0 ? [`- ...and ${remaining} more item(s)`] : []),
+    ];
+    if (assemble(description, attention).length > SUPPORT_REPORT_MAX_LENGTH) break;
     included.push(candidate);
   }
 
-  const omitted = attentionLines.length - included.length;
-  const finalLines = [
-    ...prefix,
-    ...included,
-    ...(omitted > 0 ? [`- …and ${omitted} more item(s)`] : []),
-    ...suffix,
-  ];
+  const omitted = items.length - included.length;
+  const attention =
+    included.length > 0
+      ? [...included, ...(omitted > 0 ? [`- ...and ${omitted} more item(s)`] : [])]
+      : [noneOrOmitted];
+  return assemble(description, attention);
+}
 
-  return finalLines.map((line) => neutralizeMentions(line)).join("\n");
+export function buildSupportReport(input: SupportReportInput): string {
+  return renderSupportReport(buildSupportTicketPayload(input));
+}
+
+export function buildSupportHandoffUrl(payload: SupportTicketPayload): string | null {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  const fragment = `kalpa=${encoded}`;
+  return fragment.length <= SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH
+    ? `${SUPPORT_HANDOFF_URL}#${fragment}`
+    : null;
 }

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AddonManifest, UpdateCheckResult } from "../../types";
 import {
+  buildSupportHandoffUrl,
   buildSupportReport,
+  buildSupportTicketPayload,
   SUPPORT_REPORT_MAX_LENGTH,
   type SupportReportInput,
 } from "../support-report";
@@ -55,7 +57,6 @@ function input(overrides: Partial<SupportReportInput> = {}): SupportReportInput 
     checkingUpdates: false,
     addonsPath: "C:\\Users\\Brayden\\Documents\\Elder Scrolls Online\\live\\AddOns",
     instanceLabel: "Live — NA",
-    includeAddonsPath: false,
     addons: [addon({ missingDependencies: ["LibAddonMenu-2.0"], modifiedFileCount: 2 })],
     updateResults: [update()],
     lastError: "Could not scan C:\\Users\\Brayden\\Documents\\Elder Scrolls Online\\live\\AddOns",
@@ -69,20 +70,35 @@ describe("buildSupportReport", () => {
 
     expect(report).toContain("**Issue:** Addon status looks wrong");
     expect(report).toContain("1 checked, 1 update(s) reported");
-    expect(report).toContain("Kalpa sees 1.0 → 2.0");
-    expect(report).toContain("missing dependencies: LibAddonMenu-2.0");
+    expect(report).toContain("Kalpa sees 1.0 -> 2.0");
+    expect(report).toContain("1 missing dependency warning(s)");
     expect(report).toContain("2 locally modified file(s)");
   });
 
-  it("hides local identity by default and only shares the path with opt-in", () => {
-    const hidden = buildSupportReport(input());
+  it("never includes the full local path or local identity", () => {
+    const report = buildSupportReport(input());
 
-    expect(hidden).toContain("AddOns folder: hidden by user");
-    expect(hidden).not.toContain("Brayden");
-    expect(hidden).toContain("Could not scan [AddOns folder]");
+    expect(report).toContain("AddOns folder: hidden");
+    expect(report).not.toContain("Brayden");
+    expect(report).toContain("Could not scan [AddOns folder]");
+  });
 
-    const shared = buildSupportReport(input({ includeAddonsPath: true, lastError: null }));
-    expect(shared).toContain("C:\\Users\\Brayden\\Documents");
+  it("redacts usernames containing spaces, secrets, and account-like IDs in every free-text field", () => {
+    const report = buildSupportReport(
+      input({
+        description:
+          "See C:\\Users\\Jane Player\\Desktop and access_token=super-secret for 123456789012345678",
+        lastError: "Bearer abc.def.ghi at /home/Jane Player/cache",
+      })
+    );
+
+    expect(report).not.toContain("Jane Player");
+    expect(report).not.toContain("super-secret");
+    expect(report).not.toContain("abc.def.ghi");
+    expect(report).not.toContain("123456789012345678");
+    expect(report).toContain("[local path]");
+    expect(report).toContain("[redacted]");
+    expect(report).toContain("[account-id]");
   });
 
   it("redacts home and AddOns paths across Windows case and separator variants", () => {
@@ -94,7 +110,7 @@ describe("buildSupportReport", () => {
     );
 
     expect(report).toContain("Could not scan [AddOns folder]");
-    expect(report).toContain("D:/USERS/[user]/AppData");
+    expect(report).toContain("[local path]");
     expect(report.toLowerCase()).not.toContain("brayden");
     expect(report).not.toContain("OtherName");
   });
@@ -137,7 +153,17 @@ describe("buildSupportReport", () => {
     expect(report).not.toMatch(/@(everyone|here)/i);
     expect(report).not.toContain("<@123456789>");
     expect(report).not.toContain("<@&987654321>");
-    expect(report).toContain("…and ");
+    expect(report).toContain("...and ");
     expect(report.length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
+  });
+
+  it("encodes only the bounded structured payload in the secure handoff fragment", () => {
+    const payload = buildSupportTicketPayload(input());
+    const url = buildSupportHandoffUrl(payload);
+
+    expect(url).toMatch(/^https:\/\/esotk\.com\/kalpa\/support#kalpa=/);
+    expect(url).not.toContain("Brayden");
+    expect(JSON.stringify(payload)).not.toContain("downloadUrl");
+    expect(JSON.stringify(payload)).not.toContain("LibAddonMenu-2.0");
   });
 });
