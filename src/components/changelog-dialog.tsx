@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RichDescription } from "@/components/ui/rich-description";
+import { ChangelogView } from "@/components/changelog-view";
 import { useEsouiDetail } from "@/hooks/use-esoui-detail";
 
 interface ChangelogDialogProps {
@@ -60,7 +60,7 @@ export function ChangelogDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ScrollText className="size-4 shrink-0 text-primary" />
@@ -96,7 +96,11 @@ export function ChangelogDialog({
               </Button>
             </div>
           ) : detail && detail.changeLog ? (
-            <RichDescription text={detail.changeLog} />
+            <ChangelogView
+              changeLog={detail.changeLog}
+              variant="dialog"
+              installedVersion={currentVersion}
+            />
           ) : detail ? (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-structure-06 bg-gradient-to-b from-structure-03 to-structure-01 px-4 py-8 text-center">
               <ScrollText className="size-6 text-muted-foreground/60" aria-hidden="true" />

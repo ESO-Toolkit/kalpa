@@ -1019,7 +1019,11 @@ function AddonDetailBase({
                   </div>
                 }
               >
-                <EsouiTab esouiId={addon.esouiId} isOffline={isOffline} />
+                <EsouiTab
+                  esouiId={addon.esouiId}
+                  isOffline={isOffline}
+                  installedVersion={addon.version}
+                />
               </Suspense>
             )}
           </TabsContent>

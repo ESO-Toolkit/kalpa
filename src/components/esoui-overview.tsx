@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { EsouiAddonDetail } from "@/types";
 import { SectionHeader } from "@/components/ui/section-header";
 import { RichDescription } from "@/components/ui/rich-description";
+import { ChangelogView, changelogVersionCount, hasChangelog } from "@/components/changelog-view";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
@@ -21,6 +22,9 @@ interface EsouiOverviewProps {
   detail: EsouiAddonDetail;
   /** Hide the ESOUI description when the host pane already shows one. */
   showDescription?: boolean;
+  /** Installed version, when the host pane has one — marks a matching
+   * changelog entry. Discover omits it: nothing is installed there. */
+  installedVersion?: string;
 }
 
 /**
@@ -28,11 +32,16 @@ interface EsouiOverviewProps {
  * description and changelog. Contains no actions, so it can be dropped into
  * either the Discover pane or the installed-addon pane.
  */
-export function EsouiOverview({ detail, showDescription = true }: EsouiOverviewProps) {
+export function EsouiOverview({
+  detail,
+  showDescription = true,
+  installedVersion,
+}: EsouiOverviewProps) {
   const [screenshotIdx, setScreenshotIdx] = useState(0);
   const [md5Copied, setMd5Copied] = useState(false);
   const md5TimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const versionCount = useMemo(() => changelogVersionCount(detail.changeLog), [detail.changeLog]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -246,10 +255,16 @@ export function EsouiOverview({ detail, showDescription = true }: EsouiOverviewP
       )}
 
       {/* Changelog */}
-      {detail.changeLog && (
+      {hasChangelog(detail.changeLog) && (
         <div>
-          <SectionHeader className="mb-2">Changelog</SectionHeader>
-          <RichDescription text={detail.changeLog} />
+          <SectionHeader className="mb-2">
+            {versionCount > 0 ? `Changelog (${versionCount})` : "Changelog"}
+          </SectionHeader>
+          <ChangelogView
+            changeLog={detail.changeLog}
+            variant="inline"
+            installedVersion={installedVersion}
+          />
         </div>
       )}
     </div>

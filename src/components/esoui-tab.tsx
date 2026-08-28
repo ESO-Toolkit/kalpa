@@ -9,6 +9,8 @@ import { useEsouiDetail } from "@/hooks/use-esoui-detail";
 interface EsouiTabProps {
   esouiId: number;
   isOffline?: boolean;
+  /** The installed version, so the matching changelog entry can be marked. */
+  installedVersion?: string;
 }
 
 /**
@@ -20,7 +22,7 @@ interface EsouiTabProps {
  * was already fetched this session stays on screen with a muted note, and the
  * hook is re-run as soon as connectivity returns.
  */
-export function EsouiTab({ esouiId, isOffline }: EsouiTabProps) {
+export function EsouiTab({ esouiId, isOffline, installedVersion }: EsouiTabProps) {
   const { detail, loading, error, refetch } = useEsouiDetail(esouiId, !isOffline);
 
   // Last successfully-loaded detail. Keeps the rich view on screen if the user
@@ -89,7 +91,7 @@ export function EsouiTab({ esouiId, isOffline }: EsouiTabProps) {
           You&rsquo;re offline — showing cached details.
         </p>
       )}
-      <EsouiOverview detail={shown} />
+      <EsouiOverview detail={shown} installedVersion={installedVersion} />
     </div>
   );
 }
