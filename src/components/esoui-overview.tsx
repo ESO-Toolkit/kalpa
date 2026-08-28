@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import type { EsouiAddonDetail } from "@/types";
 import { SectionHeader } from "@/components/ui/section-header";
 import { RichDescription } from "@/components/ui/rich-description";
-import { ChangelogView, changelogVersionCount, hasChangelog } from "@/components/changelog-view";
+import { ChangelogView, changelogVersionCount } from "@/components/changelog-view";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
@@ -255,7 +255,7 @@ export function EsouiOverview({
       )}
 
       {/* Changelog */}
-      {hasChangelog(detail.changeLog) && (
+      {detail.changeLog !== "" && (
         <div>
           <SectionHeader className="mb-2">
             {versionCount > 0 ? `Changelog (${versionCount})` : "Changelog"}

@@ -94,7 +94,10 @@ function EntryRow({ entry, defaultOpen, isLatest, isInstalled, date }: EntryRowP
         className={cn(
           "flex w-full items-center gap-2 px-2 py-2 text-left",
           hasBody && "hover:bg-structure-02",
-          !hasBody && "cursor-default"
+          // A version-bump-only entry is legitimate content, not an unavailable
+          // control: keep it at full strength. The shared Collapsible trigger
+          // dims disabled state, which made these rows read as broken.
+          !hasBody && "cursor-default disabled:opacity-100"
         )}
       >
         <ChevronRight
@@ -294,9 +297,4 @@ export function ChangelogView({
 export function changelogVersionCount(changeLog: string): number {
   const parsed = parseChangelog(changeLog);
   return parsed.kind === "parsed" ? parsed.entries.length : 0;
-}
-
-/** Whether a changelog has any content worth rendering a section for. */
-export function hasChangelog(changeLog: string): boolean {
-  return parseChangelog(changeLog).kind !== "empty";
 }

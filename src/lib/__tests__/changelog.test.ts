@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { parseChangelog, matchInstalledEntry, type ChangelogEntry } from "../changelog";
+import {
+  parseChangelog,
+  matchInstalledEntry,
+  buildVersionDateIndex,
+  dateForEntry,
+  type ChangelogEntry,
+} from "../changelog";
 import * as fixtures from "./__fixtures__/changelogs";
 
 /**
@@ -508,5 +514,76 @@ describe("matchInstalledEntry", () => {
     const result = expectParsed(fixtures.libCombat);
     expect(matchInstalledEntry(result.entries, "90")).toBe(-1);
     expect(result.entries.length).toBeGreaterThan(0);
+  });
+});
+
+describe("matchInstalledEntry — prefix versions", () => {
+  // Regression: containment alone marked the NEWEST entry as installed whenever
+  // the installed version was a numeric prefix of it. A user on 1.7 with 1.7.8
+  // available saw "LATEST | INSTALLED" on the same row while the dialog header
+  // said "v1.7 -> v1.7.8", and the update delta collapsed to zero.
+  const entries: ChangelogEntry[] = [
+    { header: "version 1.7.8:", body: "newest" },
+    { header: "version 1.7.7:", body: "older" },
+    { header: "version 1.7:", body: "the one actually installed" },
+  ];
+
+  it("does not mark 1.7.8 as installed when 1.7 is", () => {
+    expect(matchInstalledEntry(entries, "1.7")).toBe(2);
+  });
+
+  it("still matches the exact version", () => {
+    expect(matchInstalledEntry(entries, "1.7.8")).toBe(0);
+  });
+
+  it("falls back to containment for multi-token versions", () => {
+    // "2.0 r43" spans two tokens, so no single token can equal the needle.
+    const libEntries: ChangelogEntry[] = [
+      { header: "2.0 r44", body: "" },
+      { header: "2.0 r43 (consoles only)", body: "" },
+    ];
+    expect(matchInstalledEntry(libEntries, "2.0 r43")).toBe(1);
+  });
+});
+
+describe("buildVersionDateIndex / dateForEntry", () => {
+  const archived = [
+    { version: "1.7.7", date: "04/23/26 01:16 PM" },
+    { version: "1.7.6", date: "09/06/25 11:16 AM" },
+    { version: "2.5.49", date: "01/02/25 09:00 AM" },
+  ];
+  const index = buildVersionDateIndex(archived);
+
+  it("dates a header carrying author noise", () => {
+    expect(dateForEntry("version 1.7.7:", index)).toBe("04/23/26 01:16 PM");
+  });
+
+  it("dates a v-prefixed header against an unprefixed archive entry", () => {
+    // Without normalising the leading v, every v-prefixed changelog went undated.
+    expect(dateForEntry("v2.5.49", index)).toBe("01/02/25 09:00 AM");
+  });
+
+  it("resolves a multi-version header to the first known release", () => {
+    expect(dateForEntry("v104, 1.7.6", index)).toBe("09/06/25 11:16 AM");
+  });
+
+  it("never lets a prefix version borrow another release's date", () => {
+    // "1.7" is a substring of "1.7.7"/"1.7.6"; a plausible-but-wrong date is
+    // worse than none, so this must stay undefined.
+    expect(dateForEntry("1.7", index)).toBeUndefined();
+  });
+
+  it("returns undefined when the addon archives nothing", () => {
+    // The Tamriel Trade Centre case: no archived files at all, so every row
+    // renders with a blank date rather than a guess.
+    expect(dateForEntry("version 1.7.7:", buildVersionDateIndex([]))).toBeUndefined();
+  });
+
+  it("keeps the first date when a version is archived twice", () => {
+    const dupes = buildVersionDateIndex([
+      { version: "3.0", date: "first" },
+      { version: "3.0", date: "second" },
+    ]);
+    expect(dateForEntry("3.0", dupes)).toBe("first");
   });
 });

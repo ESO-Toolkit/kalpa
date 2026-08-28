@@ -194,9 +194,29 @@ export function parseChangelog(text: string): ParsedChangelog {
   return { kind: "parsed", preamble: preambleText || null, entries };
 }
 
-/** Reduce a version or header to comparable digits and letters. */
+/**
+ * Reduce a version or header to comparable digits and letters.
+ *
+ * A leading `v` that introduces digits is dropped so an author's `v2.5.49`
+ * compares equal to the archive table's `2.5.49` — without this, every
+ * `v`-prefixed changelog goes undated. The word `version` is unaffected: it
+ * normalises to `version…`, whose second character is not a digit.
+ */
 function normalizeVersion(value: string): string {
-  return value.toLowerCase().replace(/[^0-9a-z]/g, "");
+  const compact = value.toLowerCase().replace(/[^0-9a-z]/g, "");
+  return /^v\d/.test(compact) ? compact.slice(1) : compact;
+}
+
+/**
+ * The normalised version-ish tokens in a header. Headers carry author noise
+ * ("version 1.7.8:") and can name several releases ("v104, v105"), so callers
+ * compare against tokens rather than the header as a whole.
+ */
+function versionTokens(header: string): string[] {
+  return header
+    .split(/[\s,;/]+/)
+    .map(normalizeVersion)
+    .filter((token) => token.length > 0);
 }
 
 /**
@@ -223,6 +243,16 @@ export function matchInstalledEntry(
   if (!version) return -1;
   const needle = normalizeVersion(version);
   if (!needle) return -1;
+
+  // Exact token match first. Containment alone marks the user as running the
+  // NEWEST entry whenever their version is a numeric prefix of it (1.7 inside
+  // 1.7.8, 2.5 inside 2.5.1 — both common), which contradicts the dialog's own
+  // "v1.7 -> v1.7.8" header and collapses the update delta to zero.
+  const exact = entries.findIndex((entry) => versionTokens(entry.header).includes(needle));
+  if (exact !== -1) return exact;
+
+  // Fallback for versions that span several tokens ("2.0 r43"), where no single
+  // token can equal the needle. Only reached when nothing matched exactly.
   return entries.findIndex((entry) => normalizeVersion(entry.header).includes(needle));
 }
 
@@ -255,9 +285,7 @@ export function dateForEntry(header: string, index: Map<string, string>): string
   const direct = index.get(normalizeVersion(header));
   if (direct) return direct;
 
-  for (const token of header.split(/[\s,;/]+/)) {
-    const key = normalizeVersion(token);
-    if (!key) continue;
+  for (const key of versionTokens(header)) {
     const hit = index.get(key);
     if (hit) return hit;
   }
