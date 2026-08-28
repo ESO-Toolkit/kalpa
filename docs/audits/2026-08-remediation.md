@@ -90,8 +90,6 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
   wire and persisted-data formats are unchanged. Revert this branch's commit to
   restore the prior resolved graph and CI exceptions.
 
-## Session Log
-
 ### 2026-08-26 — Codex (H6)
 
 - Active branch: `fix/audit-h6-quick-xml-advisory`, stacked on W1.
