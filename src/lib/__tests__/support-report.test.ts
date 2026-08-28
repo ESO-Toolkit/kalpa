@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { AddonManifest, UpdateCheckResult } from "../../types";
+import supportContractFixture from "./support-contract-fixture.json";
 import {
   buildSupportHandoffUrl,
   buildSupportReport,
   buildSupportTicketPayload,
+  renderSupportReport,
   SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH,
-  SUPPORT_HANDOFF_URL,
   SUPPORT_REPORT_MAX_LENGTH,
+  type SupportTicketPayload,
   type SupportReportInput,
 } from "../support-report";
 
@@ -66,7 +68,21 @@ function input(overrides: Partial<SupportReportInput> = {}): SupportReportInput 
   };
 }
 
+function decodeHandoff(url: string): SupportTicketPayload {
+  const encoded = url.split("#kalpa=")[1]!;
+  const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  const bytes = Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes)) as SupportTicketPayload;
+}
+
 describe("buildSupportReport", () => {
+  it("renders the shared client/server contract fixture exactly", () => {
+    expect(renderSupportReport(supportContractFixture.payload as SupportTicketPayload)).toBe(
+      supportContractFixture.report
+    );
+  });
+
   it("summarizes the state support needs for a stale addon report", () => {
     const report = buildSupportReport(input());
 
@@ -95,6 +111,7 @@ describe("buildSupportReport", () => {
     );
 
     expect(report).not.toContain("Jane Player");
+    expect(report).not.toContain("Player");
     expect(report).not.toContain("super-secret");
     expect(report).not.toContain("abc.def.ghi");
     expect(report).not.toContain("123456789012345678");
@@ -143,7 +160,7 @@ describe("buildSupportReport", () => {
       update({ folderName: item.folderName, esouiId: index + 1 })
     );
 
-    const report = buildSupportReport(
+    const payload = buildSupportTicketPayload(
       input({
         description: "Hello @everyone and <@123456789>",
         addons,
@@ -151,11 +168,15 @@ describe("buildSupportReport", () => {
         lastError: "Ping @here and <@&987654321>",
       })
     );
+    const report = renderSupportReport(payload);
 
     expect(report).not.toMatch(/@(everyone|here)/i);
     expect(report).not.toContain("<@123456789>");
     expect(report).not.toContain("<@&987654321>");
-    expect(report).toContain("...and ");
+    expect(payload.diagnostics.attention.length).toBeLessThan(12);
+    for (const item of payload.diagnostics.attention) {
+      expect(report).toContain(`- ${item.name} (${item.folder}):`);
+    }
     expect(report.length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
   });
 
@@ -169,7 +190,66 @@ describe("buildSupportReport", () => {
     expect(JSON.stringify(payload)).not.toContain("LibAddonMenu-2.0");
   });
 
-  it("keeps the browser handoff safely below the Windows command-line limit", () => {
-    expect(SUPPORT_HANDOFF_URL.length + 1 + SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH).toBeLessThan(8191);
+  it("shows every transmitted attention item in the reviewed report", () => {
+    const addons = Array.from({ length: 40 }, (_, index) =>
+      addon({
+        folderName: `Attention-${index.toString().padStart(2, "0")}`,
+        title: `Attention item ${index.toString().padStart(2, "0")} ${"x".repeat(60)}`,
+        missingDependencies: ["Missing"],
+        modifiedFileCount: index % 2,
+      })
+    );
+    const payload = buildSupportTicketPayload(
+      input({
+        addons,
+        updateResults: addons.map((item) => update({ folderName: item.folderName })),
+      })
+    );
+    const report = renderSupportReport(payload);
+    const url = buildSupportHandoffUrl(payload)!;
+    const transmitted = decodeHandoff(url);
+
+    expect(transmitted).toEqual(payload);
+    for (const item of transmitted.diagnostics.attention) {
+      expect(report).toContain(`- ${item.name} (${item.folder}):`);
+    }
+    expect(report).not.toContain("...and");
+  });
+
+  it("fits a worst-case Unicode payload within the actual fragment limit", () => {
+    const addons = Array.from({ length: 40 }, (_, index) =>
+      addon({
+        folderName: `插件😀-${index}-${"界".repeat(60)}`,
+        title: `修改😀-${index}-${"界".repeat(60)}`,
+        missingDependencies: ["缺少"],
+        outdatedDependencies: ["过时"],
+        modifiedFileCount: 9999,
+      })
+    );
+    const payload = buildSupportTicketPayload(
+      input({
+        description: "😀".repeat(500),
+        appVersion: "界".repeat(40),
+        platform: "界".repeat(40),
+        instanceLabel: "界".repeat(80),
+        lastError: "界".repeat(240),
+        addons,
+        updateResults: addons.map((item, index) =>
+          update({
+            folderName: item.folderName,
+            esouiId: index + 1,
+            currentVersion: "界".repeat(40),
+            remoteVersion: "界".repeat(40),
+          })
+        ),
+      })
+    );
+    const report = renderSupportReport(payload);
+    const url = buildSupportHandoffUrl(payload);
+
+    expect(url).not.toBeNull();
+    expect(url!.split("#")[1]!.length).toBeLessThanOrEqual(SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH);
+    expect(report.length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
+    expect(decodeHandoff(url!)).toEqual(payload);
   });
 });

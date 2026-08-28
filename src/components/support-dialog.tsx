@@ -131,10 +131,14 @@ export function SupportDialog({
 
     setOpeningHandoff(true);
     try {
-      await openFeedbackUrl(handoffUrl);
-      toast.info("Continue in your browser to sign in and create the ticket.");
-    } catch {
-      toast.error("Kalpa couldn't open the secure handoff. Your report is still available below.");
+      const opened = await openFeedbackUrl(handoffUrl, { toastOnError: false });
+      if (opened) {
+        toast.info("Continue in your browser to sign in and create the ticket.");
+      } else {
+        toast.error(
+          "Kalpa couldn't open the secure handoff. Your report is still available below."
+        );
+      }
     } finally {
       setOpeningHandoff(false);
     }
@@ -280,6 +284,20 @@ export function SupportDialog({
             <p className="sr-only">
               Your support report is prepared. A ticket has not been created yet.
             </p>
+            {!handoffUrl && (
+              <GlassPanel
+                variant="subtle"
+                className="mb-2 border-status-warning/20 bg-status-warning/[0.04] p-3"
+                role="alert"
+              >
+                <p className="text-xs font-semibold text-foreground">
+                  The secure browser handoff could not be prepared.
+                </p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  Nothing has been sent. Copy the report and use the manual ticket desk instead.
+                </p>
+              </GlassPanel>
+            )}
             {copied && (
               <GlassPanel
                 variant="subtle"

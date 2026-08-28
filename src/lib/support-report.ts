@@ -105,8 +105,8 @@ export interface SupportTicketPayload {
 }
 
 export const SUPPORT_REPORT_MAX_LENGTH = 1950;
-// Keep enough headroom below cmd.exe's 8,191-character command-line limit.
-// tauri-plugin-opener launches browser URLs through `cmd /c start` on Windows.
+// Keep the desktop-to-browser handoff comfortably bounded across OS and browser launchers.
+// Report validation is stricter, but this also rejects unexpectedly large navigation payloads.
 export const SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH = 7000;
 export const SUPPORT_HANDOFF_URL = "https://esotk.com/kalpa/support";
 const MAX_ATTENTION_ITEMS = 12;
@@ -136,10 +136,10 @@ function redactSensitiveText(value: string, addonsPath: string): string {
 
   return redacted
     .replace(
-      /(?:[A-Za-z]:[\\/]+Users|[\\/]+(?:Users|home))[\\/]+[^\s\\/]+(?:[\\/]+[^\s,;]+)*/gi,
+      /(?:[A-Za-z]:[\\/]+Users|[\\/]+(?:Users|home))[\\/]+[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/gi,
       "[local path]"
     )
-    .replace(/\\\\[^\s\\/]+[\\/]+[^\s\\/]+(?:[\\/]+[^\s,;]+)*/g, "[local path]")
+    .replace(/\\\\[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/g, "[local path]")
     .replace(
       /\b(authorization|bearer|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret)\b(?:\s*[:=]\s*|\s+)[^\s,;]{6,}|\b(token)\b(?:\s*[:=]\s*[^\s,;]+|\s+[A-Za-z0-9._~+/=-]{16,})/gi,
       "$1$2 [redacted]"
@@ -188,8 +188,16 @@ export function buildSupportTicketPayload(input: SupportReportInput): SupportTic
     }
   }
 
+  const attentionPriority = (folder: string): number => {
+    const addon = addonByFolder.get(folder);
+    if ((addon?.modifiedFileCount ?? 0) > 0) return 0;
+    if ((addon?.missingDependencies.length ?? 0) > 0) return 1;
+    if ((addon?.outdatedDependencies.length ?? 0) > 0) return 2;
+    return 3;
+  };
+
   const attention = [...folders]
-    .sort((a, b) => a.localeCompare(b))
+    .sort((a, b) => attentionPriority(a) - attentionPriority(b) || a.localeCompare(b))
     .slice(0, MAX_ATTENTION_ITEMS)
     .map((folder): SupportAttentionItem => {
       const addon = addonByFolder.get(folder);
@@ -210,7 +218,7 @@ export function buildSupportTicketPayload(input: SupportReportInput): SupportTic
       };
     });
 
-  return {
+  return fitSupportTicketPayload({
     version: 1,
     issueId: input.issueId,
     description: cleanMultiline(input.description, 500, input.addonsPath),
@@ -237,7 +245,7 @@ export function buildSupportTicketPayload(input: SupportReportInput): SupportTic
       lastError: input.lastError ? cleanSingleLine(input.lastError, 240, input.addonsPath) : null,
       attention,
     },
-  };
+  });
 }
 
 function renderAttention(item: SupportAttentionItem): string {
@@ -255,7 +263,7 @@ function renderAttention(item: SupportAttentionItem): string {
   return `- ${item.name} (${item.folder}): ${details.join("; ") || "needs attention"}`;
 }
 
-export function renderSupportReport(payload: SupportTicketPayload): string {
+function renderCompleteSupportReport(payload: SupportTicketPayload): string {
   const issue = issueDetails(payload.issueId);
   const d = payload.diagnostics;
   const heading = [
@@ -290,42 +298,53 @@ export function renderSupportReport(payload: SupportTicketPayload): string {
     "## Privacy note",
     "This report does not include SavedVariables, account IDs, access tokens, or file contents.",
   ];
-  const items = payload.diagnostics.attention.map(renderAttention);
-  const noneOrOmitted =
-    items.length > 0
-      ? `- ${items.length} item(s) omitted to keep the report within Discord's limit`
-      : "- None detected automatically";
-  const assemble = (description: string, attention: string[]) =>
-    neutralizeDiscordMentions(
-      [...heading, description, ...diagnostics, ...attention, ...suffix].join("\n")
-    );
-
-  const desiredDescription = payload.description || "No description provided.";
-  const fixed = assemble("", [noneOrOmitted]);
-  const description = truncate(
-    desiredDescription,
-    Math.max(0, SUPPORT_REPORT_MAX_LENGTH - fixed.length)
+  const attention = payload.diagnostics.attention.map(renderAttention);
+  return neutralizeDiscordMentions(
+    [
+      ...heading,
+      payload.description || "No description provided.",
+      ...diagnostics,
+      ...(attention.length > 0 ? attention : ["- None detected automatically"]),
+      ...suffix,
+    ].join("\n")
   );
-  const included: string[] = [];
+}
 
-  for (const item of items) {
-    const candidate = truncate(item, 180);
-    const remaining = items.length - included.length - 1;
-    const attention = [
-      ...included,
-      candidate,
-      ...(remaining > 0 ? [`- ...and ${remaining} more item(s)`] : []),
-    ];
-    if (assemble(description, attention).length > SUPPORT_REPORT_MAX_LENGTH) break;
-    included.push(candidate);
+function encodeSupportFragment(payload: SupportTicketPayload): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `kalpa=${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
+}
+
+/**
+ * Produce the one canonical payload used by both the review and browser handoff.
+ * Lower-priority attention rows are removed until the complete rendered report
+ * and its UTF-8/base64url handoff both fit their transport limits. No field can
+ * therefore be transmitted without also appearing in the user's review.
+ */
+export function fitSupportTicketPayload(payload: SupportTicketPayload): SupportTicketPayload {
+  let fitted = payload;
+
+  while (
+    fitted.diagnostics.attention.length > 0 &&
+    (renderCompleteSupportReport(fitted).length > SUPPORT_REPORT_MAX_LENGTH ||
+      encodeSupportFragment(fitted).length > SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH)
+  ) {
+    fitted = {
+      ...fitted,
+      diagnostics: {
+        ...fitted.diagnostics,
+        attention: fitted.diagnostics.attention.slice(0, -1),
+      },
+    };
   }
 
-  const omitted = items.length - included.length;
-  const attention =
-    included.length > 0
-      ? [...included, ...(omitted > 0 ? [`- ...and ${omitted} more item(s)`] : [])]
-      : [noneOrOmitted];
-  return assemble(description, attention);
+  return fitted;
+}
+
+export function renderSupportReport(payload: SupportTicketPayload): string {
+  return renderCompleteSupportReport(fitSupportTicketPayload(payload));
 }
 
 export function buildSupportReport(input: SupportReportInput): string {
@@ -333,11 +352,7 @@ export function buildSupportReport(input: SupportReportInput): string {
 }
 
 export function buildSupportHandoffUrl(payload: SupportTicketPayload): string | null {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  const fragment = `kalpa=${encoded}`;
+  const fragment = encodeSupportFragment(fitSupportTicketPayload(payload));
   return fragment.length <= SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH
     ? `${SUPPORT_HANDOFF_URL}#${fragment}`
     : null;

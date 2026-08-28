@@ -5,15 +5,19 @@ export const FEEDBACK_DISCORD_URL = "https://discord.gg/cMumdw6cSE";
 export const FEEDBACK_DISCORD_SUPPORT_URL =
   "https://discord.com/channels/1375703719995244686/1480845158584025148";
 
-/** Open a feedback link in the user's browser, surfacing failures instead of
- *  swallowing them. The opener plugin rejects any URL outside the capability's
- *  allow-scope, and a user-clicked button that silently does nothing reads as a
- *  broken app — toast the address so the user can still reach it. */
-export async function openFeedbackUrl(url: string): Promise<void> {
+/** Open a feedback link and report whether the browser accepted it. */
+export async function openFeedbackUrl(
+  url: string,
+  options: { toastOnError?: boolean } = {}
+): Promise<boolean> {
   try {
     const m = await import("@tauri-apps/plugin-opener");
     await m.openUrl(url);
+    return true;
   } catch {
-    toast.error(`Couldn't open the link — visit ${url} in your browser.`);
+    if (options.toastOnError !== false) {
+      toast.error("Couldn't open the link. Try again or open it manually.");
+    }
+    return false;
   }
 }
