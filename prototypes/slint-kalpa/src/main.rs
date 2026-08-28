@@ -642,6 +642,15 @@ struct NativeImportResult {
     skipped: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeDependencyInstallResult {
+    /// Folders written by the requested dependency, even when a transitive
+    /// dependency could not be installed. The caller must rescan these from
+    /// disk so the primary install remains visible in the UI.
+    folders: Vec<String>,
+    failed: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeApiCompatInfo {
     game_api_version: u32,
@@ -11027,15 +11036,15 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
                 };
                 ui.set_checking_updates(false);
                 match result {
-                    Ok(folders) => {
+                    Ok(result) => {
                         // Rescan from disk rather than flipping the dependency row:
                         // the row may only claim "installed" once the library is
                         // actually there.
                         ui.invoke_refresh_requested();
-                        let message = format!(
-                            "Installed {dep_name} ({} folder{} added).",
-                            folders.len(),
-                            if folders.len() == 1 { "" } else { "s" }
+                        let message = native_dependency_install_status(
+                            &dep_name,
+                            result.folders.len(),
+                            &result.failed,
                         );
                         ui.set_status_error_message(
                             addon_write_status_message(message, eso_running).into(),
@@ -13517,23 +13526,53 @@ fn native_dependency_error_message(dep_name: &str, reason: &str) -> String {
     }
 }
 
+fn native_dependency_install_status(
+    dep_name: &str,
+    folder_count: usize,
+    failed: &[String],
+) -> String {
+    if failed.is_empty() {
+        return format!(
+            "Installed {dep_name} ({} folder{} added).",
+            folder_count,
+            if folder_count == 1 { "" } else { "s" }
+        );
+    }
+
+    format!(
+        "Installed {dep_name} ({} folder{} added), but {} dependenc{} failed: {}",
+        folder_count,
+        if folder_count == 1 { "" } else { "s" },
+        failed.len(),
+        if failed.len() == 1 { "y" } else { "ies" },
+        failed.join("; ")
+    )
+}
+
+fn native_dependency_install_result(
+    folders: Vec<String>,
+    resolved: NativeImportResult,
+) -> NativeDependencyInstallResult {
+    NativeDependencyInstallResult {
+        folders,
+        failed: resolved.failed,
+    }
+}
+
 /// Install one missing dependency by name and record it, the same way the
 /// update paths do. This is what the detail pane's dependency "Install" button
 /// runs — the row must only change once the library is really on disk.
-fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Vec<String>, String> {
+fn install_dependency_blocking(
+    addons_dir: &Path,
+    dep_name: &str,
+) -> Result<NativeDependencyInstallResult, String> {
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     let installed = native_try_install_dep(dep_name, addons_dir, &mut store);
     let folders = installed.map_err(|reason| native_dependency_error_message(dep_name, &reason))?;
     let resolved = native_resolve_transitive_deps(addons_dir, &folders, &mut store);
     metadata::save_metadata(addons_dir, &store)?;
-    if !resolved.failed.is_empty() {
-        return Err(format!(
-            "Installed {dep_name}, but dependency installation failed: {}",
-            resolved.failed.join("; ")
-        ));
-    }
-    Ok(folders)
+    Ok(native_dependency_install_result(folders, resolved))
 }
 
 fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
@@ -22664,6 +22703,25 @@ CombatMetrics_SavedVariables = {
         assert!(result.failed[0].starts_with("LibReserved: "));
         assert!(result.failed[0].contains("Kalpa's own state folder"));
         assert!(result.failed[0].contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn native_dependency_install_keeps_primary_visible_after_transitive_failure() {
+        let result = native_dependency_install_result(
+            vec!["LibPrimary".to_string()],
+            NativeImportResult {
+                installed: Vec::new(),
+                failed: vec!["LibTransitive: download_failed".to_string()],
+                skipped: Vec::new(),
+            },
+        );
+
+        assert_eq!(result.folders, vec!["LibPrimary"]);
+        assert_eq!(result.failed, vec!["LibTransitive: download_failed"]);
+        assert_eq!(
+            native_dependency_install_status("LibPrimary", result.folders.len(), &result.failed),
+            "Installed LibPrimary (1 folder added), but 1 dependency failed: LibTransitive: download_failed"
+        );
     }
 
     #[test]
