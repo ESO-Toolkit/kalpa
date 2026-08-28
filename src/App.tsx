@@ -1531,6 +1531,8 @@ function App() {
         return;
       }
 
+      reportDependencyFailures(batch.data.failedDeps);
+
       const { completed, failed, errors: batchErrors, conflicts: remainingConflicts } = batch.data;
 
       // Final progress reflects the streamed batch-update-progress events; the

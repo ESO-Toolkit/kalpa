@@ -17,6 +17,7 @@ import { RosterPackSkeleton } from "@/components/ui/skeletons";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { runBatchPackInstall } from "@/lib/pack-install";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
@@ -235,7 +236,10 @@ export function RosterPackInstall({
 
     // One prompt for the whole pack; empty unless the policy is "ask". Pass the
     // same folder the batch command installed into, not the live selection.
-    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
+    if (result) {
+      reportDependencyFailures(result.failedDeps);
+      void resolvePendingDeps(result.pendingDeps, addonsPath);
+    }
   }, [
     addonsToInstall,
     addonsPath,
