@@ -230,12 +230,12 @@ pub fn record_install_ext(
     let existing = store.addons.get(folder_name);
     // Preserve existing tags when re-recording an install (e.g. update)
     let existing_tags = existing.map(|m| m.tags.clone()).unwrap_or_default();
-    // Keep existing last_update if new one is 0
-    let last_update = if esoui_last_update == 0 {
-        existing.map(|m| m.esoui_last_update).unwrap_or(0)
-    } else {
-        esoui_last_update
-    };
+    // The filelist is eventually consistent with filedetails. Preserve the
+    // greatest marker observed locally so a lagging response cannot make a
+    // downloaded artifact look older than it is.
+    let last_update = existing
+        .map(|m| m.esoui_last_update.max(esoui_last_update))
+        .unwrap_or(esoui_last_update);
     // `installed_at` records the last time Kalpa actually downloaded/installed
     // this addon locally (a real install or update). It is intentionally
     // refreshed on every such call so the "Recently Downloaded" sort reflects
@@ -278,7 +278,9 @@ pub fn reconcile_addon(
     if meta.download_url.is_empty() && !download_url.is_empty() {
         meta.download_url = download_url.to_string();
     }
-    meta.esoui_last_update = esoui_last_update;
+    // Reconciliation can observe an older filelist entry than the marker
+    // captured when the artifact was downloaded. Never regress the marker.
+    meta.esoui_last_update = meta.esoui_last_update.max(esoui_last_update);
 }
 
 pub fn remove_entry(store: &mut MetadataStore, folder_name: &str) {
@@ -437,6 +439,17 @@ mod tests {
         assert_eq!(meta.esoui_last_update, 999);
         // download_url was non-empty, so it is preserved (not clobbered).
         assert_eq!(meta.download_url, "url");
+    }
+
+    #[test]
+    fn publication_marker_never_regresses() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 200);
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 100);
+        assert_eq!(store.addons["Addon"].esoui_last_update, 200);
+
+        reconcile_addon(store.addons.get_mut("Addon").unwrap(), 1, 50, "url");
+        assert_eq!(store.addons["Addon"].esoui_last_update, 200);
     }
 
     #[test]

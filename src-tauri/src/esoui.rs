@@ -65,6 +65,11 @@ pub struct EsouiAddonInfo {
     pub version: String,
     pub download_url: String,
     pub updated: String,
+    /// Publication marker from the same filedetails response as the checksum
+    /// and download URL. It lets update metadata distinguish a stale filelist
+    /// entry from a genuinely newer artifact.
+    #[serde(skip_serializing)]
+    pub(crate) last_update: u64,
     /// MD5 the filedetails API reports for `download_url`. Pass it to
     /// [`download_addon`] as `expected_md5` so the existing verification runs —
     /// without it, a corrupt-but-structurally-valid ZIP installs silently.
@@ -212,6 +217,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         version: detail.version,
         download_url: detail.download_uri,
         updated: String::new(), // Not needed by callers — metadata uses last_update epoch
+        last_update: detail.last_update,
         checksum: detail.checksum,
     })
 }

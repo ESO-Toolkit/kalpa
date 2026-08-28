@@ -88,6 +88,9 @@ pub struct PendingUpdate {
     pub folder_name: String,
     pub esoui_id: u32,
     pub update_version: String,
+    /// Publication marker from the filedetails response that produced the
+    /// pending ZIP. Zero means this pending entry predates marker tracking.
+    pub artifact_last_update: u64,
     /// The downloaded ZIP's hash/signature map, computed once during conflict
     /// detection (`build_conflict_report`) and reused as the post-extraction
     /// baseline so the apply step doesn't re-decompress and re-hash the whole
