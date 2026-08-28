@@ -173,6 +173,33 @@ pub(crate) fn try_claim_authority(
     }
 }
 
+/// Retry a claim briefly when another handle holds the authority lock.
+///
+/// The parent uses a non-blocking lock acquisition to prove that an active
+/// native record still has a live owner. If a newly launched child races that
+/// probe, its first claim can observe the parent's short-lived proof handle and
+/// incorrectly exit as a duplicate. A bounded retry lets that probe drain while
+/// preserving the normal single-instance result for a persistent owner.
+#[allow(dead_code)] // Used by the path-including Slint crate.
+pub(crate) fn try_claim_authority_with_grace(
+    state_dir: &Path,
+    launch_id: &str,
+    grace: Duration,
+) -> Result<AuthorityClaim, String> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match try_claim_authority(state_dir, launch_id)? {
+            held @ AuthorityClaim::Held(_) => return Ok(held),
+            AuthorityClaim::AlreadyHeld if Instant::now() < deadline => {
+                std::thread::sleep(
+                    POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            already_held => return Ok(already_held),
+        }
+    }
+}
+
 pub(crate) fn request_active_shutdown(state_dir: &Path) -> Result<bool, String> {
     let Some(active) = read_record(&state_dir.join(ACTIVE_FILE)) else {
         return Ok(false);
@@ -632,6 +659,49 @@ mod tests {
         };
         assert!(live_native_authority_exists(dir.path()));
         drop(guard);
+    }
+
+    #[test]
+    fn authority_claim_grace_outlives_a_transient_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(authority_path(dir.path()))
+            .unwrap();
+        FileExt::try_lock(&probe).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            FileExt::unlock(&probe).unwrap();
+        });
+
+        let claim = try_claim_authority_with_grace(
+            dir.path(),
+            "new-native-child",
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        release.join().unwrap();
+        assert!(matches!(claim, AuthorityClaim::Held(_)));
+    }
+
+    #[test]
+    fn authority_claim_grace_preserves_a_persistent_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let _owner = match try_claim_authority(dir.path(), "existing-native").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+
+        let claim = try_claim_authority_with_grace(
+            dir.path(),
+            "duplicate-native",
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        assert!(matches!(claim, AuthorityClaim::AlreadyHeld));
     }
 
     #[test]

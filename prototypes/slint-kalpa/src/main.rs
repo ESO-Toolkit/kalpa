@@ -1207,7 +1207,11 @@ fn acquire_native_shell_lock() -> NativeShellLock {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(native_boot::new_launch_id);
-    match native_boot::try_claim_authority(&dir, &launch_id) {
+    // A parent duplicate-authority probe can hold the OS lock for a few
+    // instructions while this child starts. Give that transient proof handle
+    // time to drain before classifying the launch as a duplicate.
+    match native_boot::try_claim_authority_with_grace(&dir, &launch_id, Duration::from_millis(100))
+    {
         Ok(native_boot::AuthorityClaim::Held(guard)) => NativeShellLock::Held(guard),
         Ok(native_boot::AuthorityClaim::AlreadyHeld) => NativeShellLock::AlreadyRunning,
         Err(error) => {
