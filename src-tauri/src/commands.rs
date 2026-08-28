@@ -4239,6 +4239,41 @@ pub struct BatchRemoveResult {
     pub errors: HashMap<String, String>,
 }
 
+fn batch_remove_addons_from_disk(
+    addons_dir: &Path,
+    folder_names: &[String],
+) -> Result<BatchRemoveResult, String> {
+    let mut store = metadata::load_metadata(addons_dir);
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
+
+    for name in folder_names {
+        match installer::remove_addon(addons_dir, name) {
+            Ok(()) => {
+                let removed_id = store.addons.get(name).map(|meta| meta.esoui_id);
+                metadata::remove_entry(&mut store, name);
+                if let Some(id) = removed_id {
+                    metadata::forget_bundled_parent(&mut store, id);
+                    file_hashes::forget_esoui_owner(addons_dir, id)?;
+                }
+                removed.push(name.clone());
+            }
+            Err(e) => {
+                errors.insert(name.clone(), e);
+                failed.push(name.clone());
+            }
+        }
+    }
+
+    metadata::save_metadata(addons_dir, &store)?;
+    Ok(BatchRemoveResult {
+        removed,
+        failed,
+        errors,
+    })
+}
+
 /// Batch remove multiple addons.
 #[tauri::command]
 pub async fn batch_remove_addons(
@@ -4257,30 +4292,7 @@ pub async fn batch_remove_addons(
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
 
-        let mut store = metadata::load_metadata(&addons_dir);
-        let mut removed: Vec<String> = Vec::new();
-        let mut failed: Vec<String> = Vec::new();
-        let mut errors: HashMap<String, String> = HashMap::new();
-
-        for name in &folder_names {
-            match installer::remove_addon(&addons_dir, name) {
-                Ok(()) => {
-                    metadata::remove_entry(&mut store, name);
-                    removed.push(name.clone());
-                }
-                Err(e) => {
-                    errors.insert(name.clone(), e);
-                    failed.push(name.clone());
-                }
-            }
-        }
-
-        metadata::save_metadata(&addons_dir, &store)?;
-        Ok(BatchRemoveResult {
-            removed,
-            failed,
-            errors,
-        })
+        batch_remove_addons_from_disk(&addons_dir, &folder_names)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -11365,6 +11377,51 @@ mod tests {
         assert_eq!(lib.esoui_id, 7);
         assert_eq!(lib.installed_version, "1.2");
         assert!(lib.bundled_by.is_empty());
+    }
+
+    #[test]
+    fn batch_remove_clears_only_successful_parent_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::record_install_ext(&mut store, "MissingParent", 9, "1.0", "u", 0);
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.2", "u", 0);
+        store.addons.get_mut("LibFoo").unwrap().bundled_by = vec![3, 9];
+        metadata::save_metadata(addons_dir, &store).unwrap();
+        file_hashes::save_hash_manifest(
+            addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "LibFoo".to_string(),
+                esoui_ids: vec![7, 3, 9],
+                recorded_at: "2026-08-28T00-00-00Z".to_string(),
+                installed_version: "1.2".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let result = batch_remove_addons_from_disk(
+            addons_dir,
+            &["AddonA".to_string(), "MissingParent".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.removed, vec!["AddonA"]);
+        assert_eq!(result.failed, vec!["MissingParent"]);
+        assert!(!addons_dir.join("AddonA").exists());
+        let store = metadata::load_metadata(addons_dir);
+        assert!(!store.addons.contains_key("AddonA"));
+        assert!(store.addons.contains_key("MissingParent"));
+        assert_eq!(store.addons["LibFoo"].bundled_by, vec![9]);
+        assert_eq!(
+            file_hashes::load_hash_manifest(addons_dir, "LibFoo")
+                .unwrap()
+                .esoui_ids,
+            vec![7, 9]
+        );
     }
 
     fn profile_of(names: &[&str]) -> AddonProfile {

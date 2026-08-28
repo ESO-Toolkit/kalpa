@@ -13824,7 +13824,12 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     // block doesn't report "Remove failed" for an addon that is actually gone.
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_root);
+    let removed_id = store.addons.get(folder_name).map(|meta| meta.esoui_id);
     metadata::remove_entry(&mut store, folder_name);
+    if let Some(id) = removed_id {
+        metadata::forget_bundled_parent(&mut store, id);
+        let _ = file_hashes::forget_esoui_owner(addons_root, id);
+    }
     let _ = metadata::save_metadata(addons_root, &store);
     let _ = save_prototype_tags(addons_root, folder_name, &[]);
     Ok(())
@@ -21274,6 +21279,47 @@ mod tests {
         assert!(!metadata::load_metadata(root)
             .addons
             .contains_key("DuplicateAddon"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_remove_clears_parent_metadata_and_hash_ownership() {
+        let root = test_temp_dir("native-remove-parent-ownership");
+        fs::create_dir_all(root.join("AddonA")).expect("create parent addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.2", "u", 0);
+        store
+            .addons
+            .get_mut("LibFoo")
+            .expect("library metadata")
+            .bundled_by = vec![3];
+        metadata::save_metadata(root, &store).expect("save metadata");
+        file_hashes::save_hash_manifest(
+            root,
+            &file_hashes::HashManifest {
+                addon_folder: "LibFoo".to_string(),
+                esoui_ids: vec![7, 3],
+                recorded_at: "2026-08-28T00-00-00Z".to_string(),
+                installed_version: "1.2".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("save hashes");
+
+        remove_addon_from_disk(root, "AddonA").expect("remove addon");
+
+        let store = metadata::load_metadata(root);
+        assert!(!store.addons.contains_key("AddonA"));
+        assert_eq!(store.addons["LibFoo"].bundled_by, Vec::<u32>::new());
+        assert_eq!(
+            file_hashes::load_hash_manifest(root, "LibFoo")
+                .expect("load hashes")
+                .esoui_ids,
+            vec![7]
+        );
 
         let _ = fs::remove_dir_all(root);
     }
