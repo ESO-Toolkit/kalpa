@@ -10,12 +10,14 @@
 //! death releases the kernel lock automatically when its handle closes.
 
 use fs4::{FileExt, TryLockError};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -188,19 +190,55 @@ fn canonicalize_with_missing_tail(path: &Path) -> io::Result<PathBuf> {
     Ok(canonical)
 }
 
-pub(crate) struct LockGuard {
+struct ProcessLockState {
+    held: Mutex<HashSet<String>>,
+    released: Condvar,
+}
+
+fn process_lock_state() -> &'static ProcessLockState {
+    static STATE: OnceLock<ProcessLockState> = OnceLock::new();
+    STATE.get_or_init(|| ProcessLockState {
+        held: Mutex::new(HashSet::new()),
+        released: Condvar::new(),
+    })
+}
+
+struct ProcessLockGuard {
+    keys: Vec<String>,
+}
+
+impl Drop for ProcessLockGuard {
+    fn drop(&mut self) {
+        let state = process_lock_state();
+        let mut held = state.held.lock().unwrap_or_else(|error| error.into_inner());
+        for key in &self.keys {
+            held.remove(key);
+        }
+        state.released.notify_all();
+    }
+}
+
+struct OsLockGuard {
     file: File,
 }
 
-impl Drop for LockGuard {
+impl Drop for OsLockGuard {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
     }
 }
 
+pub(crate) struct LockGuard {
+    // Drop the kernel lock before publishing this process's release. Keeping
+    // the fields in this order preserves that handoff ordering.
+    _os: OsLockGuard,
+    _process: ProcessLockGuard,
+}
+
 #[allow(dead_code)]
 pub(crate) struct LockSet {
-    _guards: Vec<LockGuard>,
+    _guards: Vec<OsLockGuard>,
+    _process: ProcessLockGuard,
 }
 
 pub(crate) fn acquire(
@@ -209,7 +247,17 @@ pub(crate) fn acquire(
 ) -> Result<LockGuard, LockError> {
     let key = LockKey::for_path(target)?;
     let deadline = Instant::now() + options.timeout;
-    acquire_key(&key, deadline, options.timeout, options.cancel)
+    let process = acquire_process_keys(
+        std::slice::from_ref(&key),
+        deadline,
+        options.timeout,
+        options.cancel,
+    )?;
+    let os = acquire_key(&key, deadline, options.timeout, options.cancel)?;
+    Ok(LockGuard {
+        _os: os,
+        _process: process,
+    })
 }
 
 #[allow(dead_code)]
@@ -225,11 +273,60 @@ pub(crate) fn acquire_many<P: AsRef<Path>>(
     keys.dedup_by(|a, b| a.order_key == b.order_key);
 
     let deadline = Instant::now() + options.timeout;
+    let process = acquire_process_keys(&keys, deadline, options.timeout, options.cancel)?;
     let mut guards = Vec::with_capacity(keys.len());
     for key in &keys {
         guards.push(acquire_key(key, deadline, options.timeout, options.cancel)?);
     }
-    Ok(LockSet { _guards: guards })
+    Ok(LockSet {
+        _guards: guards,
+        _process: process,
+    })
+}
+
+fn acquire_process_keys(
+    keys: &[LockKey],
+    deadline: Instant,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Result<ProcessLockGuard, LockError> {
+    if keys.is_empty() {
+        return Ok(ProcessLockGuard { keys: Vec::new() });
+    }
+    let state = process_lock_state();
+    let mut held = state.held.lock().unwrap_or_else(|error| error.into_inner());
+    loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(LockError::Cancelled {
+                path: keys[0].target.clone(),
+            });
+        }
+        if keys.iter().all(|key| !held.contains(&key.order_key)) {
+            let claimed = keys
+                .iter()
+                .map(|key| key.order_key.clone())
+                .collect::<Vec<_>>();
+            held.extend(claimed.iter().cloned());
+            return Ok(ProcessLockGuard { keys: claimed });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            let blocked = keys
+                .iter()
+                .find(|key| held.contains(&key.order_key))
+                .unwrap_or(&keys[0]);
+            return Err(LockError::Timeout {
+                path: blocked.target.clone(),
+                waited: timeout,
+            });
+        }
+        let wait = POLL_INTERVAL.min(deadline.saturating_duration_since(now));
+        let result = state.released.wait_timeout(held, wait);
+        held = match result {
+            Ok((guard, _)) => guard,
+            Err(error) => error.into_inner().0,
+        };
+    }
 }
 
 fn acquire_key(
@@ -237,7 +334,7 @@ fn acquire_key(
     deadline: Instant,
     timeout: Duration,
     cancel: Option<&AtomicBool>,
-) -> Result<LockGuard, LockError> {
+) -> Result<OsLockGuard, LockError> {
     // A fresh install may resolve a store below an app-data directory that the
     // framework has not created yet. The transaction owns creation of the
     // sibling coordination object, so it must also make that parent available.
@@ -265,7 +362,7 @@ fn acquire_key(
             });
         }
         match FileExt::try_lock(&file) {
-            Ok(()) => return Ok(LockGuard { file }),
+            Ok(()) => return Ok(OsLockGuard { file }),
             Err(TryLockError::Error(source)) => {
                 return Err(LockError::Io {
                     path: key.target.clone(),
@@ -477,6 +574,40 @@ mod tests {
         assert!(matches!(err, LockError::Timeout { .. }));
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(err.to_string().contains("kalpa.json"));
+    }
+
+    #[test]
+    fn two_threads_read_modify_write_has_no_lost_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = Arc::new(dir.path().join("counter.txt"));
+        std::fs::write(target.as_ref(), b"0").unwrap();
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let workers = (0..2)
+            .map(|_| {
+                let target = Arc::clone(&target);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        let _guard = acquire(target.as_ref(), LockOptions::default()).unwrap();
+                        let value = std::fs::read_to_string(target.as_ref())
+                            .unwrap()
+                            .trim()
+                            .parse::<u32>()
+                            .unwrap();
+                        crate::atomic_file::atomic_write(
+                            target.as_ref(),
+                            (value + 1).to_string().as_bytes(),
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(target.as_ref()).unwrap(), "200");
     }
 
     #[test]
