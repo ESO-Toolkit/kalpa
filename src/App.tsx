@@ -34,6 +34,7 @@ import {
   isDependencySkipped,
   setDependencyPolicy,
 } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { DependencyPromptProvider, type ResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import {
   getTauriErrorMessage,
@@ -1106,6 +1107,7 @@ function App() {
           dependencyPolicy: await getDependencyPolicy(),
         });
         toast.success(`Updated ${folderName}`);
+        reportDependencyFailures(result.failedDeps);
         srAnnounce(`Updated ${folderName}`);
         handleAddonUpdated(ur.esouiId);
         // Empty unless the policy is "ask"; the picker owns the rest. Pass the

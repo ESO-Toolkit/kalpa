@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
@@ -87,6 +88,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         });
         setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
+        reportDependencyFailures(res.failedDeps);
         onInstalled();
         // Empty unless the policy is "ask"; the app-level picker owns the rest.
         void resolvePendingDeps(res.pendingDeps, addonsPath);
@@ -967,6 +969,7 @@ function UrlContent({
       setResult(installResult);
       setState("installed");
       toast.success(`Installed ${installResult.installedFolders.join(", ")}`);
+      reportDependencyFailures(installResult.failedDeps);
       onInstalled();
       // Empty unless the policy is "ask"; the app-level picker owns the rest.
       void resolvePendingDeps(installResult.pendingDeps, addonsPath);

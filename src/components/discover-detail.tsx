@@ -7,6 +7,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
@@ -177,6 +178,7 @@ function DiscoverDetailBase({
       });
       setInstallSuccess(res);
       toast.success(`Installed ${res.installedFolders.join(", ")}`);
+      reportDependencyFailures(res.failedDeps);
       onInstalled();
       // Empty unless the policy is "ask"; the app-level picker owns the rest.
       // Same `addonsPath` this install was started with, so a folder switch
