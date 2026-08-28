@@ -105,7 +105,9 @@ export interface SupportTicketPayload {
 }
 
 export const SUPPORT_REPORT_MAX_LENGTH = 1950;
-export const SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH = 8192;
+// Keep enough headroom below cmd.exe's 8,191-character command-line limit.
+// tauri-plugin-opener launches browser URLs through `cmd /c start` on Windows.
+export const SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH = 7000;
 export const SUPPORT_HANDOFF_URL = "https://esotk.com/kalpa/support";
 const MAX_ATTENTION_ITEMS = 12;
 

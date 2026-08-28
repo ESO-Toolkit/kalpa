@@ -4,6 +4,8 @@ import {
   buildSupportHandoffUrl,
   buildSupportReport,
   buildSupportTicketPayload,
+  SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH,
+  SUPPORT_HANDOFF_URL,
   SUPPORT_REPORT_MAX_LENGTH,
   type SupportReportInput,
 } from "../support-report";
@@ -165,5 +167,9 @@ describe("buildSupportReport", () => {
     expect(url).not.toContain("Brayden");
     expect(JSON.stringify(payload)).not.toContain("downloadUrl");
     expect(JSON.stringify(payload)).not.toContain("LibAddonMenu-2.0");
+  });
+
+  it("keeps the browser handoff safely below the Windows command-line limit", () => {
+    expect(SUPPORT_HANDOFF_URL.length + 1 + SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH).toBeLessThan(8191);
   });
 });
