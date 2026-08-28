@@ -140,6 +140,18 @@ describe("D1 reconciliation", () => {
     expect(plan.upserts.map((item) => item.id)).toEqual(["missing"]);
     expect(plan.tag_replacements.map((item) => item.id)).toEqual(["missing"]);
   });
+  it("treats duplicate authority tags as the same unique D1 tag set", () => {
+    const pack = makePack("duplicate-tags", { tags: ["pvp", "pvp", "trials"] });
+    const plan = buildD1ReconciliationPlan(
+      { authority: "do", packs: [pack], tombstones: [] },
+      [row(pack)],
+      [
+        { pack_id: pack.id, tag: "pvp" },
+        { pack_id: pack.id, tag: "trials" },
+      ]
+    );
+    expect(plan.tag_replacements).toEqual([]);
+  });
   it("applies restoration for a missing authoritative pack", async () => {
     const fixture = fakeEnv({
       authority: { packs: [makePack("missing-apply", { tags: ["pvp"] })], tombstones: [] },
@@ -175,6 +187,19 @@ describe("D1 reconciliation", () => {
     );
     expect(unowned.deletes).toEqual([]);
     expect(unowned.unowned_extra).toEqual(["zombie"]);
+  });
+  it("records a bounded, sorted sample of unowned D1 ids", async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => row(makePack(`unknown-${String(i).padStart(2, "0")}`)));
+    const fixture = fakeEnv({ rows });
+    const result = await reconcileD1(fixture.env);
+    expect(result.unowned_extra).toBe(30);
+    expect(result.unowned_extra_ids).toEqual(
+      Array.from({ length: 25 }, (_, i) => `unknown-${String(i).padStart(2, "0")}`)
+    );
+    expect(JSON.parse(fixture.writes.get("d1-recon:last")!)).toMatchObject({
+      unowned_extra: 30,
+      unowned_extra_ids: expect.arrayContaining(["unknown-00", "unknown-24"]),
+    });
   });
   it("removes owned tag-only zombies but leaves unowned tags untouched", async () => {
     const fixture = fakeEnv({
