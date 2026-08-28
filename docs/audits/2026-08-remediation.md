@@ -10,7 +10,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
-| R4 | pr-open | `fix/audit-r4-sibling-ownership` | [#392](https://github.com/ESO-Toolkit/kalpa/pull/392) (draft) | - | D-R4-1 | pending | Rust 816 passed/17 ignored; Slint 762 passed/15 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Implements D-R4-1. Stacked on the design branch. Dependency update-check behaviour changes (see Open Questions) - flagged for review rather than pre-approved. **R5 sequences after this.** |
+| R4 | pr-open | `fix/audit-r4-sibling-ownership` | [#392](https://github.com/ESO-Toolkit/kalpa/pull/392) (draft) | - | D-R4-1 | pending | Rust 817 passed/17 ignored; Slint 763 passed/15 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Implements D-R4-1. Stacked on the design branch. Dependency update-check behaviour changes (see Open Questions) - flagged for review rather than pre-approved. **R5 sequences after this.** |
 | R5 | design-done | - | - | - | D-R5-1 | - | - | Fable design complete (`consultations/r5-fable.md`). Implementation not started. Sequence **after R4**. |
 | R6 | design-done | - | - | - | D-R6-1 | - | - | Fable design complete (`consultations/r6-fable.md`). Implementation not started. Stacks on P0-A1 **and** P0-A2; cannot merge independently. |
 | R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
@@ -99,8 +99,11 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Dependency installs route through the same rule. They previously stamped the dependency ID onto **every** extracted folder, which both overwrote separately tracked identities and made a two-folder dependency emit two identical update rows.
 - `write_folder_manifest` now unions `esoui_ids` instead of replacing it, so the hash store and the metadata store cannot disagree about who owns a folder.
 - Removing an addon drops only its provenance from other folders (`forget_bundled_parent`). Folders stay on disk because other addons may declare a dependency on them.
+- Review follow-up prevents the primary-folder fallback from claiming a separately tracked sibling when an unowned extracted folder is available, and pins the selection in both binaries.
+- Healing legacy ID-0 metadata now replaces a bundled parent's download URL with the standalone addon's URL instead of retaining the parent's identity.
+- Removing an owning addon now also removes that ID from every hash sidecar manifest while preserving any remaining owners.
 - **Failing-first verified after the fact, by re-running against the old behaviour.** With the sibling branch reverted to `record_install_ext(store, folder, 0, ..)`, `bundling_a_separately_tracked_library_does_not_take_it_over` and `removing_a_bundling_addon_leaves_the_library_tracked` both fail with `left: 0, right: 7` — exactly the demotion the finding describes. The inventory found **zero** existing coverage on any function R4 touches.
-- Gates: Rust 816 passed/17 ignored; Slint 762 passed/15 ignored; `cargo clippy --all-targets -- -D warnings` clean on both crates; `cargo fmt --check` clean on both; `npm run build:native-slint` succeeds.
+- Gates: Rust 817 passed/17 ignored; Slint 763 passed/15 ignored; `cargo clippy --all-targets -- -D warnings` clean on both crates; `cargo fmt --check` clean on both; `npm run build:native-slint` succeeds.
 
 ### 2026-08-27 — W1 twice-reject escalation
 

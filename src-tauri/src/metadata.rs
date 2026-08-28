@@ -379,10 +379,11 @@ pub fn reconcile_addon(
     esoui_last_update: u64,
     download_url: &str,
 ) {
+    let was_bundled = meta.esoui_id == 0 && !meta.bundled_by.is_empty();
     if esoui_id > 0 {
         meta.esoui_id = esoui_id;
     }
-    if meta.download_url.is_empty() && !download_url.is_empty() {
+    if (was_bundled || meta.download_url.is_empty()) && !download_url.is_empty() {
         meta.download_url = download_url.to_string();
     }
     meta.esoui_last_update = esoui_last_update;
@@ -652,6 +653,23 @@ mod tests {
         assert_eq!(meta.esoui_last_update, 999);
         // download_url was non-empty, so it is preserved (not clobbered).
         assert_eq!(meta.download_url, "url");
+    }
+
+    #[test]
+    fn reconcile_addon_replaces_legacy_parent_url_when_healing_id_zero() {
+        let mut store = MetadataStore::default();
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/parent", "1.0");
+
+        reconcile_addon(
+            store.addons.get_mut("LibFoo").unwrap(),
+            7,
+            999,
+            "https://esoui/lib-foo",
+        );
+
+        let meta = &store.addons["LibFoo"];
+        assert_eq!(meta.esoui_id, 7);
+        assert_eq!(meta.download_url, "https://esoui/lib-foo");
     }
 
     #[test]

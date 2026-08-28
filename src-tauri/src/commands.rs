@@ -225,9 +225,10 @@ pub struct UpdateCheckResult {
 /// 2. An exact, case-insensitive match against the ESOUI title.
 /// 3. A folder name contained in the title, longest first - so "LibFoo-2.0"
 ///    wins over "LibFoo" instead of depending on iteration order.
-/// 4. The first folder in the list.
+/// 4. The first untracked folder (or legacy ID-zero folder) in the list.
+/// 5. The first folder only when every candidate is already tracked.
 ///
-/// Step 4 used to be reached far more often, and the list arrived from a
+/// The fallback used to be reached far more often, and the list arrived from a
 /// `HashSet`, so which folder was treated as primary could differ between two
 /// runs over the same archive. `extract_addon_zip` now returns its folders
 /// sorted, which makes the fallback at least deterministic.
@@ -248,24 +249,35 @@ fn determine_primary_folder(
         }
     }
 
+    let eligible = |folder: &String| {
+        store
+            .addons
+            .get(folder.as_str())
+            .is_none_or(|meta| meta.esoui_id == 0)
+    };
     let title = esoui_title.trim();
     if let Some(exact) = installed_folders
         .iter()
-        .find(|folder| folder.eq_ignore_ascii_case(title))
+        .find(|folder| eligible(folder) && folder.eq_ignore_ascii_case(title))
     {
         return exact.clone();
     }
 
     let mut contained: Vec<&String> = installed_folders
         .iter()
-        .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+        .filter(|folder| eligible(folder) && !folder.is_empty() && title.contains(folder.as_str()))
         .collect();
     contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     if let Some(best) = contained.first() {
         return (*best).clone();
     }
 
-    installed_folders.first().cloned().unwrap_or_default()
+    installed_folders
+        .iter()
+        .find(|folder| eligible(folder))
+        .or_else(|| installed_folders.first())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Record metadata for every folder an archive created.
@@ -1562,6 +1574,7 @@ pub async fn remove_addon(
         metadata::remove_entry(&mut store, &folder_name);
         if let Some(id) = removed_id {
             metadata::forget_bundled_parent(&mut store, id);
+            file_hashes::forget_esoui_owner(&addons_dir, id)?;
         }
         metadata::save_metadata(&addons_dir, &store)?;
 
@@ -11310,6 +11323,16 @@ mod tests {
         assert_eq!(
             determine_primary_folder(&store, &forward, 3, "Renamed Upstream"),
             "FooAddon"
+        );
+
+        // An unrelated title must not let the deterministic fallback steal a
+        // folder that is already tracked as a different ESOUI addon.
+        let mut tracked = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut tracked, "LibFoo", 7, "1.0", "u", 0);
+        let mixed = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+        assert_eq!(
+            determine_primary_folder(&tracked, &mixed, 3, "Totally Unrelated"),
+            "ZAddon"
         );
     }
 

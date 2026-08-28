@@ -405,6 +405,73 @@ pub fn load_hash_manifest(addons_dir: &Path, folder_name: &str) -> Option<HashMa
     Some(manifest)
 }
 
+/// Remove an addon's provenance from every folder hash manifest it contributed
+/// to. All manifests are parsed before any are rewritten so a corrupt store
+/// cannot leave only part of the ownership index updated.
+pub fn forget_esoui_owner(addons_dir: &Path, esoui_id: u32) -> Result<(), String> {
+    if esoui_id == 0 {
+        return Ok(());
+    }
+    let dir = hashes_dir(addons_dir);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut paths = Vec::new();
+    for entry in
+        fs::read_dir(&dir).map_err(|e| format!("Failed to read .kalpa-hashes directory: {e}"))?
+    {
+        let path = entry
+            .map_err(|e| format!("Failed to inspect .kalpa-hashes entry: {e}"))?
+            .path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut changed = Vec::new();
+    for path in paths {
+        let mut manifest = read_manifest_for_rewrite(&path)?;
+        if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
+            manifest.esoui_ids.push(manifest.esoui_id);
+        }
+        let old_len = manifest.esoui_ids.len();
+        manifest.esoui_ids.retain(|id| *id != esoui_id);
+        if manifest.esoui_ids.len() != old_len {
+            manifest.esoui_id = 0;
+            changed.push(manifest);
+        }
+    }
+    for manifest in changed {
+        save_hash_manifest(addons_dir, &manifest)?;
+    }
+    Ok(())
+}
+
+fn read_manifest_for_rewrite(path: &Path) -> Result<HashManifest, String> {
+    let candidates = [
+        path.to_path_buf(),
+        path.with_extension("json.tmp"),
+        path.with_extension("json.bak"),
+    ];
+    let mut last_error = None;
+    for candidate in candidates {
+        match fs::read_to_string(&candidate) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(manifest) => return Ok(manifest),
+                Err(error) => last_error = Some(format!("{}: {error}", candidate.display())),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => last_error = Some(format!("{}: {error}", candidate.display())),
+        }
+    }
+    Err(format!(
+        "Failed to load hash manifest for ownership cleanup: {}",
+        last_error.unwrap_or_else(|| path.display().to_string())
+    ))
+}
+
 /// Read ONLY the count of `modified_files` recorded in a folder's hash manifest,
 /// without deserializing the (potentially many-thousand-entry) `files` map.
 ///
@@ -724,6 +791,21 @@ mod tests {
         assert_eq!(
             load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
             vec![3, 7]
+        );
+
+        create_addon_dir(addons_dir, "OtherLib", &[("OtherLib.lua", "-- lua")]);
+        record_hashes_for_folders(addons_dir, &["OtherLib".to_string()], 3, "3.1").unwrap();
+        forget_esoui_owner(addons_dir, 3).unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![7]
+        );
+        assert!(
+            load_hash_manifest(addons_dir, "OtherLib")
+                .unwrap()
+                .esoui_ids
+                .is_empty(),
+            "the removed parent must be cleared from every manifest"
         );
     }
     use std::io::Write;

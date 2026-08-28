@@ -12593,24 +12593,35 @@ fn determine_primary_folder(
         }
     }
 
+    let eligible = |folder: &String| {
+        store
+            .addons
+            .get(folder.as_str())
+            .is_none_or(|meta| meta.esoui_id == 0)
+    };
     let title = esoui_title.trim();
     if let Some(exact) = installed_folders
         .iter()
-        .find(|folder| folder.eq_ignore_ascii_case(title))
+        .find(|folder| eligible(folder) && folder.eq_ignore_ascii_case(title))
     {
         return exact.clone();
     }
 
     let mut contained: Vec<&String> = installed_folders
         .iter()
-        .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+        .filter(|folder| eligible(folder) && !folder.is_empty() && title.contains(folder.as_str()))
         .collect();
     contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     if let Some(best) = contained.first() {
         return (*best).clone();
     }
 
-    installed_folders.first().cloned().unwrap_or_default()
+    installed_folders
+        .iter()
+        .find(|folder| eligible(folder))
+        .or_else(|| installed_folders.first())
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn read_local_version(addons_dir: &Path, folder: &str) -> String {
