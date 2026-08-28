@@ -1720,13 +1720,21 @@ pub async fn check_for_updates(
     tokio::task::spawn_blocking(move || {
         // Phase 0: fetch the full ESOUI filelist outside the lock — big HTTP call
         let api_lookup = esoui::fetch_filelist_lookup()?;
+        // Minion updates addon files independently of Kalpa, so its live
+        // metadata is needed to reconcile versions already tracked in
+        // kalpa.json. A missing, unreadable, or malformed file is non-fatal;
+        // the normal Kalpa metadata comparison still works without it.
+        let minion_addons = find_minion_xml()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|content| parse_minion_addons(&content))
+            .unwrap_or_default();
 
         // Phase 1: acquire lock for metadata comparison and save
         let pending = {
             let _guard = lock
                 .lock()
                 .map_err(|_| "Internal metadata lock error".to_string())?;
-            check_for_updates_metadata(&addons_dir, &api_lookup)?
+            check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons)?
         };
         // Lock is released here
 
@@ -1773,6 +1781,7 @@ struct UpdatePending {
 fn check_for_updates_metadata(
     addons_dir: &Path,
     api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    minion_addons: &[MinionAddon],
 ) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
@@ -1786,7 +1795,7 @@ fn check_for_updates_metadata(
             continue;
         }
 
-        let meta = match store.addons.get(folder_name) {
+        let mut meta = match store.addons.get(folder_name) {
             Some(m) => m.clone(),
             None => continue,
         };
@@ -1800,19 +1809,45 @@ fn check_for_updates_metadata(
             None => continue,
         };
 
+        // Minion can replace an addon without touching kalpa.json. Its
+        // `ui-version` is authoritative when both the folder and ESOUI id match.
+        // Prefer direct disk evidence when the manifest already matches the
+        // current API version; this also handles manual/external installs.
+        // Never adopt an arbitrary manifest version: addon authors sometimes
+        // use a manifest version that differs from ESOUI's filelist version,
+        // which would recreate a perpetual false update after Kalpa installs it.
+        let minion_version = minion_version_for_folder(minion_addons, folder_name, meta.esoui_id);
+        let disk_version = read_local_version(addons_dir, folder_name);
+        let remote_ver = normalized_version(&api_entry.version);
+        let disk_matches_api = !disk_version.trim().is_empty()
+            && !remote_ver.is_empty()
+            && normalized_version(&disk_version) == remote_ver;
+        let minion_matches_api =
+            minion_version.is_some_and(|version| normalized_version(version) == remote_ver);
+        let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
+        let detected_version = if minion_matches_api || disk_matches_api {
+            Some(api_entry.version.clone())
+        } else if !stored_matches_api {
+            // Minion can still improve an already-outdated version, but its XML
+            // may lag behind an update performed by Kalpa. Never downgrade
+            // metadata that is already aligned with ESOUI's current version.
+            minion_version.map(str::to_owned)
+        } else {
+            None
+        };
+
+        if let Some(detected_version) = detected_version {
+            if detected_version != meta.installed_version {
+                if let Some(entry) = store.addons.get_mut(folder_name) {
+                    entry.installed_version = detected_version.clone();
+                    metadata_changed = true;
+                }
+                meta.installed_version = detected_version;
+            }
+        }
+
         // Normalize versions: strip leading "v"/"V" and trim whitespace
-        let local_ver = meta
-            .installed_version
-            .trim()
-            .strip_prefix('v')
-            .or_else(|| meta.installed_version.trim().strip_prefix('V'))
-            .unwrap_or(meta.installed_version.trim());
-        let remote_ver = api_entry
-            .version
-            .trim()
-            .strip_prefix('v')
-            .or_else(|| api_entry.version.trim().strip_prefix('V'))
-            .unwrap_or(api_entry.version.trim());
+        let local_ver = normalized_version(&meta.installed_version);
 
         let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
 
@@ -1855,6 +1890,36 @@ fn check_for_updates_metadata(
     }
 
     Ok(pending)
+}
+
+fn normalized_version(version: &str) -> &str {
+    version
+        .trim()
+        .strip_prefix('v')
+        .or_else(|| version.trim().strip_prefix('V'))
+        .unwrap_or(version.trim())
+}
+
+/// Return Minion's version only when every matching installation agrees.
+/// Multiple ESO roots can appear in minion.xml; conflicting matches are
+/// ambiguous and should not rewrite Kalpa's metadata.
+fn minion_version_for_folder<'a>(
+    minion_addons: &'a [MinionAddon],
+    folder_name: &str,
+    esoui_id: u32,
+) -> Option<&'a str> {
+    let mut matches = minion_addons.iter().filter(|addon| {
+        addon.uid == esoui_id
+            && !addon.version.trim().is_empty()
+            && addon
+                .folders
+                .iter()
+                .any(|folder| folder.eq_ignore_ascii_case(folder_name))
+    });
+    let first = matches.next()?.version.trim();
+    matches
+        .all(|addon| normalized_version(&addon.version) == normalized_version(first))
+        .then_some(first)
 }
 
 // ── Update cancellation + progress ──────────────────────────────────────
@@ -10803,6 +10868,139 @@ mod tests {
         let addon_dir = dir.join(folder);
         std::fs::create_dir_all(&addon_dir).unwrap();
         std::fs::write(addon_dir.join(format!("{folder}.txt")), manifest_body).unwrap();
+    }
+
+    #[test]
+    fn update_check_reconciles_a_minion_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let minion_addons = parse_minion_addons(
+            r#"<addon uid="123" ui-version="2.0">
+                <dirs>
+                    <dir>MyAddon</dir>
+                </dirs>
+            </addon>"#,
+        );
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
+    }
+
+    #[test]
+    fn update_check_keeps_known_version_when_manifest_version_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(&addons_dir, "MyAddon", "## Title: My Addon\n");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
+    fn update_check_does_not_replace_api_version_with_stale_external_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-1.9\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "2.0",
+            "https://example.com/current.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let stale_minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "1.9".to_string(),
+            folders: vec!["MyAddon".to_string()],
+        }];
+        let results =
+            check_for_updates_metadata(&addons_dir, &api_lookup, &stale_minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
     }
 
     #[test]
