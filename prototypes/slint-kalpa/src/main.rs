@@ -13477,13 +13477,25 @@ fn apply_native_pending_conflict_files_blocking(
         return Err("Every conflicted file needs a decision.".to_string());
     }
 
-    let mut kept_files = pending.auto_kept_files.clone();
+    let zip_hashes = if pending.zip_hashes.folders.is_empty() {
+        file_hashes::hash_zip_entries_by_folder(&pending.zip_path)?
+    } else {
+        pending.zip_hashes.clone()
+    };
+
+    // Decisions describe the disk state shown in the conflict panel, not the
+    // state we are about to overwrite. Reclassify immediately before applying
+    // so a reverted edit is updated normally and a newly-created edit is
+    // backed up rather than silently lost.
+    let classified = classify_native_update_archive(addons_dir, &zip_hashes)?;
+
+    let mut kept_files = classified.auto_kept_files;
     let mut files_to_backup = Vec::new();
-    for relative_path in &pending.conflicts {
+    for relative_path in &classified.conflicts {
         match pending.decisions.get(relative_path).copied() {
             Some(1) => kept_files.push(relative_path.clone()),
-            Some(2) => files_to_backup.push(relative_path.clone()),
-            _ => return Err(format!("Missing conflict decision for {relative_path}.")),
+            Some(2) | None => files_to_backup.push(relative_path.clone()),
+            Some(_) => return Err(format!("Invalid conflict decision for {relative_path}.")),
         }
     }
     kept_files.sort();
@@ -13866,7 +13878,15 @@ fn build_native_conflict_report(
     zip_path: &Path,
 ) -> Result<(NativeConflictReport, file_hashes::ZipHashSet), String> {
     let zip_hashes = file_hashes::hash_zip_entries_by_folder(zip_path)?;
+    let report = classify_native_update_archive(addons_dir, &zip_hashes)?;
 
+    Ok((report, zip_hashes))
+}
+
+fn classify_native_update_archive(
+    addons_dir: &Path,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Result<NativeConflictReport, String> {
     let mut safe_file_count = 0;
     let mut auto_kept_files = Vec::new();
     let mut conflicts = Vec::new();
@@ -13905,14 +13925,11 @@ fn build_native_conflict_report(
     auto_kept_files.sort();
     conflicts.sort();
 
-    Ok((
-        NativeConflictReport {
-            safe_file_count,
-            auto_kept_files,
-            conflicts,
-        },
-        zip_hashes,
-    ))
+    Ok(NativeConflictReport {
+        safe_file_count,
+        auto_kept_files,
+        conflicts,
+    })
 }
 
 fn native_is_rate_limited(error: &str) -> bool {
@@ -23924,6 +23941,33 @@ CombatMetrics_SavedVariables = {
                 .expect("hash manifest")
                 .installed_version,
             "2.0"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_pending_conflict_apply_ignores_stale_keep_mine_after_revert() {
+        let root = test_temp_dir("native-pending-conflict-stale-keep");
+        let folder = "StaleKeepAddon";
+        seed_conflicted_addon(root, folder);
+
+        let zip_path = root.join("update.zip");
+        write_test_addon_zip_with_lua(&zip_path, folder, "2.0", "d('new upstream')\n");
+        let pending = pending_conflict_for_test(root, folder, &zip_path, 1);
+
+        // The cached keep-mine decision is stale: while the dialog was open,
+        // the user restored the file to its recorded baseline.
+        fs::write(root.join(folder).join("main.lua"), "d('old upstream')\n")
+            .expect("restore baseline");
+
+        apply_native_pending_conflict_files_blocking(root, &pending)
+            .expect("apply pending conflict");
+
+        assert_eq!(
+            fs::read_to_string(root.join(folder).join("main.lua")).expect("read updated file"),
+            "d('new upstream')\n",
+            "a stale keep-mine decision must not skip the upstream update"
         );
 
         let _ = fs::remove_dir_all(root);
