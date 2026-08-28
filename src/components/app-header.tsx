@@ -7,6 +7,7 @@ import {
   CloudUpload,
   FileSliders,
   Layers,
+  LifeBuoy,
   MinusIcon,
   Monitor,
   PackageIcon,
@@ -52,6 +53,7 @@ interface AppHeaderProps {
   onOpenSavedVars: () => void;
   onOpenSettings: () => void;
   onOpenLogUpload: () => void;
+  onOpenSupport: () => void;
   onAuthChange: (user: AuthUser | null) => void;
   onRefresh: () => void;
   onSwitchInstance: (path: string) => void;
@@ -179,6 +181,7 @@ function AppHeaderBase({
   onOpenSavedVars,
   onOpenSettings,
   onOpenLogUpload,
+  onOpenSupport,
   onAuthChange,
   onRefresh,
 }: AppHeaderProps) {
@@ -409,6 +412,12 @@ function AppHeaderBase({
               onAuthChange={onAuthChange}
               onOpenLogUpload={onOpenLogUpload}
             />
+            <SimpleTooltip content="Get help" side="bottom">
+              <Button variant="ghost" size="sm" onClick={onOpenSupport} aria-label="Get help">
+                <LifeBuoy className="size-3.5" />
+                <span className="hidden min-[900px]:inline">Help</span>
+              </Button>
+            </SimpleTooltip>
             <SimpleTooltip content="Settings" side="bottom">
               <Button variant="ghost" size="icon-sm" onClick={onOpenSettings} aria-label="Settings">
                 <SettingsIcon />

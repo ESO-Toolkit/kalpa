@@ -2,6 +2,8 @@ import { toast } from "sonner";
 
 export const FEEDBACK_ISSUES_URL = "https://github.com/ESO-Toolkit/kalpa/issues/new/choose";
 export const FEEDBACK_DISCORD_URL = "https://discord.gg/cMumdw6cSE";
+export const FEEDBACK_DISCORD_SUPPORT_URL =
+  "https://discord.com/channels/1375703719995244686/1480845158584025148";
 
 /** Open a feedback link in the user's browser, surfacing failures instead of
  *  swallowing them. The opener plugin rejects any URL outside the capability's
