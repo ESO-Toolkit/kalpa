@@ -101,11 +101,13 @@ function ChooserRow({
   checked,
   onToggle,
   onShowChangelog,
+  isOffline,
 }: {
   update: BannerUpdate;
   checked: boolean;
   onToggle: () => void;
   onShowChangelog: () => void;
+  isOffline?: boolean;
 }) {
   return (
     <label
@@ -141,10 +143,16 @@ function ChooserRow({
         </span>
       </span>
       {update.esouiId !== undefined && (
-        <SimpleTooltip content="View changelog">
+        // Gated on connectivity like the update actions beside it and the
+        // addon-detail changelog button: on a cold cache the dialog would fetch
+        // immediately and show nothing but a network error.
+        <SimpleTooltip
+          content={isOffline ? "Changelogs require an internet connection" : "View changelog"}
+        >
           <Button
             size="sm"
             variant="ghost"
+            disabled={isOffline}
             className="size-6 shrink-0 p-0"
             // Inside the row's <label>, so a plain click would also toggle the
             // checkbox: preventDefault stops the label forwarding the
@@ -431,6 +439,7 @@ function UpdateBannerBase({
                       checked={effectiveSelected.has(update.folderName)}
                       onToggle={() => toggleOne(update.folderName)}
                       onShowChangelog={() => setChangelogFolder(update.folderName)}
+                      isOffline={isOffline}
                     />
                   ))}
                 </div>
