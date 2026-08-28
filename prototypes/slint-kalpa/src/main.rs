@@ -17879,6 +17879,8 @@ fn write_text_file(
     content: &str,
 ) -> Result<(), String> {
     let file_path = addon_file_path(addons_root, folder_name, relative_path)?;
+    // Serialize the file/manifest pair with publication by the Tauri process.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     // Temp file + rename instead of writing in place: a crash or a Controlled
     // Folder Access block mid-write would otherwise leave the live addon file
     // truncated, and update_hash_manifest_for_file would immediately record the

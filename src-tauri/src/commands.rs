@@ -3769,6 +3769,9 @@ pub async fn write_addon_file(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // Serialize the live-file mutation with publication and recovery in
+        // every Kalpa process, not just this Tauri instance.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
         // Atomic temp-file + rename: the file being saved is one the user hand
         // edited, so a crash or a Controlled Folder Access block mid-write must
@@ -3826,6 +3829,8 @@ pub async fn rescan_addon_hashes(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // Keep the folder walk and manifest save on one published generation.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
         file_hashes::detect_modifications(&addons_dir, &folder_name)
     })
     .await
