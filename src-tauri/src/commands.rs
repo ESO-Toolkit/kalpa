@@ -3883,6 +3883,9 @@ pub async fn restore_edit_backup(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || {
+        // A restore replaces a live addon file, so it must not race a
+        // whole-folder installer publication from either Kalpa process.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
         crate::edit_backups::restore_backup_file(
             &addons_dir,
             &folder_name,
@@ -6439,6 +6442,11 @@ pub async fn copy_addons_to_instance(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // Copy reads one live addon tree and publishes into another. Hold both
+        // transaction locks in canonical order so either instance's installer
+        // must finish first and two opposite-direction copies cannot deadlock.
+        let _transactions =
+            crate::install_txn::lock_many_and_recover(&[&source, &target_canonical])?;
         Ok(copy_addons_between(&source, &target_canonical))
     })
     .await

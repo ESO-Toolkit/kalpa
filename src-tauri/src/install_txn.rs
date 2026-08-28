@@ -53,6 +53,13 @@ pub(crate) struct RecoveryGuard {
     _lock: transaction_lock::LockGuard,
 }
 
+/// Holds transaction locks for a multi-root operation after recovering every
+/// root while the full, deterministically ordered lock set is held.
+#[allow(dead_code)] // Used by Tauri; this module is also compiled into the Slint binary.
+pub(crate) struct MultiRecoveryGuard {
+    _locks: transaction_lock::LockSet,
+}
+
 impl InstallTransaction {
     pub(crate) fn begin(addons_dir: &Path, cancel: Option<&AtomicBool>) -> Result<Self, String> {
         let lock = transaction_lock::acquire(
@@ -252,6 +259,16 @@ pub(crate) fn lock_and_recover(addons_dir: &Path) -> Result<RecoveryGuard, Strin
     let lock = transaction_lock::acquire(addons_dir, LockOptions::default()).map_err(lock_error)?;
     recover_staging_locked(addons_dir)?;
     Ok(RecoveryGuard { _lock: lock })
+}
+
+#[allow(dead_code)] // Used by Tauri; this module is also compiled into the Slint binary.
+pub(crate) fn lock_many_and_recover(addons_dirs: &[&Path]) -> Result<MultiRecoveryGuard, String> {
+    let locks =
+        transaction_lock::acquire_many(addons_dirs, LockOptions::default()).map_err(lock_error)?;
+    for addons_dir in addons_dirs {
+        recover_staging_locked(addons_dir)?;
+    }
+    Ok(MultiRecoveryGuard { _locks: locks })
 }
 
 fn lock_error(error: transaction_lock::LockError) -> String {

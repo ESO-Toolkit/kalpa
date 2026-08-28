@@ -14869,6 +14869,9 @@ fn restore_edit_backup_file(
     {
         return Err("Invalid backup timestamp.".to_string());
     }
+    // Serialize the live-file replacement with installer publication in the
+    // Tauri process as well as this native process.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
 
     let timestamp_dir = backup.backed_up_at.replace(':', "-");
     let source_root = addons_root
