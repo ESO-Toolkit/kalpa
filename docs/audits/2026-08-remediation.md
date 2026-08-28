@@ -65,7 +65,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Refreshed the inventory against `origin/main` `fb92cb92` after `git fetch origin --prune`: 38 local safe, 57 local retain, 56 local review; 17 remote safe, 47 remote retain, 59 remote review (274 refs total).
 - GitHub reported no protected branches; open PR heads and all attached worktrees were retained. No branch, ref, worktree, or commit was deleted or moved.
 - Updated the H5 proposal and this tracker; safe candidates are 55 local/remote refs counted separately. Review refs remain explicitly non-candidates pending maintainer inspection.
-- Verification pending: `git diff --check`, `npm run check`, then force-with-lease push and GitHub mergeability check.
+- Verification: `git diff --check` and `npm run check` pass; pushed with force-with-lease. GitHub reports PR #385 open/draft, `mergeable=true`, `mergeable_state=clean`, base `16f76144`, head `4d3c57f3`; no checks are reported for this docs-only branch.
 
 ### 2026-08-27 — W1 twice-reject escalation
 
