@@ -146,10 +146,10 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
-            ## Changed: security and dependency refresh
-            **Kalpa's HTTP/2 stack now includes `h2` 0.4.16**, addressing [RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258). The affected crate is used by Kalpa's HTTP client and built-in updater; the update prevents a peer from consuming unbounded resources with empty DATA frames.
+            ## Changed: external addon updates are recognized
+            **Kalpa now recognizes an addon after Minion or another external manager updates it.** Refreshing checks the selected live or PTS AddOns folder and reconciles Kalpa's stored version when the installed addon matches the current ESOUI release.
 
-            This release also refreshes the frontend production and development dependencies, Pack Hub development and test tooling, the Rust `base64` crate, and the GitHub Actions Rust cache revision. There are no feature changes in beta.18.
+            Minion entries are matched by addon ID, folder, and game root, so stale or cross-root records cannot rewrite another installation.
 
             ## Verify your download
             Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
