@@ -126,4 +126,92 @@ describe("Pack Hub logout invalidation", () => {
     expect(screen.getByTestId("my-packs-loading")).toHaveTextContent("false");
     expect(screen.getByTestId("my-packs-loading-more")).toHaveTextContent("false");
   });
+
+  it("clears and invalidates a private load when the authenticated identity changes", async () => {
+    const previousUserLoad = deferred<PackPage>();
+    mocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_packs" && args?.author === "42") return previousUserLoad.promise;
+      if (command === "list_packs") return Promise.resolve({ packs: [], page: 1 });
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const view = render(
+      <Packs
+        addonsPath="C:\\ESO\\AddOns"
+        installedAddons={[]}
+        authUser={{ userId: "42", userName: "Ada" }}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onRefresh={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "My Packs" }));
+    await waitFor(() => expect(screen.getByTestId("my-packs-loading")).toHaveTextContent("true"));
+
+    view.rerender(
+      <Packs
+        addonsPath="C:\\ESO\\AddOns"
+        installedAddons={[]}
+        authUser={{ userId: "84", userName: "Bea" }}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onRefresh={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("my-pack-titles")).toBeEmptyDOMElement();
+      expect(screen.getByTestId("my-packs-loading")).toHaveTextContent("false");
+      expect(screen.getByTestId("my-packs-loading-more")).toHaveTextContent("false");
+    });
+
+    await act(async () => previousUserLoad.resolve({ packs: [latePack], page: 1 }));
+
+    expect(screen.getByTestId("my-pack-titles")).toBeEmptyDOMElement();
+  });
+
+  it("clears and invalidates a private load when auth becomes null", async () => {
+    const privateLoad = deferred<PackPage>();
+    mocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "list_packs" && args?.author === "42") return privateLoad.promise;
+      if (command === "list_packs") return Promise.resolve({ packs: [], page: 1 });
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const view = render(
+      <Packs
+        addonsPath="C:\\ESO\\AddOns"
+        installedAddons={[]}
+        authUser={{ userId: "42", userName: "Ada" }}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onRefresh={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "My Packs" }));
+    await waitFor(() => expect(screen.getByTestId("my-packs-loading")).toHaveTextContent("true"));
+
+    view.rerender(
+      <Packs
+        addonsPath="C:\\ESO\\AddOns"
+        installedAddons={[]}
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onRefresh={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("my-pack-titles")).toBeEmptyDOMElement();
+      expect(screen.getByTestId("my-packs-loading")).toHaveTextContent("false");
+      expect(screen.getByTestId("my-packs-loading-more")).toHaveTextContent("false");
+    });
+
+    await act(async () => privateLoad.resolve({ packs: [latePack], page: 1 }));
+
+    expect(screen.getByTestId("my-pack-titles")).toBeEmptyDOMElement();
+  });
 });

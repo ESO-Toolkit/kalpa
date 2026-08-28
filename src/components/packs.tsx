@@ -151,6 +151,32 @@ export function Packs({
   const [myPacksPage, setMyPacksPage] = useState(1);
   const [myPacksHasMore, setMyPacksHasMore] = useState(false);
   const [duplicatingPackId, setDuplicatingPackId] = useState<string | null>(null);
+  const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
+
+  const loadMyPacksSeqRef = useRef(0);
+  const authIdentity = authUser?.userId ?? null;
+  const authIdentityRef = useRef(authIdentity);
+  const authUserRef = useRef(authUser);
+  /* eslint-disable react-hooks/refs */
+  // Keep the request guards current as soon as props render, before a stale
+  // promise continuation can run ahead of the transition effect below.
+  authIdentityRef.current = authIdentity;
+  authUserRef.current = authUser;
+  /* eslint-enable react-hooks/refs */
+
+  useEffect(() => {
+    // Auth can change outside the local logout handler (for example after a
+    // child request receives a 401). Clear all private state for both logout
+    // and account switches, while the sequence bump here rejects old loads.
+    loadMyPacksSeqRef.current++;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMyPacks([]);
+    setMyPacksPage(1);
+    setMyPacksHasMore(false);
+    setMyPacksLoading(false);
+    setMyPacksLoadingMore(false);
+    setVotingPacks(new Set());
+  }, [authIdentity]);
 
   // Delete state
   const [deletingPack, setDeletingPack] = useState(false);
@@ -269,11 +295,6 @@ export function Packs({
   }, []);
 
   // ── My Packs loader ──────────────────────────────────────────────
-  const loadMyPacksSeqRef = useRef(0);
-  const authUserRef = useRef(authUser);
-  // eslint-disable-next-line react-hooks/refs
-  authUserRef.current = authUser;
-
   const loadMyPacks = useCallback(
     async (page: number = 1) => {
       const currentUser = authUserRef.current;
@@ -294,7 +315,8 @@ export function Packs({
           author: currentUser.userId,
           status: "all",
         });
-        if (seq !== loadMyPacksSeqRef.current) return;
+        if (seq !== loadMyPacksSeqRef.current || authIdentityRef.current !== currentUser.userId)
+          return;
         if (page === 1) {
           setMyPacks(result.packs);
         } else {
@@ -304,10 +326,11 @@ export function Packs({
         const PAGE_SIZE = 10;
         setMyPacksHasMore(result.packs.length >= PAGE_SIZE);
       } catch (e) {
-        if (seq !== loadMyPacksSeqRef.current) return;
+        if (seq !== loadMyPacksSeqRef.current || authIdentityRef.current !== currentUser.userId)
+          return;
         toast.error(`Failed to load your packs: ${getTauriErrorMessage(e)}`);
       } finally {
-        if (seq === loadMyPacksSeqRef.current) {
+        if (seq === loadMyPacksSeqRef.current && authIdentityRef.current === currentUser.userId) {
           setMyPacksLoading(false);
           setMyPacksLoadingMore(false);
         }
@@ -857,8 +880,6 @@ export function Packs({
   };
 
   // ── Voting ──────────────────────────────────────────────────────────
-  const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
-
   const handleLogout = useCallback(async () => {
     if (loggingOut) return;
     setLoggingOut(true);
