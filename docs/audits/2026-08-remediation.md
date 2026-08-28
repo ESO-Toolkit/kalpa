@@ -9,7 +9,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
 | P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
 | P0-A2 | pr-open | `fix/audit-p0-a2-cross-process-locking` | [#388](https://github.com/ESO-Toolkit/kalpa/pull/388) (draft) | - | D-P0-A2 | REVISE; verified finding fixed; follow-up APPROVE | Root 490; Rust 828 passed/18 ignored; Slint 777 passed/16 ignored; native build; Tauri build; sandbox 3/3 | Shared bounded cross-process RMW locking; stacked on P0-A1. |
-| P0-A3 | pr-open | `fix/audit-p0-a3-sidecar-handshake` | [#389](https://github.com/ESO-Toolkit/kalpa/pull/389) (draft) | - | D-P0-1; final P0 review D-P0-A3-FINAL | pending (Sol) | Rust 844 passed/18 ignored; Slint 791 passed/16 ignored; clippy `-D warnings` both crates; fmt --check both; native build | Native sidecar ready handshake; stacked on P0-A2. Final Fable P0 review returned one blocker, now fixed. `test:e2e:sandbox` still outstanding. |
+| P0-A3 | pr-open | `fix/audit-p0-a3-sidecar-handshake` | [#389](https://github.com/ESO-Toolkit/kalpa/pull/389) (draft) | - | D-P0-1; final P0 review D-P0-A3-FINAL | REVISE; all verified findings addressed; follow-up APPROVE | Rust 852 passed/18 ignored; Slint 798 passed/16 ignored; clippy `-D warnings` both crates; fmt/check clean | Two-phase ready/acquired authority handoff with bounded child termination; stacked on P0-A2. `test:e2e:sandbox` remains intentionally outstanding. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
@@ -98,6 +98,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+
+### 2026-08-28 — Codex (P0-A3 completion)
+
+- Closed the final handoff races in both directions: readiness no longer causes the predecessor to surrender authority until the successor publishes a matching acquired-authority proof, and cancellation remains sticky through authority reclaim so incoming activations are preserved.
+- Replaced timeout and cancellation cleanup with bounded terminate-and-reap behavior even when `kill` races process exit. Added real-child regressions for ready-then-exit, acquired-proof ordering, pre-ready cancellation, and terminate/exit races.
+- Verification: `npm run check` passes; main Rust has 852 passed/18 ignored; Slint has 798 passed/16 ignored; strict clippy passes for all targets in both crates; formatting and `git diff --check` pass. The unrelated `src-tauri/Cargo.toml` CRLF phantom remains excluded.
+- Sol review: three review rounds identified early authority release, lost cancellation, and unbounded child reaping. All verified findings were fixed; the required GPT-5.5/xhigh read-only follow-up returned exact `VERDICT: APPROVE`.
 
 ### 2026-08-27 — P0-A3 resumed after interrupted session
 

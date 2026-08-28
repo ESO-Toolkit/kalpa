@@ -540,7 +540,6 @@ pub fn run() {
             }
             if let Err(error) = commands::cancel_native_handoff_for_activation(app) {
                 eprintln!("Failed to preserve activation during native handoff: {error}");
-                return;
             }
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {

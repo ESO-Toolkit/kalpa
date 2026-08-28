@@ -782,6 +782,11 @@ thread_local! {
 type NativePendingConflictStore = Arc<Mutex<HashMap<String, NativePendingConflict>>>;
 
 static PENDING_NATIVE_CONFLICTS: OnceLock<NativePendingConflictStore> = OnceLock::new();
+static NATIVE_AUTHORITY: OnceLock<Mutex<Option<native_boot::AuthorityGuard>>> = OnceLock::new();
+
+fn native_authority() -> &'static Mutex<Option<native_boot::AuthorityGuard>> {
+    NATIVE_AUTHORITY.get_or_init(|| Mutex::new(None))
+}
 
 /// Serializes every `.kalpa-metadata` read-modify-write inside this process.
 ///
@@ -1228,7 +1233,28 @@ fn confirm_native_boot_ready() {
         return;
     };
     match native_boot::signal_ready(&dir, &launch_id) {
-        Ok(true) => eprintln!("[native-shell] event loop ready launch_id={launch_id}"),
+        Ok(true) => {
+            eprintln!("[native-shell] event loop ready launch_id={launch_id}");
+            match native_authority().lock() {
+                Ok(authority) => match authority.as_ref() {
+                    Some(guard) => match guard.signal_acquired() {
+                        Ok(true) => eprintln!(
+                            "[native-shell] authority acquired launch_id={launch_id}"
+                        ),
+                        Ok(false) => eprintln!(
+                            "[native-shell] authority proof rejected launch_id={launch_id}"
+                        ),
+                        Err(error) => eprintln!(
+                            "[native-shell] failed to publish authority launch_id={launch_id}: {error}"
+                        ),
+                    },
+                    None => eprintln!(
+                        "[native-shell] ready without authority launch_id={launch_id}"
+                    ),
+                },
+                Err(_) => eprintln!("[native-shell] authority state is unavailable"),
+            }
+        }
         Ok(false) => eprintln!("[native-shell] rejected stale launch_id={launch_id}"),
         Err(error) => {
             eprintln!("[native-shell] failed to acknowledge launch_id={launch_id}: {error}")
@@ -1284,7 +1310,12 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         NativeShellLock::Held(guard) => (Some(guard), false),
     };
-    let authority_guard = Rc::new(RefCell::new(initial_authority));
+    if let Ok(mut authority) = native_authority().lock() {
+        *authority = initial_authority;
+    } else {
+        eprintln!("[native-shell] authority state is unavailable");
+        return Ok(());
+    }
 
     let render_config = native_render_config();
 
@@ -1370,15 +1401,18 @@ fn main() -> Result<(), slint::PlatformError> {
     start_native_app_update_check(ui.as_weak(), true);
     let shutdown_timer = slint::Timer::default();
     if let Some(state_dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
-        let shutdown_authority = authority_guard.clone();
         shutdown_timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(50),
             move || {
-                let launch_id = shutdown_authority
-                    .borrow()
-                    .as_ref()
-                    .map(|guard| guard.launch_id().to_string());
+                let launch_id = native_authority()
+                    .lock()
+                    .ok()
+                    .and_then(|authority| {
+                        authority
+                            .as_ref()
+                            .map(|guard| guard.launch_id().to_string())
+                    });
                 if let Some(launch_id) = launch_id {
                     if native_boot::shutdown_requested(&state_dir, &launch_id) {
                         eprintln!(
@@ -1400,7 +1434,6 @@ fn main() -> Result<(), slint::PlatformError> {
             .expect("handoff launch has a native state directory");
         let launch_id = handoff_launch_id.expect("handoff launch has an ID");
         let handoff_ui = ui.as_weak();
-        let handoff_authority = authority_guard.clone();
         slint::Timer::single_shot(Duration::ZERO, move || {
             match native_boot::signal_ready(&state_dir, &launch_id) {
                 Ok(true) => eprintln!("[native-shell] event loop ready launch_id={launch_id}"),
@@ -1423,10 +1456,41 @@ fn main() -> Result<(), slint::PlatformError> {
                 native_boot::READY_TIMEOUT,
             ) {
                 Ok(guard) => {
-                    *handoff_authority.borrow_mut() = Some(guard);
+                    let mut authority = match native_authority().lock() {
+                        Ok(authority) => authority,
+                        Err(_) => {
+                            eprintln!("[native-shell] authority state is unavailable");
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    };
+                    *authority = Some(guard);
                     if let Some(ui) = handoff_ui.upgrade() {
                         if let Err(error) = ui.show() {
                             eprintln!("[native-shell] failed to show ready UI: {error}");
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    }
+                    let proof = authority
+                        .as_ref()
+                        .expect("native authority was just stored")
+                        .signal_acquired();
+                    match proof {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            eprintln!(
+                                "[native-shell] rejected authority proof launch_id={launch_id}"
+                            );
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[native-shell] failed to publish authority launch_id={launch_id}: {error}"
+                            );
+                            authority.take();
                             let _ = slint::quit_event_loop();
                         }
                     }
@@ -18314,11 +18378,68 @@ fn return_to_webview_shell(
             Err(error) => Err(format!("failed to inspect WebView handoff: {error}")),
         },
     );
+    let first_outcome = outcome?;
+    if first_outcome == native_boot::WaitOutcome::Ready {
+        let released = native_authority()
+            .lock()
+            .map_err(|_| "native authority state is unavailable".to_string())?
+            .take();
+        if released.is_none() {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            return Err("native UI authority was unavailable for WebView handoff".to_string());
+        }
+        drop(released);
+        eprintln!(
+            "[native-shell] WebView ready launch_id={launch_id}; waiting for authority proof"
+        );
+        let acquired = native_boot::wait_for_acquired(
+            &state_dir,
+            &launch_id,
+            native_boot::READY_TIMEOUT,
+            || match child.try_wait() {
+                Ok(Some(_)) => Ok(native_boot::ChildState::Exited),
+                Ok(None) => Ok(native_boot::ChildState::Running),
+                Err(error) => Err(format!(
+                    "failed to inspect WebView authority handoff: {error}"
+                )),
+            },
+        );
+        if matches!(acquired, Ok(native_boot::WaitOutcome::Ready)) {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            eprintln!("[native-shell] WebView authority acquired launch_id={launch_id}");
+            return Ok(());
+        }
+
+        let reap = native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+        let reclaim_id = format!("native-reclaim-{}", native_boot::new_launch_id());
+        let reclaimed = native_boot::claim_after_ready_release(
+            &state_dir,
+            &reclaim_id,
+            native_boot::READY_TIMEOUT,
+        );
+        native_boot::clear_owned(&state_dir, &launch_id);
+        let failure = match acquired {
+            Ok(_) => "WebView failed to acquire UI authority after readiness.".to_string(),
+            Err(error) => {
+                format!("Failed while waiting for WebView UI authority after readiness: {error}")
+            }
+        };
+        let guard = reclaimed
+            .map_err(|error| format!("{failure} Native authority recovery failed: {error}"))?;
+        *native_authority()
+            .lock()
+            .map_err(|_| "native authority state is unavailable".to_string())? = Some(guard);
+        if let Err(error) = reap {
+            eprintln!(
+                "[native-shell] failed to reap unsuccessful WebView launch_id={launch_id}: {error}"
+            );
+        }
+        return Err(failure);
+    }
     native_boot::clear_owned(&state_dir, &launch_id);
-    match outcome? {
+    match first_outcome {
         native_boot::WaitOutcome::Ready => {
-            eprintln!("[native-shell] WebView ready launch_id={launch_id}; releasing native UI");
-            Ok(())
+            unreachable!("ready handoff returned above")
         }
         native_boot::WaitOutcome::ChildExited => {
             Err("WebView exited before reporting that its runtime was ready.".to_string())
@@ -18327,8 +18448,12 @@ fn return_to_webview_shell(
             eprintln!(
                 "[native-shell] WebView ready timeout launch_id={launch_id}; keeping native UI"
             );
-            if child.kill().is_ok() {
-                let _ = child.wait();
+            if let Err(error) =
+                native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))
+            {
+                eprintln!(
+                    "[native-shell] failed to terminate/reap WebView launch_id={launch_id}: {error}"
+                );
             }
             Err("WebView timed out before its runtime was ready.".to_string())
         }

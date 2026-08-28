@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(crate) const PENDING_FILE: &str = "native-boot.pending";
 pub(crate) const READY_FILE: &str = "native-boot.ready";
+pub(crate) const ACQUIRED_FILE: &str = "native-boot.acquired";
 pub(crate) const LAUNCH_ID_ENV: &str = "KALPA_NATIVE_LAUNCH_ID";
 pub(crate) const WEBVIEW_LAUNCH_ID_ENV: &str = "KALPA_WEBVIEW_LAUNCH_ID";
 pub(crate) const ACTIVE_FILE: &str = "native-shell.active";
@@ -68,12 +69,19 @@ impl AuthorityGuard {
     pub(crate) fn launch_id(&self) -> &str {
         &self.launch_id
     }
+
+    pub(crate) fn signal_acquired(&self) -> Result<bool, String> {
+        signal_acquired(&self.state_dir, &self.launch_id)
+    }
 }
 
 impl Drop for AuthorityGuard {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        // The active record belongs to the lock epoch. Clear it while this
+        // guard still excludes a successor; otherwise an old owner can unlock,
+        // pause, and then delete the new owner's freshly published record.
         clear_record_if_owned(&self.state_dir.join(ACTIVE_FILE), &self.launch_id);
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -83,6 +91,10 @@ pub(crate) fn pending_path(state_dir: &Path) -> PathBuf {
 
 pub(crate) fn ready_path(state_dir: &Path) -> PathBuf {
     state_dir.join(READY_FILE)
+}
+
+pub(crate) fn acquired_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ACQUIRED_FILE)
 }
 
 #[allow(dead_code)] // Used by the Tauri parent crate.
@@ -270,6 +282,7 @@ pub(crate) fn prepare(state_dir: &Path, launch_id: &str) -> Result<(), String> {
     fs::create_dir_all(state_dir)
         .map_err(|error| format!("Could not create native state directory: {error}"))?;
     let _ = fs::remove_file(ready_path(state_dir));
+    let _ = fs::remove_file(acquired_path(state_dir));
     write_record(
         &pending_path(state_dir),
         &BootRecord {
@@ -298,9 +311,39 @@ pub(crate) fn ready_matches(state_dir: &Path, launch_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn signal_acquired(state_dir: &Path, launch_id: &str) -> Result<bool, String> {
+    let pending_matches = read_record(&pending_path(state_dir))
+        .map(|record| record.launch_id == launch_id)
+        .unwrap_or(false);
+    let active_matches = read_record(&state_dir.join(ACTIVE_FILE))
+        .map(|record| record.launch_id == launch_id)
+        .unwrap_or(false);
+    if !pending_matches || !active_matches {
+        return Ok(false);
+    }
+    write_record(
+        &acquired_path(state_dir),
+        &BootRecord {
+            launch_id: launch_id.to_string(),
+            parent_pid: std::process::id(),
+        },
+    )?;
+    Ok(true)
+}
+
+pub(crate) fn acquired_matches(state_dir: &Path, launch_id: &str) -> bool {
+    read_record(&acquired_path(state_dir))
+        .map(|record| record.launch_id == launch_id)
+        .unwrap_or(false)
+}
+
 #[allow(dead_code)] // Used by the Tauri parent crate.
 pub(crate) fn clear_owned(state_dir: &Path, launch_id: &str) {
-    for path in [pending_path(state_dir), ready_path(state_dir)] {
+    for path in [
+        pending_path(state_dir),
+        ready_path(state_dir),
+        acquired_path(state_dir),
+    ] {
         if read_record(&path)
             .map(|record| record.launch_id == launch_id)
             .unwrap_or(false)
@@ -338,6 +381,61 @@ pub(crate) fn wait_for_ready(
             return Ok(WaitOutcome::TimedOut);
         }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[allow(dead_code)] // Used by both parent crates.
+pub(crate) fn wait_for_acquired(
+    state_dir: &Path,
+    launch_id: &str,
+    timeout: Duration,
+    mut child_state: impl FnMut() -> Result<ChildState, String>,
+) -> Result<WaitOutcome, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if acquired_matches(state_dir, launch_id) {
+            return Ok(if child_state()? == ChildState::Running {
+                WaitOutcome::Ready
+            } else {
+                WaitOutcome::ChildExited
+            });
+        }
+        if child_state()? == ChildState::Exited {
+            return Ok(WaitOutcome::ChildExited);
+        }
+        if Instant::now() >= deadline {
+            return Ok(WaitOutcome::TimedOut);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+#[allow(dead_code)] // Used by both parent crates.
+pub(crate) fn terminate_and_reap_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<(), String> {
+    if child
+        .try_wait()
+        .map_err(|error| format!("Could not inspect child process: {error}"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let kill_error = child.kill().err();
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => {
+                return Err(kill_error.map_or_else(
+                    || "Timed out reaping terminated child process.".to_string(),
+                    |error| format!("Could not terminate child process: {error}"),
+                ))
+            }
+            Err(error) => return Err(format!("Could not reap child process: {error}")),
+        }
     }
 }
 
@@ -592,6 +690,48 @@ mod tests {
                 }
                 AuthorityClaim::AlreadyHeld => std::process::exit(93),
             },
+            "ready-then-crash-before-authority" => {
+                assert!(signal_ready(&state_dir, &launch_id).unwrap());
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !state_dir.join("crash-before-authority").is_file()
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                std::process::exit(96);
+            }
+            "ready-without-authority-hold" => {
+                assert!(signal_ready(&state_dir, &launch_id).unwrap());
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "ready-acquire-hold" => {
+                assert!(signal_ready(&state_dir, &launch_id).unwrap());
+                let guard =
+                    claim_after_ready_release(&state_dir, &launch_id, Duration::from_secs(10))
+                        .unwrap();
+                assert!(guard.signal_acquired().unwrap());
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "authority-reclaim" => {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let _guard = loop {
+                    match try_claim_authority(&state_dir, &launch_id).unwrap() {
+                        AuthorityClaim::Held(guard) => break guard,
+                        AuthorityClaim::AlreadyHeld if Instant::now() < deadline => {
+                            std::thread::sleep(POLL_INTERVAL);
+                        }
+                        AuthorityClaim::AlreadyHeld => std::process::exit(94),
+                    }
+                };
+                fs::write(state_dir.join("reclaimer.claimed"), b"claimed").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !state_dir.join("reclaimer.release").is_file() && Instant::now() < deadline {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                if !state_dir.join("reclaimer.release").is_file() {
+                    std::process::exit(95);
+                }
+            }
             "hang" => std::thread::sleep(Duration::from_secs(2)),
             _ => panic!("unknown child mode"),
         }
@@ -643,6 +783,190 @@ mod tests {
         // ...but the kernel released its authority lock, so it is not a live
         // owner and must never be accepted as one.
         assert!(!live_native_authority_exists(&state_dir));
+    }
+
+    #[test]
+    fn ready_then_crash_before_authority_never_completes_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "successor").unwrap();
+        let parent = match try_claim_authority(&state_dir, "parent").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        let mut child =
+            spawn_protocol_child(&state_dir, "successor", "ready-then-crash-before-authority");
+        assert_eq!(
+            wait_for_ready(&state_dir, "successor", Duration::from_secs(10), || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::Ready
+        );
+        drop(parent);
+        fs::write(state_dir.join("crash-before-authority"), b"crash").unwrap();
+        assert_eq!(
+            wait_for_acquired(&state_dir, "successor", Duration::from_secs(10), || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::ChildExited
+        );
+        assert!(!acquired_matches(&state_dir, "successor"));
+    }
+
+    #[test]
+    fn handoff_completes_only_after_successor_proves_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "successor").unwrap();
+        let parent = match try_claim_authority(&state_dir, "parent").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        let mut child = spawn_protocol_child(&state_dir, "successor", "ready-acquire-hold");
+        assert_eq!(
+            wait_for_ready(&state_dir, "successor", Duration::from_secs(10), || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::Ready
+        );
+        assert!(!acquired_matches(&state_dir, "successor"));
+        drop(parent);
+        assert_eq!(
+            wait_for_acquired(&state_dir, "successor", Duration::from_secs(10), || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::Ready
+        );
+        assert!(live_native_authority_exists(&state_dir));
+        terminate_and_reap_child(&mut child, Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn ready_then_block_before_authority_times_out_and_is_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "successor").unwrap();
+        let parent = match try_claim_authority(&state_dir, "parent").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        let mut child =
+            spawn_protocol_child(&state_dir, "successor", "ready-without-authority-hold");
+        assert_eq!(
+            wait_for_ready(&state_dir, "successor", Duration::from_secs(10), || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::Ready
+        );
+        drop(parent);
+        assert_eq!(
+            wait_for_acquired(&state_dir, "successor", Duration::from_millis(100), || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            })
+            .unwrap(),
+            WaitOutcome::TimedOut
+        );
+        terminate_and_reap_child(&mut child, Duration::from_secs(1)).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(!acquired_matches(&state_dir, "successor"));
+    }
+
+    #[test]
+    fn terminate_and_reap_accepts_a_child_that_won_the_exit_race() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "already-exited").unwrap();
+        let mut child = spawn_protocol_child(&state_dir, "already-exited", "crash");
+        std::thread::sleep(Duration::from_millis(100));
+
+        terminate_and_reap_child(&mut child, Duration::from_secs(1)).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn pre_ready_cancellation_terminates_and_reaps_spawned_child() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "cancelled-child").unwrap();
+        let mut child = spawn_protocol_child(&state_dir, "cancelled-child", "hang");
+        let mut cancel = true;
+
+        let outcome = wait_for_ready(
+            &state_dir,
+            "cancelled-child",
+            Duration::from_secs(3),
+            || {
+                if cancel {
+                    cancel = false;
+                    terminate_and_reap_child(&mut child, Duration::from_secs(1))?;
+                    return Ok(ChildState::Exited);
+                }
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, WaitOutcome::ChildExited);
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn successor_active_record_survives_authority_release_and_reclaim() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        let old = match try_claim_authority(&state_dir, "old-owner").unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        let mut successor = spawn_protocol_child(&state_dir, "new-owner", "authority-reclaim");
+
+        drop(old);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !state_dir.join("reclaimer.claimed").is_file() && Instant::now() < deadline {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        assert_eq!(
+            read_record(&state_dir.join(ACTIVE_FILE))
+                .expect("successor publishes its active record")
+                .launch_id,
+            "new-owner"
+        );
+
+        fs::write(state_dir.join("reclaimer.release"), b"release").unwrap();
+        assert!(successor.wait().unwrap().success());
     }
 
     #[test]

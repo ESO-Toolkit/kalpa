@@ -9985,6 +9985,29 @@ fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGua
     WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
 }
 
+fn begin_native_handoff() -> Result<(), String> {
+    // Serialize admission with activation cancellation and authority release.
+    // Only the admitted invocation may reset the process-global cancel flag.
+    let _authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    NATIVE_HANDOFF_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| "A native performance mode handoff is already in progress.".to_string())?;
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+fn abort_native_handoff() {
+    // The caller reached this only after winning begin_native_handoff, so it
+    // owns both flags. Taking the mutex prevents an activation from observing
+    // a half-reset state.
+    if let Ok(_authority) = webview_authority().lock() {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    }
+}
+
 pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), String> {
     let state_dir = app
         .path()
@@ -10000,23 +10023,50 @@ pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), Stri
     Ok(())
 }
 
+fn reclaim_webview_authority(state_dir: &Path) -> Result<(), String> {
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if authority.is_some() {
+        return Ok(());
+    }
+    let guard = crate::native_boot::claim_webview_after_shutdown(
+        state_dir,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    *authority = Some(guard);
+    Ok(())
+}
+
 /// Preserve an activation in the still-live WebView instead of letting an
 /// in-flight native handoff exit underneath it.
 pub(crate) fn cancel_native_handoff_for_activation(app: &tauri::AppHandle) -> Result<bool, String> {
+    // Checking the handoff state and publishing cancellation belong to the
+    // same critical section as authority release. Otherwise commit can pass
+    // between the load and store and exit underneath this activation.
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
     if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
         NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
         eprintln!("[native-shell] cancelling handoff for incoming activation");
-        let has_authority = webview_authority()
-            .lock()
-            .map_err(|_| "WebView authority state is unavailable.".to_string())?
-            .is_some();
-        if !has_authority {
+        if authority.is_none() {
             // The child became ready and the command released authority, but
             // ExitRequested has not committed yet. Reclaim before the callback
             // reveals or emits into this WebView.
-            if let Err(error) = claim_webview_authority(app) {
-                NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
-                return Err(error);
+            let reclaim = (|| {
+                let state_dir = app
+                    .path()
+                    .app_data_dir()
+                    .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+                crate::native_boot::claim_webview_after_shutdown(
+                    &state_dir,
+                    crate::native_boot::READY_TIMEOUT,
+                )
+            })();
+            match reclaim {
+                Ok(guard) => *authority = Some(guard),
+                Err(error) => return Err(error),
             }
         }
         Ok(true)
@@ -10041,6 +10091,11 @@ fn commit_native_handoff_authority_release() -> Result<(), String> {
 }
 
 pub(crate) fn finish_native_handoff_exit() -> bool {
+    // Serialize the ExitRequested decision with an activation callback that
+    // has entered cancellation but has not published its flag yet.
+    let Ok(_authority) = webview_authority().lock() else {
+        return true;
+    };
     if !NATIVE_HANDOFF_ACTIVE.swap(false, Ordering::SeqCst) {
         return false;
     }
@@ -10066,9 +10121,51 @@ pub(crate) fn complete_webview_handoff(app: &tauri::AppHandle) -> Result<(), Str
         ));
     }
     eprintln!("[native-shell] WebView runtime ready launch_id={launch_id}");
-    claim_webview_authority(app)?;
+    let guard = crate::native_boot::claim_after_ready_release(
+        &state_dir,
+        &launch_id,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    *authority = Some(guard);
+    let proof = authority
+        .as_ref()
+        .expect("WebView authority was just stored")
+        .signal_acquired();
+    match proof {
+        Ok(true) => {}
+        Ok(false) => {
+            authority.take();
+            return Err(format!(
+                "WebView handoff authority proof failed for {launch_id}: launch ID was rejected"
+            ));
+        }
+        Err(error) => {
+            authority.take();
+            return Err(format!(
+                "WebView handoff authority proof failed for {launch_id}: {error}"
+            ));
+        }
+    }
+    drop(authority);
     std::env::remove_var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV);
     Ok(())
+}
+
+fn acquire_native_launch_guard(
+    state_dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire(
+        crate::native_boot::pending_path(state_dir),
+        crate::transaction_lock::LockOptions {
+            timeout: crate::native_boot::READY_TIMEOUT,
+            cancel,
+        },
+    )
+    .map_err(|error| format!("Could not serialize native launch: {error}"))
 }
 
 fn launch_native_shell_process(
@@ -10080,15 +10177,7 @@ fn launch_native_shell_process(
     let state_dir = app_data_dir.ok_or_else(|| {
         "Native performance UI requires an application state directory.".to_string()
     })?;
-    let pending_path = crate::native_boot::pending_path(&state_dir);
-    let _pending_guard = crate::transaction_lock::acquire(
-        &pending_path,
-        crate::transaction_lock::LockOptions {
-            timeout: crate::native_boot::READY_TIMEOUT,
-            cancel: None,
-        },
-    )
-    .map_err(|error| format!("Could not serialize native launch: {error}"))?;
+    let _pending_guard = acquire_native_launch_guard(&state_dir, cancel)?;
     let launch_id = crate::native_boot::new_launch_id();
     crate::native_boot::prepare(&state_dir, &launch_id)?;
     let (render_preset, render_backend) = native_shell_render_config();
@@ -10142,8 +10231,7 @@ fn launch_native_shell_process(
                 .unwrap_or(false)
             {
                 cancelled = true;
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))?;
                 eprintln!("[native-shell] launch cancelled before ready launch_id={launch_id}");
                 return Ok(crate::native_boot::ChildState::Exited);
             }
@@ -10165,11 +10253,86 @@ fn launch_native_shell_process(
     // child's `ready` marker would make duplicate acceptance depend on a file
     // publication the duplicate child may fail to complete.
     let existing_native_ready = crate::native_boot::live_native_authority_exists(&state_dir);
+    let first_outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(error);
+        }
+    };
+    if first_outcome == crate::native_boot::WaitOutcome::Ready && cancel.is_some() {
+        if let Err(error) = commit_native_handoff_authority_release() {
+            let _ =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(error);
+        }
+        eprintln!("[native-shell] ready launch_id={launch_id}; waiting for authority proof");
+        let acquired = crate::native_boot::wait_for_acquired(
+            &state_dir,
+            &launch_id,
+            crate::native_boot::READY_TIMEOUT,
+            || {
+                if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    cancelled = true;
+                    let _ = crate::native_boot::terminate_and_reap_child(
+                        &mut child,
+                        Duration::from_secs(1),
+                    );
+                    return Ok(crate::native_boot::ChildState::Exited);
+                }
+                match child.try_wait() {
+                    Ok(Some(_)) => Ok(crate::native_boot::ChildState::Exited),
+                    Ok(None) => Ok(crate::native_boot::ChildState::Running),
+                    Err(error) => Err(format!(
+                        "Failed to inspect native authority handoff {launch_id}: {error}"
+                    )),
+                }
+            },
+        );
+        if !matches!(acquired, Ok(crate::native_boot::WaitOutcome::Ready)) {
+            let reap =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            let reclaim = reclaim_webview_authority(&state_dir);
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            if let Err(error) = reap {
+                eprintln!(
+                    "[native-shell] failed to reap unsuccessful launch_id={launch_id}: {error}"
+                );
+            }
+            let failure = if cancelled {
+                "Native handoff was cancelled to preserve an incoming activation.".to_string()
+            } else {
+                match acquired {
+                    Ok(_) => {
+                        "Native performance UI failed to acquire UI authority after readiness."
+                            .to_string()
+                    }
+                    Err(error) => format!(
+                        "Failed while waiting for native UI authority after readiness: {error}"
+                    ),
+                }
+            };
+            reclaim
+                .map_err(|error| format!("{failure} WebView authority recovery failed: {error}"))?;
+            return Err(failure);
+        }
+        crate::native_boot::clear_owned(&state_dir, &launch_id);
+        eprintln!("[native-shell] authority acquired launch_id={launch_id}");
+        return Ok(());
+    }
     crate::native_boot::clear_owned(&state_dir, &launch_id);
-    match outcome? {
+    match first_outcome {
         crate::native_boot::WaitOutcome::Ready => {
-            eprintln!("[native-shell] ready launch_id={launch_id}");
-            Ok(())
+            if existing_native_ready {
+                eprintln!("[native-shell] ready with authority launch_id={launch_id}");
+                Ok(())
+            } else {
+                Err(
+                    "Native performance UI reported readiness without owning UI authority."
+                        .to_string(),
+                )
+            }
         }
         crate::native_boot::WaitOutcome::ChildExited if cancelled => {
             Err("Native handoff was cancelled to preserve an incoming activation.".to_string())
@@ -10186,13 +10349,12 @@ fn launch_native_shell_process(
         ),
         crate::native_boot::WaitOutcome::TimedOut => {
             eprintln!("[native-shell] ready timeout launch_id={launch_id}; keeping WebView");
-            match child.kill() {
-                Ok(()) => {
-                    let _ = child.wait();
-                }
-                Err(error) => eprintln!(
-                    "[native-shell] failed to terminate timed-out launch_id={launch_id}: {error}"
-                ),
+            if let Err(error) =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))
+            {
+                eprintln!(
+                    "[native-shell] failed to terminate/reap timed-out launch_id={launch_id}: {error}"
+                );
             }
             Err("Native performance UI timed out before its event loop was ready.".to_string())
         }
@@ -10468,6 +10630,11 @@ pub fn native_boot_failure_pending(app: tauri::AppHandle) -> bool {
     }
 }
 
+fn live_native_startup_owner(state_dir: &Path) -> Option<PathBuf> {
+    crate::native_boot::live_native_authority_exists(state_dir)
+        .then(|| crate::native_boot::authority_path(state_dir))
+}
+
 pub fn try_launch_native_performance_mode_on_startup(
     app: &tauri::AppHandle,
 ) -> Result<Option<PathBuf>, String> {
@@ -10480,6 +10647,15 @@ pub fn try_launch_native_performance_mode_on_startup(
         .app_data_dir()
         .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
     let settings_path = app_data_dir.join("settings.json");
+
+    // Authority is stronger evidence than any marker. A parent may die after
+    // its child has acquired authority and become ready but before it clears
+    // `pending`; preserve that healthy sidecar instead of misclassifying its
+    // marker as an abandoned launch and reverting the user's mode.
+    if let Some(authority_path) = live_native_startup_owner(&app_data_dir) {
+        eprintln!("[native-shell] live native owner holds authority; exiting duplicate");
+        return Ok(Some(authority_path));
+    }
 
     // A surviving marker whose fs4 launch guard is free belongs to an abandoned
     // launch and triggers the existing crash-loop fallback. If the guard is
@@ -10529,16 +10705,6 @@ pub fn try_launch_native_performance_mode_on_startup(
         return Ok(None);
     }
 
-    // A live sidecar already holds UI authority, so this launch is a duplicate
-    // activation. The OS lock is positive proof of a live owner, so exit here
-    // without spawning a child at all. Requiring the duplicate child to publish
-    // `ready` instead would let a transient publication failure revert the
-    // user's setting and shut down the sidecar they are already using.
-    if crate::native_boot::live_native_authority_exists(&app_data_dir) {
-        eprintln!("[native-shell] live native owner holds authority; exiting duplicate");
-        return Ok(Some(crate::native_boot::authority_path(&app_data_dir)));
-    }
-
     // Resolve failure = the sidecar is missing entirely (broken or partial
     // install). Same treatment as a boot that died mid-start: self-heal the
     // setting and leave the one-shot note so the webview UI explains itself —
@@ -10576,11 +10742,10 @@ pub async fn launch_native_performance_mode(
     app: tauri::AppHandle,
 ) -> Result<NativePerformanceLaunch, String> {
     let exe_path = resolve_native_shell_executable(&app)?;
+    begin_native_handoff()?;
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
-    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
-    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
     let task_result = tokio::task::spawn_blocking(move || {
         launch_native_shell_process(
             &launch_path,
@@ -10594,15 +10759,13 @@ pub async fn launch_native_performance_mode(
         .map_err(|error| format!("Native handoff task failed: {error}"))
         .and_then(|result| result);
     if let Err(error) = launch_result {
-        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
-        NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+        abort_native_handoff();
         return Err(error);
     }
 
     // The blocking launcher returns only after the matching child has executed
     // a callback on Slint's live event loop. Every failure keeps this WebView
     // process authoritative and visible.
-    commit_native_handoff_authority_release()?;
     app.exit(0);
 
     Ok(NativePerformanceLaunch {
@@ -12757,10 +12920,61 @@ mod tests {
         assert!(pack.addons[0].required);
     }
 }
+
+#[test]
+fn a_live_native_owner_wins_over_its_surviving_pending_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::native_boot::prepare(dir.path(), "ready-child-orphaned-parent").unwrap();
+    let _owner =
+        match crate::native_boot::try_claim_authority(dir.path(), "ready-child-orphaned-parent")
+            .unwrap()
+        {
+            crate::native_boot::AuthorityClaim::Held(guard) => guard,
+            crate::native_boot::AuthorityClaim::AlreadyHeld => panic!("fresh authority was held"),
+        };
+
+    assert!(crate::native_boot::has_pending(dir.path()));
+    assert_eq!(
+        live_native_startup_owner(dir.path()),
+        Some(crate::native_boot::authority_path(dir.path()))
+    );
+}
+
+#[test]
+fn native_launch_lock_wait_observes_handoff_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let pending = crate::native_boot::pending_path(dir.path());
+    let _held = crate::transaction_lock::acquire(
+        &pending,
+        crate::transaction_lock::LockOptions {
+            timeout: Duration::ZERO,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    let cancelled = AtomicBool::new(true);
+
+    let error = match acquire_native_launch_guard(dir.path(), Some(&cancelled)) {
+        Ok(_) => panic!("cancelled launch lock wait unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.contains("cancelled"));
+}
+
 /// Both handoff atomics are process-global, so every case lives in one test.
 /// Splitting them would let the parallel test harness race the flags.
 #[test]
 fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
+    // Manual commands are backend-single-flight. A losing invocation must not
+    // reset cancellation belonging to the admitted invocation.
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    begin_native_handoff().unwrap();
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(begin_native_handoff().is_err());
+    assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    abort_native_handoff();
+
     // Committing a cancelled handoff must refuse to release authority, so the
     // still-live WebView keeps the activation instead of exiting underneath it.
     NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
@@ -12768,6 +12982,22 @@ fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
     assert!(commit_native_handoff_authority_release().is_err());
     assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
     assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // Commit cannot pass after an activation enters the authority critical
+    // section but before it publishes cancellation.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let authority = webview_authority().lock().unwrap();
+    let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+    let commit = std::thread::spawn(move || {
+        commit_tx
+            .send(commit_native_handoff_authority_release())
+            .unwrap();
+    });
+    assert!(commit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    drop(authority);
+    assert!(commit_rx.recv().unwrap().is_err());
+    commit.join().unwrap();
 
     // ExitRequested outside any handoff must never be prevented.
     NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
@@ -12786,4 +13016,18 @@ fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
     assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
     assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
     assert!(!finish_native_handoff_exit());
+
+    // ExitRequested makes the same serialized decision, so it cannot overtake
+    // an activation that has entered cancellation.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let authority = webview_authority().lock().unwrap();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    let exit = std::thread::spawn(move || {
+        exit_tx.send(finish_native_handoff_exit()).unwrap();
+    });
+    assert!(exit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    drop(authority);
+    assert!(exit_rx.recv().unwrap());
+    exit.join().unwrap();
 }
