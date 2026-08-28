@@ -89,6 +89,50 @@ test("retains a trailing link definition used by release copy", () => {
   );
 });
 
+test("retains global link definitions below the next release heading", () => {
+  assert.equal(
+    extractReleaseSection(
+      [
+        "## [1.0.0] — 2026-08-26",
+        "",
+        "- Read the [release notes][notes].",
+        "",
+        "## [0.9.0] — 2026-08-20",
+        "",
+        "- Previous work.",
+        "",
+        "[notes]: https://example.test/notes",
+      ].join("\n"),
+      "v1.0.0"
+    ),
+    [
+      "- Read the [release notes][notes].",
+      "",
+      "[notes]: https://example.test/notes",
+    ].join("\n")
+  );
+});
+
+test("does not retain definitions for inline links", () => {
+  assert.equal(
+    extractReleaseSection(
+      [
+        "## [1.0.0] — 2026-08-26",
+        "",
+        "- Read the [release notes](https://example.test/notes).",
+        "",
+        "## [0.9.0] — 2026-08-20",
+        "",
+        "- Previous work.",
+        "",
+        "[release notes]: https://example.test/other-notes",
+      ].join("\n"),
+      "v1.0.0"
+    ),
+    "- Read the [release notes](https://example.test/notes)."
+  );
+});
+
 test("matches trailing reference labels case-insensitively with normalized whitespace", () => {
   assert.equal(
     extractReleaseSection(

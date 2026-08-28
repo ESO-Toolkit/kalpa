@@ -37,7 +37,7 @@ jobs:
       # Pure Node and dependency-free: keep Discord release history, platform
       # detection, embed limits, and mention safety correct before a workflow
       # can post externally.
-      - name: Discord release message tests
+      - name: Release and Discord message tests
         run: node --test .github/scripts/discord-release.test.cjs .github/scripts/release-body.test.cjs
 
       - name: Setup Rust

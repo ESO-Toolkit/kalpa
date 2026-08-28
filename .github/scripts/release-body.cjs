@@ -58,17 +58,33 @@ function extractReleaseSection(changelog, releaseRef) {
   if (trailingDefinitionsIndex !== -1) {
     const mainLines = sectionLines.slice(0, trailingDefinitionsIndex);
     while (mainLines.at(-1) === "") mainLines.pop();
-    const mainText = mainLines.join("\n");
-    const referencedLabels = new Set(
-      [...mainText.matchAll(/\[([^\]\n]+)\]/g)].map((match) => normalizeReferenceLabel(match[1]))
-    );
-    const referencedDefinitions = sectionLines.slice(trailingDefinitionsIndex).filter((line) => {
+    contentLines = mainLines;
+  }
+
+  const referencedLabels = new Set();
+  for (const match of contentLines.join("\n").matchAll(
+    /\[([^\]\n]+)\](?:\[([^\]\n]*)\])?(?!\s*[\(:])/g
+  )) {
+    referencedLabels.add(normalizeReferenceLabel(match[2] || match[1]));
+  }
+  const presentDefinitions = new Set(
+    contentLines.flatMap((line) => {
       const definition = /^\[([^\]]+)\]:\s+\S/.exec(line);
-      return definition && referencedLabels.has(normalizeReferenceLabel(definition[1]));
-    });
-    contentLines = referencedDefinitions.length
-      ? [...mainLines, "", ...referencedDefinitions]
-      : mainLines;
+      return definition ? [normalizeReferenceLabel(definition[1])] : [];
+    })
+  );
+  const definitionLines = changelog.replace(/<!--[^]*?-->/g, "").split(/\r?\n/);
+  const referencedDefinitions = definitionLines.filter((line) => {
+    const definition = /^\[([^\]]+)\]:\s+\S/.exec(line);
+    if (!definition) return false;
+    const label = normalizeReferenceLabel(definition[1]);
+    if (!referencedLabels.has(label) || presentDefinitions.has(label)) return false;
+    presentDefinitions.add(label);
+    return true;
+  });
+  if (referencedDefinitions.length > 0) {
+    while (contentLines.at(-1) === "") contentLines.pop();
+    contentLines = [...contentLines, "", ...referencedDefinitions];
   }
   const section = contentLines.join("\n").trim();
 
