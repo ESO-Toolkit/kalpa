@@ -520,11 +520,14 @@ fn try_install_dep(
     let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
     let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
         .map_err(|_| "download_failed")?;
-    let dep_folders =
-        installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
-
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|_| "hash_record_failed")?;
+    let dep_folders = installer::install_addon_zip_with_hashes(
+        dep_tmp.path(),
+        addons_dir,
+        dep_id,
+        &dep_info.version,
+        installer::ExtractHooks::NONE,
+    )
+    .map_err(|_| "extract_failed")?;
 
     for f in &dep_folders {
         let dep_version = read_local_version(addons_dir, f);
@@ -1101,6 +1104,7 @@ fn scan_installed_addons_blocking(
     addons_dir: &Path,
     cache_dir: &Path,
 ) -> Result<Vec<AddonManifest>, String> {
+    let _transaction = crate::install_txn::lock_and_recover(addons_dir)?;
     let entries =
         fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
 
@@ -1121,6 +1125,9 @@ fn scan_installed_addons_blocking(
             Some(n) => n.to_string(),
             None => continue,
         };
+        if crate::installer::is_reserved_state_folder(&name) {
+            continue;
+        }
         let is_disabled = name.ends_with(".disabled");
         let base_name = if is_disabled {
             name.strip_suffix(".disabled").unwrap_or(&name).to_string()
@@ -1417,13 +1424,12 @@ fn install_addon_blocking(
     esoui_version: &str,
     dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
-    let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
-
-    file_hashes::record_hashes_for_folders(
+    let installed_folders = installer::install_addon_zip_with_hashes(
+        tmp_file.path(),
         addons_dir,
-        &installed_folders,
         esoui_id,
         esoui_version,
+        installer::ExtractHooks::NONE,
     )?;
 
     let mut store = metadata::load_metadata(addons_dir);
@@ -1468,6 +1474,7 @@ pub async fn remove_addon(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        crate::install_txn::recover_staging(&addons_dir)?;
 
         // Remove both the enabled and disabled copies if they exist.
         // If only one exists, remove that one. Handles the edge case where
@@ -1505,6 +1512,7 @@ pub fn disable_addon(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
     let src = addons_dir.join(&folder_name);
     if !src.is_dir() {
         return Err(format!("Addon folder not found: {folder_name}"));
@@ -1524,6 +1532,7 @@ pub fn enable_addon(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
     let src = addons_dir.join(format!("{folder_name}.disabled"));
     if !src.is_dir() {
         return Err(format!("Disabled addon folder not found: {folder_name}"));
@@ -1583,11 +1592,14 @@ fn install_dependency_blocking(
     // Surface the real extraction error (installer already explains the common
     // Controlled Folder Access / permission case with fix steps) rather than a
     // generic "extract_failed" the user can't act on.
-    let dep_folders = installer::extract_addon_zip(dep_tmp.path(), addons_dir)
-        .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
-
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
+    let dep_folders = installer::install_addon_zip_with_hashes(
+        dep_tmp.path(),
+        addons_dir,
+        dep_id,
+        &dep_info.version,
+        installer::ExtractHooks::NONE,
+    )
+    .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
     let mut store = metadata::load_metadata(addons_dir);
     for f in &dep_folders {
@@ -2046,16 +2058,18 @@ fn update_addon_blocking(
     hooks: installer::ExtractHooks,
     dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
-    // Extract the downloaded ZIP
-    let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
-
     // Store the API version (from filelist.json) when available, since
     // check_for_updates compares against the API version. Using the
     // HTML-scraped version here caused perpetual "update available" when
     // the two sources returned slightly different version strings.
     let version = api_version.unwrap_or(&info.version);
-
-    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
+    let installed_folders = installer::install_addon_zip_with_hashes(
+        tmp_file.path(),
+        addons_dir,
+        esoui_id,
+        version,
+        hooks,
+    )?;
 
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
@@ -2247,7 +2261,13 @@ fn batch_extract_and_record(
                 failed.push(folder_name);
                 // Already emitted "failed" during download phase
             }
-            Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
+            Ok(dl) => match installer::install_addon_zip_with_hashes(
+                dl.tmp.path(),
+                addons_dir,
+                dl.esoui_id,
+                &dl.api_version,
+                installer::ExtractHooks::NONE,
+            ) {
                 Err(e) => {
                     let _ = app.emit(
                         "batch-update-progress",
@@ -2263,30 +2283,6 @@ fn batch_extract_and_record(
                 }
                 Ok(installed_folders) => {
                     let version = &dl.api_version;
-
-                    if let Err(e) = file_hashes::record_hashes_for_folders(
-                        addons_dir,
-                        &installed_folders,
-                        dl.esoui_id,
-                        version,
-                    ) {
-                        // Files are on disk, but the hash baseline didn't persist.
-                        // Don't record this addon in metadata — leaving metadata
-                        // pointing at a folder with no baseline would let the next
-                        // update silently clobber user edits. Surface it as failed.
-                        let _ = app.emit(
-                            "batch-update-progress",
-                            BatchUpdateProgress {
-                                folder_name: folder_name.clone(),
-                                phase: "failed".to_string(),
-                                index: dl.index,
-                                total,
-                            },
-                        );
-                        errors.insert(folder_name.clone(), e);
-                        failed.push(folder_name);
-                        continue;
-                    }
 
                     // Clean up old metadata entries for this esoui_id
                     // that aren't in the newly extracted folders (handles renames)
@@ -3071,22 +3067,6 @@ fn extract_streamed_downloads(
             .map(|p| format!("{folder_name}/{p}"))
             .collect();
 
-        let extract_result = if skip_files.is_empty() {
-            installer::extract_addon_zip(dl.zip.path(), addons_dir)
-        } else {
-            installer::extract_addon_zip_selective(dl.zip.path(), addons_dir, &skip_files)
-        };
-
-        let installed_folders = match extract_result {
-            Ok(folders) => folders,
-            Err(e) => {
-                emit_phase(&folder_name, "failed", index);
-                errors.insert(folder_name.clone(), e);
-                failed.push(folder_name);
-                continue;
-            }
-        };
-
         // For kept files, store the upstream hash as the new baseline so the
         // user's edit stays detectable on the next update. The ZIP hashes were
         // already computed for the conflict report above — reuse them here
@@ -3107,21 +3087,25 @@ fn extract_streamed_downloads(
         // don't write metadata for this addon: a folder tracked in metadata but
         // missing its hash baseline would let the next update silently overwrite
         // user edits. Surface it as a failed addon instead.
-        if let Err(e) = file_hashes::record_hashes_with_zip_baseline(
-            addons_dir,
+        let empty_overrides = HashMap::new();
+        let installed_folders = match installer::install_addon_zip_selective_with_hashes(
             dl.zip.path(),
-            &installed_folders,
-            &folder_name,
-            &zip_hashes,
+            addons_dir,
+            &skip_files,
+            installer::ExtractHooks::NONE,
             dl.esoui_id,
             &dl.api_version,
-            hash_overrides.as_ref(),
+            &folder_name,
+            hash_overrides.as_ref().unwrap_or(&empty_overrides),
         ) {
-            emit_phase(&folder_name, "failed", index);
-            errors.insert(folder_name.clone(), e);
-            failed.push(folder_name);
-            continue;
-        }
+            Ok(folders) => folders,
+            Err(e) => {
+                emit_phase(&folder_name, "failed", index);
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
+                continue;
+            }
+        };
 
         // Drop stale metadata entries for this esoui_id whose folders were
         // renamed/removed by the new release.
@@ -3394,9 +3378,9 @@ fn update_with_decisions_inner(
     // detection (stored on the pending update) so we don't re-decompress and
     // re-hash the whole archive again here — the dominant cost on many-file
     // addons. Fall back to hashing it if a pending entry predates that field.
-    // This map becomes the new baseline after extraction (reused by
-    // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
-    // "keep_mine" files so the user's edit stays detectable on the next update.
+    // This map becomes the staged transaction's new baseline and supplies the
+    // upstream hashes for kept "keep_mine" files so the user's edit stays
+    // detectable on the next update.
     let zip_hashes = if pu.zip_hashes.is_empty() {
         Arc::new(file_hashes::hash_zip_entries(
             &pu.zip_path,
@@ -3472,25 +3456,16 @@ fn update_with_decisions_inner(
     };
 
     // Extract with selective skipping (cancellable, progress-reporting)
-    let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip_with(&pu.zip_path, addons_dir, hooks)?
-    } else {
-        installer::extract_addon_zip_selective_with(&pu.zip_path, addons_dir, &skip_files, hooks)?
-    };
-
-    // Record the baseline from the ZIP hash map (plus a disk pass over only
-    // the files the ZIP didn't provide), rather than re-hashing the folder.
-    // Fail the update if it can't persist: saving metadata without a hash
-    // baseline would let the next update silently overwrite the user's edits.
-    file_hashes::record_hashes_with_zip_baseline(
-        addons_dir,
+    let empty_overrides = HashMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes(
         &pu.zip_path,
-        &installed_folders,
-        &pu.folder_name,
-        &zip_hashes,
+        addons_dir,
+        &skip_files,
+        hooks,
         pu.esoui_id,
         &pu.update_version,
-        hash_overrides.as_ref(),
+        &pu.folder_name,
+        hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
     // Update metadata
@@ -4123,6 +4098,7 @@ pub async fn batch_remove_addons(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        crate::install_txn::recover_staging(&addons_dir)?;
 
         let mut store = metadata::load_metadata(&addons_dir);
         let mut removed: Vec<String> = Vec::new();
@@ -4463,28 +4439,18 @@ fn import_extract_and_record(
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
             }
-            Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
+            Ok(dl) => match installer::install_addon_zip_with_hashes(
+                dl.tmp.path(),
+                addons_dir,
+                dl.esoui_id,
+                &dl.info.version,
+                installer::ExtractHooks::NONE,
+            ) {
                 Err(e) => {
                     errors.insert(folder_name.clone(), e);
                     failed.push(folder_name);
                 }
                 Ok(folders) => {
-                    // Record the modification baseline before tracking the install,
-                    // so the next update can detect user edits instead of silently
-                    // overwriting them. Treat a baseline failure as a failed import
-                    // rather than leaving metadata pointing at a folder with no
-                    // baseline (mirrors install_addon_blocking / try_install_dep).
-                    if let Err(e) = file_hashes::record_hashes_for_folders(
-                        addons_dir,
-                        &folders,
-                        dl.esoui_id,
-                        &dl.info.version,
-                    ) {
-                        errors.insert(folder_name.clone(), e);
-                        failed.push(folder_name);
-                        continue;
-                    }
-
                     record_installed_folders(
                         &mut store,
                         addons_dir,
@@ -4680,7 +4646,13 @@ pub async fn batch_install_pack_addons(
                             total,
                         },
                     );
-                    match installer::extract_addon_zip(dl.tmp.path(), &addons_dir) {
+                    match installer::install_addon_zip_with_hashes(
+                        dl.tmp.path(),
+                        &addons_dir,
+                        dl.esoui_id,
+                        &dl.info.version,
+                        installer::ExtractHooks::NONE,
+                    ) {
                         Err(e) => {
                             errors.insert(dl.esoui_id, e);
                             failed.push(dl.esoui_id);
@@ -4696,35 +4668,6 @@ pub async fn batch_install_pack_addons(
                             );
                         }
                         Ok(folders) => {
-                            // Record the modification baseline BEFORE tracking the
-                            // install in metadata. Without it, the next update sees
-                            // stored=None, treats every file as unmodified, and would
-                            // silently overwrite the user's edits — the exact failure
-                            // the hash system prevents. If the baseline can't persist,
-                            // treat the addon as failed rather than leaving metadata
-                            // pointing at a folder with no baseline (mirrors
-                            // install_addon_blocking and try_install_dep).
-                            if let Err(e) = file_hashes::record_hashes_for_folders(
-                                &addons_dir,
-                                &folders,
-                                dl.esoui_id,
-                                &dl.info.version,
-                            ) {
-                                errors.insert(dl.esoui_id, e);
-                                failed.push(dl.esoui_id);
-                                let _ = app.emit(
-                                    "pack-install-progress",
-                                    PackInstallProgress {
-                                        esoui_id: dl.esoui_id,
-                                        label: dl.label.clone(),
-                                        phase: "failed".to_string(),
-                                        index,
-                                        total,
-                                    },
-                                );
-                                continue;
-                            }
-
                             record_installed_folders(
                                 &mut store,
                                 &addons_dir,
@@ -6202,8 +6145,11 @@ pub async fn activate_profile(
                 .ok_or_else(|| format!("Profile '{profile_name}' not found."))?
         };
 
+        let _addon_transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
+
         // Unlocked: the renames take seconds, and holding the lock across them
-        // would freeze every other profile command for the duration.
+        // would freeze every other profile command for the duration. The
+        // AddOns transaction lock remains held so installs cannot race them.
         let result = apply_profile(&addons_dir, &profile);
 
         // Re-load rather than writing the pre-apply snapshot back: a profile
@@ -7420,9 +7366,12 @@ pub async fn restore_snapshot(
 ) -> Result<u32, String> {
     validate_name(&snapshot_id)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || safe_migration::restore_snapshot(&addons_dir, &snapshot_id))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
+        safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]

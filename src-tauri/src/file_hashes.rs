@@ -289,6 +289,7 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
 /// `hash_zip_entries` still hashes but `extract_addon_zip*` does not write — is
 /// therefore never recorded, matching `compute_addon_hashes` and avoiding a
 /// spurious "file deleted" flag on the next modification scan.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn compute_baseline_with_zip(
     addon_path: &Path,
     zip_hashes: &HashMap<String, String>,
@@ -477,6 +478,7 @@ pub fn detect_modifications(addons_dir: &Path, folder_name: &str) -> Result<Vec<
 /// remaining folders are still attempted first. A missing/stale manifest is
 /// silent-data-loss territory (the next update would see no baseline and treat
 /// user edits as absent), so callers should surface this rather than ignore it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn record_hashes_for_folders(
     addons_dir: &Path,
     installed_folders: &[String],
@@ -497,6 +499,7 @@ pub fn record_hashes_for_folders(
 ///
 /// Every folder is attempted; the first per-folder failure is reported via the
 /// returned `Err` (later folders still get their manifests written).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn record_hashes_for_folders_with_overrides(
     addons_dir: &Path,
     installed_folders: &[String],
@@ -521,6 +524,32 @@ pub fn record_hashes_for_folders_with_overrides(
     })
 }
 
+/// Build hash manifests from a staged addon tree without publishing them.
+/// The installer serializes these into its transaction and promotes them only
+/// after every addon folder has been swapped successfully.
+pub(crate) fn build_hash_manifests_for_folders(
+    staged_addons_dir: &Path,
+    installed_folders: &[String],
+    esoui_id: u32,
+    version: &str,
+    hash_overrides: Option<&HashMap<String, String>>,
+) -> Result<Vec<HashManifest>, String> {
+    let timestamp = manifest_timestamp();
+    let mut manifests = Vec::with_capacity(installed_folders.len());
+    for folder in installed_folders {
+        let files = compute_addon_hashes(&staged_addons_dir.join(folder))?;
+        manifests.push(build_folder_manifest(
+            folder,
+            files,
+            esoui_id,
+            version,
+            &timestamp,
+            hash_overrides,
+        ));
+    }
+    Ok(manifests)
+}
+
 /// Record hash baselines after a conflict-aware install/update, reusing an
 /// already-computed ZIP hash map instead of re-hashing each folder from disk.
 ///
@@ -542,6 +571,7 @@ pub fn record_hashes_for_folders_with_overrides(
 /// caller can fail the update instead of leaving metadata pointing at a folder
 /// with no hash baseline.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn record_hashes_with_zip_baseline(
     addons_dir: &Path,
     zip_path: &Path,
@@ -595,6 +625,7 @@ pub fn record_hashes_with_zip_baseline(
 /// Run `record` for every folder, attempting all of them and returning the first
 /// error encountered (logging each). Centralizes the "attempt all, report any
 /// failure" policy both record paths share.
+#[cfg_attr(not(test), allow(dead_code))]
 fn record_each_folder<F>(installed_folders: &[String], mut record: F) -> Result<(), String>
 where
     F: FnMut(&str) -> Result<(), String>,
@@ -628,15 +659,30 @@ fn manifest_timestamp() -> String {
 /// folder's manifest. Shared by the disk-only and ZIP-baseline record paths so
 /// they produce byte-identical manifests for the same `files` map. Returns the
 /// `save_hash_manifest` error so callers can treat a failed write as fatal.
+#[cfg_attr(not(test), allow(dead_code))]
 fn write_folder_manifest(
     addons_dir: &Path,
+    folder: &str,
+    files: HashMap<String, String>,
+    esoui_id: u32,
+    version: &str,
+    timestamp: &str,
+    hash_overrides: Option<&HashMap<String, String>>,
+) -> Result<(), String> {
+    let manifest =
+        build_folder_manifest(folder, files, esoui_id, version, timestamp, hash_overrides);
+
+    save_hash_manifest(addons_dir, &manifest)
+}
+
+fn build_folder_manifest(
     folder: &str,
     mut files: HashMap<String, String>,
     esoui_id: u32,
     version: &str,
     timestamp: &str,
     hash_overrides: Option<&HashMap<String, String>>,
-) -> Result<(), String> {
+) -> HashManifest {
     // For kept files, record the upstream ZIP hash as the baseline so the user's
     // change stays detectable on the next update. This is inserted
     // UNCONDITIONALLY: a kept file the user *deleted* (auto-kept because upstream
@@ -659,7 +705,7 @@ fn write_folder_manifest(
         None => Vec::new(),
     };
 
-    let manifest = HashManifest {
+    HashManifest {
         addon_folder: folder.to_string(),
         esoui_ids: vec![esoui_id],
         recorded_at: timestamp.to_string(),
@@ -667,9 +713,7 @@ fn write_folder_manifest(
         files,
         modified_files,
         ..Default::default()
-    };
-
-    save_hash_manifest(addons_dir, &manifest)
+    }
 }
 
 #[cfg(test)]
