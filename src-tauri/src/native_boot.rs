@@ -962,6 +962,65 @@ mod tests {
         assert!(child.try_wait().unwrap().is_some());
     }
 
+    /// Cancellation arriving *after* the parent released authority and the
+    /// child took the lock. `pre_ready_cancellation_*` covers only the half
+    /// where nothing has been handed over yet. Here the child is a real
+    /// process genuinely holding the OS lock, so the only thing that can free
+    /// it is the kernel reaping the terminated process — which is exactly what
+    /// the parent must be able to rely on before it reclaims.
+    #[test]
+    fn post_acquire_cancellation_reaps_the_child_and_frees_the_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        prepare(&state_dir, "cancel-after-acquire").unwrap();
+
+        // The WebView parent owns authority until the child proves ready.
+        let parent = match try_claim_authority(&state_dir, &webview_launch_id()).unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        let mut child =
+            spawn_protocol_child(&state_dir, "cancel-after-acquire", "ready-acquire-hold");
+
+        let ready = wait_for_ready(
+            &state_dir,
+            "cancel-after-acquire",
+            Duration::from_secs(10),
+            || {
+                Ok(if child.try_wait().unwrap().is_some() {
+                    ChildState::Exited
+                } else {
+                    ChildState::Running
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(ready, WaitOutcome::Ready);
+
+        // Release, and let the child actually take the lock.
+        drop(parent);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !acquired_matches(&state_dir, "cancel-after-acquire") && Instant::now() < deadline {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            acquired_matches(&state_dir, "cancel-after-acquire"),
+            "child never proved it took the authority lock"
+        );
+        assert!(live_native_authority_exists(&state_dir));
+
+        // Now cancel: the child is holding the lock and must be reaped anyway.
+        terminate_and_reap_child(&mut child, Duration::from_secs(5)).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
+
+        // The reap is what makes the reclaim possible; assert the real thing
+        // the parent depends on rather than just "the process is gone".
+        assert!(!live_native_authority_exists(&state_dir));
+        let reclaimed = claim_webview_after_shutdown(&state_dir, Duration::from_secs(10)).unwrap();
+        assert!(webview_authority_is_active(&state_dir));
+        drop(reclaimed);
+    }
+
     #[test]
     fn pre_ready_cancellation_terminates_and_reaps_spawned_child() {
         let root = tempfile::tempdir().unwrap();

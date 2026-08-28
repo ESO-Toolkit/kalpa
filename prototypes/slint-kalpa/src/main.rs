@@ -18436,8 +18436,22 @@ fn return_to_webview_shell(
                 format!("Failed while waiting for WebView UI authority after readiness: {error}")
             }
         };
-        let guard = reclaimed
-            .map_err(|error| format!("{failure} Native authority recovery failed: {error}"))?;
+        let guard = match reclaimed {
+            Ok(guard) => guard,
+            Err(error) => {
+                // Same rule the forward-handoff child follows: a shell that
+                // cannot hold UI authority must not keep rendering. Staying up
+                // leaves the lock free, so the next launch spawns a second
+                // sidecar and both write. The shutdown timer is keyed on the
+                // guard's launch ID too, so an unauthoritative shell would not
+                // even hear a later release request.
+                eprintln!(
+                    "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
+                );
+                let _ = slint::quit_event_loop();
+                return Err(format!("{failure} Native authority recovery failed: {error}"));
+            }
+        };
         *native_authority()
             .lock()
             .map_err(|_| "native authority state is unavailable".to_string())? = Some(guard);

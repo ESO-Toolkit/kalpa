@@ -9980,6 +9980,14 @@ static WEBVIEW_AUTHORITY: OnceLock<Mutex<Option<crate::native_boot::AuthorityGua
     OnceLock::new();
 static NATIVE_HANDOFF_ACTIVE: AtomicBool = AtomicBool::new(false);
 static NATIVE_HANDOFF_CANCELLED: AtomicBool = AtomicBool::new(false);
+/// Set when this process released UI authority and could not take it back.
+///
+/// Staying alive in that state is not merely "unauthoritative": the lock is the
+/// only thing that stops the next launch from spawning a sidecar, and a sidecar
+/// that finds the lock free claims it and starts writing. Two independent
+/// writers is exactly what the handshake exists to prevent, so this is fatal —
+/// the same rule the sidecar's own authority failures already follow.
+static WEBVIEW_AUTHORITY_LOST: AtomicBool = AtomicBool::new(false);
 
 fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGuard>> {
     WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
@@ -10030,12 +10038,30 @@ fn reclaim_webview_authority(state_dir: &Path) -> Result<(), String> {
     if authority.is_some() {
         return Ok(());
     }
-    let guard = crate::native_boot::claim_webview_after_shutdown(
+    let guard = match crate::native_boot::claim_webview_after_shutdown(
         state_dir,
         crate::native_boot::READY_TIMEOUT,
-    )?;
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            // The reclaim polls for the whole timeout, so failing means either
+            // another process held the lock for that entire window — it is the
+            // UI now, not this one — or the lock itself is unusable. Continuing
+            // to render and write either way is the two-writer bug.
+            WEBVIEW_AUTHORITY_LOST.store(true, Ordering::SeqCst);
+            eprintln!(
+                "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
+            );
+            return Err(error);
+        }
+    };
     *authority = Some(guard);
     Ok(())
+}
+
+/// Whether this process released UI authority and failed to take it back.
+pub(crate) fn webview_authority_was_lost() -> bool {
+    WEBVIEW_AUTHORITY_LOST.load(Ordering::SeqCst)
 }
 
 /// Whether this process currently holds the cross-process UI authority lock.
@@ -10786,6 +10812,12 @@ pub async fn launch_native_performance_mode(
         .and_then(|result| result);
     if let Err(error) = launch_result {
         abort_native_handoff();
+        if webview_authority_was_lost() {
+            // Returning the error alone would leave a visible, lock-less window
+            // that the next launch would happily spawn a sidecar alongside.
+            eprintln!("[native-shell] exiting: cannot continue without UI authority ({error})");
+            app.exit(1);
+        }
         return Err(error);
     }
 
