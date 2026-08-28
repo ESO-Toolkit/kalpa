@@ -610,7 +610,10 @@ export function UploaderWorkspace({
     // fails; an OS dialog error must surface, not silently no-op.
     try {
       const picked = await openDialog({ directory: true, title: "Select your ESO Logs folder" });
-      if (typeof picked === "string" && picked !== logsDir) {
+      // The dialog can remain open while another detection/refresh changes the
+      // active folder. Read the ref after it resolves so selecting the folder
+      // that is already current does not restart its in-flight listing.
+      if (typeof picked === "string" && picked !== logsDirRef.current) {
         clearSelection(); // switching folders invalidates the current selection
         setActiveLogsDir(picked);
         setLogs([]);

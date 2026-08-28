@@ -172,6 +172,56 @@ describe("UploaderWorkspace log-directory sequencing", () => {
     }
   );
 
+  it("does not restart the current directory when a picker resolves after refresh", async () => {
+    const picker = deferred<string>();
+    const refreshedDetection: LogPathDetection = { ...detection, path: "B" };
+    let detectionCalls = 0;
+
+    mocks.open.mockReturnValue(picker.promise);
+    mocks.invoke.mockImplementation((command: string, args?: { logsDir?: string }) => {
+      if (command === "uploader_detect_path") {
+        detectionCalls++;
+        return Promise.resolve(detectionCalls === 1 ? detection : refreshedDetection);
+      }
+      if (command === "uploader_transport_info") return Promise.resolve(transport);
+      if (command === "uploader_list_logs" && args?.logsDir === "A") {
+        return Promise.resolve([log("A-file")]);
+      }
+      if (command === "uploader_list_logs" && args?.logsDir === "B") {
+        return Promise.resolve([log("B-file")]);
+      }
+      if (command === "uploader_list_history") return Promise.resolve([]);
+      if (command === "uploader_has_session") return Promise.resolve(false);
+      if (command === "settings_tainted") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+
+    render(
+      <UploaderWorkspace
+        open
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    await screen.findByText("A-file.log");
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder" }));
+
+    // Change the active directory while the OS dialog is still unresolved.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh logs" }));
+    await screen.findByText("B-file.log");
+
+    picker.resolve("B");
+    await waitFor(() => expect(screen.getByTitle("B")).toBeInTheDocument());
+
+    const bListings = mocks.invoke.mock.calls.filter(
+      ([command, args]) => command === "uploader_list_logs" && args?.logsDir === "B"
+    );
+    expect(bListings).toHaveLength(1);
+  });
+
   it.each(["resolve", "reject"] as const)(
     "does not let late initial detection %s replace or report over a manual directory",
     async (settlement) => {
