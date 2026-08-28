@@ -10038,6 +10038,21 @@ fn reclaim_webview_authority(state_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether this process currently holds the cross-process UI authority lock.
+///
+/// A live WebView normally always holds it: startup fails closed if
+/// `claim_webview_authority` cannot, and a reverse-handoff child claims it in
+/// `complete_webview_handoff`. It is false only between releasing authority to
+/// a native child and either that child proving acquisition or this process
+/// reclaiming. Acting on a user activation in that window is what would put two
+/// writers on the same state, so the activation path gates on this.
+pub(crate) fn holds_webview_authority() -> bool {
+    webview_authority()
+        .lock()
+        .map(|authority| authority.is_some())
+        .unwrap_or(false)
+}
+
 /// Preserve an activation in the still-live WebView instead of letting an
 /// in-flight native handoff exit underneath it.
 pub(crate) fn cancel_native_handoff_for_activation(app: &tauri::AppHandle) -> Result<bool, String> {
@@ -10111,6 +10126,15 @@ pub(crate) fn complete_webview_handoff(app: &tauri::AppHandle) -> Result<(), Str
     else {
         return Ok(());
     };
+    // This process claims authority under the handoff ID rather than minting its
+    // own, so the ID must classify as a WebView owner. Refusing here fails closed
+    // to the still-live native shell, which reclaims on our exit; proceeding
+    // would publish an active record that reads as native.
+    if !crate::native_boot::is_webview_launch_id(&launch_id) {
+        return Err(format!(
+            "WebView handoff launch ID is not WebView-shaped: {launch_id}"
+        ));
+    }
     let state_dir = app
         .path()
         .app_data_dir()
@@ -10682,6 +10706,7 @@ pub fn try_launch_native_performance_mode_on_startup(
                 revert_performance_mode_to_webview(&settings_path);
                 let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
                 let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+                let _ = fs::remove_file(crate::native_boot::acquired_path(&app_data_dir));
                 let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
                 drop(stale_guard);
                 eprintln!(
@@ -10731,6 +10756,7 @@ pub fn try_launch_native_performance_mode_on_startup(
         revert_performance_mode_to_webview(&settings_path);
         let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
         let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::acquired_path(&app_data_dir));
         let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
         return Err(error);
     }
@@ -12959,6 +12985,49 @@ fn native_launch_lock_wait_observes_handoff_cancellation() {
         Err(error) => error,
     };
     assert!(error.contains("cancelled"));
+}
+
+/// The single-instance activation path reveals the window and emits the deep
+/// link only when this process holds UI authority. Releasing authority to a
+/// native child and failing to reclaim leaves the WebView alive but not the
+/// writer; acting on an activation there is what puts two writers on the same
+/// state. Pin the predicate that gate reads.
+#[test]
+fn released_authority_is_reported_as_not_held_until_reclaimed() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Establish authority the way startup does.
+    let guard = match crate::native_boot::try_claim_authority(
+        dir.path(),
+        &crate::native_boot::webview_launch_id(),
+    )
+    .unwrap()
+    {
+        crate::native_boot::AuthorityClaim::Held(guard) => guard,
+        crate::native_boot::AuthorityClaim::AlreadyHeld => {
+            panic!("fresh directory was already locked")
+        }
+    };
+    *webview_authority().lock().unwrap() = Some(guard);
+    assert!(holds_webview_authority());
+
+    // The handoff releases it for the child to take.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    commit_native_handoff_authority_release().unwrap();
+    assert!(
+        !holds_webview_authority(),
+        "a WebView that released authority must not claim to hold it"
+    );
+
+    // Reclaiming restores it, and reclaiming again is a no-op.
+    reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+    reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+
+    *webview_authority().lock().unwrap() = None;
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
 }
 
 /// Both handoff atomics are process-global, so every case lives in one test.

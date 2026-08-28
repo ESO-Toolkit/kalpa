@@ -21,6 +21,12 @@ pub(crate) const ACQUIRED_FILE: &str = "native-boot.acquired";
 pub(crate) const LAUNCH_ID_ENV: &str = "KALPA_NATIVE_LAUNCH_ID";
 pub(crate) const WEBVIEW_LAUNCH_ID_ENV: &str = "KALPA_WEBVIEW_LAUNCH_ID";
 pub(crate) const ACTIVE_FILE: &str = "native-shell.active";
+/// Owner kind is carried in the launch ID itself, because `native-shell.active`
+/// is the only record a successor can read without holding the lock. Every
+/// WebView-role mint site must go through `webview_launch_id`: an unprefixed ID
+/// makes the WebView read as a *native* owner to `native_authority_is_active`,
+/// which is how a reverse handoff could later exit both processes at once.
+pub(crate) const WEBVIEW_LAUNCH_PREFIX: &str = "webview-";
 pub(crate) const SHUTDOWN_FILE: &str = "native-shell.shutdown";
 const AUTHORITY_FILE: &str = "native-shell.authority";
 /// A boot record is republished from a fresh staging path on failure; see
@@ -119,6 +125,16 @@ pub(crate) fn new_launch_id() -> String {
     format!("{:016x}{:016x}", first.finish(), second.finish())
 }
 
+/// Mint a launch ID for a WebView-role owner. Never build one by hand.
+pub(crate) fn webview_launch_id() -> String {
+    format!("{WEBVIEW_LAUNCH_PREFIX}{}", new_launch_id())
+}
+
+/// Classify an owner from its launch ID alone.
+pub(crate) fn is_webview_launch_id(launch_id: &str) -> bool {
+    launch_id.starts_with(WEBVIEW_LAUNCH_PREFIX)
+}
+
 pub(crate) fn try_claim_authority(
     state_dir: &Path,
     launch_id: &str,
@@ -172,14 +188,14 @@ pub(crate) fn request_active_shutdown(state_dir: &Path) -> Result<bool, String> 
 #[allow(dead_code)] // Used by the path-including Slint crate.
 pub(crate) fn native_authority_is_active(state_dir: &Path) -> bool {
     read_record(&state_dir.join(ACTIVE_FILE))
-        .map(|record| !record.launch_id.starts_with("webview-"))
+        .map(|record| !is_webview_launch_id(&record.launch_id))
         .unwrap_or(false)
 }
 
 #[allow(dead_code)] // Used by the path-including Slint crate.
 pub(crate) fn webview_authority_is_active(state_dir: &Path) -> bool {
     read_record(&state_dir.join(ACTIVE_FILE))
-        .map(|record| record.launch_id.starts_with("webview-"))
+        .map(|record| is_webview_launch_id(&record.launch_id))
         .unwrap_or(false)
 }
 
@@ -222,7 +238,7 @@ pub(crate) fn claim_webview_after_shutdown(
     state_dir: &Path,
     timeout: Duration,
 ) -> Result<AuthorityGuard, String> {
-    let launch_id = format!("webview-{}", new_launch_id());
+    let launch_id = webview_launch_id();
     let deadline = Instant::now() + timeout;
     let mut requested = false;
     let mut last_request = None;
@@ -582,6 +598,40 @@ mod tests {
             .unwrap(),
             WaitOutcome::ChildExited
         );
+    }
+
+    /// `live_native_authority_exists` is what the parent accepts a duplicate
+    /// sidecar on. A WebView owner must never satisfy it: if it does, toggling
+    /// native mode makes the sidecar bow out to the "existing native shell"
+    /// AND the parent exit to it, leaving no window at all. Every WebView-role
+    /// mint therefore has to go through `webview_launch_id`.
+    #[test]
+    fn a_webview_owner_is_never_mistaken_for_a_live_native_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch_id = webview_launch_id();
+        assert!(is_webview_launch_id(&launch_id));
+        // A raw ID is native-shaped, which is exactly why WebView-role callers
+        // must not mint one.
+        assert!(!is_webview_launch_id(&new_launch_id()));
+
+        let guard = match try_claim_authority(dir.path(), &launch_id).unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("fresh directory was already locked"),
+        };
+        assert!(webview_authority_is_active(dir.path()));
+        assert!(!native_authority_is_active(dir.path()));
+        assert!(!live_native_authority_exists(dir.path()));
+        drop(guard);
+
+        // The same claim under a raw ID is what the bug produced: a WebView
+        // process advertising itself as a live native owner.
+        let raw = new_launch_id();
+        let guard = match try_claim_authority(dir.path(), &raw).unwrap() {
+            AuthorityClaim::Held(guard) => guard,
+            AuthorityClaim::AlreadyHeld => panic!("released directory was still locked"),
+        };
+        assert!(live_native_authority_exists(dir.path()));
+        drop(guard);
     }
 
     #[test]

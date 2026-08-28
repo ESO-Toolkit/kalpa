@@ -541,6 +541,17 @@ pub fn run() {
             if let Err(error) = commands::cancel_native_handoff_for_activation(app) {
                 eprintln!("Failed to preserve activation during native handoff: {error}");
             }
+            // Same rule as the reverse-handoff branch above, for the same
+            // reason: never reveal or emit without UI authority. Cancellation
+            // can fail (the native child holds or wedges the lock, or the
+            // reclaim timed out), and revealing anyway would put this WebView
+            // and a live sidecar on the same state as two independent writers.
+            if !commands::holds_webview_authority() {
+                eprintln!(
+                    "[native-shell] ignoring activation: this WebView does not hold UI authority"
+                );
+                return;
+            }
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
                 webview_power::on_shown(app); // resume before showing (flash-free)

@@ -18294,6 +18294,19 @@ fn open_path(path: &Path) {
     }
 }
 
+/// Mint the reverse-handoff launch ID and publish its pending record.
+///
+/// Extracted so the ID's shape is testable. The child claims authority under
+/// THIS ID, so it is also what `native_authority_is_active` classifies the
+/// resulting owner by: an unprefixed ID makes the WebView read as a *native*
+/// owner, and a later native toggle then sees a "live native owner", exits the
+/// WebView, and leaves the user with no window at all.
+fn prepare_webview_handoff(state_dir: &Path) -> Result<String, String> {
+    let launch_id = native_boot::webview_launch_id();
+    native_boot::prepare(state_dir, &launch_id)?;
+    Ok(launch_id)
+}
+
 fn return_to_webview_shell(
     start_app_update: bool,
     start_log_uploader: bool,
@@ -18322,8 +18335,7 @@ fn return_to_webview_shell(
         },
     )
     .map_err(|error| format!("Could not serialize WebView handoff: {error}"))?;
-    let launch_id = native_boot::new_launch_id();
-    native_boot::prepare(&state_dir, &launch_id)?;
+    let launch_id = prepare_webview_handoff(&state_dir)?;
 
     let mut command = std::process::Command::new(&exe);
     // Children inherit this process's environment, and THIS process may itself
@@ -24267,5 +24279,35 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title.as_str(), "Dolgubon's Lazy Writ Crafter");
         assert_eq!(entries[0].rank, 1);
+    }
+
+    /// The reverse handoff hands its launch ID to the WebView child, which
+    /// claims UI authority under it. `native-shell.active` is therefore
+    /// classified by that ID, so minting it without the WebView prefix makes
+    /// the WebView read as a *native* owner. A later "turn native mode on"
+    /// then finds a "live native owner", exits the WebView, and leaves the
+    /// user with no window. Guard the mint, not just the classifier.
+    #[test]
+    fn reverse_handoff_mints_a_webview_shaped_launch_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path();
+
+        let launch_id = prepare_webview_handoff(state_dir).expect("prepare handoff");
+
+        assert!(
+            native_boot::is_webview_launch_id(&launch_id),
+            "reverse-handoff launch ID must be WebView-shaped, got {launch_id}"
+        );
+        assert!(native_boot::has_pending(state_dir));
+
+        // Claim under exactly the ID the child would use, then assert the
+        // owner classifies as WebView and never as a live native owner.
+        let _guard = match native_boot::try_claim_authority(state_dir, &launch_id).unwrap() {
+            native_boot::AuthorityClaim::Held(guard) => guard,
+            native_boot::AuthorityClaim::AlreadyHeld => panic!("authority was unexpectedly held"),
+        };
+        assert!(native_boot::webview_authority_is_active(state_dir));
+        assert!(!native_boot::native_authority_is_active(state_dir));
+        assert!(!native_boot::live_native_authority_exists(state_dir));
     }
 }
