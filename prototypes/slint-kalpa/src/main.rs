@@ -784,6 +784,20 @@ type NativePendingConflictStore = Arc<Mutex<HashMap<String, NativePendingConflic
 static PENDING_NATIVE_CONFLICTS: OnceLock<NativePendingConflictStore> = OnceLock::new();
 static NATIVE_AUTHORITY: OnceLock<Mutex<Option<native_boot::AuthorityGuard>>> = OnceLock::new();
 
+/// Set when this shell released UI authority and could not take it back.
+///
+/// The event loop is already quitting at that point. Callers consult it so they
+/// do not "restore" state on the way out: the settings toggle in particular
+/// would otherwise write `performanceMode` back to native, which is both a
+/// write after authority loss and the worse recovery value - leaving it on
+/// webview means the next launch boots the WebView, whose startup claim
+/// re-requests shutdown of whatever still holds the lock.
+static NATIVE_AUTHORITY_LOST: AtomicBool = AtomicBool::new(false);
+
+fn native_authority_was_lost() -> bool {
+    NATIVE_AUTHORITY_LOST.load(Ordering::SeqCst)
+}
+
 fn native_authority() -> &'static Mutex<Option<native_boot::AuthorityGuard>> {
     NATIVE_AUTHORITY.get_or_init(|| Mutex::new(None))
 }
@@ -9121,6 +9135,15 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         match return_to_webview_shell(false, false, false, None) {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
+            }
+            Err(error) if native_authority_was_lost() => {
+                // This shell is on its way out and no longer owns the UI. Do
+                // not write `performanceMode` back to native: the value that
+                // recovers is webview, and the status message would never be
+                // rendered anyway.
+                eprintln!(
+                    "[native-shell] leaving performanceMode=webview after authority loss: {error}"
+                );
             }
             Err(error) => {
                 ui.set_settings_native_performance_mode(true);
@@ -18452,8 +18475,11 @@ fn return_to_webview_shell(
                 eprintln!(
                     "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
                 );
+                NATIVE_AUTHORITY_LOST.store(true, Ordering::SeqCst);
                 let _ = slint::quit_event_loop();
-                return Err(format!("{failure} Native authority recovery failed: {error}"));
+                return Err(format!(
+                    "{failure} Native authority recovery failed: {error}"
+                ));
             }
         };
         *native_authority()

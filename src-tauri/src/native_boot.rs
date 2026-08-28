@@ -269,13 +269,18 @@ pub(crate) fn claim_webview_after_shutdown(
     let deadline = Instant::now() + timeout;
     let mut requested = false;
     let mut last_request = None;
+    let mut last_error: Option<String> = None;
     loop {
-        match try_claim_authority(state_dir, &launch_id)? {
-            AuthorityClaim::Held(guard) => {
+        // A transient IO error on the lock file - a scanner or indexer touching
+        // app-data - must not end the wait on its first poll. Losing authority
+        // is fatal to the caller, so "could not reclaim" has to mean the whole
+        // window elapsed, not that one `open` lost a race.
+        match try_claim_authority(state_dir, &launch_id) {
+            Ok(AuthorityClaim::Held(guard)) => {
                 eprintln!("[native-shell] WebView acquired UI authority");
                 return Ok(guard);
             }
-            AuthorityClaim::AlreadyHeld => {
+            Ok(AuthorityClaim::AlreadyHeld) => {
                 // Re-read and re-target periodically: a crashed/relaunched native
                 // owner can replace the active launch ID while this WebView waits.
                 // A one-shot request would remain bound to the dead owner forever.
@@ -283,16 +288,30 @@ pub(crate) fn claim_webview_after_shutdown(
                     .map(|instant: Instant| instant.elapsed() >= Duration::from_millis(250))
                     .unwrap_or(true)
                 {
-                    requested = request_active_shutdown(state_dir)?;
+                    match request_active_shutdown(state_dir) {
+                        Ok(sent) => requested = sent,
+                        Err(error) => {
+                            eprintln!("[native-shell] shutdown request failed: {error}");
+                            last_error = Some(error);
+                        }
+                    }
                     last_request = Some(Instant::now());
                 }
             }
+            Err(error) => {
+                eprintln!("[native-shell] authority claim failed, retrying: {error}");
+                last_error = Some(error);
+            }
         }
         if Instant::now() >= deadline {
-            return Err(if requested {
-                "Timed out waiting for the native shell to release UI authority.".to_string()
-            } else {
-                "Native UI authority is held but its active record is unavailable.".to_string()
+            return Err(match last_error {
+                Some(error) => format!("Could not acquire WebView UI authority: {error}"),
+                None if requested => {
+                    "Timed out waiting for the native shell to release UI authority.".to_string()
+                }
+                None => {
+                    "Native UI authority is held but its active record is unavailable.".to_string()
+                }
             });
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -308,13 +327,25 @@ pub(crate) fn claim_after_ready_release(
     timeout: Duration,
 ) -> Result<AuthorityGuard, String> {
     let deadline = Instant::now() + timeout;
+    let mut last_error: Option<String> = None;
     loop {
-        match try_claim_authority(state_dir, launch_id)? {
-            AuthorityClaim::Held(guard) => return Ok(guard),
-            AuthorityClaim::AlreadyHeld => {}
+        // Same rule as `claim_webview_after_shutdown`: retry a transient IO
+        // error to the deadline rather than failing the whole handoff on it.
+        match try_claim_authority(state_dir, launch_id) {
+            Ok(AuthorityClaim::Held(guard)) => return Ok(guard),
+            Ok(AuthorityClaim::AlreadyHeld) => {}
+            Err(error) => {
+                eprintln!("[native-shell] authority claim failed, retrying: {error}");
+                last_error = Some(error);
+            }
         }
         if Instant::now() >= deadline {
-            return Err("Timed out waiting for the ready parent to release UI authority.".into());
+            return Err(match last_error {
+                Some(error) => format!("Could not acquire UI authority: {error}"),
+                None => {
+                    "Timed out waiting for the ready parent to release UI authority.".to_string()
+                }
+            });
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -702,6 +733,38 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(claim, AuthorityClaim::AlreadyHeld));
+    }
+
+    /// A transient IO error on the lock file must be retried, not treated as
+    /// "another process owns the UI". The caller exits the process on failure,
+    /// so a single unlucky `open` used to be enough to drop the user's window.
+    /// A directory standing where the lock file belongs makes `open` fail
+    /// deterministically; replacing it mid-wait proves the loop kept trying.
+    #[test]
+    fn a_transient_claim_error_is_retried_until_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = authority_path(dir.path());
+        fs::create_dir(&lock).unwrap();
+
+        let repair = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                fs::remove_dir(&lock).unwrap();
+            })
+        };
+
+        let started = Instant::now();
+        let guard = claim_webview_after_shutdown(dir.path(), Duration::from_secs(10)).unwrap();
+        let elapsed = started.elapsed();
+        repair.join().unwrap();
+
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "returned before the obstruction cleared: {elapsed:?}"
+        );
+        assert!(webview_authority_is_active(dir.path()));
+        drop(guard);
     }
 
     #[test]
