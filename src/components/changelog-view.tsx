@@ -1,6 +1,13 @@
 import { useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import { parseChangelog, matchInstalledEntry, type ChangelogEntry } from "@/lib/changelog";
+import {
+  parseChangelog,
+  matchInstalledEntry,
+  buildVersionDateIndex,
+  dateForEntry,
+  type ChangelogEntry,
+} from "@/lib/changelog";
+import type { ArchivedVersion } from "@/types";
 import { RichText } from "@/components/ui/rich-description";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
@@ -40,6 +47,14 @@ function splitHeader(header: string): { version: string; annotation: string | nu
   return { version: stripped.replace(/[:\s]+$/, ""), annotation: null };
 }
 
+/**
+ * ESOUI archive dates arrive as `04/23/26 01:16 PM`. The time is noise in a
+ * dense version list, so only the date is shown.
+ */
+function dateOnly(value: string): string {
+  return value.split(" ")[0] ?? value;
+}
+
 /** A micro-label in the app's uppercase caption style. */
 function Tag({ children, tone }: { children: string; tone: "primary" | "muted" }) {
   return (
@@ -59,9 +74,11 @@ interface EntryRowProps {
   defaultOpen: boolean;
   isLatest: boolean;
   isInstalled: boolean;
+  /** Release date, when ESOUI knows one. Blank rather than guessed. */
+  date?: string;
 }
 
-function EntryRow({ entry, defaultOpen, isLatest, isInstalled }: EntryRowProps) {
+function EntryRow({ entry, defaultOpen, isLatest, isInstalled, date }: EntryRowProps) {
   const { version, annotation } = useMemo(() => splitHeader(entry.header), [entry.header]);
   const hasBody = entry.body.trim().length > 0;
 
@@ -93,9 +110,9 @@ function EntryRow({ entry, defaultOpen, isLatest, isInstalled }: EntryRowProps) 
         </span>
         {isLatest && <Tag tone="primary">Latest</Tag>}
         {isInstalled && <Tag tone="muted">Installed</Tag>}
-        {annotation && (
-          <span className="ml-auto truncate pl-3 text-[11px] text-muted-foreground">
-            {annotation}
+        {(annotation ?? date) && (
+          <span className="ml-auto truncate pl-3 text-[11px] tabular-nums text-muted-foreground">
+            {annotation ?? (date ? dateOnly(date) : null)}
           </span>
         )}
       </CollapsibleTrigger>
@@ -167,6 +184,10 @@ export interface ChangelogViewProps {
   variant: "inline" | "dialog";
   /** Installed version — highlights a matching entry. Omitted in Discover. */
   installedVersion?: string;
+  /** Archived release dates from ESOUI, used to date past entries. */
+  archivedVersions?: ArchivedVersion[];
+  /** Date of the newest release (the API's lastUpdate); the archive omits it. */
+  latestDate?: string;
   /** How many entries to list before the "show all" affordance. */
   initialVisible?: number;
   className?: string;
@@ -187,12 +208,18 @@ export function ChangelogView({
   changeLog,
   variant,
   installedVersion,
+  archivedVersions,
+  latestDate,
   initialVisible,
   className,
 }: ChangelogViewProps) {
   const parsed = useMemo(() => parseChangelog(changeLog), [changeLog]);
   const visibleCount = initialVisible ?? (variant === "dialog" ? 10 : 5);
   const [showAll, setShowAll] = useState(false);
+  const dateIndex = useMemo(
+    () => buildVersionDateIndex(archivedVersions ?? []),
+    [archivedVersions]
+  );
 
   const installedIdx = useMemo(
     () => (parsed.kind === "parsed" ? matchInstalledEntry(parsed.entries, installedVersion) : -1),
@@ -238,6 +265,13 @@ export function ChangelogView({
                 defaultOpen={idx === 0 || (expandDelta && idx < delta)}
                 isLatest={idx === 0}
                 isInstalled={idx === installedIdx}
+                // The newest release is never in the archive table, so it takes
+                // the API's lastUpdate instead.
+                date={
+                  idx === 0
+                    ? (dateForEntry(entry.header, dateIndex) ?? latestDate)
+                    : dateForEntry(entry.header, dateIndex)
+                }
               />
             </div>
           ))}

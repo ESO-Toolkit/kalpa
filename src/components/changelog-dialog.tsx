@@ -100,6 +100,8 @@ export function ChangelogDialog({
               changeLog={detail.changeLog}
               variant="dialog"
               installedVersion={currentVersion}
+              archivedVersions={detail.archivedVersions}
+              latestDate={detail.updated}
             />
           ) : detail ? (
             <div className="flex flex-col items-center gap-2 rounded-xl border border-structure-06 bg-gradient-to-b from-structure-03 to-structure-01 px-4 py-8 text-center">

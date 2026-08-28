@@ -225,3 +225,41 @@ export function matchInstalledEntry(
   if (!needle) return -1;
   return entries.findIndex((entry) => normalizeVersion(entry.header).includes(needle));
 }
+
+/**
+ * Index archived release dates by normalised version, for annotating entries.
+ *
+ * Matching is exact on the normalised token, never a substring: `1.7` appearing
+ * inside `1.7.8` would otherwise stamp an entry with a different release's date,
+ * and a plausible-but-wrong date is worse than none.
+ */
+export function buildVersionDateIndex(
+  archived: Array<{ version: string; date: string }>
+): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const entry of archived) {
+    const key = normalizeVersion(entry.version);
+    if (key && !index.has(key)) index.set(key, entry.date);
+  }
+  return index;
+}
+
+/**
+ * The release date for a changelog entry, or undefined when unknown.
+ *
+ * A header can name several releases ("v104, v105", "v100, 101, 103"), so each
+ * whitespace/comma-separated token is tried and the first known one wins —
+ * that is the release the entry's notes actually shipped in.
+ */
+export function dateForEntry(header: string, index: Map<string, string>): string | undefined {
+  const direct = index.get(normalizeVersion(header));
+  if (direct) return direct;
+
+  for (const token of header.split(/[\s,;/]+/)) {
+    const key = normalizeVersion(token);
+    if (!key) continue;
+    const hit = index.get(key);
+    if (hit) return hit;
+  }
+  return undefined;
+}

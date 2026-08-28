@@ -240,6 +240,21 @@ pub struct EsouiAddonDetail {
     pub download_url: String,
     /// Cleaned version history, or empty when the author published none.
     pub change_log: String,
+    /// Upload dates for past releases, newest first, scraped from the same
+    /// fileinfo page the compatibility/created fields come from — so this
+    /// costs no extra request. Empty when the author archives nothing.
+    pub archived_versions: Vec<ArchivedVersion>,
+}
+
+/// One row of the ESOUI "Archived Files" table: a past release and the date it
+/// was uploaded. The current version is never in this table — its date is the
+/// API's `lastUpdate`, already exposed as [`EsouiAddonDetail::updated`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedVersion {
+    pub version: String,
+    /// As ESOUI renders it, e.g. `04/23/26 01:16 PM`.
+    pub date: String,
 }
 
 fn clean_description(s: &str) -> String {
@@ -390,13 +405,17 @@ fn format_epoch_millis(millis: u64) -> String {
     )
 }
 
-/// Scrape compatibility and created from the ESOUI fileinfo HTML page.
-/// Best-effort: returns empty strings on any failure.
-fn scrape_fileinfo_page(client: &reqwest::blocking::Client, id: u32) -> (String, String) {
+/// Scrape compatibility, created and the archived-version dates from the ESOUI
+/// fileinfo HTML page. Best-effort: returns empties on any failure, because a
+/// detail view without these is still useful.
+fn scrape_fileinfo_page(
+    client: &reqwest::blocking::Client,
+    id: u32,
+) -> (String, String, Vec<ArchivedVersion>) {
     let url = format!("https://www.esoui.com/downloads/fileinfo.php?id={id}");
     let body = match fetch_page(client, &url, None) {
         Ok(b) => b,
-        Err(_) => return (String::new(), String::new()),
+        Err(_) => return (String::new(), String::new(), Vec::new()),
     };
     let document = Html::parse_document(&body);
 
@@ -436,7 +455,59 @@ fn scrape_fileinfo_page(client: &reqwest::blocking::Client, id: u32) -> (String,
         i += 1;
     }
 
-    (compatibility, created)
+    (compatibility, created, scrape_archived_versions(&document))
+}
+
+/// Parse the "Archived Files" table into version/date pairs.
+///
+/// Anchored on the `#other_t` section that wraps the table, with a shape check
+/// on every row (five cells, a date-looking last cell) so a markup change
+/// degrades to "no dates" rather than to rows of nonsense.
+fn scrape_archived_versions(document: &Html) -> Vec<ArchivedVersion> {
+    let Ok(row_sel) = Selector::parse("div#other_t tr") else {
+        return Vec::new();
+    };
+    let Ok(cell_sel) = Selector::parse("td") else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for row in document.select(&row_sel) {
+        let cells: Vec<String> = row
+            .select(&cell_sel)
+            .map(|c| c.text().collect::<String>().trim().to_string())
+            .collect();
+
+        // File Name | Version | Size | Uploader | Date
+        if cells.len() < 5 {
+            continue;
+        }
+        let version = cells[1].trim();
+        let date = cells[4].trim();
+        if version.is_empty() || !looks_like_esoui_date(date) {
+            continue;
+        }
+        out.push(ArchivedVersion {
+            version: version.to_string(),
+            date: date.to_string(),
+        });
+    }
+    out
+}
+
+/// ESOUI renders archive dates as `MM/DD/YY HH:MM AM`. Checking the shape keeps
+/// the header row and any future column shuffle out of the results.
+fn looks_like_esoui_date(s: &str) -> bool {
+    let head = s.as_bytes();
+    head.len() >= 8
+        && head[0].is_ascii_digit()
+        && head[1].is_ascii_digit()
+        && head[2] == b'/'
+        && head[3].is_ascii_digit()
+        && head[4].is_ascii_digit()
+        && head[5] == b'/'
+        && head[6].is_ascii_digit()
+        && head[7].is_ascii_digit()
 }
 
 /// Fetch full addon details from the ESOUI JSON API.
@@ -448,7 +519,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let screenshots: Vec<String> = detail.images.into_iter().map(|img| img.image_url).collect();
     let updated = format_epoch_millis(detail.last_update);
     let change_log = clean_change_log(&detail.change_log);
-    let (compatibility, created) = scrape_fileinfo_page(client, detail.id);
+    let (compatibility, created, archived_versions) = scrape_fileinfo_page(client, detail.id);
 
     Ok(EsouiAddonDetail {
         id: detail.id,
@@ -466,6 +537,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         screenshots,
         download_url: detail.download_uri,
         change_log,
+        archived_versions,
     })
 }
 
@@ -1615,6 +1687,45 @@ mod tests {
         let result = clean_description(input);
         assert!(result.contains("В процессе разработки!"));
         assert!(result.contains("If you want to help"));
+    }
+
+    #[test]
+    fn archived_versions_parsed_from_fileinfo_table() {
+        // The shape ESOUI renders: File Name | Version | Size | Uploader | Date.
+        let html = r##"<html><body><div id="other_t">
+          <div class="title">Archived Files (2)</div>
+          <table>
+            <tr><td class="thead"><div>File Name</div></td><td class="thead"><div>Version</div></td>
+                <td class="thead"><div>Size</div></td><td class="thead"><div>Uploader</div></td>
+                <td class="thead"><div>Date</div></td></tr>
+            <tr><td><div><a href="#">AwesomeGuildStore</a></div></td><td><div>1.7.7</div></td>
+                <td><div>393kB</div></td><td><div>sirinsidiator</div></td>
+                <td><div>04/23/26 01:16 PM</div></td></tr>
+            <tr><td><div><a href="#">AwesomeGuildStore</a></div></td><td><div>1.7.6</div></td>
+                <td><div>393kB</div></td><td><div>sirinsidiator</div></td>
+                <td><div>09/06/25 11:16 AM</div></td></tr>
+          </table></div></body></html>"##;
+        let out = scrape_archived_versions(&Html::parse_document(html));
+        assert_eq!(out.len(), 2, "header row must not become an entry");
+        assert_eq!(out[0].version, "1.7.7");
+        assert_eq!(out[0].date, "04/23/26 01:16 PM");
+        assert_eq!(out[1].version, "1.7.6");
+    }
+
+    #[test]
+    fn archived_versions_empty_when_section_missing() {
+        // No #other_t: the addon archives nothing, or the markup drifted. Both
+        // must degrade to "no dates" rather than to rows of nonsense.
+        let html = "<html><body><table><tr><td>x</td></tr></table></body></html>";
+        assert!(scrape_archived_versions(&Html::parse_document(html)).is_empty());
+    }
+
+    #[test]
+    fn esoui_date_shape_is_checked() {
+        assert!(looks_like_esoui_date("04/23/26 01:16 PM"));
+        assert!(!looks_like_esoui_date("Date"));
+        assert!(!looks_like_esoui_date("393kB"));
+        assert!(!looks_like_esoui_date(""));
     }
 
     #[test]

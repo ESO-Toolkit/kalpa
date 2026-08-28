@@ -264,6 +264,8 @@ export function EsouiOverview({
             changeLog={detail.changeLog}
             variant="inline"
             installedVersion={installedVersion}
+            archivedVersions={detail.archivedVersions}
+            latestDate={detail.updated}
           />
         </div>
       )}
