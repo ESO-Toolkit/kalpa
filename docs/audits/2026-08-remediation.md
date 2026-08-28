@@ -26,7 +26,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
-| H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) (draft) | - | D-H5-1 | APPROVE after one follow-up | `npm run check`; `git diff --check`; freshness guard | 54 evidence-backed candidates proposed; no branches deleted. |
+| H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) (draft) | - | D-H5-1 | APPROVE after one follow-up; refreshed 2026-08-28 | `npm run check`; `git diff --check`; freshness guard | 55 evidence-backed candidates proposed; no branches deleted. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
 ## Decisions
@@ -58,6 +58,14 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
 
 ## Session Log
+
+### 2026-08-28 — Codex (H5 evidence refresh)
+
+- Rebases PR #385 onto current W1 base `origin/fix/audit-w1-worker-consistency`.
+- Refreshed the inventory against `origin/main` `fb92cb92` after `git fetch origin --prune`: 38 local safe, 57 local retain, 56 local review; 17 remote safe, 47 remote retain, 59 remote review (274 refs total).
+- GitHub reported no protected branches; open PR heads and all attached worktrees were retained. No branch, ref, worktree, or commit was deleted or moved.
+- Updated the H5 proposal and this tracker; safe candidates are 55 local/remote refs counted separately. Review refs remain explicitly non-candidates pending maintainer inspection.
+- Verification pending: `git diff --check`, `npm run check`, then force-with-lease push and GitHub mergeability check.
 
 ### 2026-08-27 — W1 twice-reject escalation
 
