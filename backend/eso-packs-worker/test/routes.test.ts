@@ -535,7 +535,7 @@ describe("GET /packs/:id", () => {
   });
 
   it("does not cache redacted detail after a failed bearer lookup", async () => {
-    await putPack(e, makePack("detail-auth-outage"));
+    await putPackIndex(e, { packs: [makePack("detail-auth-outage")] });
     fetchSpy.mockResolvedValueOnce(esoLogsUnauthorized());
 
     const res = await call(authedRequest(`${BASE}/packs/detail-auth-outage`));

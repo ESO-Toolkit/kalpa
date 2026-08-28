@@ -239,9 +239,22 @@ export class PackIndexDO extends DurableObject<Env> {
       });
       if (!result) return null;
 
-      // A duplicate is a read-only idempotent response. Mirroring it would
-      // turn harmless retries into unconditional KV writes.
-      if (result.claimed) await this.mirror(await this.getStoredPacks(), result.pack);
+      if (result.claimed) {
+        await this.mirror(await this.getStoredPacks(), result.pack);
+      } else {
+        // A duplicate is normally a read-only idempotent response. Only
+        // repair a missing or stale detail mirror left by an earlier failure;
+        // harmless retries must not rewrite the KV index unconditionally.
+        const mirrored = await this.env.ESO_PACKS.get<Pack>(this.packKey(id), "json");
+        if (
+          !mirrored ||
+          mirrored.created_at !== result.pack.created_at ||
+          mirrored.updated_at !== result.pack.updated_at ||
+          mirrored.install_count !== result.pack.install_count
+        ) {
+          await this.mirror(await this.getStoredPacks(), result.pack);
+        }
+      }
       return result.pack;
     });
   }
@@ -275,10 +288,6 @@ export class PackIndexDO extends DurableObject<Env> {
       else await this.ctx.storage.setAlarm(nextExpiry);
       return removed;
     });
-  }
-
-  async alarm(): Promise<void> {
-    await this.cleanupInstallClaims();
   }
 
   async toggleVote(
@@ -457,6 +466,7 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    await this.cleanupInstallClaims();
     await this.ctx.blockConcurrencyWhile(async () => {
       const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX });
       for (const operationId of pending.values()) {
@@ -1032,6 +1042,18 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.scheduleRetry();
         return false;
       }
+    }
+    // Install claims are durable per-pack state too. Remove them before the
+    // delete journal can complete; deleteInstallClaims uses bounded batches so
+    // a pack with a full ring cannot turn this into thousands of sequential
+    // storage operations.
+    try {
+      await this.deleteInstallClaims(operation.packId);
+    } catch (error) {
+      console.error(`Install claim cleanup failed [${operation.packId}]:`, error);
+      await this.saveOperation(operation);
+      await this.scheduleRetry();
+      return false;
     }
     if (!operation.d1Done) {
       operation.d1Done = await this.deleteD1Pack(operation.packId);

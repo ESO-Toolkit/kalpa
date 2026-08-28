@@ -1,6 +1,7 @@
 import type { Env, Pack, PackType, PackStatus, PackView, VoteRecord, VoteResponse } from "./types";
 import {
   getPackIndex,
+  getPack,
   putPack,
   getVotedPackIds,
   getVote,

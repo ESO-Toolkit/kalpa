@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { runDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { putPack, putVote } from "../src/kv";
 import type { Env, Pack } from "../src/types";
@@ -328,7 +328,21 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(claims.slot?.markerKey).toContain(":newest");
   });
 
-  it("does not write the KV mirror for a duplicate claim", async () => {
+  it("does not rewrite the KV mirror for a duplicate claim", async () => {
+    const pack = makePack("w3-install-duplicate");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "duplicate-identity", pack.created_at, 1_000);
+    const put = vi.spyOn(e.ESO_PACKS, "put");
+
+    const retry = await index.recordInstall(pack.id, "duplicate-identity", pack.created_at, 2_000);
+
+    expect(retry).toMatchObject({ install_count: 1 });
+    expect(put).not.toHaveBeenCalled();
+    put.mockRestore();
+  });
+
+  it("heals the KV detail when a duplicate claim retries after mirror loss", async () => {
     const pack = makePack("w3-install-heal");
     const index = packIndex();
     await index.replaceIndex({ packs: [pack] });
@@ -338,7 +352,8 @@ describe("PackIndexDO authoritative mutations", () => {
     const retry = await index.recordInstall(pack.id, "healing-identity", pack.created_at, 2_000);
 
     expect(retry).toMatchObject({ install_count: 1 });
-    expect(await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json")).toBeNull();
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json"))
+      .toMatchObject({ install_count: 1 });
   });
 
   it("deletes install claims in bounded batches during pack cleanup", async () => {
