@@ -169,6 +169,8 @@ export interface EsouiAddonDetail {
   created: string;
   screenshots: string[];
   downloadUrl: string;
+  /** Full version history, newest first. Empty when the author published none. */
+  changeLog: string;
 }
 
 export interface EsouiCategory {

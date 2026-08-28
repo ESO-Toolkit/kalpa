@@ -25,6 +25,11 @@ struct ApiFileDetail {
     downloads: u64,
     downloads_monthly: u64,
     favorites: u64,
+    /// Full version history as one BBCode blob, newest first. The API omits it
+    /// on some entries and sends the literal string "None" on others, so it is
+    /// defaulted here and normalised in [`fetch_addon_detail`].
+    #[serde(default)]
+    change_log: String,
     #[serde(default)]
     images: Vec<ApiImage>,
 }
@@ -233,6 +238,8 @@ pub struct EsouiAddonDetail {
     pub created: String,
     pub screenshots: Vec<String>,
     pub download_url: String,
+    /// Cleaned version history, or empty when the author published none.
+    pub change_log: String,
 }
 
 fn clean_description(s: &str) -> String {
@@ -250,6 +257,17 @@ fn clean_description(s: &str) -> String {
     static RE_HTML: OnceLock<Regex> = OnceLock::new();
     let re_html = RE_HTML.get_or_init(|| Regex::new(r"</?[A-Za-z][^>]*>").unwrap());
     re_html.replace_all(&no_bbcode, "").trim().to_string()
+}
+
+/// Normalise the API's `changeLog` field. ESOUI sends the literal string
+/// "None" rather than an empty value when an author published no changelog, so
+/// both collapse to `""` — the single "no changelog" signal the UI checks.
+fn clean_change_log(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return String::new();
+    }
+    clean_description(trimmed)
 }
 
 fn decode_html_entities(s: &str) -> String {
@@ -429,6 +447,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let description = clean_description(&detail.description);
     let screenshots: Vec<String> = detail.images.into_iter().map(|img| img.image_url).collect();
     let updated = format_epoch_millis(detail.last_update);
+    let change_log = clean_change_log(&detail.change_log);
     let (compatibility, created) = scrape_fileinfo_page(client, detail.id);
 
     Ok(EsouiAddonDetail {
@@ -446,6 +465,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         created,
         screenshots,
         download_url: detail.download_uri,
+        change_log,
     })
 }
 
@@ -1595,6 +1615,38 @@ mod tests {
         let result = clean_description(input);
         assert!(result.contains("В процессе разработки!"));
         assert!(result.contains("If you want to help"));
+    }
+
+    #[test]
+    fn change_log_none_sentinel_becomes_empty() {
+        // ESOUI sends the literal string "None" rather than an empty value when
+        // an author published no changelog. Both must collapse to "", which is
+        // the single signal the UI checks before rendering the section.
+        assert_eq!(clean_change_log("None"), "");
+        assert_eq!(clean_change_log("none"), "");
+        assert_eq!(clean_change_log("  None  "), "");
+        assert_eq!(clean_change_log(""), "");
+        assert_eq!(clean_change_log("   "), "");
+    }
+
+    #[test]
+    fn change_log_strips_bbcode_and_keeps_versions() {
+        let input = "[B]Version 1.7.8[/B][LIST]\r\n[*] Fixed a crash[/LIST]";
+        let result = clean_change_log(input);
+        assert!(result.contains("Version 1.7.8"));
+        assert!(result.contains("Fixed a crash"));
+        // The [*] marker becomes a bullet so list items do not run together.
+        assert!(result.contains('\u{2022}'));
+        assert!(!result.contains("[B]"));
+        assert!(!result.contains("[LIST]"));
+    }
+
+    #[test]
+    fn change_log_keeps_a_real_entry_named_none_in_context() {
+        // Only a bare "None" is the sentinel — a changelog that merely mentions
+        // the word must survive.
+        let result = clean_change_log("None of the old bugs remain");
+        assert_eq!(result, "None of the old bugs remain");
     }
 
     #[test]
