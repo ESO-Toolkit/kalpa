@@ -4244,6 +4244,7 @@ pub async fn batch_set_enabled(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
         let mut enabled: Vec<String> = Vec::new();
         let mut disabled: Vec<String> = Vec::new();
