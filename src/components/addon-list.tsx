@@ -279,6 +279,10 @@ const FILTERS: [FilterMode, string][] = [
   ["disabled", "Disabled"],
 ];
 
+export function isAddonContextMenuShortcut(key: string, shiftKey: boolean): boolean {
+  return key === "ContextMenu" || (shiftKey && key === "F10");
+}
+
 function AddonListBase({
   addons,
   allAddons,
@@ -503,7 +507,7 @@ function AddonListBase({
         e.preventDefault();
         onSelect(addons[addons.length - 1]!);
         rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
-      } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+      } else if (isAddonContextMenuShortcut(e.key, e.shiftKey)) {
         e.preventDefault();
         if (currentIndex >= 0) {
           const addon = addons[currentIndex]!;
