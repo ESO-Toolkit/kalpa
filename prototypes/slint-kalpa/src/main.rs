@@ -13489,13 +13489,27 @@ fn apply_native_pending_conflict_files_blocking(
     // backed up rather than silently lost.
     let classified = classify_native_update_archive(addons_dir, &zip_hashes)?;
 
+    let newly_conflicting: Vec<&str> = classified
+        .conflicts
+        .iter()
+        .map(String::as_str)
+        .filter(|relative_path| !pending.decisions.contains_key(*relative_path))
+        .collect();
+    if !newly_conflicting.is_empty() {
+        return Err(format!(
+            "Conflicts changed while the update was open; review again: {}",
+            newly_conflicting.join(", ")
+        ));
+    }
+
     let mut kept_files = classified.auto_kept_files;
     let mut files_to_backup = Vec::new();
     for relative_path in &classified.conflicts {
         match pending.decisions.get(relative_path).copied() {
             Some(1) => kept_files.push(relative_path.clone()),
-            Some(2) | None => files_to_backup.push(relative_path.clone()),
+            Some(2) => files_to_backup.push(relative_path.clone()),
             Some(_) => return Err(format!("Invalid conflict decision for {relative_path}.")),
+            None => unreachable!("new conflicts are rejected before applying"),
         }
     }
     kept_files.sort();
@@ -13907,7 +13921,8 @@ fn classify_native_update_archive(
             let user_modified = match (stored_hash, disk_hash) {
                 (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
                 (Some(_), None) => true,
-                (None, _) => false,
+                (None, Some(disk)) => !file_hashes::signatures_match(disk, zip_hash),
+                (None, None) => false,
             };
             let upstream_changed = match stored_hash {
                 Some(stored) => stored != zip_hash,
@@ -23974,6 +23989,105 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn native_pending_apply_rejects_a_sibling_conflict_that_appeared_after_scan() {
+        let root = test_temp_dir("native-pending-new-sibling-conflict");
+        for folder in ["MainAddon", "LibFoo"] {
+            let addon_dir = root.join(folder);
+            fs::create_dir_all(&addon_dir).expect("create addon dir");
+            fs::write(
+                addon_dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: 1.0\n"),
+            )
+            .expect("write manifest");
+            fs::write(addon_dir.join("init.lua"), "-- baseline").expect("write baseline");
+        }
+        file_hashes::record_hashes_for_folders(
+            root,
+            &["MainAddon".to_string(), "LibFoo".to_string()],
+            42,
+            "1.0",
+        )
+        .expect("record baselines");
+        fs::write(root.join("MainAddon/init.lua"), "-- main edit").expect("write main edit");
+
+        let zip_path = root.join("update.zip");
+        write_multi_folder_zip(&zip_path);
+        let (report, zip_hashes) =
+            build_native_conflict_report(root, "MainAddon", &zip_path).expect("build report");
+        assert_eq!(report.conflicts, vec!["MainAddon/init.lua".to_string()]);
+        let pending = NativePendingConflict {
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 42,
+            update_version: "2.0".to_string(),
+            title: "MainAddon".to_string(),
+            download_url: "https://example.invalid/update.zip".to_string(),
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::from([("MainAddon/init.lua".to_string(), 2)]),
+            zip_path,
+            zip_hashes,
+        };
+
+        fs::write(root.join("LibFoo/init.lua"), "-- fresh lib edit")
+            .expect("write fresh sibling edit");
+        let error = apply_native_pending_conflict_files_blocking(root, &pending)
+            .expect_err("a newly-conflicting sibling must stop the apply");
+
+        assert!(
+            error.contains("LibFoo/init.lua"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("MainAddon/init.lua")).expect("read main"),
+            "-- main edit"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("LibFoo/init.lua")).expect("read lib"),
+            "-- fresh lib edit"
+        );
+        assert_eq!(pending.conflicts, vec!["MainAddon/init.lua".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_conflict_report_flags_user_added_file_newly_shipped_by_sibling() {
+        let root = test_temp_dir("native-user-added-sibling-conflict");
+        for folder in ["MainAddon", "LibFoo"] {
+            let addon_dir = root.join(folder);
+            fs::create_dir_all(&addon_dir).expect("create addon dir");
+            fs::write(
+                addon_dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: 1.0\n"),
+            )
+            .expect("write manifest");
+            fs::write(addon_dir.join("init.lua"), "-- baseline").expect("write baseline");
+        }
+        file_hashes::record_hashes_for_folders(
+            root,
+            &["MainAddon".to_string(), "LibFoo".to_string()],
+            42,
+            "1.0",
+        )
+        .expect("record baselines");
+        fs::write(root.join("LibFoo/user.lua"), "-- user file").expect("write user file");
+
+        let zip_path = root.join("update.zip");
+        write_multi_folder_zip_with_extra_lib_file(&zip_path, Some("-- upstream file"));
+        let (report, _) =
+            build_native_conflict_report(root, "MainAddon", &zip_path).expect("build report");
+
+        assert!(
+            report.conflicts.contains(&"LibFoo/user.lua".to_string()),
+            "user-added sibling file must remain folder-qualified: {:?}",
+            report.conflicts
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn native_pending_conflict_apply_takes_update_and_backs_up_user_file() {
         let root = test_temp_dir("native-pending-conflict-take");
         let folder = "TakeConflictAddon";
@@ -24081,6 +24195,10 @@ CombatMetrics_SavedVariables = {
     }
 
     fn write_multi_folder_zip(zip_path: &Path) {
+        write_multi_folder_zip_with_extra_lib_file(zip_path, None);
+    }
+
+    fn write_multi_folder_zip_with_extra_lib_file(zip_path: &Path, extra_lib_body: Option<&str>) {
         use std::io::Write;
         let file = fs::File::create(zip_path).expect("create zip");
         let mut archive = zip::ZipWriter::new(file);
@@ -24106,6 +24224,14 @@ CombatMetrics_SavedVariables = {
                 .start_file(format!("{folder}/init.lua"), options)
                 .expect("start lua");
             archive.write_all(body.as_bytes()).expect("write lua");
+        }
+        if let Some(body) = extra_lib_body {
+            archive
+                .start_file("LibFoo/user.lua", options)
+                .expect("start extra lib file");
+            archive
+                .write_all(body.as_bytes())
+                .expect("write extra lib file");
         }
         archive.finish().expect("finish zip");
     }

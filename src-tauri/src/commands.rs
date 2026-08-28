@@ -3809,6 +3809,44 @@ pub struct FileDecision {
     pub action: String, // "keep_mine" | "take_update"
 }
 
+const CONFLICTS_CHANGED_PREFIX: &str = "Conflicts changed while the update was open";
+
+/// Complete the lifecycle claimed by `update_addon_with_decisions`.
+///
+/// Revalidation errors are deliberately retryable at the UI level: the old
+/// review must remain cancellable while the user closes it and starts a fresh
+/// scan. All other outcomes consume the session, matching the command's
+/// historical cleanup guarantee.
+fn finish_pending_update(
+    pending: &Mutex<HashMap<String, crate::PendingUpdate>>,
+    session_id: &str,
+    zip_path: &Path,
+    outcome: Result<InstallResult, String>,
+) -> Result<InstallResult, String> {
+    if outcome
+        .as_ref()
+        .is_err_and(|error| error.starts_with(CONFLICTS_CHANGED_PREFIX))
+    {
+        return outcome;
+    }
+
+    // Delete the kept temp ZIP first, then drop the pending entry. If the
+    // delete genuinely fails (e.g. another process briefly holds the file),
+    // keep the entry so `cancel_pending_update` can retry cleanup later. A
+    // file that's already gone counts as removed.
+    let removed = match fs::remove_file(zip_path) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if removed {
+        if let Ok(mut map) = pending.lock() {
+            map.remove(session_id);
+        }
+    }
+
+    outcome
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_addon_with_decisions(
@@ -3850,10 +3888,16 @@ pub async fn update_addon_with_decisions(
 
         // Run the fallible work in a helper so that, once the session is claimed,
         // the pending entry and kept temp ZIP are cleaned up whether that work
-        // succeeds OR fails. The temp ZIP was `.keep()`-ed (no auto-delete), so an
-        // early `?` return inside the helper (backup, hashing, extraction,
-        // recording, metadata save) would otherwise orphan it and leave a stale
-        // pending entry that blocks re-resolving the conflict.
+        // succeeds OR fails. The one exception is apply-time revalidation: no
+        // writes have happened yet, and the visible conflict panel still owns the
+        // session so the user can close it (which calls `cancel_pending_update`)
+        // and run a fresh scan. Consuming the session there leaves the panel with
+        // a dead id and makes its next diff/apply fail with "Session not found".
+        //
+        // The temp ZIP was `.keep()`-ed (no auto-delete), so an early `?` return
+        // inside the helper (backup, hashing, extraction, recording, metadata
+        // save) would otherwise orphan it and leave a stale pending entry that
+        // blocks re-resolving the conflict.
         //
         // The only exits before this point are the lock-poisoned and
         // session-not-found errors above, where there is nothing to clean up: no
@@ -3872,21 +3916,7 @@ pub async fn update_addon_with_decisions(
         };
         let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks, dep_policy);
 
-        // Delete the kept temp ZIP first, then drop the pending entry. If the
-        // delete genuinely fails (e.g. another process briefly holds the file),
-        // keep the entry so `cancel_pending_update` can retry cleanup later. A
-        // file that's already gone counts as removed.
-        let removed = match fs::remove_file(&pu.zip_path) {
-            Ok(()) => true,
-            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-        };
-        if removed {
-            if let Ok(mut map) = pending_clone.lock() {
-                map.remove(&session_id);
-            }
-        }
-
-        outcome
+        finish_pending_update(&pending_clone, &session_id, &pu.zip_path, outcome)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -3930,6 +3960,12 @@ fn update_with_decisions_inner(
     // steer it; extending that guard to the folder axis keeps a crafted or
     // stale decision from reaching an unrelated addon's files.
     for decision in decisions {
+        if !matches!(decision.action.as_str(), "keep_mine" | "take_update") {
+            return Err(format!(
+                "Invalid update decision for {}: {}",
+                decision.relative_path, decision.action
+            ));
+        }
         match file_hashes::split_qualified(&decision.relative_path) {
             Some((folder, _)) if zip_hashes.has_folder(folder) => {}
             _ => {
@@ -3954,6 +3990,23 @@ fn update_with_decisions_inner(
         .map(|conflict| conflict.relative_path.as_str())
         .collect();
 
+    let newly_conflicting: Vec<&str> = classified
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.relative_path.as_str())
+        .filter(|path| {
+            !decisions
+                .iter()
+                .any(|decision| decision.relative_path.as_str() == *path)
+        })
+        .collect();
+    if !newly_conflicting.is_empty() {
+        return Err(format!(
+            "{CONFLICTS_CHANGED_PREFIX}; close this review and run Update again: {}",
+            newly_conflicting.join(", ")
+        ));
+    }
+
     let mut kept_files: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "keep_mine")
@@ -3971,21 +4024,13 @@ fn update_with_decisions_inner(
     // get overwritten anyway.
     let skip_files: HashSet<String> = kept_files.iter().cloned().collect();
 
-    // Collect files to back up: the ones the user chose "take_update" on, plus
-    // any edit that appeared after the scan and therefore has no decision — both
-    // are about to be overwritten.
-    let mut files_to_backup: Vec<String> = decisions
+    // Back up only current conflicts the user explicitly chose to overwrite.
+    let files_to_backup: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "take_update")
         .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
-    for conflict in &classified.conflicts {
-        let path = &conflict.relative_path;
-        if !files_to_backup.contains(path) && !kept_files.contains(path) {
-            files_to_backup.push(path.clone());
-        }
-    }
 
     // Get current version from hash manifest for backup metadata. Pending
     // entries created before version tracking (or from an empty API response)
@@ -13396,6 +13441,84 @@ mod tests {
         assert_eq!(report.conflicts[0].relative_path, "LibFoo/init.lua");
         // The primary was untouched by the user, so it updates without asking.
         assert_eq!(report.safe_files, vec!["MainAddon/init.lua".to_string()]);
+    }
+
+    #[test]
+    fn pending_apply_rejects_a_sibling_conflict_that_appeared_after_scan() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        for folder in ["MainAddon", "LibFoo"] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), b"-- baseline").unwrap();
+            file_hashes::record_hashes_for_folders(addons_dir, &[folder.to_string()], 123, "1.0")
+                .unwrap();
+        }
+        fs::write(addons_dir.join("MainAddon/init.lua"), b"-- main edit").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MainAddon/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream main v2").unwrap();
+        archive.start_file("LibFoo/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream lib v2").unwrap();
+        archive.finish().unwrap();
+
+        let (report, zip_hashes) =
+            build_conflict_report(addons_dir, "MainAddon", &zip_path, "2.0", "session").unwrap();
+        assert_eq!(report.conflicts[0].relative_path, "MainAddon/init.lua");
+        let pending = crate::PendingUpdate {
+            zip_path,
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 123,
+            update_version: "2.0".to_string(),
+            zip_hashes: Arc::new(zip_hashes),
+        };
+
+        fs::write(addons_dir.join("LibFoo/init.lua"), b"-- fresh lib edit").unwrap();
+        let decisions = vec![FileDecision {
+            relative_path: "MainAddon/init.lua".to_string(),
+            action: "take_update".to_string(),
+        }];
+        let error = update_with_decisions_inner(
+            addons_dir,
+            &pending,
+            &decisions,
+            installer::ExtractHooks::NONE,
+            DependencyPolicy::Skip,
+        )
+        .expect_err("a newly-conflicting sibling must stop the apply");
+
+        assert!(
+            error.contains("LibFoo/init.lua"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("close this review and run Update again"));
+
+        // Exercise the command wrapper's lifecycle boundary, not only the
+        // classifier: this specific error must leave both resources alive so
+        // the still-visible panel can cancel its session before a fresh scan.
+        let pending_store = Mutex::new(HashMap::from([("session".to_string(), pending.clone())]));
+        let outcome =
+            finish_pending_update(&pending_store, "session", &pending.zip_path, Err(error));
+        assert!(outcome.is_err());
+        assert!(pending.zip_path.is_file(), "the pending ZIP must survive");
+        assert!(
+            pending_store.lock().unwrap().contains_key("session"),
+            "the visible conflict panel must retain a cancellable session"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("MainAddon/init.lua")).unwrap(),
+            b"-- main edit"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("LibFoo/init.lua")).unwrap(),
+            b"-- fresh lib edit"
+        );
     }
 
     /// Two folders shipping the same relative filename must stay distinct all
