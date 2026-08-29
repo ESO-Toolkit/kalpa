@@ -310,3 +310,57 @@ export function SavedVariablesSkeleton() {
     </div>
   );
 }
+
+/**
+ * Loading state for the ESOUI tab of an installed addon. Same body as
+ * DiscoverDetailSkeleton minus the title/author header — AddonDetail already
+ * renders the addon's title and pills above the tab strip.
+ */
+export function EsouiTabSkeleton() {
+  const style = (i: number) => ({ "--shimmer-delay": `${i * 60}ms` }) as React.CSSProperties;
+
+  return (
+    <div className="space-y-5" role="status" aria-label="Loading ESOUI details">
+      {/* Stat cards */}
+      <div className="grid grid-cols-4 gap-2">
+        {Array.from({ length: 4 }, (_, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-structure-04 bg-structure-02 p-2.5 space-y-1.5"
+          >
+            <div className="flex items-center gap-1.5">
+              <Skeleton className="size-3.5 rounded" style={style(i)} />
+              <Skeleton className="h-2 w-12 rounded" style={style(i)} />
+            </div>
+            <Skeleton className="h-4 w-16 rounded" style={style(i)} />
+          </div>
+        ))}
+      </div>
+
+      {/* Secondary metadata line (Created + MD5) */}
+      <div className="flex items-center gap-2">
+        <Skeleton className="h-2.5 w-36 rounded" style={style(4)} />
+        <Skeleton className="h-2.5 w-20 rounded" style={style(5)} />
+      </div>
+
+      {/* Screenshots */}
+      <div className="space-y-2">
+        <Skeleton className="h-2.5 w-24 rounded" style={style(6)} />
+        <Skeleton className="h-[200px] w-full rounded-xl" style={style(6)} />
+        <div className="flex gap-2">
+          {Array.from({ length: 4 }, (_, i) => (
+            <Skeleton key={i} className="h-14 w-24 shrink-0 rounded-lg" style={style(7 + i)} />
+          ))}
+        </div>
+      </div>
+
+      {/* Description */}
+      <div className="space-y-2">
+        <Skeleton className="h-2.5 w-20 rounded" style={style(11)} />
+        <Skeleton className="h-3 w-full rounded" style={style(11)} />
+        <Skeleton className="h-3 w-[92%] rounded" style={style(12)} />
+        <Skeleton className="h-3 w-[78%] rounded" style={style(13)} />
+      </div>
+    </div>
+  );
+}

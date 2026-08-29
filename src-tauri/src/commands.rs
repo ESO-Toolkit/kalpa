@@ -9,6 +9,7 @@ use crate::uploader::native::session::{SessionProvider, StoredSessionProvider};
 use crate::AllowedAddonsPath;
 use crate::MetadataLock;
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1720,13 +1721,21 @@ pub async fn check_for_updates(
     tokio::task::spawn_blocking(move || {
         // Phase 0: fetch the full ESOUI filelist outside the lock — big HTTP call
         let api_lookup = esoui::fetch_filelist_lookup()?;
+        // Minion updates addon files independently of Kalpa, so its live
+        // metadata is needed to reconcile versions already tracked in
+        // kalpa.json. A missing, unreadable, or malformed file is non-fatal;
+        // the normal Kalpa metadata comparison still works without it.
+        let minion_addons = find_minion_xml()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|content| parse_minion_addons(&content))
+            .unwrap_or_default();
 
         // Phase 1: acquire lock for metadata comparison and save
         let pending = {
             let _guard = lock
                 .lock()
                 .map_err(|_| "Internal metadata lock error".to_string())?;
-            check_for_updates_metadata(&addons_dir, &api_lookup)?
+            check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons)?
         };
         // Lock is released here
 
@@ -1773,6 +1782,7 @@ struct UpdatePending {
 fn check_for_updates_metadata(
     addons_dir: &Path,
     api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    minion_addons: &[MinionAddon],
 ) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
@@ -1786,7 +1796,7 @@ fn check_for_updates_metadata(
             continue;
         }
 
-        let meta = match store.addons.get(folder_name) {
+        let mut meta = match store.addons.get(folder_name) {
             Some(m) => m.clone(),
             None => continue,
         };
@@ -1800,19 +1810,50 @@ fn check_for_updates_metadata(
             None => continue,
         };
 
+        // Minion can replace an addon without touching kalpa.json. Its
+        // `ui-version` is authoritative when both the folder and ESOUI id match.
+        // Only trust that evidence when the folder-keyed ESOUI lookup still
+        // resolves to the same addon id we track locally; the filelist cache is
+        // keyed by top-level folder name, so a stale or duplicate mapping should
+        // not let unrelated external state rewrite this entry.
+        // Prefer direct disk evidence when the manifest already matches the
+        // current API version; this also handles manual/external installs.
+        // Never adopt an arbitrary manifest version: addon authors sometimes
+        // use a manifest version that differs from ESOUI's filelist version,
+        // which would recreate a perpetual false update after Kalpa installs it.
+        let api_ids_match = api_entry.esoui_id == meta.esoui_id;
+        let remote_ver = normalized_version(&api_entry.version);
+        let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
+        let detected_version = (api_ids_match && !stored_matches_api)
+            .then(|| {
+                let minion_matches_api = minion_version_for_folder(
+                    minion_addons,
+                    addons_dir,
+                    folder_name,
+                    meta.esoui_id,
+                )
+                .is_some_and(|version| normalized_version(version) == remote_ver);
+                let disk_version = read_local_version(addons_dir, folder_name);
+                let disk_matches_api = !disk_version.trim().is_empty()
+                    && !remote_ver.is_empty()
+                    && normalized_version(&disk_version) == remote_ver;
+
+                (minion_matches_api || disk_matches_api).then(|| api_entry.version.clone())
+            })
+            .flatten();
+
+        if let Some(detected_version) = detected_version {
+            if detected_version != meta.installed_version {
+                if let Some(entry) = store.addons.get_mut(folder_name) {
+                    entry.installed_version = detected_version.clone();
+                    metadata_changed = true;
+                }
+                meta.installed_version = detected_version;
+            }
+        }
+
         // Normalize versions: strip leading "v"/"V" and trim whitespace
-        let local_ver = meta
-            .installed_version
-            .trim()
-            .strip_prefix('v')
-            .or_else(|| meta.installed_version.trim().strip_prefix('V'))
-            .unwrap_or(meta.installed_version.trim());
-        let remote_ver = api_entry
-            .version
-            .trim()
-            .strip_prefix('v')
-            .or_else(|| api_entry.version.trim().strip_prefix('V'))
-            .unwrap_or(api_entry.version.trim());
+        let local_ver = normalized_version(&meta.installed_version);
 
         let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
 
@@ -1824,6 +1865,7 @@ fn check_for_updates_metadata(
             // would mark it up to date without downloading anything and mask
             // that update forever.
             if !has_update
+                && api_ids_match
                 && !remote_ver.is_empty()
                 && !local_ver.is_empty()
                 && meta.installed_version != api_entry.version
@@ -1855,6 +1897,68 @@ fn check_for_updates_metadata(
     }
 
     Ok(pending)
+}
+
+fn normalized_version(version: &str) -> &str {
+    version
+        .trim()
+        .strip_prefix('v')
+        .or_else(|| version.trim().strip_prefix('V'))
+        .unwrap_or(version.trim())
+}
+
+/// Return Minion's version for the selected AddOns root. Older Minion files
+/// without root information fall back to accepting a version only when every
+/// matching installation agrees.
+fn minion_version_for_folder<'a>(
+    minion_addons: &'a [MinionAddon],
+    addons_dir: &Path,
+    folder_name: &str,
+    esoui_id: u32,
+) -> Option<&'a str> {
+    let has_scoped_entries = minion_addons
+        .iter()
+        .any(|addon| addon.addons_path.is_some());
+    let mut matches = minion_addons.iter().filter(|addon| {
+        addon.uid == esoui_id
+            && !addon.version.trim().is_empty()
+            && minion_addon_is_for_root(addon, addons_dir, has_scoped_entries)
+            && addon
+                .folders
+                .iter()
+                .any(|folder| folder.eq_ignore_ascii_case(folder_name))
+    });
+    let first = matches.next()?.version.trim();
+    matches
+        .all(|addon| normalized_version(&addon.version) == normalized_version(first))
+        .then_some(first)
+}
+
+pub(crate) fn minion_addon_is_for_root(
+    addon: &MinionAddon,
+    addons_dir: &Path,
+    has_scoped_entries: bool,
+) -> bool {
+    match addon.addons_path.as_deref() {
+        Some(path) => paths_refer_to_same_dir(path, addons_dir),
+        None => !has_scoped_entries,
+    }
+}
+
+fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
+    let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .eq_ignore_ascii_case(right.to_string_lossy().trim_end_matches(['/', '\\']))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 // ── Update cancellation + progress ──────────────────────────────────────
@@ -7225,6 +7329,8 @@ pub struct MinionAddon {
     pub uid: u32,
     pub version: String,
     pub folders: Vec<String>,
+    #[serde(skip)]
+    pub addons_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7248,21 +7354,36 @@ pub fn find_minion_xml() -> Option<PathBuf> {
 
 pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
     let mut addons: Vec<MinionAddon> = Vec::new();
+    static RE_GAME: OnceLock<Regex> = OnceLock::new();
+    let re_game = RE_GAME.get_or_init(|| Regex::new(r#"<game\s+([^>]*)>"#).unwrap());
     static RE_ADDON: OnceLock<Regex> = OnceLock::new();
-    let re_addon = RE_ADDON.get_or_init(|| {
-        Regex::new(r#"<addon[^>]*uid="(\d+)"[^>]*ui-version="([^"]*)"[^>]*>"#).unwrap()
-    });
+    let re_addon = RE_ADDON.get_or_init(|| Regex::new(r#"<addon\s+([^>]*)>"#).unwrap());
+    static RE_UID: OnceLock<Regex> = OnceLock::new();
+    let re_uid = RE_UID.get_or_init(|| Regex::new(r#"(?:^|\s)uid="(\d+)""#).unwrap());
+    static RE_VERSION: OnceLock<Regex> = OnceLock::new();
+    let re_version =
+        RE_VERSION.get_or_init(|| Regex::new(r#"(?:^|\s)ui-version="([^"]*)""#).unwrap());
+    static RE_ADDONS_PATH: OnceLock<Regex> = OnceLock::new();
+    let re_addons_path =
+        RE_ADDONS_PATH.get_or_init(|| Regex::new(r#"(?:^|\s)addon-path="([^"]*)""#).unwrap());
     static RE_DIR: OnceLock<Regex> = OnceLock::new();
     let re_dir = RE_DIR.get_or_init(|| Regex::new(r"<dir>([^<]+)</dir>").unwrap());
 
     // Simple state machine parser for Minion XML
+    let mut current_addons_path: Option<PathBuf> = None;
     let mut current_uid: Option<u32> = None;
     let mut current_version = String::new();
     let mut current_dirs: Vec<String> = Vec::new();
 
     for line in xml_content.lines() {
         let line = line.trim();
-        if let Some(caps) = re_addon.captures(line) {
+        if let Some(caps) = re_game.captures(line) {
+            current_addons_path = re_addons_path
+                .captures(&caps[1])
+                .and_then(|path_caps| decode_minion_addons_path(&path_caps[1]));
+        } else if line.contains("</game>") {
+            current_addons_path = None;
+        } else if let Some(caps) = re_addon.captures(line) {
             // Save previous addon if any
             if let Some(uid) = current_uid {
                 if !current_dirs.is_empty() {
@@ -7270,11 +7391,17 @@ pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
                         uid,
                         version: current_version.clone(),
                         folders: current_dirs.clone(),
+                        addons_path: current_addons_path.clone(),
                     });
                 }
             }
-            current_uid = caps[1].parse::<u32>().ok();
-            current_version = caps[2].to_string();
+            current_uid = re_uid
+                .captures(&caps[1])
+                .and_then(|uid_caps| uid_caps[1].parse::<u32>().ok());
+            current_version = re_version
+                .captures(&caps[1])
+                .map(|version_caps| version_caps[1].to_string())
+                .unwrap_or_default();
             current_dirs = Vec::new();
         } else if let Some(caps) = re_dir.captures(line) {
             current_dirs.push(caps[1].to_string());
@@ -7285,6 +7412,7 @@ pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
                         uid,
                         version: current_version.clone(),
                         folders: current_dirs.clone(),
+                        addons_path: current_addons_path.clone(),
                     });
                 }
             }
@@ -7294,6 +7422,21 @@ pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
     }
 
     addons
+}
+
+fn decode_minion_addons_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    BASE64_STANDARD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from(value)))
 }
 
 #[tauri::command]
@@ -11466,6 +11609,321 @@ mod tests {
         let addon_dir = dir.join(folder);
         std::fs::create_dir_all(&addon_dir).unwrap();
         std::fs::write(addon_dir.join(format!("{folder}.txt")), manifest_body).unwrap();
+    }
+
+    #[test]
+    fn parse_minion_addons_accepts_real_attribute_order_and_tracks_root() {
+        let encoded_path = BASE64_STANDARD.encode(r"C:\Games\ESO\live\AddOns");
+        let xml = format!(
+            r#"<game addon-path="{encoded_path}" game-id="ESO">
+                <addon md5="abc123" ui-version="2.0 r7" uid="123">
+                    <dirs>
+                        <dir>MyAddon</dir>
+                        <dir>MyAddonData</dir>
+                    </dirs>
+                </addon>
+            </game>"#
+        );
+
+        let addons = parse_minion_addons(&xml);
+
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].uid, 123);
+        assert_eq!(addons[0].version, "2.0 r7");
+        assert_eq!(addons[0].folders, ["MyAddon", "MyAddonData"]);
+        assert_eq!(
+            addons[0].addons_path.as_deref(),
+            Some(Path::new(r"C:\Games\ESO\live\AddOns"))
+        );
+    }
+
+    #[test]
+    fn update_check_reconciles_a_minion_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let minion_addons = parse_minion_addons(
+            r#"<addon md5="abc123" ui-version="2.0" uid="123">
+                <dirs>
+                    <dir>MyAddon</dir>
+                </dirs>
+            </addon>"#,
+        );
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
+    }
+
+    #[test]
+    fn update_check_uses_minion_version_from_selected_root_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_addons_dir = tmp.path().join("live").join("AddOns");
+        let pts_addons_dir = tmp.path().join("pts").join("AddOns");
+        make_addon_folder(
+            &live_addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+        std::fs::create_dir_all(&pts_addons_dir).unwrap();
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&live_addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let live_path = BASE64_STANDARD.encode(live_addons_dir.to_string_lossy().as_bytes());
+        let pts_path = BASE64_STANDARD.encode(pts_addons_dir.to_string_lossy().as_bytes());
+        let xml = format!(
+            r#"<games>
+                <game addon-path="{pts_path}" game-id="ESO">
+                    <addon ui-version="1.0" uid="123">
+                        <dirs><dir>MyAddon</dir></dirs>
+                    </addon>
+                </game>
+                <game addon-path="{live_path}" game-id="ESO">
+                    <addon ui-version="2.0" uid="123">
+                        <dirs><dir>MyAddon</dir></dirs>
+                    </addon>
+                </game>
+            </games>"#
+        );
+        let minion_addons = parse_minion_addons(&xml);
+
+        let results =
+            check_for_updates_metadata(&live_addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+    }
+
+    #[test]
+    fn update_check_keeps_known_version_when_manifest_version_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(&addons_dir, "MyAddon", "## Title: My Addon\n");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
+    fn update_check_does_not_replace_api_version_with_stale_external_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-1.9\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "2.0",
+            "https://example.com/current.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let stale_minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "1.9".to_string(),
+            folders: vec!["MyAddon".to_string()],
+            addons_path: None,
+        }];
+        let results =
+            check_for_updates_metadata(&addons_dir, &api_lookup, &stale_minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
+    }
+
+    #[test]
+    fn update_check_does_not_downgrade_an_outdated_version_from_stale_minion_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.5",
+            "https://example.com/intermediate.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let stale_minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "1.0".to_string(),
+            folders: vec!["MyAddon".to_string()],
+            addons_path: None,
+        }];
+        let results =
+            check_for_updates_metadata(&addons_dir, &api_lookup, &stale_minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "1.5");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.5");
+    }
+
+    #[test]
+    fn update_check_ignores_external_reconciliation_when_api_lookup_points_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: 2.0\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 999,
+                title: "Other Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "2.0".to_string(),
+            folders: vec!["MyAddon".to_string()],
+            addons_path: None,
+        }];
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
     }
 
     #[test]

@@ -38,9 +38,13 @@ mod native_boot;
 
 #[allow(dead_code)]
 mod commands {
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
     use regex::Regex;
     use serde::Serialize;
-    use std::{path::PathBuf, sync::OnceLock};
+    use std::{
+        path::{Path, PathBuf},
+        sync::OnceLock,
+    };
 
     #[derive(Debug, Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -48,6 +52,8 @@ mod commands {
         pub uid: u32,
         pub version: String,
         pub folders: Vec<String>,
+        #[serde(skip)]
+        pub addons_path: Option<PathBuf>,
     }
 
     pub fn find_minion_xml() -> Option<PathBuf> {
@@ -60,31 +66,52 @@ mod commands {
 
     pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
         let mut addons = Vec::new();
+        static RE_GAME: OnceLock<Regex> = OnceLock::new();
+        let re_game = RE_GAME.get_or_init(|| Regex::new(r#"<game\s+([^>]*)>"#).unwrap());
         static RE_ADDON: OnceLock<Regex> = OnceLock::new();
-        let re_addon = RE_ADDON.get_or_init(|| {
-            Regex::new(r#"<addon[^>]*uid="(\d+)"[^>]*ui-version="([^"]*)"[^>]*>"#).unwrap()
-        });
+        let re_addon = RE_ADDON.get_or_init(|| Regex::new(r#"<addon\s+([^>]*)>"#).unwrap());
+        static RE_UID: OnceLock<Regex> = OnceLock::new();
+        let re_uid = RE_UID.get_or_init(|| Regex::new(r#"(?:^|\s)uid="(\d+)""#).unwrap());
+        static RE_VERSION: OnceLock<Regex> = OnceLock::new();
+        let re_version =
+            RE_VERSION.get_or_init(|| Regex::new(r#"(?:^|\s)ui-version="([^"]*)""#).unwrap());
+        static RE_ADDONS_PATH: OnceLock<Regex> = OnceLock::new();
+        let re_addons_path =
+            RE_ADDONS_PATH.get_or_init(|| Regex::new(r#"(?:^|\s)addon-path="([^"]*)""#).unwrap());
         static RE_DIR: OnceLock<Regex> = OnceLock::new();
         let re_dir = RE_DIR.get_or_init(|| Regex::new(r"<dir>([^<]+)</dir>").unwrap());
 
+        let mut current_addons_path = None;
         let mut current_uid = None;
         let mut current_version = String::new();
         let mut current_dirs = Vec::new();
 
         for line in xml_content.lines() {
             let line = line.trim();
-            if let Some(caps) = re_addon.captures(line) {
+            if let Some(caps) = re_game.captures(line) {
+                current_addons_path = re_addons_path
+                    .captures(&caps[1])
+                    .and_then(|path_caps| decode_minion_addons_path(&path_caps[1]));
+            } else if line.contains("</game>") {
+                current_addons_path = None;
+            } else if let Some(caps) = re_addon.captures(line) {
                 if let Some(uid) = current_uid {
                     if !current_dirs.is_empty() {
                         addons.push(MinionAddon {
                             uid,
                             version: current_version.clone(),
                             folders: current_dirs.clone(),
+                            addons_path: current_addons_path.clone(),
                         });
                     }
                 }
-                current_uid = caps[1].parse::<u32>().ok();
-                current_version = caps[2].to_string();
+                current_uid = re_uid
+                    .captures(&caps[1])
+                    .and_then(|uid_caps| uid_caps[1].parse::<u32>().ok());
+                current_version = re_version
+                    .captures(&caps[1])
+                    .map(|version_caps| version_caps[1].to_string())
+                    .unwrap_or_default();
                 current_dirs.clear();
             } else if let Some(caps) = re_dir.captures(line) {
                 current_dirs.push(caps[1].to_string());
@@ -95,6 +122,7 @@ mod commands {
                             uid,
                             version: current_version.clone(),
                             folders: current_dirs.clone(),
+                            addons_path: current_addons_path.clone(),
                         });
                     }
                 }
@@ -104,6 +132,94 @@ mod commands {
         }
 
         addons
+    }
+
+    fn decode_minion_addons_path(value: &str) -> Option<PathBuf> {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+
+        BASE64_STANDARD
+            .decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from(value)))
+    }
+
+    pub(crate) fn minion_addon_is_for_root(
+        addon: &MinionAddon,
+        addons_dir: &Path,
+        has_scoped_entries: bool,
+    ) -> bool {
+        match addon.addons_path.as_deref() {
+            Some(path) => paths_refer_to_same_dir(path, addons_dir),
+            None => !has_scoped_entries,
+        }
+    }
+
+    fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
+        let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+        let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+
+        #[cfg(windows)]
+        {
+            left.to_string_lossy()
+                .trim_end_matches(['/', '\\'])
+                .eq_ignore_ascii_case(right.to_string_lossy().trim_end_matches(['/', '\\']))
+        }
+        #[cfg(not(windows))]
+        {
+            left == right
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_minion_root_and_attribute_order() {
+            let encoded_path = BASE64_STANDARD.encode(r"C:\Games\ESO\live\AddOns");
+            let xml = format!(
+                r#"<game addon-path="{encoded_path}" game-id="ESO">
+                    <addon md5="abc123" ui-version="2.0 r7" uid="123">
+                        <dir>MyAddon</dir>
+                    </addon>
+                </game>"#
+            );
+
+            let addons = parse_minion_addons(&xml);
+
+            assert_eq!(addons.len(), 1);
+            assert_eq!(addons[0].uid, 123);
+            assert_eq!(addons[0].version, "2.0 r7");
+            assert_eq!(addons[0].folders, ["MyAddon"]);
+            assert_eq!(
+                addons[0].addons_path.as_deref(),
+                Some(Path::new(r"C:\Games\ESO\live\AddOns"))
+            );
+        }
+
+        #[test]
+        fn scoped_minion_entries_only_match_their_addons_root() {
+            let temp = tempfile::tempdir().unwrap();
+            let live = temp.path().join("live").join("AddOns");
+            let pts = temp.path().join("pts").join("AddOns");
+            std::fs::create_dir_all(&live).unwrap();
+            std::fs::create_dir_all(&pts).unwrap();
+            let addon = MinionAddon {
+                uid: 123,
+                version: "2.0".to_string(),
+                folders: vec!["MyAddon".to_string()],
+                addons_path: Some(live.clone()),
+            };
+
+            assert!(minion_addon_is_for_root(&addon, &live, true));
+            assert!(!minion_addon_is_for_root(&addon, &pts, true));
+        }
     }
 }
 
@@ -10273,10 +10389,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         set_theme_draft_color_fields(&ui, &draft.colors);
         set_theme_draft_contrast(&ui, &draft.colors);
 
-        let mut custom_themes = save_custom_themes.borrow_mut();
-        upsert_custom_theme(&mut custom_themes, draft.clone());
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let saved_draft = draft.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            upsert_custom_theme(themes, saved_draft);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme save failed: {error}").into());
+                return;
+            }
+        };
+        *save_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &save_custom_themes.borrow());
         set_theme_draft(&ui, &draft, false);
         *save_draft.borrow_mut() = draft.clone();
         apply_theme_selection(
@@ -10337,10 +10461,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         };
 
         let theme_id = theme_id.to_string();
-        let mut custom_themes = delete_custom_themes.borrow_mut();
-        custom_themes.retain(|theme| theme.id != theme_id);
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let deleted_theme_id = theme_id.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            themes.retain(|theme| theme.id != deleted_theme_id);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme delete failed: {error}").into());
+                return;
+            }
+        };
+        *delete_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &delete_custom_themes.borrow());
         ui.set_settings_editor_open(false);
 
         if ui.get_active_theme_id().as_str() == theme_id {
@@ -10436,10 +10568,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
             return;
         };
 
-        let mut custom_themes = import_custom_themes.borrow_mut();
-        upsert_custom_theme(&mut custom_themes, theme.clone());
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let imported_theme = theme.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            upsert_custom_theme(themes, imported_theme);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme import failed: {error}").into());
+                return;
+            }
+        };
+        *import_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &import_custom_themes.borrow());
         apply_theme_selection(
             &ui,
             &ThemeSelection::with_skin(theme.colors.clone(), theme.skin_id.as_deref()),
@@ -15211,24 +15351,39 @@ fn read_installed_pack_refs_from_settings_path(
         .map_err(|error| format!("Failed to parse installed packs: {error}"))
 }
 
-fn persist_installed_pack_refs(refs: &[NativeInstalledPackRef]) -> Result<(), String> {
-    let Some(path) = native_settings_store_path() else {
-        return Err("settings store path was not available".to_string());
-    };
-    persist_installed_pack_refs_to_settings_path(&path, refs)
-}
-
-fn persist_installed_pack_refs_to_settings_path(
+fn update_installed_pack_refs_to_settings_path(
     path: &Path,
-    refs: &[NativeInstalledPackRef],
-) -> Result<(), String> {
+    fallback_paths: &[PathBuf],
+    mutate: impl FnOnce(&mut Vec<NativeInstalledPackRef>),
+) -> Result<Vec<NativeInstalledPackRef>, String> {
     update_settings_store_object_to_path(path, |object| {
+        let mut refs = match object.get(STORE_KEY_INSTALLED_PACKS).cloned() {
+            Some(value) => serde_json::from_value::<Vec<NativeInstalledPackRef>>(value)
+                .map(normalize_installed_pack_refs)
+                .map_err(|error| format!("Failed to parse installed packs: {error}"))?,
+            None => {
+                let mut fallback = Vec::new();
+                for fallback_path in fallback_paths {
+                    match read_installed_pack_refs_from_settings_path(fallback_path)? {
+                        Some(refs) => {
+                            fallback = refs;
+                            break;
+                        }
+                        None => continue,
+                    }
+                }
+                fallback
+            }
+        };
+
+        mutate(&mut refs);
+        refs = normalize_installed_pack_refs(refs);
         object.insert(
             STORE_KEY_INSTALLED_PACKS.to_string(),
-            serde_json::to_value(normalize_installed_pack_refs(refs.to_vec()))
+            serde_json::to_value(&refs)
                 .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
         );
-        Ok(())
+        Ok(refs)
     })
 }
 
@@ -15265,21 +15420,24 @@ fn upsert_installed_pack_ref(entry: &PackHubEntry) -> Result<Vec<NativeInstalled
         installed_at: current_iso_utc(),
     };
 
-    let mut refs = read_installed_pack_refs();
-    refs.retain(|existing| existing.pack_id != reference.pack_id);
-    refs.insert(0, reference);
-    persist_installed_pack_refs(&refs)?;
-    Ok(refs)
+    let paths = native_settings_store_paths();
+    let Some((path, fallback_paths)) = paths.split_first() else {
+        return Err("settings store path was not available".to_string());
+    };
+    update_installed_pack_refs_to_settings_path(path, fallback_paths, |refs| {
+        refs.retain(|existing| existing.pack_id != reference.pack_id);
+        refs.insert(0, reference);
+    })
 }
 
 fn remove_installed_pack_ref(pack_id: &str) -> Result<Vec<NativeInstalledPackRef>, String> {
-    let mut refs = read_installed_pack_refs();
-    let before = refs.len();
-    refs.retain(|reference| reference.pack_id != pack_id);
-    if refs.len() != before {
-        persist_installed_pack_refs(&refs)?;
-    }
-    Ok(refs)
+    let paths = native_settings_store_paths();
+    let Some((path, fallback_paths)) = paths.split_first() else {
+        return Err("settings store path was not available".to_string());
+    };
+    update_installed_pack_refs_to_settings_path(path, fallback_paths, |refs| {
+        refs.retain(|reference| reference.pack_id != pack_id);
+    })
 }
 
 fn parse_addon_count_label(label: &str) -> usize {
@@ -19118,33 +19276,63 @@ fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String
         .map_err(|error| format!("Failed to parse custom themes: {error}"))
 }
 
-fn persist_custom_themes(custom_themes: &[CatalogTheme]) {
-    if let Some(path) = native_settings_store_path() {
-        if let Err(error) = persist_custom_themes_to_settings_path(&path, custom_themes) {
-            eprintln!("Failed to persist native custom themes: {error}");
-        }
-        return;
+fn update_custom_themes(
+    mutate: impl FnOnce(&mut Vec<CatalogTheme>),
+) -> Result<Vec<CatalogTheme>, String> {
+    let settings_paths = native_settings_store_paths();
+    if let Some((path, fallback_paths)) = settings_paths.split_first() {
+        return update_custom_themes_in_settings_path(path, fallback_paths, mutate);
     }
 
-    if let Some(path) = custom_theme_store_path() {
-        if let Err(error) = persist_custom_themes_to_path(&path, custom_themes) {
-            eprintln!("Failed to persist native custom themes: {error}");
-        }
-    }
+    let Some(path) = custom_theme_store_path() else {
+        return Err("custom theme store path was not available".to_string());
+    };
+    let _transaction = transaction_lock::acquire(&path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let mut themes = read_custom_themes_from_path(&path)?;
+    mutate(&mut themes);
+    themes = normalize_custom_themes(themes);
+    persist_custom_themes_to_path(&path, &themes)?;
+    Ok(themes)
 }
 
-fn persist_custom_themes_to_settings_path(
+fn update_custom_themes_in_settings_path(
     path: &Path,
-    custom_themes: &[CatalogTheme],
-) -> Result<(), String> {
+    fallback_paths: &[PathBuf],
+    mutate: impl FnOnce(&mut Vec<CatalogTheme>),
+) -> Result<Vec<CatalogTheme>, String> {
     update_settings_store_object_to_path(path, |object| {
+        let mut themes = match object.get(STORE_KEY_CUSTOM_THEMES).cloned() {
+            Some(value) => serde_json::from_value::<Vec<CatalogTheme>>(value)
+                .map(normalize_custom_themes)
+                .map_err(|error| format!("Failed to parse production custom themes: {error}"))?,
+            None => {
+                let mut fallback = None;
+                for fallback_path in fallback_paths {
+                    if let Some(themes) = read_custom_themes_from_settings_path(fallback_path)? {
+                        fallback = Some(themes);
+                        break;
+                    }
+                }
+                match fallback {
+                    Some(themes) => themes,
+                    None => custom_theme_store_path()
+                        .map(|fallback_path| read_custom_themes_from_path(&fallback_path))
+                        .transpose()?
+                        .unwrap_or_default(),
+                }
+            }
+        };
+
+        mutate(&mut themes);
+        themes = normalize_custom_themes(themes);
         object.insert(
             STORE_KEY_CUSTOM_THEMES.to_string(),
-            serde_json::to_value(normalize_custom_themes(custom_themes.to_vec())).map_err(
-                |error| format!("Failed to serialize production custom themes: {error}"),
-            )?,
+            serde_json::to_value(&themes).map_err(|error| {
+                format!("Failed to serialize production custom themes: {error}")
+            })?,
         );
-        Ok(())
+        Ok(themes)
     })
 }
 
@@ -19182,20 +19370,28 @@ fn read_settings_store_key_from_path(
 fn read_settings_store_object_from_path(
     path: &Path,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match read_settings_store_value_from_path(path)? {
+        None => Ok(serde_json::Map::default()),
+        Some(serde_json::Value::Object(object)) => Ok(object),
+        Some(_) => Err("Failed to parse settings store: root must be a JSON object".to_string()),
+    }
+}
+
+fn read_settings_store_value_from_path(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Failed to read settings store: {error}")),
     };
 
     let contents = json_without_bom(&contents);
     if contents.trim().is_empty() {
-        return Ok(Default::default());
+        return Ok(None);
     }
 
     serde_json::from_str::<serde_json::Value>(contents)
         .map_err(|error| format!("Failed to parse settings store: {error}"))
-        .map(|value| value.as_object().cloned().unwrap_or_default())
+        .map(Some)
 }
 
 fn write_settings_store_object_to_path(
@@ -19231,21 +19427,7 @@ fn read_native_settings() -> NativeSettings {
 }
 
 fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(NativeSettings::default());
-        }
-        Err(error) => return Err(format!("Failed to read native settings: {error}")),
-    };
-
-    let contents = json_without_bom(&contents);
-    if contents.trim().is_empty() {
-        return Ok(NativeSettings::default());
-    }
-
-    let value = serde_json::from_str::<serde_json::Value>(contents)
-        .map_err(|error| format!("Failed to parse native settings: {error}"))?;
+    let value = serde_json::Value::Object(read_settings_store_object_from_path(path)?);
     Ok(native_settings_from_store_value(&value))
 }
 
@@ -19292,9 +19474,7 @@ fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Re
     let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
         .map_err(|error| error.to_string())?;
     let settings = normalize_native_settings(settings.clone());
-    let existing = fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+    let existing = read_settings_store_object_from_path(path)?;
     let store_value = native_settings_to_store_value(&settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
@@ -19311,9 +19491,7 @@ fn persist_native_settings_delta_to_path(
         .map_err(|error| error.to_string())?;
     let baseline = normalize_native_settings(baseline.clone());
     let settings = normalize_native_settings(settings.clone());
-    let existing = fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+    let existing = read_settings_store_object_from_path(path)?;
     let store_value = native_settings_delta_to_store_value(&baseline, &settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
@@ -19416,11 +19594,9 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
 #[cfg(test)]
 fn native_settings_to_store_value(
     settings: &NativeSettings,
-    existing: Option<serde_json::Value>,
+    existing: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut object = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut object = existing;
 
     object.remove("warnEsoRunning");
     object.remove("officialUploader");
@@ -19467,11 +19643,9 @@ fn native_settings_to_store_value(
 fn native_settings_delta_to_store_value(
     baseline: &NativeSettings,
     settings: &NativeSettings,
-    existing: Option<serde_json::Value>,
+    existing: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut object = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut object = existing;
 
     if baseline.auto_update != settings.auto_update {
         object.insert(
@@ -20060,7 +20234,7 @@ mod tests {
         fs::write(&path, r#"{"conflictPolicy":"ask"}"#).expect("seed settings store");
         let theme = sample_custom_theme("custom-one", "Custom One");
 
-        persist_custom_themes_to_settings_path(&path, std::slice::from_ref(&theme))
+        update_custom_themes_in_settings_path(&path, &[], |themes| themes.push(theme.clone()))
             .expect("persist custom themes");
         let themes = read_custom_themes_from_settings_path(&path)
             .expect("read production custom themes")
@@ -20214,8 +20388,10 @@ mod tests {
             },
         ];
 
-        persist_installed_pack_refs_to_settings_path(&path, &refs)
-            .expect("persist installed packs");
+        update_installed_pack_refs_to_settings_path(&path, &[], |installed| {
+            installed.extend(refs.clone());
+        })
+        .expect("persist installed packs");
         let restored = read_installed_pack_refs_from_settings_path(&path)
             .expect("read installed packs")
             .expect("installed packs key exists");
@@ -20237,6 +20413,91 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .is_some());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_installed_pack_mutations_preserve_both_updates() {
+        let root = test_temp_dir("installed-packs-concurrent-mutations");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+
+        let make_ref = |pack_id: &str| NativeInstalledPackRef {
+            pack_id: pack_id.to_string(),
+            title: format!("Pack {pack_id}"),
+            pack_type: "addon-pack".to_string(),
+            author_name: "Kalpa".to_string(),
+            addon_count: 1,
+            installed_at: "2026-08-29T00:00:00Z".to_string(),
+        };
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_ref = make_ref("left");
+        let right_ref = make_ref("right");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            update_installed_pack_refs_to_settings_path(&left_path, &[], |refs| {
+                refs.push(left_ref);
+            })
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            update_installed_pack_refs_to_settings_path(&right_path, &[], |refs| {
+                refs.push(right_ref);
+            })
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let restored = read_installed_pack_refs_from_settings_path(&path)
+            .unwrap()
+            .unwrap();
+        let ids = restored
+            .iter()
+            .map(|reference| reference.pack_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["left", "right"]));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_custom_theme_mutations_preserve_both_updates() {
+        let root = test_temp_dir("custom-themes-concurrent-mutations");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_theme = sample_custom_theme("left", "Left");
+        let right_theme = sample_custom_theme("right", "Right");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            update_custom_themes_in_settings_path(&left_path, &[], |themes| {
+                upsert_custom_theme(themes, left_theme);
+            })
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            update_custom_themes_in_settings_path(&right_path, &[], |themes| {
+                upsert_custom_theme(themes, right_theme);
+            })
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let restored = read_custom_themes_from_settings_path(&path)
+            .unwrap()
+            .unwrap();
+        let ids = restored
+            .iter()
+            .map(|theme| theme.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["left", "right"]));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -20979,6 +21240,80 @@ mod tests {
                 .get("suppressEsoRunningWarning")
                 .and_then(serde_json::Value::as_bool),
             Some(true)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_rejects_malformed_store_without_overwriting_it() {
+        let root = test_temp_dir("native-settings-malformed-store");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let malformed = br#"{"autoUpdate": true"#;
+        fs::write(&path, malformed).expect("seed malformed settings store");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect_err("malformed settings must stop the transaction");
+
+        assert!(error.contains("Failed to parse settings store"));
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_writers_reject_non_object_roots_without_overwriting_them() {
+        let root = test_temp_dir("settings-non-object-root");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        for invalid in [b"[]".as_slice(), b"null", b"42", br#""scalar""#] {
+            fs::write(&path, invalid).expect("seed non-object settings store");
+            let error = update_settings_store_object_to_path(&path, |object| {
+                object.insert("autoUpdate".to_string(), serde_json::Value::Bool(true));
+                Ok(())
+            })
+            .expect_err("semantic settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = match read_native_settings_from_path(&path) {
+                Ok(_) => panic!("native settings reads must reject a non-object root"),
+                Err(error) => error,
+            };
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+                .expect_err("native settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_rejects_read_failure_without_replacing_target() {
+        let root = test_temp_dir("native-settings-read-failure");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&path).expect("create directory at settings path");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect_err("unreadable settings target must stop the transaction");
+
+        assert!(error.contains("Failed to read settings store"));
+        assert!(
+            path.is_dir(),
+            "the failed transaction must not replace the target"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -23958,6 +24293,8 @@ CombatMetrics_SavedVariables = {
                 updated: "03/03/26".to_string(),
                 created: "08/05/14".to_string(),
                 screenshots: Vec::new(),
+                archived_versions: Vec::new(),
+                change_log: String::new(),
                 download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
             },
         );
@@ -23991,6 +24328,8 @@ CombatMetrics_SavedVariables = {
             updated: "03/03/26".to_string(),
             created: "08/05/14".to_string(),
             screenshots: Vec::new(),
+            archived_versions: Vec::new(),
+            change_log: String::new(),
             download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
         };
 
