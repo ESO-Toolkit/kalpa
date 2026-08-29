@@ -9980,6 +9980,10 @@ static WEBVIEW_AUTHORITY: OnceLock<Mutex<Option<crate::native_boot::AuthorityGua
     OnceLock::new();
 static NATIVE_HANDOFF_ACTIVE: AtomicBool = AtomicBool::new(false);
 static NATIVE_HANDOFF_CANCELLED: AtomicBool = AtomicBool::new(false);
+static NATIVE_HANDOFF_IS_STARTUP: AtomicBool = AtomicBool::new(false);
+static STARTUP_WEBVIEW_REQUESTED: AtomicBool = AtomicBool::new(false);
+const NATIVE_HANDOFF_CANCELLED_ERROR: &str =
+    "Native handoff was cancelled to preserve an incoming activation.";
 /// Set when this process released UI authority and could not take it back.
 ///
 /// Staying alive in that state is not merely "unauthoritative": the lock is the
@@ -9993,7 +9997,7 @@ fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGua
     WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
 }
 
-fn begin_native_handoff() -> Result<(), String> {
+fn begin_native_handoff(is_startup: bool) -> Result<(), String> {
     // Serialize admission with activation cancellation and authority release.
     // Only the admitted invocation may reset the process-global cancel flag.
     let _authority = webview_authority()
@@ -10002,7 +10006,11 @@ fn begin_native_handoff() -> Result<(), String> {
     NATIVE_HANDOFF_ACTIVE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| "A native performance mode handoff is already in progress.".to_string())?;
-    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(
+        is_startup && STARTUP_WEBVIEW_REQUESTED.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    NATIVE_HANDOFF_IS_STARTUP.store(is_startup, Ordering::SeqCst);
     Ok(())
 }
 
@@ -10013,6 +10021,8 @@ fn abort_native_handoff() {
     if let Ok(_authority) = webview_authority().lock() {
         NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
         NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+        STARTUP_WEBVIEW_REQUESTED.store(false, Ordering::SeqCst);
     }
 }
 
@@ -10025,9 +10035,11 @@ pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), Stri
         &state_dir,
         crate::native_boot::READY_TIMEOUT,
     )?;
-    *webview_authority()
+    let mut authority = webview_authority()
         .lock()
-        .map_err(|_| "WebView authority state is unavailable.".to_string())? = Some(guard);
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    *authority = Some(guard);
+    STARTUP_WEBVIEW_REQUESTED.store(false, Ordering::SeqCst);
     Ok(())
 }
 
@@ -10081,7 +10093,9 @@ pub(crate) fn holds_webview_authority() -> bool {
 
 /// Preserve an activation in the still-live WebView instead of letting an
 /// in-flight native handoff exit underneath it.
-pub(crate) fn cancel_native_handoff_for_activation(app: &tauri::AppHandle) -> Result<bool, String> {
+fn cancel_native_handoff(
+    reclaim: impl FnOnce() -> Result<crate::native_boot::AuthorityGuard, String>,
+) -> Result<bool, String> {
     // Checking the handoff state and publishing cancellation belong to the
     // same critical section as authority release. Otherwise commit can pass
     // between the load and store and exit underneath this activation.
@@ -10091,21 +10105,11 @@ pub(crate) fn cancel_native_handoff_for_activation(app: &tauri::AppHandle) -> Re
     if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
         NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
         eprintln!("[native-shell] cancelling handoff for incoming activation");
-        if authority.is_none() {
+        if authority.is_none() && !NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst) {
             // The child became ready and the command released authority, but
             // ExitRequested has not committed yet. Reclaim before the callback
             // reveals or emits into this WebView.
-            let reclaim = (|| {
-                let state_dir = app
-                    .path()
-                    .app_data_dir()
-                    .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
-                crate::native_boot::claim_webview_after_shutdown(
-                    &state_dir,
-                    crate::native_boot::READY_TIMEOUT,
-                )
-            })();
-            match reclaim {
+            match reclaim() {
                 Ok(guard) => *authority = Some(guard),
                 Err(error) => return Err(error),
             }
@@ -10125,7 +10129,8 @@ fn commit_native_handoff_authority_release() -> Result<(), String> {
         .map_err(|_| "WebView authority state is unavailable.".to_string())?;
     if NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst) {
         NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
-        return Err("Native handoff was cancelled to preserve an incoming activation.".into());
+        NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+        return Err(NATIVE_HANDOFF_CANCELLED_ERROR.into());
     }
     authority.take();
     Ok(())
@@ -10140,7 +10145,33 @@ pub(crate) fn finish_native_handoff_exit() -> bool {
     if !NATIVE_HANDOFF_ACTIVE.swap(false, Ordering::SeqCst) {
         return false;
     }
+    NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
     NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst)
+}
+
+/// Decide an early-startup duplicate result on the UI thread. An activation
+/// callback and this decision are serialized by that thread and this mutex.
+pub(crate) fn should_exit_for_existing_native_startup() -> bool {
+    let Ok(_authority) = webview_authority().lock() else {
+        return false;
+    };
+    !STARTUP_WEBVIEW_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn finish_existing_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<bool, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let exit_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let should_exit = should_exit_for_existing_native_startup();
+        let _ = sender.send(should_exit);
+        if should_exit {
+            exit_handle.exit(0);
+        }
+    })
+    .map_err(|error| format!("Failed to finalize native startup on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())
 }
 
 /// Complete the reverse handoff only after the WebView page/runtime is live.
@@ -10218,16 +10249,78 @@ fn acquire_native_launch_guard(
     .map_err(|error| format!("Could not serialize native launch: {error}"))
 }
 
+#[derive(Clone)]
+enum NativeLaunchMode {
+    Startup(tauri::AppHandle),
+    Handoff,
+}
+
+impl NativeLaunchMode {
+    fn cancel_flag(&self) -> &'static AtomicBool {
+        &NATIVE_HANDOFF_CANCELLED
+    }
+}
+
+pub(crate) fn cancel_native_handoff_for_activation(
+    app: &tauri::AppHandle,
+    startup_pending: bool,
+) -> Result<bool, String> {
+    if startup_pending {
+        let _authority = webview_authority()
+            .lock()
+            .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+        STARTUP_WEBVIEW_REQUESTED.store(true, Ordering::SeqCst);
+        if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
+            NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+        }
+        return Ok(true);
+    }
+    cancel_native_handoff(|| {
+        let state_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+        crate::native_boot::claim_webview_after_shutdown(
+            &state_dir,
+            crate::native_boot::READY_TIMEOUT,
+        )
+    })
+}
+
+fn finish_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let exit_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = commit_native_handoff_authority_release();
+        let should_exit = result.is_ok();
+        let _ = sender.send(result);
+        if should_exit {
+            exit_handle.exit(0);
+        }
+    })
+    .map_err(|error| format!("Failed to finalize native startup on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())?
+}
+
 fn launch_native_shell_process(
     exe_path: &Path,
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
-    cancel: Option<&AtomicBool>,
+    mode: NativeLaunchMode,
 ) -> Result<(), String> {
     let state_dir = app_data_dir.ok_or_else(|| {
         "Native performance UI requires an application state directory.".to_string()
     })?;
-    let _pending_guard = acquire_native_launch_guard(&state_dir, cancel)?;
+    let cancel = mode.cancel_flag();
+    let _pending_guard = match acquire_native_launch_guard(&state_dir, Some(cancel)) {
+        Ok(guard) => guard,
+        Err(_) if cancel.load(Ordering::SeqCst) => {
+            return Err(NATIVE_HANDOFF_CANCELLED_ERROR.to_string());
+        }
+        Err(error) => return Err(error),
+    };
     let launch_id = crate::native_boot::new_launch_id();
     crate::native_boot::prepare(&state_dir, &launch_id)?;
     let (render_preset, render_backend) = native_shell_render_config();
@@ -10276,10 +10369,7 @@ fn launch_native_shell_process(
         &launch_id,
         crate::native_boot::READY_TIMEOUT,
         || {
-            if cancel
-                .map(|flag| flag.load(Ordering::SeqCst))
-                .unwrap_or(false)
-            {
+            if cancel.load(Ordering::SeqCst) {
                 cancelled = true;
                 crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))?;
                 eprintln!("[native-shell] launch cancelled before ready launch_id={launch_id}");
@@ -10306,11 +10396,13 @@ fn launch_native_shell_process(
     let first_outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
+            let _ =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
             crate::native_boot::clear_owned(&state_dir, &launch_id);
             return Err(error);
         }
     };
-    if first_outcome == crate::native_boot::WaitOutcome::Ready && cancel.is_some() {
+    if first_outcome == crate::native_boot::WaitOutcome::Ready {
         if let Err(error) = commit_native_handoff_authority_release() {
             let _ =
                 crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
@@ -10323,7 +10415,7 @@ fn launch_native_shell_process(
             &launch_id,
             crate::native_boot::READY_TIMEOUT,
             || {
-                if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                if cancel.load(Ordering::SeqCst) {
                     cancelled = true;
                     let _ = crate::native_boot::terminate_and_reap_child(
                         &mut child,
@@ -10343,7 +10435,11 @@ fn launch_native_shell_process(
         if !matches!(acquired, Ok(crate::native_boot::WaitOutcome::Ready)) {
             let reap =
                 crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
-            let reclaim = reclaim_webview_authority(&state_dir);
+            let reclaim = if matches!(&mode, NativeLaunchMode::Handoff) {
+                reclaim_webview_authority(&state_dir)
+            } else {
+                Ok(())
+            };
             crate::native_boot::clear_owned(&state_dir, &launch_id);
             if let Err(error) = reap {
                 eprintln!(
@@ -10351,7 +10447,7 @@ fn launch_native_shell_process(
                 );
             }
             let failure = if cancelled {
-                "Native handoff was cancelled to preserve an incoming activation.".to_string()
+                NATIVE_HANDOFF_CANCELLED_ERROR.to_string()
             } else {
                 match acquired {
                     Ok(_) => {
@@ -10369,6 +10465,16 @@ fn launch_native_shell_process(
         }
         crate::native_boot::clear_owned(&state_dir, &launch_id);
         eprintln!("[native-shell] authority acquired launch_id={launch_id}");
+        if let NativeLaunchMode::Startup(app) = &mode {
+            if let Err(error) = finish_native_startup_on_main_thread(app) {
+                let _ = crate::native_boot::terminate_and_reap_child(
+                    &mut child,
+                    Duration::from_secs(1),
+                );
+                crate::native_boot::clear_owned(&state_dir, &launch_id);
+                return Err(error);
+            }
+        }
         return Ok(());
     }
     crate::native_boot::clear_owned(&state_dir, &launch_id);
@@ -10376,6 +10482,9 @@ fn launch_native_shell_process(
         crate::native_boot::WaitOutcome::Ready => {
             if existing_native_ready {
                 eprintln!("[native-shell] ready with authority launch_id={launch_id}");
+                if let NativeLaunchMode::Startup(app) = &mode {
+                    finish_native_startup_on_main_thread(app)?;
+                }
                 Ok(())
             } else {
                 Err(
@@ -10385,12 +10494,15 @@ fn launch_native_shell_process(
             }
         }
         crate::native_boot::WaitOutcome::ChildExited if cancelled => {
-            Err("Native handoff was cancelled to preserve an incoming activation.".to_string())
+            Err(NATIVE_HANDOFF_CANCELLED_ERROR.to_string())
         }
         crate::native_boot::WaitOutcome::ChildExited if existing_native_ready => {
             eprintln!(
                 "[native-shell] duplicate child acknowledged live native owner launch_id={launch_id}"
             );
+            if let NativeLaunchMode::Startup(app) = &mode {
+                finish_native_startup_on_main_thread(app)?;
+            }
             Ok(())
         }
         crate::native_boot::WaitOutcome::ChildExited => Err(
@@ -10704,7 +10816,8 @@ pub fn try_launch_native_performance_mode_on_startup(
     // marker as an abandoned launch and reverting the user's mode.
     if let Some(authority_path) = live_native_startup_owner(&app_data_dir) {
         eprintln!("[native-shell] live native owner holds authority; exiting duplicate");
-        return Ok(Some(authority_path));
+        return finish_existing_native_startup_on_main_thread(app)
+            .map(|should_exit| should_exit.then_some(authority_path));
     }
 
     // A surviving marker whose fs4 launch guard is free belongs to an abandoned
@@ -10724,7 +10837,8 @@ pub fn try_launch_native_performance_mode_on_startup(
                 eprintln!(
                     "[native-shell] another launcher is awaiting readiness; exiting duplicate"
                 );
-                return Ok(Some(marker));
+                return finish_existing_native_startup_on_main_thread(app)
+                    .map(|should_exit| should_exit.then_some(marker));
             }
             Ok(stale_guard) => {
                 // Keep the launch guard through cleanup so a rapid relaunch
@@ -10756,6 +10870,11 @@ pub fn try_launch_native_performance_mode_on_startup(
         return Ok(None);
     }
 
+    // Startup has not claimed WebView authority yet, but it still participates
+    // in activation cancellation so a duplicate launch cannot disappear while
+    // the sidecar spends up to the handshake timeout becoming ready.
+    begin_native_handoff(true)?;
+
     // Resolve failure = the sidecar is missing entirely (broken or partial
     // install). Same treatment as a boot that died mid-start: self-heal the
     // setting and leave the one-shot note so the webview UI explains itself —
@@ -10765,6 +10884,11 @@ pub fn try_launch_native_performance_mode_on_startup(
     let exe_path = match resolve_native_shell_executable(app) {
         Ok(path) => path,
         Err(error) => {
+            let cancelled = NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst);
+            abort_native_handoff();
+            if cancelled {
+                return Ok(None);
+            }
             revert_performance_mode_to_webview(&settings_path);
             let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
             return Err(error);
@@ -10774,8 +10898,14 @@ pub fn try_launch_native_performance_mode_on_startup(
         &exe_path,
         Some(app_data_dir.clone()),
         std::env::current_exe().ok(),
-        None,
+        NativeLaunchMode::Startup(app.clone()),
     ) {
+        let cancelled = NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst)
+            || error == NATIVE_HANDOFF_CANCELLED_ERROR;
+        abort_native_handoff();
+        if cancelled {
+            return Ok(None);
+        }
         // The sidecar could not spawn, exited, or timed out before readiness:
         // this launch continues into the webview and the next one doesn't
         // retry a known-broken native mode.
@@ -10794,7 +10924,7 @@ pub async fn launch_native_performance_mode(
     app: tauri::AppHandle,
 ) -> Result<NativePerformanceLaunch, String> {
     let exe_path = resolve_native_shell_executable(&app)?;
-    begin_native_handoff()?;
+    begin_native_handoff(false)?;
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
@@ -10803,7 +10933,7 @@ pub async fn launch_native_performance_mode(
             &launch_path,
             app_data_dir,
             webview_exe,
-            Some(&NATIVE_HANDOFF_CANCELLED),
+            NativeLaunchMode::Handoff,
         )
     })
     .await;
@@ -13062,7 +13192,7 @@ fn released_authority_is_reported_as_not_held_until_reclaimed() {
     NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
 }
 
-/// Both handoff atomics are process-global, so every case lives in one test.
+/// The handoff atomics are process-global, so every case lives in one test.
 /// Splitting them would let the parallel test harness race the flags.
 #[test]
 fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
@@ -13070,11 +13200,27 @@ fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
     // reset cancellation belonging to the admitted invocation.
     NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
     NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
-    begin_native_handoff().unwrap();
+    NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+    begin_native_handoff(false).unwrap();
     NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
-    assert!(begin_native_handoff().is_err());
+    assert!(begin_native_handoff(false).is_err());
     assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
     abort_native_handoff();
+
+    // Startup has not claimed WebView authority yet. An activation still
+    // cancels its sidecar launch, but must not try to reclaim a lock this
+    // process never held; the caller buffers the activation until startup
+    // falls back to the WebView and claims normally.
+    *webview_authority().lock().unwrap() = None;
+    begin_native_handoff(true).unwrap();
+    assert!(cancel_native_handoff(|| {
+        panic!("startup cancellation unexpectedly tried to reclaim authority")
+    })
+    .unwrap());
+    assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst));
+    abort_native_handoff();
+    assert!(!NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst));
 
     // Committing a cancelled handoff must refuse to release authority, so the
     // still-live WebView keeps the activation instead of exiting underneath it.
