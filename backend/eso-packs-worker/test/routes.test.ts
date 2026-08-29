@@ -29,6 +29,15 @@ function packIndexForTest() {
   return e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton"));
 }
 
+async function ensureD1MirrorTables(): Promise<void> {
+  await e.ROSTER_HUB_DB!.prepare(
+    "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, author_id TEXT, author_name TEXT, is_anonymous INTEGER, title TEXT, description TEXT, pack_type TEXT, addons TEXT, vote_count INTEGER, created_at TEXT, updated_at TEXT)"
+  ).run();
+  await e.ROSTER_HUB_DB!.prepare(
+    "CREATE TABLE IF NOT EXISTS pack_tags (pack_id TEXT, tag TEXT)"
+  ).run();
+}
+
 async function putPackIndex(testEnv: Env, index: PackIndex): Promise<void> {
   const id = testEnv.PACK_INDEX.idFromName("singleton");
   await testEnv.PACK_INDEX.get(id).replaceIndex(index);
@@ -1597,6 +1606,7 @@ describe("POST /admin/restore", () => {
     //
     // Pack records are required because restore deliberately rejects orphan
     // votes whose pack is absent from the snapshot corpus.
+    await ensureD1MirrorTables();
     const overCap = RESTORE_MAX_PAGE_SIZE + 1;
     const packs = Array.from({ length: overCap }, (_, i) => makePack(`cap-pack-${i}`));
     await e.ESO_PACKS.put(
@@ -1642,9 +1652,11 @@ describe("POST /admin/restore", () => {
         e.ESO_PACKS.delete(`pack:cap-pack-${i}`)
       )
     );
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id LIKE 'cap-pack-%'").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id LIKE 'cap-pack-%'").run();
     await e.ESO_PACKS.delete("backup:latest");
-    // 30s, not the 5s default: this case restores 300 pack records for real.
-  }, 30_000);
+    // 120s: this case restores 300 pack records and mirrors each one to D1.
+  }, 120_000);
 
   it("restores an empty snapshot without tripping the cursor guard", async () => {
     // start === 0 is always legitimate, including when there is nothing to do.
