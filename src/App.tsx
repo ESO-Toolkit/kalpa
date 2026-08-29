@@ -554,6 +554,12 @@ function App() {
         );
         await scanAddons(path);
       }
+
+      if (result.data.notFound.length > 0) {
+        toast.warning(
+          `Could not auto-link ${result.data.notFound.length} addon${result.data.notFound.length > 1 ? "s" : ""}; review them manually.`
+        );
+      }
     },
     [scanAddons]
   );

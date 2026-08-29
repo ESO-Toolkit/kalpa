@@ -219,9 +219,11 @@ pub struct UpdateCheckResult {
 ///
 /// Preference order, most to least trustworthy:
 ///
-/// 1. A folder already recorded under this very ESOUI ID. On an update the
-///    existing primary must stay the primary, or an archive whose title stops
-///    matching would hand ownership to a bundled library.
+/// 1. A unique folder already recorded under this very ESOUI ID. On an update
+///    the existing primary must stay the primary, or an archive whose title
+///    stops matching would hand ownership to a bundled library. Legacy installs
+///    may have recorded the ID on several folders, so duplicate IDs are
+///    disambiguated by the title before falling through to the other heuristics.
 /// 2. An exact, case-insensitive match against the ESOUI title.
 /// 3. A folder name contained in the title, longest first - so "LibFoo-2.0"
 ///    wins over "LibFoo" instead of depending on iteration order.
@@ -238,14 +240,45 @@ fn determine_primary_folder(
     esoui_id: u32,
     esoui_title: &str,
 ) -> String {
-    if esoui_id != 0 {
-        if let Some(existing) = installed_folders.iter().find(|folder| {
-            store
-                .addons
-                .get(folder.as_str())
-                .is_some_and(|meta| meta.esoui_id == esoui_id)
-        }) {
-            return existing.clone();
+    let same_id: Vec<&String> = if esoui_id == 0 {
+        Vec::new()
+    } else {
+        installed_folders
+            .iter()
+            .filter(|folder| {
+                store
+                    .addons
+                    .get(folder.as_str())
+                    .is_some_and(|meta| meta.esoui_id == esoui_id)
+            })
+            .collect()
+    };
+
+    // A single recorded owner is authoritative. Legacy installs, however,
+    // stamped the same ID onto every folder in a multi-folder archive, so the
+    // first match is not necessarily the archive's primary folder. Let the
+    // title disambiguate those duplicates below.
+    if same_id.len() == 1 {
+        return same_id[0].clone();
+    }
+
+    if same_id.len() > 1 {
+        let title = esoui_title.trim();
+        if let Some(exact) = same_id
+            .iter()
+            .find(|folder| folder.eq_ignore_ascii_case(title))
+        {
+            return (*exact).clone();
+        }
+
+        let mut contained: Vec<&String> = same_id
+            .iter()
+            .copied()
+            .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+            .collect();
+        contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        if let Some(best) = contained.first() {
+            return (*best).clone();
         }
     }
 
@@ -4152,6 +4185,10 @@ fn auto_link_addons_blocking(
                 !heals
             });
             if is_bundled_secondary {
+                // Keep the mismatch visible to the caller. It is already
+                // tracked metadata, so it cannot reach the ordinary
+                // `!store.addons.contains_key` not-found branch below.
+                not_found.push(folder_name);
                 continue;
             }
 
@@ -11390,6 +11427,55 @@ mod tests {
         assert_eq!(
             determine_primary_folder(&tracked, &mixed, 3, "Totally Unrelated"),
             "ZAddon"
+        );
+
+        // Legacy metadata could stamp the archive ID onto every folder. A
+        // duplicate ID is not enough to identify the owner: the title must
+        // disambiguate it instead of accepting the first (sorted) candidate.
+        let mut legacy = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut legacy, "LibFoo", 3, "1.0", "u", 0);
+        metadata::record_install_ext(&mut legacy, "ZAddon", 3, "1.0", "u", 0);
+        let legacy_folders = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+        assert_eq!(
+            determine_primary_folder(&legacy, &legacy_folders, 3, "ZAddon"),
+            "ZAddon"
+        );
+    }
+
+    #[test]
+    fn auto_link_surfaces_legacy_version_mismatch_as_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "2.0");
+        write_versioned_addon(addons_dir, "LibFoo", "1.0");
+
+        // This is the pre-provenance shape: LibFoo was demoted to ID zero but
+        // still shares the parent archive URL. Its standalone disk version is
+        // different from ESOUI, so auto-linking would create a phantom update.
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "2.0", "parent", 1);
+        metadata::record_install_ext(&mut store, "LibFoo", 0, "1.0", "parent", 0);
+        metadata::save_metadata(addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "LibFoo".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 7,
+                title: "LibFoo".to_string(),
+                version: "2.0".to_string(),
+                author: "Test".to_string(),
+                last_update: 2,
+                file_info_uri: "standalone".to_string(),
+            }),
+        );
+
+        let result = auto_link_addons_blocking(addons_dir, &api_lookup).unwrap();
+        assert!(result.linked.is_empty());
+        assert_eq!(result.not_found, vec!["LibFoo"]);
+        assert_eq!(
+            metadata::load_metadata(addons_dir).addons["LibFoo"].esoui_id,
+            0
         );
     }
 

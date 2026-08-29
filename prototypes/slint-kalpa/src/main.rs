@@ -12662,14 +12662,45 @@ fn determine_primary_folder(
     esoui_id: u32,
     esoui_title: &str,
 ) -> String {
-    if esoui_id != 0 {
-        if let Some(existing) = installed_folders.iter().find(|folder| {
-            store
-                .addons
-                .get(folder.as_str())
-                .is_some_and(|meta| meta.esoui_id == esoui_id)
-        }) {
-            return existing.clone();
+    let same_id: Vec<&String> = if esoui_id == 0 {
+        Vec::new()
+    } else {
+        installed_folders
+            .iter()
+            .filter(|folder| {
+                store
+                    .addons
+                    .get(folder.as_str())
+                    .is_some_and(|meta| meta.esoui_id == esoui_id)
+            })
+            .collect()
+    };
+
+    // A single recorded owner is authoritative. Legacy installs, however,
+    // stamped the same ID onto every folder in a multi-folder archive, so the
+    // first match is not necessarily the archive's primary folder. Let the
+    // title disambiguate those duplicates below.
+    if same_id.len() == 1 {
+        return same_id[0].clone();
+    }
+
+    if same_id.len() > 1 {
+        let title = esoui_title.trim();
+        if let Some(exact) = same_id
+            .iter()
+            .find(|folder| folder.eq_ignore_ascii_case(title))
+        {
+            return (*exact).clone();
+        }
+
+        let mut contained: Vec<&String> = same_id
+            .iter()
+            .copied()
+            .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+            .collect();
+        contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        if let Some(best) = contained.first() {
+            return (*best).clone();
         }
     }
 
@@ -19592,6 +19623,21 @@ mod tests {
         assert_eq!(addon_meta("", "Author"), "Author");
         assert_eq!(addon_meta("", ""), "");
         assert_eq!(addon_meta(" 1.2.3 ", " Author "), "1.2.3  \u{00b7} Author");
+    }
+
+    #[test]
+    fn primary_folder_selection_disambiguates_duplicate_legacy_ids_by_title() {
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 3, "1.0", "u", 0);
+        metadata::record_install_ext(&mut store, "ZAddon", 3, "1.0", "u", 0);
+        let folders = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+
+        // Legacy metadata stamped the same ID on every extracted folder. The
+        // title, rather than sorted iteration order, identifies the owner.
+        assert_eq!(
+            determine_primary_folder(&store, &folders, 3, "ZAddon"),
+            "ZAddon"
+        );
     }
 
     #[test]
