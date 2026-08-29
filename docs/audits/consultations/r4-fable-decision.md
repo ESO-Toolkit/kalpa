@@ -27,8 +27,10 @@ ecosystem relies on — many "addons" legitimately vendor their libs).
         installed_at := now (a download did land in this folder).
      b. otherwise (absent, or id 0, or id == parent_id) → GENUINELY BUNDLED.
         esoui_id := 0, download_url := parent_url, esoui_last_update := 0,
-        installed_version := local_version, bundled_by := {parent_id},
-        tags preserved.
+        installed_version := local_version,
+        bundled_by := sort(dedup(existing.bundled_by ∪ {parent_id})),
+        tags preserved. An absent entry starts with the singleton set; an
+        already-bundled folder retains every earlier parent's provenance.
    `record_install_ext` stays for the PRIMARY only and additionally does
    `bundled_by.clear()` when its esoui_id != 0 — a folder that is now the
    primary of its own install is owned, not bundled. Keep its existing
@@ -127,9 +129,12 @@ CRASH_RECOVERY:
    torn one; `load_json_with_backup` recovers .tmp/.bak.
 2. Files extracted but metadata not yet saved (kill between extract and
    save): folder holds A's copy of L, metadata still says L's id + old
-   version. Next `auto_link`/scan reads the manifest version from disk;
-   the existing scan path already reconciles `installed_version` against
-   the manifest, so the state self-corrects on next open. No new marker.
+   version. Add an explicit reconciliation step to scan/`auto_link`: for a
+   tracked folder whose on-disk manifest exposes `## Version`, update that
+   entry's `installed_version` to the normalized disk value before update
+   checks and persist it through `save_json_with_backup`. This reconciliation
+   is idempotent and runs for existing entries as well as newly linked ones;
+   it is not behavior the current scan path already provides.
 3. Metadata saved but hash manifest not (step 10 second write): hash
    manifest's `esoui_ids` lacks the parent; consequence is only that a
    later Protected-Edits diff attributes files to L alone. Next update of
@@ -177,6 +182,10 @@ TESTS:
 13. Slint: mirror of tests 6–7 against `record_native_installed_folders`
     (the crate has its own test target; the shared rule is in metadata.rs,
     so this mainly guards the dispatch not regressing).
+14. Crash reconciliation: seed metadata L{id 7, version "1.5"} and an on-disk
+    manifest at version "1.2"; scan/`auto_link` persists version "1.2" before
+    update checks. Re-running is a no-op, and a missing/unparseable version
+    leaves the last known value unchanged.
 
 RISKS:
 1. Dependency semantics change (step 7): a multi-folder dependency now
