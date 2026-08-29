@@ -6,6 +6,60 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.20] — 2026-08-28
+
+Two changes from beta feedback: you can now read an addon's changelog without
+leaving Kalpa, and the addon list no longer comes back empty after a visit to
+Discover.
+
+### Features
+
+- **My Addons now has an ESOUI tab, and changelogs are readable in-app.** The
+  tab shows the same rich remote view Discover does — screenshots, the full
+  description and download stats — and both panes now read through a cached
+  lookup, so Discover also stops refetching on every selection. Changelogs come
+  from ESOUI's own file data, reachable from a "What's new" button in the update
+  panel and in each Update All row. The tab is hidden for side-loaded addons
+  with no ESOUI ID, and only fetches once you open it.
+  ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+- **Changelogs render as a scannable version list rather than one flat dump.**
+  A long changelog could be tens of thousands of characters with no hierarchy
+  and no way to find a given version — on AwesomeGuildStore it was 87% of the
+  panel's text. Versions are now hairline-separated rows with the latest
+  expanded, behind a "Show all N versions" affordance, and each row carries its
+  release date taken from ESOUI's archived-files table (no extra request). Your
+  installed version is marked but never used to hide older entries. When an
+  author's changelog has no reliable structure, the previous plain view is used
+  instead. ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+
+### Bug Fixes
+
+- **The addon list no longer renders empty after returning from Discover.**
+  Switching to Discover unmounts the installed list, but its virtualizer lived
+  further up the tree and outlived the scroll container it measured — so coming
+  back mounted a fresh container that nothing was ever told about, leaving a
+  correctly-sized but blank list until something forced a re-render. The
+  virtualizer now shares a lifecycle with the element it observes.
+  ([#398](https://github.com/ESO-Toolkit/kalpa/pull/398))
+- **Fixed the wrong changelog entry being marked as installed.** Version
+  matching used containment, so an installed version that is a numeric prefix of
+  a newer one — 1.7 inside 1.7.8 — marked the newest entry as installed and
+  collapsed the update delta to nothing. Matching is now exact on the version
+  token. Versions written as "v2.5.49" also now match their archived release
+  date, and entries with no notes no longer render at half strength as though
+  broken. ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+- **The per-row changelog button in the update chooser is now disabled while
+  offline**, matching the update actions beside it, instead of opening a dialog
+  that could only show a network error.
+  ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+
+### Maintenance
+
+- Pack Hub's index is now authoritative for pack lifecycles, with mutations
+  journaled through the Durable Object to close races between concurrent
+  create, update and delete requests.
+  ([#398](https://github.com/ESO-Toolkit/kalpa/pull/398))
+
 ## [0.1.0-beta.19] — 2026-08-28
 
 A focused fix for addons updated outside Kalpa.
@@ -612,7 +666,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...HEAD
+[0.1.0-beta.20]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...v0.1.0-beta.20
 [0.1.0-beta.19]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...v0.1.0-beta.19
 [0.1.0-beta.18]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.17...v0.1.0-beta.18
 [0.1.0-beta.17]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...v0.1.0-beta.17

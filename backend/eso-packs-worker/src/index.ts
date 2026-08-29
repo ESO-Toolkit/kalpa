@@ -18,8 +18,8 @@ export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
-// directly to roster-hub-db (D1) so every KV mutation is atomically
-// mirrored — no async sync, no reconciliation, no deployment ordering.
+// directly to roster-hub-db (D1), mirrors live mutations through the Pack
+// Index Durable Object, and runs a guarded scheduled reconciliation for drift.
 
 export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;

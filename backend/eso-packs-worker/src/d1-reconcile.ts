@@ -10,6 +10,7 @@ const LIMITS = {
   deletes: 25,
   emptyDeletes: 5,
   total: 150,
+  unownedSample: 25,
 };
 
 export interface ReconciliationAuthority {
@@ -58,6 +59,7 @@ export interface D1ReconciliationResult {
   planned: Counts;
   applied: Counts;
   unowned_extra: number;
+  unowned_extra_ids?: string[];
   limit_hit?: string;
   message?: string;
 }
@@ -91,7 +93,8 @@ function rowsEqual(a: D1PackRow, b: D1PackRow): boolean {
   );
 }
 function sameTags(a: string[], b: string[]): boolean {
-  return [...a].sort().join("\0") === [...b].sort().join("\0");
+  const canonical = (tags: string[]) => [...new Set(tags)].sort().join("\0");
+  return canonical(a) === canonical(b);
 }
 
 export function buildD1ReconciliationPlan(
@@ -337,6 +340,8 @@ export async function reconcileD1(env: Env): Promise<D1ReconciliationResult> {
     const plan = buildD1ReconciliationPlan(authority, rows, tags);
     result.planned = planCounts(plan);
     result.unowned_extra = plan.unowned_extra.length;
+    if (plan.unowned_extra.length > 0)
+      result.unowned_extra_ids = plan.unowned_extra.slice(0, LIMITS.unownedSample);
     result.limit_hit = limitHit(authority.packs.length, result.planned);
     if (result.limit_hit) {
       result.stage = "plan-rejected";
