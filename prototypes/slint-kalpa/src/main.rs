@@ -12592,6 +12592,45 @@ fn normalized_addon_version(version: &str) -> &str {
         .unwrap_or(version.trim())
 }
 
+fn reconcile_native_update_observation(
+    entry: &mut metadata::AddonMetadata,
+    remote_version: &str,
+    remote_marker: u64,
+    has_update: bool,
+) -> bool {
+    let local_version = normalized_addon_version(&entry.installed_version);
+    let remote_version_normalized = normalized_addon_version(remote_version);
+
+    // A filelist observation is not proof that its artifact was installed.
+    // Only attach its version and publication marker when it matches the
+    // non-empty version already on disk.
+    if has_update
+        || local_version.is_empty()
+        || remote_version_normalized.is_empty()
+        || local_version != remote_version_normalized
+    {
+        return false;
+    }
+
+    let mut changed = false;
+    if entry.installed_version != remote_version {
+        entry.installed_version = remote_version.to_string();
+        changed = true;
+    }
+    if remote_marker > entry.esoui_last_update {
+        entry.esoui_last_update = remote_marker;
+        entry.esoui_marker_installed = true;
+        changed = true;
+    } else if remote_marker > 0
+        && remote_marker == entry.esoui_last_update
+        && !entry.esoui_marker_installed
+    {
+        entry.esoui_marker_installed = true;
+        changed = true;
+    }
+    changed
+}
+
 fn check_native_addon_updates_blocking(
     addons_dir: &Path,
 ) -> Result<Vec<NativeAddonUpdateCheck>, String> {
@@ -12625,14 +12664,12 @@ fn check_native_addon_updates_blocking(
             && remote_version != local_version;
 
         if let Some(entry) = store.addons.get_mut(&folder_name) {
-            if !has_update && entry.installed_version != api_entry.version {
-                entry.installed_version = api_entry.version.clone();
-                metadata_changed = true;
-            }
-            if entry.esoui_last_update != api_entry.last_update {
-                entry.esoui_last_update = api_entry.last_update;
-                metadata_changed = true;
-            }
+            metadata_changed |= reconcile_native_update_observation(
+                entry,
+                &api_entry.version,
+                api_entry.last_update,
+                has_update,
+            );
         }
 
         results.push(NativeAddonUpdateCheck {
@@ -22211,6 +22248,46 @@ CombatMetrics_SavedVariables = {
         assert!(entry.favorite);
         assert!(tag_model_has_active(&entry.tags, "favorite"));
         assert!(tag_model_has_active(&entry.tags, "pvp-build"));
+    }
+
+    #[test]
+    fn native_pending_update_preserves_installed_publication_marker() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: true,
+        };
+
+        assert!(!reconcile_native_update_observation(
+            &mut meta, "v2", 200, true
+        ));
+        assert_eq!(meta.installed_version, "v1");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn native_matching_observation_can_establish_marker_provenance() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: false,
+        };
+
+        assert!(reconcile_native_update_observation(
+            &mut meta, " 1 ", 100, false
+        ));
+        assert_eq!(meta.installed_version, " 1 ");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
     }
 
     #[test]
