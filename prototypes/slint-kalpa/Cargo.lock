@@ -3378,6 +3378,7 @@ dependencies = [
  "arboard",
  "base64",
  "dirs",
+ "dunce",
  "i-slint-backend-winit",
  "keyring",
  "md-5",
