@@ -146,10 +146,12 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
-            ## Changed: external addon updates are recognized
-            **Kalpa now recognizes an addon after Minion or another external manager updates it.** Refreshing checks the selected live or PTS AddOns folder and reconciles Kalpa's stored version when the installed addon matches the current ESOUI release.
+            ## Changed: read changelogs in-app, and a fix for the empty addon list
+            **My Addons has an ESOUI tab, and changelogs are readable without leaving Kalpa.** The tab shows the same screenshots, description and download stats Discover does, and a "What's new" button in the update panel and in each Update All row opens the addon's changelog.
 
-            Minion entries are matched by addon ID, folder, and game root, so stale or cross-root records cannot rewrite another installation.
+            Changelogs render as a scannable list of versions — latest expanded, each row dated from ESOUI's archived releases, the rest behind "Show all N versions" — instead of one long flat dump. Your installed version is marked, never used to hide older entries.
+
+            **Fixed: the addon list could come back empty after visiting Discover.** The list's virtualizer outlived the scroll container it measured, so returning from Discover left a correctly-sized but blank list until something forced a redraw.
 
             ## Verify your download
             Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
