@@ -31,6 +31,13 @@ describe("openFeedbackUrl", () => {
     expect(mocks.toastError.mock.calls.flat().join(" ")).not.toContain("private-diagnostics");
   });
 
+  it("names a plain destination the user could still reach by hand", async () => {
+    mocks.openUrl.mockRejectedValue(new Error("browser unavailable"));
+
+    await expect(openFeedbackUrl("https://example.com/help")).resolves.toBe(false);
+    expect(mocks.toastError.mock.calls.flat().join(" ")).toContain("https://example.com/help");
+  });
+
   it("lets a caller provide its own contextual failure message", async () => {
     mocks.openUrl.mockRejectedValue(new Error("browser unavailable"));
 
