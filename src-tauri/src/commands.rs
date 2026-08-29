@@ -2181,6 +2181,7 @@ fn versions_match(local_version: &str, remote_version: &str) -> bool {
 /// or before the marker recorded with the installed artifact is not allowed to
 /// trigger an update: ESOUI can briefly serve an older filelist after the
 /// filedetails endpoint has published a new artifact.
+#[cfg(test)]
 fn artifact_is_newer(
     local_version: &str,
     remote_version: &str,
