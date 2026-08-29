@@ -12592,6 +12592,24 @@ fn normalized_addon_version(version: &str) -> &str {
         .unwrap_or(version.trim())
 }
 
+fn native_artifact_has_update(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    let local_version = normalized_addon_version(local_version);
+    let remote_version = normalized_addon_version(remote_version);
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
 fn reconcile_native_update_observation(
     entry: &mut metadata::AddonMetadata,
     remote_version: &str,
@@ -12657,11 +12675,13 @@ fn check_native_addon_updates_blocking(
             continue;
         };
 
-        let local_version = normalized_addon_version(&meta.installed_version);
-        let remote_version = normalized_addon_version(&api_entry.version);
-        let has_update = !remote_version.is_empty()
-            && !local_version.is_empty()
-            && remote_version != local_version;
+        let has_update = native_artifact_has_update(
+            &meta.installed_version,
+            &api_entry.version,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(&folder_name) {
             metadata_changed |= reconcile_native_update_observation(
@@ -22268,6 +22288,13 @@ CombatMetrics_SavedVariables = {
         assert_eq!(meta.installed_version, "v1");
         assert_eq!(meta.esoui_last_update, 100);
         assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn native_update_check_rejects_a_stale_filelist_downgrade() {
+        assert!(!native_artifact_has_update("v2", "v1", 200, true, 100));
+        assert!(native_artifact_has_update("v1", "v2", 100, true, 200));
+        assert!(native_artifact_has_update("v2", "v1", 200, false, 100));
     }
 
     #[test]
