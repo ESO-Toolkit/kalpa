@@ -186,9 +186,11 @@ export function SupportDialog({
 
         {/* Below ~420px of viewport height the inner scroller would collapse to
             a few pixels, so the whole dialog becomes the single scroll
-            container instead of nesting a useless one inside it. Above that the
-            sticky footer is worth keeping: the primary action stays in view. */}
-        <div className="min-h-0 space-y-4 overflow-y-auto px-5 py-4 max-h-short:space-y-3 max-h-tiny:overflow-visible max-h-short:py-2">
+            container instead of nesting a useless one inside it — it must also
+            stop shrinking there, or its content spills out of a collapsed box
+            and paints over the footer. Above that the sticky footer is worth
+            keeping: the primary action stays in view. */}
+        <div className="min-h-0 space-y-4 overflow-y-auto px-5 py-4 max-h-short:space-y-3 max-h-short:py-2 max-h-tiny:shrink-0 max-h-tiny:overflow-visible">
           <section className="space-y-2">
             <SectionHeader id="support-issue-heading">
               1 · What do you need help with?
