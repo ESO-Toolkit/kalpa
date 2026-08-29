@@ -127,8 +127,9 @@ export function SupportDialog({
   async function copyReport(): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(report);
+      // The status panel below announces this; a toast as well would make a
+      // screen reader read the same result twice.
       setCopiedReport(report);
-      toast.success("Support report copied");
       return true;
     } catch {
       toast.error("Kalpa couldn't copy the report. Select the preview and copy it manually.");
@@ -153,8 +154,8 @@ export function SupportDialog({
     try {
       const opened = await openFeedbackUrl(handoffUrl, { toastOnError: false });
       if (opened) {
+        // The stage line owns this announcement for the same reason.
         setHandoffOpened(true);
-        toast.info("Continue in your browser to sign in and create the ticket.");
       } else {
         toast.error(
           "Kalpa couldn't open the secure handoff. Your report is still available below."
@@ -361,7 +362,7 @@ export function SupportDialog({
           </div>
         </div>
 
-        <DialogFooter className="mx-0 mb-0 shrink-0 gap-3 px-5 py-4 max-h-short:gap-2 max-h-short:py-2 sm:flex-row sm:items-end sm:justify-between">
+        <DialogFooter className="mx-0 mb-0 shrink-0 flex-col gap-3 px-5 py-4 max-h-short:gap-2 max-h-short:py-2 sm:flex-row sm:items-end sm:justify-between">
           <div className="flex min-w-0 flex-wrap gap-1">
             <Button
               variant="ghost"
@@ -386,8 +387,13 @@ export function SupportDialog({
             <Button
               aria-busy={openingHandoff}
               aria-describedby={blockedReason ? "support-create-blocked" : "support-stage"}
-              className="h-auto min-h-9 py-2 whitespace-normal"
-              disabled={blockedReason !== null || openingHandoff}
+              // Busy is advertised, not enforced with `disabled`: Chromium blurs
+              // a focused element the moment it is disabled, so a keyboard user
+              // who activated this would lose their place. createPrivateTicket
+              // already refuses a second run while one is in flight.
+              aria-disabled={openingHandoff}
+              className="h-auto min-h-9 py-2 whitespace-normal aria-disabled:pointer-events-none aria-disabled:opacity-50"
+              disabled={blockedReason !== null}
               onClick={() => void createPrivateTicket()}
             >
               {openingHandoff ? <LoaderCircle className="animate-spin" /> : <LockKeyhole />}
