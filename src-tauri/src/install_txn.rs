@@ -204,10 +204,7 @@ impl InstallTransaction {
         }
         promote_hashes(&self.addons_dir, &self.root, &journal.hash_folders)?;
         journal.phase = Phase::Promoted;
-        write_journal(&self.root, &journal)?;
-        fs::remove_dir_all(&self.root)
-            .map_err(|e| format!("Install succeeded, but staging cleanup failed: {e}"))?;
-        cleanup_empty_staging(&self.addons_dir);
+        finish_committed_transaction(&self.addons_dir, &self.root, &journal);
         self.finished = true;
         Ok(folders)
     }
@@ -326,12 +323,62 @@ fn recover_staging_locked(addons_dir: &Path) -> Result<(), String> {
                 validate_journal(&journal)?;
                 rollback_journal(addons_dir, &root, &journal)?;
             }
-            _ => {}
+            Some(journal) if journal.phase == Phase::Promoted => {
+                validate_journal(&journal)?;
+            }
+            _ => rollback_unjournaled_tombstones(addons_dir, &root)?,
         }
         fs::remove_dir_all(&root)
             .map_err(|e| format!("Failed to clean abandoned installer transaction: {e}"))?;
     }
     cleanup_empty_staging(addons_dir);
+    Ok(())
+}
+
+fn rollback_unjournaled_tombstones(addons_dir: &Path, root: &Path) -> Result<(), String> {
+    let tombstone_dir = root.join("tombstone");
+    let entries = match fs::read_dir(&tombstone_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect installer recovery tombstones: {error}"
+            ));
+        }
+    };
+    let mut folders = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("Failed to inspect installer recovery tombstone: {error}"))?;
+        let folder = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "Invalid non-Unicode installer recovery tombstone name.".to_string())?;
+        crate::installer::validate_top_folder_name(&folder)
+            .map_err(|error| format!("Invalid folder in installer recovery tombstone: {error}"))?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            format!("Failed to inspect installer recovery tombstone {folder}: {error}")
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(format!(
+                "Unexpected installer recovery tombstone: {}",
+                entry.path().display()
+            ));
+        }
+        folders.push(folder);
+    }
+    folders.sort();
+    folders.reverse();
+    for folder in folders {
+        let live = addons_dir.join(&folder);
+        let tombstone = tombstone_dir.join(&folder);
+        if live.exists() {
+            fs::remove_dir_all(&live)
+                .map_err(|error| format!("Failed to remove incomplete {folder}: {error}"))?;
+        }
+        rename_with_retries(&tombstone, &live)
+            .map_err(|error| format!("Failed to restore {folder}: {error}"))?;
+    }
     Ok(())
 }
 
@@ -436,6 +483,34 @@ fn write_journal(root: &Path, journal: &Journal) -> Result<(), String> {
         .map_err(|e| format!("Failed to encode installer journal: {e}"))?;
     atomic_file::atomic_write(&root.join("journal.json"), &bytes)
         .map_err(|e| format!("Failed to persist installer journal: {e}"))
+}
+
+fn finish_committed_transaction(addons_dir: &Path, root: &Path, journal: &Journal) {
+    finish_committed_transaction_with(
+        || write_journal(root, journal),
+        || fs::remove_dir_all(root),
+        || cleanup_empty_staging(addons_dir),
+    );
+}
+
+fn finish_committed_transaction_with(
+    persist_promoted: impl FnOnce() -> Result<(), String>,
+    cleanup_root: impl FnOnce() -> io::Result<()>,
+    cleanup_staging: impl FnOnce(),
+) {
+    if let Err(error) = persist_promoted() {
+        eprintln!(
+            "Warning: install publication committed, but its recovery journal could not be finalized: {error}"
+        );
+        return;
+    }
+    if let Err(error) = cleanup_root() {
+        eprintln!(
+            "Warning: install publication committed, but staging cleanup was deferred: {error}"
+        );
+        return;
+    }
+    cleanup_staging();
 }
 
 fn is_transient_rename_error(error: &io::Error) -> bool {
@@ -563,6 +638,42 @@ mod tests {
             "second-old"
         );
         assert!(!addons_dir.join(STAGING_DIR).exists());
+    }
+
+    #[test]
+    fn recovery_restores_the_only_addon_copy_when_the_journal_cannot_describe_the_swap() {
+        for journal_state in ["preparing", "missing", "corrupt"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let addons_dir = temp.path().join("AddOns");
+            let root = prepare_root(&addons_dir, journal_state);
+            write_addon(&root.join("tombstone/Example"), "old");
+            match journal_state {
+                "preparing" => write_journal(
+                    &root,
+                    &Journal {
+                        phase: Phase::Preparing,
+                        folders: Vec::new(),
+                        pre_existing: Vec::new(),
+                        hash_folders: Vec::new(),
+                    },
+                )
+                .expect("write preparing journal"),
+                "corrupt" => fs::write(root.join("journal.json"), b"not-json")
+                    .expect("write corrupt journal"),
+                "missing" => {}
+                _ => unreachable!(),
+            }
+
+            recover_staging(&addons_dir).expect("recover transaction");
+
+            assert_eq!(
+                fs::read_to_string(addons_dir.join("Example/main.lua"))
+                    .expect("read restored addon"),
+                "old",
+                "journal state: {journal_state}"
+            );
+            assert!(!addons_dir.join(STAGING_DIR).exists());
+        }
     }
 
     #[test]
@@ -751,6 +862,24 @@ mod tests {
 
         assert_eq!(attempts.get(), 3);
         assert_eq!(waits.get(), 2);
+    }
+
+    #[test]
+    fn committed_publication_defers_bookkeeping_failures() {
+        let staging_cleanups = std::cell::Cell::new(0);
+        finish_committed_transaction_with(
+            || Err("journal unavailable".to_string()),
+            || panic!("cleanup must wait when the promoted journal is not durable"),
+            || staging_cleanups.set(staging_cleanups.get() + 1),
+        );
+        assert_eq!(staging_cleanups.get(), 0);
+
+        finish_committed_transaction_with(
+            || Ok(()),
+            || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            || staging_cleanups.set(staging_cleanups.get() + 1),
+        );
+        assert_eq!(staging_cleanups.get(), 0);
     }
 
     #[cfg(windows)]
