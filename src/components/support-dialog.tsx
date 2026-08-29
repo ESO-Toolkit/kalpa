@@ -24,11 +24,14 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { FEEDBACK_DISCORD_SUPPORT_URL, openFeedbackUrl } from "@/lib/feedback";
 import { osType } from "@/lib/platform";
+import { collectSupportEnvironment } from "@/lib/support-environment";
 import {
   buildSupportHandoffUrl,
   buildSupportTicketPayload,
   renderSupportReport,
   SUPPORT_ISSUES,
+  UNKNOWN_SUPPORT_ENVIRONMENT,
+  type SupportEnvironment,
   type SupportIssueId,
 } from "@/lib/support-report";
 import { cn } from "@/lib/utils";
@@ -59,7 +62,9 @@ export function SupportDialog({
   const [description, setDescription] = useState("");
   const [consented, setConsented] = useState(false);
   const [openingHandoff, setOpeningHandoff] = useState(false);
+  const [handoffOpened, setHandoffOpened] = useState(false);
   const [appVersion, setAppVersion] = useState("unknown");
+  const [environment, setEnvironment] = useState<SupportEnvironment>(UNKNOWN_SUPPORT_ENVIRONMENT);
   const [generatedAt] = useState(() => new Date());
   const [copiedReport, setCopiedReport] = useState<string | null>(null);
 
@@ -67,6 +72,11 @@ export function SupportDialog({
     void getVersion()
       .then(setAppVersion)
       .catch(() => setAppVersion("unknown"));
+    // Every field degrades to "unknown" on its own, so a rejection here can
+    // only mean the whole collection failed; keep the all-unknown default.
+    void collectSupportEnvironment()
+      .then(setEnvironment)
+      .catch(() => setEnvironment(UNKNOWN_SUPPORT_ENVIRONMENT));
   }, []);
 
   const payload = useMemo(
@@ -76,6 +86,7 @@ export function SupportDialog({
         description,
         appVersion,
         platform: osType(),
+        environment,
         generatedAt,
         isOffline,
         checkingUpdates,
@@ -91,6 +102,7 @@ export function SupportDialog({
       appVersion,
       checkingUpdates,
       description,
+      environment,
       generatedAt,
       instanceLabel,
       isOffline,
@@ -102,6 +114,14 @@ export function SupportDialog({
   const report = useMemo(() => renderSupportReport(payload), [payload]);
   const handoffUrl = useMemo(() => buildSupportHandoffUrl(payload), [payload]);
   const copied = copiedReport === report;
+  // A disabled primary action has to say what would enable it.
+  const blockedReason = !consented
+    ? "Tick the consent box above to enable this."
+    : isOffline
+      ? "Kalpa is offline. Reconnect, or copy the report and use the manual ticket desk."
+      : !handoffUrl
+        ? "This report is too large for the secure handoff. Copy it and use the manual ticket desk."
+        : null;
   const selectedIssue = SUPPORT_ISSUES.find((issue) => issue.id === issueId)!;
 
   async function copyReport(): Promise<boolean> {
@@ -133,6 +153,7 @@ export function SupportDialog({
     try {
       const opened = await openFeedbackUrl(handoffUrl, { toastOnError: false });
       if (opened) {
+        setHandoffOpened(true);
         toast.info("Continue in your browser to sign in and create the ticket.");
       } else {
         toast.error(
@@ -146,8 +167,13 @@ export function SupportDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex max-h-[92vh] flex-col gap-0 p-0 sm:max-w-2xl">
-        <DialogHeader className="mx-0 mt-0 px-5 pt-5">
+      {/* Short viewports are the norm here, not an edge case: Kalpa's minimum
+          window is 800x500, and at 200% zoom that is a 400x250 CSS viewport.
+          The header and footer are compacted so the review region keeps a
+          usable height, and the popup itself scrolls as a last resort so a
+          footer action can never be clipped out of reach. */}
+      <DialogContent className="flex max-h-[calc(100dvh-1rem)] flex-col gap-0 overflow-y-auto p-0 sm:max-w-2xl">
+        <DialogHeader className="mx-0 mt-0 shrink-0 px-5 pt-5 pb-4 max-h-short:pt-3 max-h-short:pb-2">
           <DialogTitle className="flex items-center gap-2">
             <LifeBuoy className="size-4 text-primary" />
             Help me with Kalpa
@@ -158,7 +184,11 @@ export function SupportDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 space-y-4 overflow-y-auto px-5 py-4">
+        {/* Below ~420px of viewport height the inner scroller would collapse to
+            a few pixels, so the whole dialog becomes the single scroll
+            container instead of nesting a useless one inside it. Above that the
+            sticky footer is worth keeping: the primary action stays in view. */}
+        <div className="min-h-0 space-y-4 overflow-y-auto px-5 py-4 max-h-short:space-y-3 max-h-tiny:overflow-visible max-h-short:py-2">
           <section className="space-y-2">
             <SectionHeader id="support-issue-heading">
               1 · What do you need help with?
@@ -188,9 +218,11 @@ export function SupportDialog({
                       onChange={() => setIssueId(issue.id)}
                       className="sr-only"
                     />
-                    <span className="flex items-center gap-2 font-heading text-xs font-semibold text-foreground">
-                      {selected && <CheckCircle2 className="size-3.5 text-accent-sky" />}
-                      {issue.label}
+                    <span className="flex items-start gap-2 font-heading text-xs font-semibold text-foreground">
+                      {selected && (
+                        <CheckCircle2 className="mt-px size-3.5 shrink-0 text-accent-sky" />
+                      )}
+                      <span className="min-w-0">{issue.label}</span>
                     </span>
                     <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
                       {issue.description}
@@ -273,21 +305,30 @@ export function SupportDialog({
               <pre
                 aria-label="Exact support report that will be shared"
                 tabIndex={0}
-                className="max-h-56 overflow-auto whitespace-pre-wrap border-t border-structure-06 bg-scrim-10 px-3 py-2.5 font-mono text-xs leading-relaxed text-muted-foreground select-text"
+                className="max-h-56 overflow-y-auto overflow-x-hidden border-t border-structure-06 bg-scrim-10 px-3 py-2.5 font-mono text-xs leading-relaxed whitespace-pre-wrap wrap-anywhere text-muted-foreground select-text"
               >
                 {report}
               </pre>
             </details>
           </section>
 
-          <div aria-live="polite">
-            <p className="sr-only">
-              Your support report is prepared. A ticket has not been created yet.
+          <div className="space-y-2">
+            {/* One polite status owns the prepared/continuing distinction. The
+                panels below carry their own alert/status roles, so nesting them
+                inside another live region would announce everything twice. */}
+            <p
+              id="support-stage"
+              role="status"
+              className="text-[11px] leading-relaxed text-muted-foreground"
+            >
+              {handoffOpened
+                ? "Continuing in your browser. No ticket exists until ESO Toolkit confirms it there."
+                : "Your report is prepared. No ticket has been created yet."}
             </p>
             {!handoffUrl && (
               <GlassPanel
                 variant="subtle"
-                className="mb-2 border-status-warning/20 bg-status-warning/[0.04] p-3"
+                className="border-status-warning/20 bg-status-warning/[0.04] p-3"
                 role="alert"
               >
                 <p className="text-xs font-semibold text-foreground">
@@ -318,29 +359,52 @@ export function SupportDialog({
           </div>
         </div>
 
-        <DialogFooter className="mx-0 mb-0 gap-2 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap gap-1">
-            <Button variant="ghost" size="sm" onClick={() => void copyReport()}>
+        <DialogFooter className="mx-0 mb-0 shrink-0 gap-3 px-5 py-4 max-h-short:gap-2 max-h-short:py-2 sm:flex-row sm:items-end sm:justify-between">
+          <div className="flex min-w-0 flex-wrap gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-auto min-h-8 py-1.5 whitespace-normal"
+              onClick={() => void copyReport()}
+            >
               <ClipboardCheck />
               Copy report
             </Button>
             <Button
               variant="ghost"
               size="sm"
+              className="h-auto min-h-8 py-1.5 whitespace-normal"
               onClick={() => void openFeedbackUrl(FEEDBACK_DISCORD_SUPPORT_URL)}
             >
               Manual ticket desk
               <ExternalLink />
             </Button>
           </div>
-          <Button
-            disabled={!consented || isOffline || !handoffUrl || openingHandoff}
-            onClick={() => void createPrivateTicket()}
-          >
-            {openingHandoff ? <LoaderCircle className="animate-spin" /> : <LockKeyhole />}
-            {openingHandoff ? "Opening secure sign-in…" : "Create private ticket"}
-            {!openingHandoff && <ExternalLink />}
-          </Button>
+          <div className="flex min-w-0 flex-col items-stretch gap-1 sm:items-end">
+            <Button
+              aria-busy={openingHandoff}
+              aria-describedby={blockedReason ? "support-create-blocked" : "support-stage"}
+              className="h-auto min-h-9 py-2 whitespace-normal"
+              disabled={blockedReason !== null || openingHandoff}
+              onClick={() => void createPrivateTicket()}
+            >
+              {openingHandoff ? <LoaderCircle className="animate-spin" /> : <LockKeyhole />}
+              {openingHandoff
+                ? "Opening secure sign-in…"
+                : handoffOpened
+                  ? "Reopen secure sign-in"
+                  : "Create private ticket"}
+              {!openingHandoff && <ExternalLink />}
+            </Button>
+            {blockedReason && (
+              <p
+                id="support-create-blocked"
+                className="text-[11px] leading-relaxed text-muted-foreground sm:text-right"
+              >
+                {blockedReason}
+              </p>
+            )}
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

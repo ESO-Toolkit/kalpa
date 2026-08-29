@@ -6,6 +6,15 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Short viewports: the minimum 800x500 window at 125% or more OS scaling, or
+ * any window zoomed past 150%. Dialog chrome compacts here so the scrollable
+ * review region keeps a usable height instead of collapsing. */
+@custom-variant max-h-short (@media (max-height: 560px));
+
+/* Below this the header and footer no longer leave a usable review region at
+ * all, so the dialog gives up its sticky chrome and scrolls as one document. */
+@custom-variant max-h-tiny (@media (max-height: 420px));
+
 /* Register the 12 BASE theme variables as typed <color> custom properties.
  * This gives per-token invalid-value robustness: if a malformed custom color is
  * ever assigned, the browser falls back to the initial-value below instead of
