@@ -37,7 +37,7 @@ unstarted. Reconcile the rows as PRs merge.
 |---|---|---|---|---|
 | #389 | P0-A3 sidecar handshake | `fix/audit-p0-a2-cross-process-locking` | **pending** | Fable's final P0 review found and fixed a blocker |
 | #390 | R4/R5/R6 designs | **`main`** | **pending** | Design records only, no code; #391 must merge first |
-| #391 | Reserved `.kalpa-` folders | **`main`** | **pending** | **CI green: `check`, `check-linux`, `check-macos`, and `check-slint`; prerequisite for #390** |
+| #391 | Reserved `.kalpa-` folders | **`main`** | **pending** | **Checks currently running (`check`, `check-linux`, `check-macos`, `check-slint`) after sync; prerequisite for #390** |
 | #392 | R4 sibling ownership | `docs/audit-r-lane-designs` | **pending** | Behaviour change flagged for review |
 | #393 | R5 folder-qualified conflicts | `fix/audit-r4-sibling-ownership` | *in progress* | Largest change; Sol was mid-review |
 
@@ -46,7 +46,7 @@ PRs #370–#388 are already Sol-converged; do not re-review them.
 
 CI is base-sensitive: the workflow triggers on `pull_request: branches: [main]`.
 #386 has green checks after retargeting to `main`; #390 is docs-only and currently
-has no checks; #391 has four green checks. The still-stacked implementation PRs
+has checks running; #391 also has four checks running after its latest sync. The still-stacked implementation PRs
 have no checks until they are retargeted to `main`.
 
 ## Work remaining
