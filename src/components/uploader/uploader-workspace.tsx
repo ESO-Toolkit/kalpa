@@ -470,14 +470,18 @@ export function UploaderWorkspace({
         return;
       }
 
-      if (logsDirRef.current !== det.path) clearSelection();
+      const sameDirectory = logsDirRef.current === det.path;
+      if (!sameDirectory) clearSelection();
       setActiveLogsDir(det.path);
-      setLogs([]);
+      // A refresh re-detects the same folder before listing it again. Keep the
+      // last successful snapshot visible while that replacement request is in
+      // flight; only a directory switch should blank the old list immediately.
+      if (!sameDirectory) setLogs([]);
       setListError(null);
       if (det.logsDirExists) {
         await loadLogs(det.path);
       } else {
-        setLogs([]);
+        if (!sameDirectory) setLogs([]);
         setListError(null);
         clearSelection();
       }

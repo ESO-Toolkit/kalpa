@@ -222,6 +222,46 @@ describe("UploaderWorkspace log-directory sequencing", () => {
     expect(bListings).toHaveLength(1);
   });
 
+  it("preserves the current list while a same-folder refresh is pending", async () => {
+    const refreshedList = deferred<LogFileInfo[]>();
+    let listCalls = 0;
+
+    mocks.invoke.mockImplementation((command: string, args?: { logsDir?: string }) => {
+      if (command === "uploader_detect_path") return Promise.resolve(detection);
+      if (command === "uploader_transport_info") return Promise.resolve(transport);
+      if (command === "uploader_list_logs" && args?.logsDir === "A") {
+        listCalls++;
+        return listCalls === 1 ? Promise.resolve([log("A-before-refresh")]) : refreshedList.promise;
+      }
+      if (command === "uploader_list_history") return Promise.resolve([]);
+      if (command === "uploader_has_session") return Promise.resolve(false);
+      if (command === "settings_tainted") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+
+    render(
+      <UploaderWorkspace
+        open
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    await screen.findByText("A-before-refresh.log");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh logs" }));
+    await waitFor(() => expect(listCalls).toBe(2));
+
+    // The old successful snapshot remains usable until the replacement arrives.
+    expect(screen.getByText("A-before-refresh.log")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh logs" })).toBeDisabled();
+
+    refreshedList.resolve([log("A-after-refresh")]);
+    await screen.findByText("A-after-refresh.log");
+    expect(screen.queryByText("A-before-refresh.log")).not.toBeInTheDocument();
+  });
+
   it.each(["resolve", "reject"] as const)(
     "does not let late initial detection %s replace or report over a manual directory",
     async (settlement) => {
