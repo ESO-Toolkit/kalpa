@@ -12,9 +12,8 @@
 //! the old complete file reappear; this module promises old-or-new, never torn.
 
 use std::collections::hash_map::RandomState;
-use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::hash::{BuildHasher, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,15 +33,10 @@ static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// process/crate has its own instance.
 static PROCESS_PUBLISH_LOCK: Mutex<()> = Mutex::new(());
 
-fn suffixed(path: &Path, suffix: &str) -> PathBuf {
-    let mut value: OsString = path.as_os_str().to_owned();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
 fn staging_candidate(target: &Path) -> PathBuf {
     let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut hasher = RandomState::new().build_hasher();
+    target.hash(&mut hasher);
     hasher.write_u64(counter);
     hasher.write_u32(std::process::id());
     let clock = SystemTime::now()
@@ -50,13 +44,14 @@ fn staging_candidate(target: &Path) -> PathBuf {
         .unwrap_or_default()
         .as_nanos() as u64;
     let nonce = hasher.finish() ^ clock;
-    suffixed(
-        target,
-        &format!(
-            "{STAGING_INFIX}{}-{counter}-{nonce:016x}",
-            std::process::id()
-        ),
-    )
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent.join(format!(
+        ".kalpa-{nonce:016x}{STAGING_INFIX}{}-{counter}",
+        std::process::id()
+    ))
 }
 
 fn is_transient_rename_error(error: &io::Error) -> bool {
@@ -241,6 +236,24 @@ mod tests {
         assert!(second_path.exists());
         drop(second);
         assert!(!second_path.exists());
+    }
+
+    #[test]
+    fn long_target_name_uses_a_bounded_sibling_staging_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join(format!("{}.json", "a".repeat(240)));
+        fs::write(&target, b"old").unwrap();
+
+        atomic_write(&target, b"replacement").unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(STAGING_INFIX)
+        }));
     }
 
     #[test]

@@ -8,6 +8,8 @@ build = "build.rs"
 arboard = "3"
 base64 = "0.22"
 dirs = "6"
+dunce = "1"
+fs4 = { version = "1.1.0", features = ["sync"] }
 i-slint-backend-winit = "1.17.0"
 keyring = { version = "3", features = ["windows-native"] }
 md-5 = "0.11"
@@ -30,8 +32,6 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", 
 url = "2"
 wry = "0.55"
 zip = "8"
-fs4 = { version = "1.1.0", features = ["sync"] }
-dunce = "1.0.5"
 
 [build-dependencies]
 slint-build = "1.17.0"
