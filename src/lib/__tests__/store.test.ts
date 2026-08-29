@@ -171,6 +171,19 @@ describe("setSettings", () => {
     expect(backing.has("fresh")).toBe(true);
   });
 
+  it("preserves the cache and reports success after a committed reload failure", async () => {
+    const backing = backStore({ existing: "old" });
+    mockInvoke.mockRejectedValue(
+      "settings-store-committed: cache reload failed: transient read error"
+    );
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ existing: "new", fresh: 1 })).resolves.toBe(true);
+
+    expect(backing.get("existing")).toBe("new");
+    expect(backing.get("fresh")).toBe(1);
+  });
+
   it("does not clobber a concurrent write when rolling back", async () => {
     const backing = backStore({ active: "old-theme" });
     // A concurrent writer lands a new value right as the batch tries to flush.

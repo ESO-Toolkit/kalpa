@@ -231,7 +231,7 @@ impl Drop for OsLockGuard {
 pub(crate) struct LockGuard {
     // Drop the kernel lock before publishing this process's release. Keeping
     // the fields in this order preserves that handoff ordering.
-    _os: OsLockGuard,
+    _os: Option<OsLockGuard>,
     _process: ProcessLockGuard,
 }
 
@@ -254,6 +254,29 @@ pub(crate) fn acquire(
         options.cancel,
     )?;
     let os = acquire_key(&key, deadline, options.timeout, options.cancel)?;
+    Ok(LockGuard {
+        _os: Some(os),
+        _process: process,
+    })
+}
+
+/// Coordinate a read with writers without requiring permission to create or
+/// modify the sibling lock file. If no writer has created the lock yet, the
+/// atomically-published target can safely be read as its previous or next
+/// complete version.
+pub(crate) fn acquire_read(
+    target: impl AsRef<Path>,
+    options: LockOptions<'_>,
+) -> Result<LockGuard, LockError> {
+    let key = LockKey::for_path(target)?;
+    let deadline = Instant::now() + options.timeout;
+    let process = acquire_process_keys(
+        std::slice::from_ref(&key),
+        deadline,
+        options.timeout,
+        options.cancel,
+    )?;
+    let os = acquire_shared_key_if_present(&key, deadline, options.timeout, options.cancel)?;
     Ok(LockGuard {
         _os: os,
         _process: process,
@@ -363,6 +386,51 @@ fn acquire_key(
         }
         match FileExt::try_lock(&file) {
             Ok(()) => return Ok(OsLockGuard { file }),
+            Err(TryLockError::Error(source)) => {
+                return Err(LockError::Io {
+                    path: key.target.clone(),
+                    source,
+                })
+            }
+            Err(TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(LockError::Timeout {
+                        path: key.target.clone(),
+                        waited: timeout,
+                    });
+                }
+                std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+            }
+        }
+    }
+}
+
+fn acquire_shared_key_if_present(
+    key: &LockKey,
+    deadline: Instant,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
+) -> Result<Option<OsLockGuard>, LockError> {
+    let file = match OpenOptions::new().read(true).open(&key.lock_path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(LockError::Io {
+                path: key.target.clone(),
+                source,
+            })
+        }
+    };
+
+    loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(LockError::Cancelled {
+                path: key.target.clone(),
+            });
+        }
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => return Ok(Some(OsLockGuard { file })),
             Err(TryLockError::Error(source)) => {
                 return Err(LockError::Io {
                     path: key.target.clone(),
@@ -503,6 +571,38 @@ mod tests {
 
         assert!(target.parent().unwrap().is_dir());
         assert!(key.lock_path().is_file());
+    }
+
+    #[test]
+    fn read_lock_does_not_create_a_coordination_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("profiles.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let key = LockKey::for_path(&target).unwrap();
+
+        let _guard = acquire_read(&target, LockOptions::default()).unwrap();
+
+        assert!(!key.lock_path().exists());
+    }
+
+    #[test]
+    fn read_lock_opens_an_existing_read_only_coordination_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("profiles.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let key = LockKey::for_path(&target).unwrap();
+        std::fs::write(key.lock_path(), b"").unwrap();
+        let mut permissions = std::fs::metadata(key.lock_path()).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(key.lock_path(), permissions).unwrap();
+
+        acquire_read(&target, LockOptions::default())
+            .expect("a reader must not require write access to an existing lock file");
+
+        // Windows cannot remove a read-only file when TempDir cleans up.
+        let mut permissions = std::fs::metadata(key.lock_path()).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(key.lock_path(), permissions).unwrap();
     }
 
     #[test]

@@ -54,6 +54,11 @@ const STORE_FILE: &str = "settings.json";
 /// sync with `STORE_RELOADED_SIGNAL` in `src/lib/store.ts`.
 const STORE_RELOADED_SIGNAL: &str = "settings-store-reloaded";
 
+/// Publication already succeeded, but refreshing the plugin cache did not.
+/// The frontend must preserve its attempted values and report success because
+/// rolling them back would make memory disagree with the committed file.
+const STORE_COMMITTED_SIGNAL: &str = "settings-store-committed";
+
 /// Attempts to (re)load the settings file at startup before giving up and
 /// tainting. A transient lock on this tiny file clears well within this window,
 /// so the frontend never sees the empty cache in the realistic case.
@@ -342,7 +347,7 @@ pub fn flush_entries<R: Runtime>(
     atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
     store
         .reload_ignore_defaults()
-        .map_err(|e| format!("settings saved but cache reload failed: {e}"))
+        .map_err(|e| format!("{STORE_COMMITTED_SIGNAL}: cache reload failed: {e}"))
 }
 
 pub fn delete_entries<R: Runtime>(app: &AppHandle<R>, keys: &[&str]) -> Result<(), String> {
@@ -366,7 +371,7 @@ pub fn delete_entries<R: Runtime>(app: &AppHandle<R>, keys: &[&str]) -> Result<(
     atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
     store
         .reload_ignore_defaults()
-        .map_err(|e| format!("settings saved but cache reload failed: {e}"))
+        .map_err(|e| format!("{STORE_COMMITTED_SIGNAL}: cache reload failed: {e}"))
 }
 
 /// Whether the settings store is currently TAINTED — it opened empty over a

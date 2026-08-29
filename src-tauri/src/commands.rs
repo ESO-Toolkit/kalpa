@@ -5770,6 +5770,16 @@ fn profile_transaction_guard(
     .map_err(|error| error.to_string())
 }
 
+fn profile_read_transaction_guard(
+    addons_dir: &std::path::Path,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire_read(
+        profiles_path(addons_dir),
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     load_profiles_with_mirror(
         addons_dir,
@@ -5792,7 +5802,7 @@ pub fn list_profiles(
 ) -> Result<(Vec<AddonProfile>, Option<String>), String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
-    let _transaction = profile_transaction_guard(&addons_dir)?;
+    let _transaction = profile_read_transaction_guard(&addons_dir)?;
     let store = load_profiles(&addons_dir);
     Ok((store.profiles, store.active_profile))
 }
@@ -6196,7 +6206,7 @@ pub async fn preview_profile(
     tokio::task::spawn_blocking(move || {
         let store = {
             let _guard = profile_store_guard();
-            let _transaction = profile_transaction_guard(&addons_dir)?;
+            let _transaction = profile_read_transaction_guard(&addons_dir)?;
             load_profiles(&addons_dir)
         };
         let profile = store
