@@ -264,13 +264,17 @@ pub fn record_install_ext(
     // Preserve existing tags when re-recording an install (e.g. update)
     let existing_tags = existing.map(|m| m.tags.clone()).unwrap_or_default();
     // The filelist is eventually consistent with filedetails. When this
-    // install has a marker, preserve the greatest marker observed locally so
-    // a lagging response cannot make the downloaded artifact look older than
-    // it is. A zero marker means this install has no proven ESOUI publication
-    // identity (manual imports and dependency installs use this path), so an
-    // older artifact's marker must not be inherited.
+    // install has a marker, preserve the greatest marker already proven to
+    // belong to an installed artifact so a lagging response cannot make that
+    // artifact look older than it is. Observation-only markers from migrated
+    // metadata do not belong to the artifact being installed and must be
+    // replaced by the download's marker. A zero marker means this install has
+    // no proven ESOUI publication identity (manual imports and dependency
+    // installs use this path), so an older artifact's marker must not be
+    // inherited.
     let last_update = if esoui_last_update > 0 {
         existing
+            .filter(|m| m.esoui_marker_installed)
             .map(|m| m.esoui_last_update.max(esoui_last_update))
             .unwrap_or(esoui_last_update)
     } else {
@@ -536,6 +540,23 @@ mod tests {
 
         reconcile_addon(store.addons.get_mut("Addon").unwrap(), 1, 50, "url");
         assert_eq!(store.addons["Addon"].esoui_last_update, 200);
+    }
+
+    #[test]
+    fn install_replaces_an_observation_only_marker() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "Addon", 1, "1.0", "url", 300);
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 200);
+
+        let meta = &store.addons["Addon"];
+        assert_eq!(meta.esoui_last_update, 200);
+        assert!(meta.esoui_marker_installed);
     }
 
     #[test]

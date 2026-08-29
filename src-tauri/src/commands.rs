@@ -1847,6 +1847,8 @@ fn check_for_updates_metadata(
             if !local_ver.is_empty()
                 && !remote_ver.is_empty()
                 && local_ver == remote_ver
+                && api_entry.last_update > 0
+                && api_entry.last_update == entry.esoui_last_update
                 && !entry.esoui_marker_installed
             {
                 entry.esoui_marker_installed = true;
@@ -10857,6 +10859,28 @@ mod tests {
         let addon = store.addons.get("Addon").unwrap();
         assert_eq!(addon.esoui_last_update, 100);
         assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
+    fn lagging_matching_observation_does_not_claim_retained_legacy_marker() {
+        let (tmp, mut lookup) = update_check_fixture("v1", 200, "v1", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        assert!(!pending[0].has_update);
+        assert!(!metadata::load_metadata(tmp.path()).addons["Addon"].esoui_marker_installed);
+
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).version = "v2".to_string();
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).last_update = 200;
+        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        assert!(pending[0].has_update);
     }
 
     #[test]
