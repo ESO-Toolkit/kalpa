@@ -10955,7 +10955,7 @@ mod tests {
     fn update_check_does_not_downgrade_installed_artifact_from_lagging_filelist() {
         let (tmp, lookup) = update_check_fixture("v2", 200, "v1", 100);
 
-        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(!pending[0].has_update);
 
@@ -10969,7 +10969,7 @@ mod tests {
     fn update_check_detects_newer_artifact_from_filelist() {
         let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 200);
 
-        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].has_update);
 
@@ -10994,7 +10994,7 @@ mod tests {
             .esoui_marker_installed = false;
         metadata::save_metadata(tmp.path(), &store).unwrap();
 
-        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].has_update);
 
@@ -11016,13 +11016,13 @@ mod tests {
             .esoui_marker_installed = false;
         metadata::save_metadata(tmp.path(), &store).unwrap();
 
-        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
         assert!(!pending[0].has_update);
         assert!(!metadata::load_metadata(tmp.path()).addons["Addon"].esoui_marker_installed);
 
         Arc::make_mut(lookup.get_mut("Addon").unwrap()).version = "v2".to_string();
         Arc::make_mut(lookup.get_mut("Addon").unwrap()).last_update = 200;
-        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
         assert!(pending[0].has_update);
     }
 
