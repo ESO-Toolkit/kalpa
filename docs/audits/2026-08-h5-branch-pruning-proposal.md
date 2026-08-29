@@ -7,10 +7,11 @@ Comparison base: `origin/main` at `fb92cb92`
 Scope: local branches and `origin/*` remote-tracking branches after `git fetch origin --prune`.
 
 This is a proposal only. No local or remote branch, worktree, commit, or branch tip was deleted or moved.
+Branch roles, pull-request state, and counts in this document describe the snapshot above; they are not claims about current GitHub metadata.
 
 ## Decision rule
 
-A branch is a safe candidate only when it has zero commits unique to `origin/main`, no open pull request, no worktree attachment, and is not `main`, the current H5 branch, or the W1 stack base. Open-PR, worktree, protected, and current-stack refs are retained. Every remaining ref with one or more unique commits is needs-human-review. This fails closed for squash- or rebase-merged work.
+A branch is a safe candidate only when it has zero commits unique to `origin/main`, no open pull request, no worktree attachment, and was not `main`, the H5 branch, or the W1 stack base at the snapshot. Open-PR, worktree, protected, and then-current-stack refs were retained. Every remaining ref with one or more unique commits was classified as needs-human-review. This fails closed for squash- or rebase-merged work.
 
 The GitHub branches API reported no protected branches at this snapshot. `origin/HEAD` is symbolic and excluded. Local and remote refs are counted separately.
 

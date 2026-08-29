@@ -26,7 +26,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
-| H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) (draft) | - | D-H5-1 | APPROVE after one follow-up; refreshed 2026-08-28 | `npm run check`; `git diff --check`; freshness guard | 55 evidence-backed candidates proposed; no branches deleted. |
+| H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) | - | D-H5-1 | APPROVE after one follow-up; refreshed 2026-08-28 | `npm run check`; `git diff --check`; freshness guard | Point-in-time proposal; PR now targets `main` directly; no branches deleted. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
 ## Decisions
@@ -61,11 +61,11 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 ### 2026-08-28 — Codex (H5 evidence refresh)
 
-- Rebases PR #385 onto current W1 base `origin/fix/audit-w1-worker-consistency`.
+- At that time, rebased PR #385 onto the W1 base `origin/fix/audit-w1-worker-consistency`; the PR was later retargeted to `main` after W1 merged.
 - Refreshed the inventory against `origin/main` `fb92cb92` after `git fetch origin --prune`: 38 local safe, 57 local retain, 56 local review; 17 remote safe, 47 remote retain, 59 remote review (274 refs total).
 - GitHub reported no protected branches; open PR heads and all attached worktrees were retained. No branch, ref, worktree, or commit was deleted or moved.
 - Updated the H5 proposal and this tracker; safe candidates are 55 local/remote refs counted separately. Review refs remain explicitly non-candidates pending maintainer inspection.
-- Verification: `git diff --check` and `npm run check` pass; pushed with force-with-lease. GitHub reports PR #385 open/draft, `mergeable=true`, `mergeable_state=clean`, base `16f76144`, head `4d3c57f3`; no checks are reported for this docs-only branch.
+- Verification at that time: `git diff --check` and `npm run check` passed; the branch was pushed with force-with-lease. GitHub then reported PR #385 open/draft, `mergeable=true`, `mergeable_state=clean`, base `16f76144`, head `4d3c57f3`; no checks were reported for the docs-only branch. These values are historical observations, not current PR metadata.
 
 ### 2026-08-27 — W1 twice-reject escalation
 
@@ -77,7 +77,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
 ### 2026-08-26 — Codex (H5)
 
-- Active branch: `fix/audit-h5-branch-pruning-proposal` (stacked on W1).
+- Active branch at that time: `fix/audit-h5-branch-pruning-proposal` (then stacked on W1; now retargeted to `main`).
 - Completed: refreshed and pruned stale remote-tracking refs; inventoried 129 local and 111 remote branches against `origin/main`; correlated open PRs and worktree attachments; classified 54 safe candidates, 76 retain refs, and 110 needs-human-review refs in `2026-08-h5-branch-pruning-proposal.md`. Refreshed the snapshot after concurrent H1 PR #384, the H3 worktree, and this published H5 branch appeared.
 - Safety: no local or remote branch was deleted, and no branch tip or worktree was moved.
 - Reviews: initial Sol verdict `REVISE` after concurrent H1 PR #384 made the snapshot stale. Refreshed H1 and H3 state, added a mandatory freshness guard, and clarified protection/worktree-counterpart handling. The single follow-up verdict was `APPROVE` with exact count and candidate-set parity.
