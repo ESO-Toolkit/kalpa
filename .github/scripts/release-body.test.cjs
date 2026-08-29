@@ -79,6 +79,31 @@ test("does not truncate content after a section-local link definition", () => {
   );
 });
 
+test("ignores release-looking headings inside HTML comments", () => {
+  assert.equal(
+    extractReleaseSection(
+      [
+        "## [1.0.0] — 2026-08-26",
+        "",
+        "- First item.",
+        "",
+        "<!--",
+        "## [0.9.0] — 2026-08-20",
+        "This is an example heading, not a release.",
+        "-->",
+        "",
+        "- A later item must still ship.",
+        "",
+        "## [0.8.0] — 2026-08-18",
+        "",
+        "- Previous work.",
+      ].join("\n"),
+      "v1.0.0"
+    ),
+    "- First item.\n\n\n\n- A later item must still ship."
+  );
+});
+
 test("retains a trailing link definition used by release copy", () => {
   assert.equal(
     extractReleaseSection(

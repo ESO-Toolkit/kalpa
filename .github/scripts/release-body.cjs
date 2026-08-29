@@ -12,6 +12,11 @@ function normalizeReleaseName(releaseRef) {
 function extractReleaseSection(changelog, releaseRef) {
   const releaseName = normalizeReleaseName(releaseRef);
   const lines = changelog.split(/\r?\n/);
+  // Keep line numbers aligned with the source while hiding headings in HTML
+  // comments. A commented example must not terminate the live release section.
+  const headingLines = changelog
+    .replace(/<!--[^]*?-->/g, (comment) => comment.replace(/[^\r\n]/g, ""))
+    .split(/\r?\n/);
   const exactHeading =
     releaseName === "Unreleased"
       ? "## [Unreleased]"
@@ -20,7 +25,7 @@ function extractReleaseSection(changelog, releaseRef) {
   const matchingIndexes = [];
   const malformedHeadings = [];
 
-  for (const [index, line] of lines.entries()) {
+  for (const [index, line] of headingLines.entries()) {
     if (!line.startsWith(targetPrefix)) continue;
     if (typeof exactHeading === "string" ? line === exactHeading : exactHeading.test(line)) {
       matchingIndexes.push(index);
@@ -40,7 +45,9 @@ function extractReleaseSection(changelog, releaseRef) {
   }
 
   const startIndex = matchingIndexes[0];
-  const nextReleaseOffset = lines.slice(startIndex + 1).findIndex((line) => /^## \[/.test(line));
+  const nextReleaseOffset = headingLines
+    .slice(startIndex + 1)
+    .findIndex((line) => /^## \[/.test(line));
   const endIndex = nextReleaseOffset === -1 ? lines.length : startIndex + 1 + nextReleaseOffset;
   const sectionLines = lines
     .slice(startIndex + 1, endIndex)
