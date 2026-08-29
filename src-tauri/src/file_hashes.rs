@@ -36,6 +36,11 @@ pub struct HashManifest {
     pub recorded_at: String,
     pub installed_version: String,
     pub files: HashMap<String, String>,
+    /// Baseline signatures for files written directly under the AddOns root.
+    /// These are owned by the primary addon manifest because a foldered archive
+    /// can carry ancillary files beside its addon folders.
+    #[serde(default)]
+    pub root_files: HashMap<String, String>,
     #[serde(default)]
     pub modified_files: Vec<String>,
 }
@@ -328,6 +333,8 @@ pub fn compute_baseline_with_zip(
 pub struct ZipHashSet {
     /// Folder name -> bare relative path -> hash or size signature.
     pub folders: BTreeMap<String, HashMap<String, String>>,
+    /// Files written directly under AddOns by a foldered archive.
+    pub root_files: HashMap<String, String>,
     /// Set when the archive is flat and its entries are re-rooted under a
     /// synthesised folder that does not appear in the entry names.
     pub flat_wrap: Option<String>,
@@ -404,6 +411,7 @@ pub fn hash_zip_entries_by_folder(zip_path: &Path) -> Result<ZipHashSet, String>
     let flat_wrap = crate::installer::flat_archive_wrap_name(&archive);
     let mut set = ZipHashSet {
         folders: BTreeMap::new(),
+        root_files: HashMap::new(),
         flat_wrap: flat_wrap.clone(),
     };
 
@@ -435,11 +443,21 @@ pub fn hash_zip_entries_by_folder(zip_path: &Path) -> Result<ZipHashSet, String>
         let (folder, relative) = match flat_wrap {
             Some(ref wrap) => (wrap.clone(), name.clone()),
             None => match name.split_once('/') {
-                // A loose file at the root of a foldered archive belongs to no
-                // addon folder and is never extracted; skip it rather than
-                // inventing a folder for it.
                 Some((folder, relative)) if !folder.is_empty() && !relative.is_empty() => {
                     (folder.to_string(), relative.to_string())
+                }
+                // Foldered archives really do extract these entries at the
+                // AddOns root. Keep them in a separate map so classification,
+                // baselines, and extraction all agree on that destination.
+                None if !name.is_empty() => {
+                    let value = if hashes_file_contents(&name) {
+                        stream_sha256(&mut entry)
+                            .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?
+                    } else {
+                        size_signature(entry.size())
+                    };
+                    set.root_files.insert(name, value);
+                    continue;
                 }
                 _ => continue,
             },
@@ -1238,8 +1256,8 @@ mod tests {
         archive.write_all(b"## Title: AddonB").unwrap();
         archive.start_file("AddonB/init.lua", options).unwrap();
         archive.write_all(b"bbb").unwrap();
-        // A loose file at the archive root belongs to no addon folder and is
-        // never extracted, so it must not invent a folder.
+        // A loose file at the archive root is written directly under AddOns;
+        // it belongs to the primary addon manifest, not a phantom folder.
         archive.start_file("readme.txt", options).unwrap();
         archive.write_all(b"hi").unwrap();
         archive.finish().unwrap();
@@ -1256,6 +1274,7 @@ mod tests {
             set.folders["AddonA"]["init.lua"],
             set.folders["AddonB"]["init.lua"]
         );
+        assert!(set.root_files.contains_key("readme.txt"));
         assert!(set.flat_wrap.is_none());
         assert_eq!(set.zip_entry_name("AddonA", "init.lua"), "AddonA/init.lua");
     }

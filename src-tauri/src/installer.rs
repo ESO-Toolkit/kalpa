@@ -132,11 +132,13 @@ pub fn install_addon_zip_with_hashes(
             esoui_id,
             version,
             overrides: None,
+            root: None,
         }),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn install_addon_zip_selective_with_hashes(
     zip_path: &Path,
     addons_dir: &Path,
@@ -145,6 +147,28 @@ pub fn install_addon_zip_selective_with_hashes(
     esoui_id: u32,
     version: &str,
     overrides: &BTreeMap<String, HashMap<String, String>>,
+) -> Result<Vec<String>, String> {
+    install_addon_zip_selective_with_hashes_and_root(
+        zip_path, addons_dir, skip_files, hooks, esoui_id, version, overrides, None,
+    )
+}
+
+pub struct RootHashBaseline<'a> {
+    pub owner_folder: &'a str,
+    pub hashes: &'a HashMap<String, String>,
+    pub overrides: Option<&'a HashMap<String, String>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn install_addon_zip_selective_with_hashes_and_root(
+    zip_path: &Path,
+    addons_dir: &Path,
+    skip_files: &HashSet<String>,
+    hooks: ExtractHooks,
+    esoui_id: u32,
+    version: &str,
+    overrides: &BTreeMap<String, HashMap<String, String>>,
+    root: Option<RootHashBaseline<'_>>,
 ) -> Result<Vec<String>, String> {
     extract_with_rollback(
         zip_path,
@@ -155,6 +179,7 @@ pub fn install_addon_zip_selective_with_hashes(
             esoui_id,
             version,
             overrides: Some(overrides),
+            root,
         }),
     )
 }
@@ -163,6 +188,7 @@ struct HashBaseline<'a> {
     esoui_id: u32,
     version: &'a str,
     overrides: Option<&'a BTreeMap<String, HashMap<String, String>>>,
+    root: Option<RootHashBaseline<'a>>,
 }
 
 /// Shared extraction driver: recover abandoned work, extract into an isolated
@@ -196,6 +222,15 @@ fn extract_with_rollback(
     };
     validate_top_folders(&top_level)?;
 
+    // Foldered archives may also write loose files directly under AddOns.
+    // They are extracted into staging and published by the same crash-safe
+    // transaction as the addon folders.
+    let mut root_files = if wrap_name.is_none() {
+        collect_zip_root_files(&archive)
+    } else {
+        HashSet::new()
+    };
+
     let transaction = InstallTransaction::begin(addons_dir, hooks.cancel)?;
     let stage_dir = transaction.stage_dir();
     let mut installed = extract_addon_zip_inner(
@@ -215,6 +250,11 @@ fn extract_with_rollback(
         }
     }
 
+    // A kept root file is absent from staging and must remain untouched live.
+    root_files.retain(|relative| stage_dir.join(relative).is_file());
+    let mut root_files: Vec<String> = root_files.into_iter().collect();
+    root_files.sort();
+
     let manifests = match hash_baseline {
         Some(baseline) => {
             let manifests = crate::file_hashes::build_hash_manifests_for_folders(
@@ -230,7 +270,7 @@ fn extract_with_rollback(
         None => Vec::new(),
     };
 
-    transaction.commit(&installed, &manifests)
+    transaction.commit_with_root_files(&installed, &root_files, &manifests)
 }
 
 fn manifests_to_bytes(
@@ -243,15 +283,32 @@ fn manifests_to_bytes(
             .overrides
             .and_then(|all| all.get(&manifest.addon_folder))
         {
-                for (path, hash) in overrides {
-                    manifest.files.insert(path.clone(), hash.clone());
-                }
-                manifest.modified_files = overrides.keys().cloned().collect();
-                manifest.modified_files.sort();
+            for (path, hash) in overrides {
+                manifest.files.insert(path.clone(), hash.clone());
+            }
+            manifest.modified_files = overrides.keys().cloned().collect();
+            manifest.modified_files.sort();
+        }
+        if let Some(root) = baseline
+            .root
+            .as_ref()
+            .filter(|root| root.owner_folder == manifest.addon_folder)
+        {
+            manifest.root_files = root.hashes.clone();
+            if let Some(overrides) = root.overrides {
+                manifest.root_files.extend(overrides.clone());
+            }
         }
         let bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|e| format!("Failed to encode hash baseline: {e}"))?;
         serialized.push((manifest.addon_folder.clone(), bytes));
+    }
+    if baseline.root.as_ref().is_some_and(|root| {
+        !manifests
+            .iter()
+            .any(|manifest| manifest.addon_folder == root.owner_folder)
+    }) {
+        return Err("Root-file hash baseline owner is not part of this install.".to_string());
     }
     Ok(serialized)
 }
@@ -400,11 +457,35 @@ fn enclosed_components(name: &str) -> Option<Vec<String>> {
 fn collect_zip_top_folders(archive: &zip::ZipArchive<fs::File>) -> HashSet<String> {
     let mut folders = HashSet::new();
     for name in archive.file_names() {
-        if let Some(folder) = enclosed_top_component(name) {
-            folders.insert(folder);
+        // A one-component directory entry represents a folder, while a
+        // one-component file is an AddOns-root write and must not become a
+        // phantom addon folder during rollback.
+        let is_directory = name.ends_with('/') || name.ends_with('\\');
+        if let Some(components) = enclosed_components(name) {
+            if components.len() > 1 || is_directory {
+                // Keep the top-component helper exercised in production too;
+                // it is the same normalization used by the extraction path.
+                if let Some(folder) = enclosed_top_component(name) {
+                    folders.insert(folder);
+                }
+            }
         }
     }
     folders
+}
+
+/// Collect files written directly under AddOns by a foldered archive.
+fn collect_zip_root_files(archive: &zip::ZipArchive<fs::File>) -> HashSet<String> {
+    archive
+        .file_names()
+        .filter_map(|name| {
+            if name.ends_with('/') || name.ends_with('\\') {
+                return None;
+            }
+            let components = enclosed_components(name)?;
+            (components.len() == 1).then(|| components[0].clone())
+        })
+        .collect()
 }
 
 /// The folder a FLAT archive's contents must be wrapped in, if it is flat.
@@ -605,10 +686,16 @@ fn extract_addon_zip_inner(
 
         let out_path = addons_dir.join(&relative_path);
 
-        // Track top-level folder names
-        if let Some(first_component) = relative_path.components().next() {
-            let folder = first_component.as_os_str().to_string_lossy().to_string();
-            created_folders.insert(folder);
+        // Track top-level folder names. A foldered archive's root files are
+        // written directly under AddOns and must not be reported as folders.
+        // Directory entries are retained even when they have only one path
+        // component so an empty addon folder is still considered installed.
+        let component_count = relative_path.components().count();
+        if component_count > 1 || entry.is_dir() {
+            if let Some(first_component) = relative_path.components().next() {
+                let folder = first_component.as_os_str().to_string_lossy().to_string();
+                created_folders.insert(folder);
+            }
         }
 
         if entry.is_dir() {
@@ -817,6 +904,55 @@ mod tests {
         }
         archive.finish().unwrap();
         zip_path
+    }
+
+    #[test]
+    fn foldered_archive_writes_root_files_without_reporting_them_as_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "foldered.zip",
+            &[
+                "MainAddon/MainAddon.txt",
+                "MainAddon/init.lua",
+                "readme.txt",
+            ],
+        );
+
+        let folders = extract_addon_zip(&zip_path, &addons_dir).unwrap();
+
+        assert_eq!(folders, vec!["MainAddon".to_string()]);
+        assert!(addons_dir.join("MainAddon/init.lua").is_file());
+        assert!(addons_dir.join("readme.txt").is_file());
+    }
+
+    #[test]
+    fn sibling_skip_key_does_not_suppress_same_named_root_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("LibFoo")).unwrap();
+        fs::write(addons_dir.join("LibFoo/init.lua"), b"USER LIB").unwrap();
+        fs::write(addons_dir.join("init.lua"), b"OLD ROOT").unwrap();
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "collision.zip",
+            &["MainAddon/MainAddon.txt", "LibFoo/init.lua", "init.lua"],
+        );
+
+        let skip = HashSet::from(["LibFoo/init.lua".to_string()]);
+        extract_addon_zip_selective(&zip_path, &addons_dir, &skip).unwrap();
+
+        assert_eq!(
+            fs::read(addons_dir.join("LibFoo/init.lua")).unwrap(),
+            b"USER LIB"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("init.lua")).unwrap(),
+            b"x",
+            "a qualified sibling decision must not match a bare root entry by suffix"
+        );
     }
 
     /// The UL_LootLog shape: the addon's *contents* were zipped instead of its

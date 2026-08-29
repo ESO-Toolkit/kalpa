@@ -102,6 +102,11 @@ pub struct PendingUpdate {
     /// Publication marker from the filedetails response that produced the
     /// pending ZIP. Zero means this pending entry predates marker tracking.
     pub artifact_last_update: u64,
+    /// Folder-qualified paths that were genuine conflicts when this pending
+    /// review was created. The frontend also submits synthetic `keep_mine`
+    /// decisions for auto-kept files, so apply-time revalidation cannot infer
+    /// scan-time conflict membership from the decision list alone.
+    pub reviewed_conflicts: Vec<String>,
     /// Every folder the downloaded ZIP writes, each with its own hash map,
     /// computed once during conflict detection (`build_conflict_report`) and
     /// reused as the post-extraction baseline so the apply step doesn't
