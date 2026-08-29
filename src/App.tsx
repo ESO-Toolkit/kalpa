@@ -1420,8 +1420,10 @@ function App() {
       const currentAddons = coverage.ok
         ? hidePendingRemovals(coverage.data, pendingRemovalsRef.current, path)
         : [];
-      addonsRef.current = currentAddons;
-      if (coverage.ok) setAddons(currentAddons);
+      if (coverage.ok) {
+        addonsRef.current = currentAddons;
+        setAddons(currentAddons);
+      }
 
       const unavailableCount = countUpdatesWithoutProtectedEditsBaseline(updates, currentAddons);
       if (unavailableCount > 0) {
