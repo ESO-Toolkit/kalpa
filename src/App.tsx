@@ -1383,6 +1383,7 @@ function App() {
         title: titleByFolder.get(u.folderName) ?? u.folderName,
         currentVersion: u.currentVersion,
         remoteVersion: u.remoteVersion,
+        esouiId: u.esouiId,
       }))
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [updatesAvailable, addons]);

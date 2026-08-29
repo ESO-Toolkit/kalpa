@@ -6,11 +6,17 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker from "../src/index";
-import { putPackIndex, putVote } from "../src/kv";
+import { putVote } from "../src/kv";
 import type { Env, PackIndex } from "../src/types";
 import { makePack } from "./helpers";
 
 const e = env as unknown as Env;
+
+async function putPackIndex(index: PackIndex): Promise<void> {
+  const stub = e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton"));
+  await stub.setAuthority("kv", []);
+  await stub.replaceIndex(index);
+}
 
 describe("scheduled backup", () => {
   // The handler uses new Date() internally, so the backup key is always today's date
@@ -21,7 +27,7 @@ describe("scheduled backup", () => {
     await e.ESO_PACKS.delete(`backup:${today}`);
 
     const index: PackIndex = { packs: [makePack("backup-a")] };
-    await putPackIndex(e, index);
+    await putPackIndex(index);
 
     const ctrl = createScheduledController({
       scheduledTime: new Date(),
@@ -39,7 +45,7 @@ describe("scheduled backup", () => {
 
   it("skips backup when index is empty", async () => {
     await e.ESO_PACKS.delete(`backup:${today}`);
-    await e.ESO_PACKS.delete("index:packs");
+    await putPackIndex({ packs: [] });
 
     const ctrl = createScheduledController({
       scheduledTime: new Date(),
@@ -54,7 +60,7 @@ describe("scheduled backup", () => {
   });
 
   it("does not overwrite existing backup", async () => {
-    await putPackIndex(e, { packs: [makePack("first")] });
+    await putPackIndex({ packs: [makePack("first")] });
     await e.ESO_PACKS.put(`backup:${today}`, '{"packs":[]}');
 
     const ctrl = createScheduledController({
@@ -85,8 +91,9 @@ describe("scheduled backup", () => {
 
     const doomed = makePack("purge-me", { author_id: "9001" });
     const kept = makePack("keep-me", { author_id: "9002" });
-    await putPackIndex(e, { packs: [doomed, kept] });
+    await putPackIndex({ packs: [doomed, kept] });
     await putVote(e, "purge-me", "9001");
+    await putVote(e, "purge-me", "9003");
     await putVote(e, "keep-me", "9002");
 
     await e.ESO_PACKS.put("deleted:9001", new Date().toISOString());
@@ -105,7 +112,7 @@ describe("scheduled backup", () => {
       const snapshot = JSON.parse(raw!) as {
         packs: Array<{ id: string }>;
         packBodies: Record<string, unknown>;
-        votes: Record<string, { userId: string }>;
+        votes: Record<string, { userId: string; packId: string }>;
       };
 
       expect(snapshot.packs.map((p) => p.id), key).toEqual(["keep-me"]);
@@ -114,8 +121,36 @@ describe("scheduled backup", () => {
         Object.values(snapshot.votes).map((v) => v.userId),
         key
       ).not.toContain("9001");
+      expect(
+        Object.values(snapshot.votes).map((v) => v.packId),
+        key,
+      ).not.toContain("purge-me");
     }
 
     await e.ESO_PACKS.delete("deleted:9001");
+  });
+
+  it("does not back up votes whose pack is no longer live", async () => {
+    await e.ESO_PACKS.delete(`backup:${today}`);
+    await e.ESO_PACKS.delete("backup:meta");
+    const live = makePack("live-vote-owner");
+    await putPackIndex({ packs: [live] });
+    await putVote(e, live.id, "live-voter");
+    await putVote(e, "tombstoned-pack", "orphan-voter");
+
+    const ctrl = createScheduledController({
+      scheduledTime: new Date(),
+      cron: "0 0 * * *",
+    });
+    const ctx = createExecutionContext();
+    await worker.scheduled(ctrl, e, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const snapshot = await e.ESO_PACKS.get<{
+      votes: Record<string, { packId: string }>;
+    }>("backup:latest", "json");
+    expect(Object.values(snapshot!.votes).map(({ packId }) => packId)).toEqual([live.id]);
+    await e.ESO_PACKS.delete("vote:tombstoned-pack:orphan-voter");
+    await e.ESO_PACKS.delete("user-votes:orphan-voter:tombstoned-pack");
   });
 });

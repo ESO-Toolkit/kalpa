@@ -8,6 +8,7 @@ build = "build.rs"
 arboard = "3"
 base64 = "0.22"
 dirs = "6"
+dunce = "1"
 i-slint-backend-winit = "1.17.0"
 keyring = { version = "3", features = ["windows-native"] }
 md-5 = "0.11"
