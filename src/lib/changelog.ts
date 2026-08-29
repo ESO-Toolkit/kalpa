@@ -219,6 +219,10 @@ function versionTokens(header: string): string[] {
     .filter((token) => token.length > 0);
 }
 
+function hasMultipleVersionTokens(value: string): boolean {
+  return value.split(/[\s,;/]+/).filter((token) => normalizeVersion(token).length > 0).length > 1;
+}
+
 /**
  * Find the entry that corresponds to the installed `version`, for decoration
  * only — a "you have this one" marker next to a single row.
@@ -251,8 +255,10 @@ export function matchInstalledEntry(
   const exact = entries.findIndex((entry) => versionTokens(entry.header).includes(needle));
   if (exact !== -1) return exact;
 
-  // Fallback for versions that span several tokens ("2.0 r43"), where no single
-  // token can equal the needle. Only reached when nothing matched exactly.
+  // Fallback only for versions that genuinely span several tokens ("2.0 r43"),
+  // where no single token can equal the needle. A one-token version such as
+  // "1.7" must not match a newer "1.7.8" merely because it is a prefix.
+  if (!hasMultipleVersionTokens(version)) return -1;
   return entries.findIndex((entry) => normalizeVersion(entry.header).includes(needle));
 }
 
