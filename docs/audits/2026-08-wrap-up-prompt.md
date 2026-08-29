@@ -31,22 +31,23 @@ unstarted. Reconcile the rows as PRs merge.
   history of finding real defects in exactly the "safety machinery" code this
   audit adds.
 
-## Current state — 5 open PRs from the last session
+## Current state — refreshed 2026-08-29
 
 | PR | Lane | Base | Sol | Notes |
 |---|---|---|---|---|
 | #389 | P0-A3 sidecar handshake | `fix/audit-p0-a2-cross-process-locking` | **pending** | Fable's final P0 review found and fixed a blocker |
-| #390 | R4/R5/R6 designs | `fix/audit-w1-worker-consistency` | **pending** | Design records only, no code |
-| #391 | Reserved `.kalpa-` folders | **`main`** | **pending** | **CI green on all 3 platforms.** Only PR based on main |
+| #390 | R4/R5/R6 designs | **`main`** | **pending** | Design records only, no code; #391 must merge first |
+| #391 | Reserved `.kalpa-` folders | **`main`** | **pending** | **CI green: `check`, `check-linux`, `check-macos`, and `check-slint`; prerequisite for #390** |
 | #392 | R4 sibling ownership | `docs/audit-r-lane-designs` | **pending** | Behaviour change flagged for review |
 | #393 | R5 folder-qualified conflicts | `fix/audit-r4-sibling-ownership` | *in progress* | Largest change; Sol was mid-review |
 
-Earlier PRs (#369–#388) are already Sol-converged; do not re-review them.
+PR #369 is merged into `main`; #386 is retargeted to `main` and green. Earlier
+PRs #370–#388 are already Sol-converged; do not re-review them.
 
-**Why almost nothing has CI:** `ci.yml` triggers on `pull_request: branches: [main]`.
-Every PR except #391 targets a parent branch, so CI has never run on them. This is
-expected for a stack this deep, not a failure. They get CI as they are retargeted
-to `main` during the merge train.
+CI is base-sensitive: the workflow triggers on `pull_request: branches: [main]`.
+#386 has green checks after retargeting to `main`; #390 is docs-only and currently
+has no checks; #391 has four green checks. The still-stacked implementation PRs
+have no checks until they are retargeted to `main`.
 
 ## Work remaining
 
@@ -96,11 +97,12 @@ test; rewrite it, do not preserve it.
 
 ### 3. Merge train
 
-Nothing merges until the maintainer decides on #369, which is the root of the
-whole stack. **Merging #369 auto-deploys the Pack Hub Worker shadow phase**, and
-per `D-W1-2` the rollback path requires a verified backup restore — flipping the
-authority flag alone is not a reconciliation strategy. That decision is the
-maintainer's, not yours.
+PR #369 is already merged into `main`; that merge auto-deployed the Pack Hub
+Worker shadow phase. The remaining stack requires maintainer review, and per
+`D-W1-2` the rollback path requires a verified backup restore — flipping the
+authority flag alone is not a reconciliation strategy. Merge #391 before the
+docs record #390 because #390 records #391's reserved-folder fix, then follow
+each implementation dependency bottom-up.
 
 When they green-light it: retarget stacked PRs to `main` and merge bottom-up, or
 GitHub auto-closes the chain. Squashing a base PR always breaks its stacked child
