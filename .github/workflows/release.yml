@@ -146,10 +146,12 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
-            ## Changed: security and dependency refresh
-            **Kalpa's HTTP/2 stack now includes `h2` 0.4.16**, addressing [RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258). The affected crate is used by Kalpa's HTTP client and built-in updater; the update prevents a peer from consuming unbounded resources with empty DATA frames.
+            ## Changed: read changelogs in-app, and a fix for the empty addon list
+            **My Addons has an ESOUI tab, and changelogs are readable without leaving Kalpa.** The tab shows the same screenshots, description and download stats Discover does, and a "What's new" button in the update panel and in each Update All row opens the addon's changelog.
 
-            This release also refreshes the frontend production and development dependencies, Pack Hub development and test tooling, the Rust `base64` crate, and the GitHub Actions Rust cache revision. There are no feature changes in beta.18.
+            Changelogs render as a scannable list of versions — latest expanded, each row dated from ESOUI's archived releases, the rest behind "Show all N versions" — instead of one long flat dump. Your installed version is marked, never used to hide older entries.
+
+            **Fixed: the addon list could come back empty after visiting Discover.** The list's virtualizer outlived the scroll container it measured, so returning from Discover left a correctly-sized but blank list until something forced a redraw.
 
             ## Verify your download
             Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
