@@ -264,6 +264,7 @@ pub(crate) fn acquire(
 /// modify the sibling lock file. If no writer has created the lock yet, the
 /// atomically-published target can safely be read as its previous or next
 /// complete version.
+#[allow(dead_code)]
 pub(crate) fn acquire_read(
     target: impl AsRef<Path>,
     options: LockOptions<'_>,
@@ -406,6 +407,7 @@ fn acquire_key(
     }
 }
 
+#[allow(dead_code)]
 fn acquire_shared_key_if_present(
     key: &LockKey,
     deadline: Instant,
@@ -599,10 +601,16 @@ mod tests {
         acquire_read(&target, LockOptions::default())
             .expect("a reader must not require write access to an existing lock file");
 
-        // Windows cannot remove a read-only file when TempDir cleans up.
-        let mut permissions = std::fs::metadata(key.lock_path()).unwrap().permissions();
-        permissions.set_readonly(false);
-        std::fs::set_permissions(key.lock_path(), permissions).unwrap();
+        // Windows cannot remove a read-only file when TempDir cleans up. Unix
+        // can unlink it from the writable parent directory and should retain
+        // the mode bits established above.
+        #[cfg(windows)]
+        {
+            let mut permissions = std::fs::metadata(key.lock_path()).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(key.lock_path(), permissions).unwrap();
+        }
     }
 
     #[test]
@@ -694,7 +702,18 @@ mod tests {
                 std::thread::spawn(move || {
                     start.wait();
                     for _ in 0..100 {
-                        let _guard = acquire(target.as_ref(), LockOptions::default()).unwrap();
+                        let _guard = acquire(
+                            target.as_ref(),
+                            LockOptions {
+                                // This stress test verifies transaction
+                                // integrity, not the interactive 2s timeout.
+                                // Leave enough headroom for a worker running
+                                // beside the rest of the suite on Windows CI.
+                                timeout: Duration::from_secs(10),
+                                cancel: None,
+                            },
+                        )
+                        .unwrap();
                         let value = std::fs::read_to_string(target.as_ref())
                             .unwrap()
                             .trim()
