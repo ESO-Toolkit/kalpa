@@ -10252,7 +10252,7 @@ fn acquire_native_launch_guard(
 #[derive(Clone)]
 enum NativeLaunchMode {
     Startup(tauri::AppHandle),
-    Handoff,
+    Handoff(tauri::AppHandle),
 }
 
 impl NativeLaunchMode {
@@ -10302,6 +10302,52 @@ fn finish_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<(), St
     receiver
         .recv()
         .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())?
+}
+
+fn set_main_webview_visible_on_main_thread(
+    app: &tauri::AppHandle,
+    visible: bool,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let window_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = window_app
+            .get_webview_window("main")
+            .ok_or_else(|| "Main WebView window is unavailable.".to_string())
+            .and_then(|window| {
+                if visible {
+                    window.show().map_err(|error| {
+                        format!("Failed to restore the WebView window: {error}")
+                    })?;
+                    window.set_focus().map_err(|error| {
+                        format!("Failed to focus the restored WebView window: {error}")
+                    })
+                } else {
+                    window
+                        .hide()
+                        .map_err(|error| format!("Failed to quiesce the WebView window: {error}"))
+                }
+            });
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("Failed to update the WebView on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "WebView visibility channel closed unexpectedly.".to_string())?
+}
+
+fn quiesce_then_release_webview_authority(
+    quiesce: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    quiesce()?;
+    commit_native_handoff_authority_release()
+}
+
+fn restore_handoff_webview(mode: &NativeLaunchMode) -> Result<(), String> {
+    match mode {
+        NativeLaunchMode::Handoff(app) => set_main_webview_visible_on_main_thread(app, true),
+        NativeLaunchMode::Startup(_) => Ok(()),
+    }
 }
 
 fn launch_native_shell_process(
@@ -10403,10 +10449,19 @@ fn launch_native_shell_process(
         }
     };
     if first_outcome == crate::native_boot::WaitOutcome::Ready {
-        if let Err(error) = commit_native_handoff_authority_release() {
+        let release = match &mode {
+            NativeLaunchMode::Handoff(app) => quiesce_then_release_webview_authority(|| {
+                set_main_webview_visible_on_main_thread(app, false)
+            }),
+            NativeLaunchMode::Startup(_) => commit_native_handoff_authority_release(),
+        };
+        if let Err(error) = release {
             let _ =
                 crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
             crate::native_boot::clear_owned(&state_dir, &launch_id);
+            restore_handoff_webview(&mode).map_err(|restore_error| {
+                format!("{error} WebView restoration failed: {restore_error}")
+            })?;
             return Err(error);
         }
         eprintln!("[native-shell] ready launch_id={launch_id}; waiting for authority proof");
@@ -10435,7 +10490,7 @@ fn launch_native_shell_process(
         if !matches!(acquired, Ok(crate::native_boot::WaitOutcome::Ready)) {
             let reap =
                 crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
-            let reclaim = if matches!(&mode, NativeLaunchMode::Handoff) {
+            let reclaim = if matches!(&mode, NativeLaunchMode::Handoff(_)) {
                 reclaim_webview_authority(&state_dir)
             } else {
                 Ok(())
@@ -10461,6 +10516,8 @@ fn launch_native_shell_process(
             };
             reclaim
                 .map_err(|error| format!("{failure} WebView authority recovery failed: {error}"))?;
+            restore_handoff_webview(&mode)
+                .map_err(|error| format!("{failure} WebView restoration failed: {error}"))?;
             return Err(failure);
         }
         crate::native_boot::clear_owned(&state_dir, &launch_id);
@@ -10928,12 +10985,13 @@ pub async fn launch_native_performance_mode(
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
+    let handoff_app = app.clone();
     let task_result = tokio::task::spawn_blocking(move || {
         launch_native_shell_process(
             &launch_path,
             app_data_dir,
             webview_exe,
-            NativeLaunchMode::Handoff,
+            NativeLaunchMode::Handoff(handoff_app),
         )
     })
     .await;
@@ -13176,7 +13234,17 @@ fn released_authority_is_reported_as_not_held_until_reclaimed() {
     // The handoff releases it for the child to take.
     NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
     NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
-    commit_native_handoff_authority_release().unwrap();
+    let mut quiesced = false;
+    quiesce_then_release_webview_authority(|| {
+        assert!(
+            holds_webview_authority(),
+            "the WebView must still own authority while it is being quiesced"
+        );
+        quiesced = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(quiesced);
     assert!(
         !holds_webview_authority(),
         "a WebView that released authority must not claim to hold it"
@@ -13184,6 +13252,11 @@ fn released_authority_is_reported_as_not_held_until_reclaimed() {
 
     // Reclaiming restores it, and reclaiming again is a no-op.
     reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+
+    let error = quiesce_then_release_webview_authority(|| Err("cannot hide".to_string()))
+        .expect_err("failed quiescence must prevent authority release");
+    assert_eq!(error, "cannot hide");
     assert!(holds_webview_authority());
     reclaim_webview_authority(dir.path()).unwrap();
     assert!(holds_webview_authority());

@@ -18334,6 +18334,22 @@ fn prepare_webview_handoff(state_dir: &Path) -> Result<String, String> {
     Ok(launch_id)
 }
 
+fn cleanup_failed_webview_ready_wait(
+    state_dir: &Path,
+    launch_id: &str,
+    original_error: String,
+    terminate_and_reap: impl FnOnce() -> Result<(), String>,
+) -> String {
+    let reap = terminate_and_reap();
+    native_boot::clear_owned(state_dir, launch_id);
+    if let Err(error) = reap {
+        eprintln!(
+            "[native-shell] failed to reap WebView after readiness polling error launch_id={launch_id}: {error}"
+        );
+    }
+    original_error
+}
+
 fn return_to_webview_shell(
     start_app_update: bool,
     start_log_uploader: bool,
@@ -18417,7 +18433,17 @@ fn return_to_webview_shell(
             Err(error) => Err(format!("failed to inspect WebView handoff: {error}")),
         },
     );
-    let first_outcome = outcome?;
+    let first_outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(cleanup_failed_webview_ready_wait(
+                &state_dir,
+                &launch_id,
+                error,
+                || native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1)),
+            ));
+        }
+    };
     if first_outcome == native_boot::WaitOutcome::Ready {
         let released = native_authority()
             .lock()
@@ -24353,5 +24379,32 @@ CombatMetrics_SavedVariables = {
         assert!(native_boot::webview_authority_is_active(state_dir));
         assert!(!native_boot::native_authority_is_active(state_dir));
         assert!(!native_boot::live_native_authority_exists(state_dir));
+    }
+
+    #[test]
+    fn reverse_handoff_polling_error_reaps_and_clears_owned_markers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path();
+        let launch_id = prepare_webview_handoff(state_dir).expect("prepare handoff");
+        assert!(native_boot::signal_ready(state_dir, &launch_id).unwrap());
+        assert!(native_boot::has_pending(state_dir));
+        assert!(native_boot::ready_matches(state_dir, &launch_id));
+
+        let mut reaped = false;
+        let error = cleanup_failed_webview_ready_wait(
+            state_dir,
+            &launch_id,
+            "poll failed".to_string(),
+            || {
+                reaped = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(error, "poll failed");
+        assert!(reaped, "the spawned WebView must be terminated and reaped");
+        assert!(!native_boot::has_pending(state_dir));
+        assert!(!native_boot::ready_matches(state_dir, &launch_id));
+        assert!(!native_boot::acquired_matches(state_dir, &launch_id));
     }
 }
