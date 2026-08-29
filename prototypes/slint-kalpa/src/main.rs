@@ -13803,6 +13803,7 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    esoui_marker_installed: false,
                 },
             );
         }
@@ -22197,6 +22198,7 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            esoui_marker_installed: true,
         };
 
         hydrate_addon_from_metadata(&mut entry, &meta);

@@ -1331,6 +1331,12 @@ pub fn refresh_filelist_cache() -> Result<(), String> {
 /// must fetch again instead of comparing the installed artifact against the
 /// stale pre-download filelist and offering a phantom update.
 pub fn invalidate_filelist_cache() {
+    // Serialize with the complete fetch-and-publish operation. Clearing only
+    // the cache mutex allows a refresh that started before an install to
+    // publish its stale, pre-install observation after this invalidation.
+    let _refresh_guard = FILELIST_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
 }
@@ -1647,6 +1653,28 @@ mod tests {
         assert!(cache_exists());
         invalidate_filelist_cache();
         assert!(!cache_exists());
+    }
+
+    #[test]
+    fn invalidation_waits_for_an_in_flight_refresh_to_finish() {
+        let refresh_guard = FILELIST_REFRESH_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+        let invalidator = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            invalidate_filelist_cache();
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        drop(refresh_guard);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        invalidator.join().unwrap();
     }
 
     #[test]

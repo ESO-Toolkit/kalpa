@@ -263,12 +263,19 @@ pub fn record_install_ext(
     let existing = store.addons.get(folder_name);
     // Preserve existing tags when re-recording an install (e.g. update)
     let existing_tags = existing.map(|m| m.tags.clone()).unwrap_or_default();
-    // The filelist is eventually consistent with filedetails. Preserve the
-    // greatest marker observed locally so a lagging response cannot make a
-    // downloaded artifact look older than it is.
-    let last_update = existing
-        .map(|m| m.esoui_last_update.max(esoui_last_update))
-        .unwrap_or(esoui_last_update);
+    // The filelist is eventually consistent with filedetails. When this
+    // install has a marker, preserve the greatest marker observed locally so
+    // a lagging response cannot make the downloaded artifact look older than
+    // it is. A zero marker means this install has no proven ESOUI publication
+    // identity (manual imports and dependency installs use this path), so an
+    // older artifact's marker must not be inherited.
+    let last_update = if esoui_last_update > 0 {
+        existing
+            .map(|m| m.esoui_last_update.max(esoui_last_update))
+            .unwrap_or(esoui_last_update)
+    } else {
+        0
+    };
     // `installed_at` records the last time Kalpa actually downloaded/installed
     // this addon locally (a real install or update). It is intentionally
     // refreshed on every such call so the "Recently Downloaded" sort reflects
@@ -290,7 +297,7 @@ pub fn record_install_ext(
             installed_at,
             tags: existing_tags,
             esoui_last_update: last_update,
-            esoui_marker_installed: true,
+            esoui_marker_installed: esoui_last_update > 0,
         },
     );
 }
@@ -529,6 +536,19 @@ mod tests {
 
         reconcile_addon(store.addons.get_mut("Addon").unwrap(), 1, 50, "url");
         assert_eq!(store.addons["Addon"].esoui_last_update, 200);
+    }
+
+    #[test]
+    fn install_without_marker_clears_an_older_artifacts_provenance() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 200);
+
+        record_install(&mut store, "Addon", 1, "1.0", "manual-url");
+
+        let meta = &store.addons["Addon"];
+        assert_eq!(meta.installed_version, "1.0");
+        assert_eq!(meta.esoui_last_update, 0);
+        assert!(!meta.esoui_marker_installed);
     }
 
     #[test]
