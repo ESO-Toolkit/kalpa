@@ -64,6 +64,8 @@
     },
     "opener:allow-reveal-item-in-dir",
     "notification:default",
+    "core:app:allow-version",
+    "core:app:allow-tauri-version",
     "os:allow-platform",
     "os:allow-version",
     "os:allow-arch"
