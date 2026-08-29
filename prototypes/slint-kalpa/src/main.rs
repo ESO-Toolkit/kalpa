@@ -23459,6 +23459,8 @@ CombatMetrics_SavedVariables = {
                 updated: "03/03/26".to_string(),
                 created: "08/05/14".to_string(),
                 screenshots: Vec::new(),
+                archived_versions: Vec::new(),
+                change_log: String::new(),
                 download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
             },
         );
@@ -23492,6 +23494,8 @@ CombatMetrics_SavedVariables = {
             updated: "03/03/26".to_string(),
             created: "08/05/14".to_string(),
             screenshots: Vec::new(),
+            archived_versions: Vec::new(),
+            change_log: String::new(),
             download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
         };
 
