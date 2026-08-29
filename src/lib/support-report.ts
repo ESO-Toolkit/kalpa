@@ -56,11 +56,117 @@ export const SUPPORT_ISSUES = [
 
 export type SupportIssueId = (typeof SUPPORT_ISSUES)[number]["id"];
 
+/**
+ * Allow-listed environment details.
+ *
+ * Every field below is here because support triage repeatedly needs it and it
+ * cannot be used to single a person out:
+ *
+ * - `osVersion`  OS product/build (for example `10.0.26200`). Windows feature
+ *                builds change Controlled Folder Access, SmartScreen and
+ *                WebView2 behaviour, and macOS/Linux releases change file
+ *                permission prompts. Digits and dots only; anything else
+ *                becomes `unknown`, so an edition or machine string cannot leak.
+ * - `arch`       CPU architecture from a fixed allow-list. Distinguishes the
+ *                x86_64 and aarch64 builds, and on macOS separates native
+ *                Apple-silicon runs from Rosetta reports.
+ * - `tauri`      Tauri runtime version. Bundled with the release, so it pins
+ *                which windowing/opener/updater behaviour is in play.
+ * - `webview`    Web view engine and MAJOR version only (for example
+ *                `Chromium 138`). WebView2 and WebKit majors drive the CSS and
+ *                clipboard differences behind most "the dialog looks wrong"
+ *                reports. The major alone keeps the value coarse.
+ *
+ * Deliberately absent, and never collected anywhere in this flow: hostname or
+ * computer name, user or home-directory name, hardware/device IDs, serial
+ * numbers, MAC or IP addresses, Discord or account IDs, locale, environment
+ * variables, tokens, credentials, cookies, SavedVariables, combat-log content,
+ * raw file contents, and full local paths. Collection failures produce
+ * `unknown` rather than a guess, and every value is bounded and re-validated
+ * independently by the server.
+ */
+export interface SupportEnvironment {
+  osVersion: string;
+  arch: string;
+  tauri: string;
+  webview: string;
+}
+
+export const SUPPORT_UNKNOWN = "unknown";
+
+/** Architectures Tauri's os plugin can report. Anything else becomes `unknown`. */
+const SUPPORT_ARCHITECTURES = [
+  "x86",
+  "x86_64",
+  "arm",
+  "aarch64",
+  "loongarch64",
+  "mips",
+  "mips64",
+  "powerpc",
+  "powerpc64",
+  "riscv64",
+  "s390x",
+  "sparc",
+  "sparc64",
+] as const;
+
+/** Numeric-only OS product/build, at most four components (`10.0.26200`). */
+export function normalizeOsVersion(value: unknown): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^\d{1,6}(\.\d{1,6}){0,3}$/.test(text) ? text : SUPPORT_UNKNOWN;
+}
+
+export function normalizeArchitecture(value: unknown): string {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return (SUPPORT_ARCHITECTURES as readonly string[]).includes(text) ? text : SUPPORT_UNKNOWN;
+}
+
+/** Bounded semver-shaped runtime version, pre-release tag preserved. */
+export function normalizeRuntimeVersion(value: unknown): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^\d{1,4}(\.\d{1,4}){0,3}(-[0-9A-Za-z.]{1,16})?$/.test(text) ? text : SUPPORT_UNKNOWN;
+}
+
+/**
+ * Engine plus major version only, derived from the web view's own user-agent.
+ * The major is the whole signal support needs, and dropping the build/patch
+ * components keeps the value shared by millions of installs.
+ */
+export function normalizeWebviewLabel(userAgent: unknown): string {
+  const text = typeof userAgent === "string" ? userAgent : "";
+  const chromium = /(?:Chrome|Chromium)\/(\d{1,4})\./.exec(text);
+  if (chromium) return `Chromium ${chromium[1]}`;
+  const webkit = /AppleWebKit\/(\d{1,4})\./.exec(text);
+  if (webkit) return `WebKit ${webkit[1]}`;
+  return SUPPORT_UNKNOWN;
+}
+
+export function normalizeSupportEnvironment(value: unknown): SupportEnvironment {
+  const input = (value ?? {}) as Partial<Record<keyof SupportEnvironment, unknown>>;
+  return {
+    osVersion: normalizeOsVersion(input.osVersion),
+    arch: normalizeArchitecture(input.arch),
+    tauri: normalizeRuntimeVersion(input.tauri),
+    webview: /^(?:Chromium|WebKit) \d{1,4}$/.test(String(input.webview ?? ""))
+      ? String(input.webview)
+      : SUPPORT_UNKNOWN,
+  };
+}
+
+export const UNKNOWN_SUPPORT_ENVIRONMENT: SupportEnvironment = {
+  osVersion: SUPPORT_UNKNOWN,
+  arch: SUPPORT_UNKNOWN,
+  tauri: SUPPORT_UNKNOWN,
+  webview: SUPPORT_UNKNOWN,
+};
+
 export interface SupportReportInput {
   issueId: SupportIssueId;
   description: string;
   appVersion: string;
   platform: string;
+  environment: SupportEnvironment;
   generatedAt: Date;
   isOffline: boolean;
   checkingUpdates: boolean;
@@ -82,11 +188,14 @@ export interface SupportAttentionItem {
 }
 
 export interface SupportTicketPayload {
-  version: 1;
+  /** 1 kept only so a legacy report still renders; Kalpa now always emits 2. */
+  version: 1 | 2;
   issueId: SupportIssueId;
   description: string;
   appVersion: string;
   platform: string;
+  /** Present from version 2 onward. A version-1 report omits the key entirely. */
+  environment?: SupportEnvironment;
   generatedAt: string;
   connection: "online" | "offline";
   updateState: "checking" | "complete";
@@ -230,11 +339,12 @@ export function buildSupportTicketPayload(input: SupportReportInput): SupportTic
     });
 
   return fitSupportTicketPayload({
-    version: 1,
+    version: 2,
     issueId: input.issueId,
     description: cleanMultiline(input.description, 500, input.addonsPath),
     appVersion: cleanSingleLine(input.appVersion || "unknown", 40, input.addonsPath),
     platform: cleanSingleLine(input.platform || "unknown", 40, input.addonsPath),
+    environment: normalizeSupportEnvironment(input.environment),
     generatedAt: input.generatedAt.toISOString(),
     connection: input.isOffline ? "offline" : "online",
     updateState: input.checkingUpdates ? "checking" : "complete",
@@ -284,12 +394,20 @@ function renderCompleteSupportReport(payload: SupportTicketPayload): string {
     "",
     "**What happened**",
   ];
+  const environment = payload.environment
+    ? [
+        `- OS build: ${payload.environment.osVersion}`,
+        `- CPU architecture: ${payload.environment.arch}`,
+        `- App runtime: Tauri ${payload.environment.tauri}, web view ${payload.environment.webview}`,
+      ]
+    : [];
   const diagnostics = [
     "",
     "## Automatic diagnostics",
     `- Generated: ${payload.generatedAt}`,
     `- Kalpa version: ${payload.appVersion}`,
     `- Platform: ${payload.platform}`,
+    ...environment,
     `- Connection: ${payload.connection}`,
     `- ESO instance: ${payload.instanceLabel}`,
     "- AddOns folder: hidden (local account names and full paths are never shared)",
@@ -328,20 +446,54 @@ function encodeSupportFragment(payload: SupportTicketPayload): string {
   return `kalpa=${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
 }
 
+/** Shortest useful remainder of a free-text field before shrinking gives up. */
+const MIN_FREE_TEXT_LENGTH = 40;
+
+function reportOverflow(payload: SupportTicketPayload): number {
+  return renderCompleteSupportReport(payload).length - SUPPORT_REPORT_MAX_LENGTH;
+}
+
+function exceedsTransport(payload: SupportTicketPayload): boolean {
+  return (
+    reportOverflow(payload) > 0 ||
+    encodeSupportFragment(payload).length > SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH
+  );
+}
+
+/**
+ * Trim the longer of the two free-text fields by the amount the report is over,
+ * with a visible ellipsis. Returns null once neither field can usefully shrink.
+ */
+function shrinkFreeText(
+  payload: SupportTicketPayload,
+  overflow: number
+): SupportTicketPayload | null {
+  const lastError = payload.diagnostics.lastError ?? "";
+  const shrinkDescription = payload.description.length >= lastError.length;
+  const current = shrinkDescription ? payload.description : lastError;
+  if (current.length <= MIN_FREE_TEXT_LENGTH) return null;
+
+  const next = truncate(
+    current,
+    Math.max(MIN_FREE_TEXT_LENGTH, current.length - Math.max(overflow, 1))
+  );
+  return shrinkDescription
+    ? { ...payload, description: next }
+    : { ...payload, diagnostics: { ...payload.diagnostics, lastError: next } };
+}
+
 /**
  * Produce the one canonical payload used by both the review and browser handoff.
- * Lower-priority attention rows are removed until the complete rendered report
- * and its UTF-8/base64url handoff both fit their transport limits. No field can
- * therefore be transmitted without also appearing in the user's review.
+ * Lower-priority attention rows are removed first, then the free-text fields are
+ * shortened, until the complete rendered report and its UTF-8/base64url handoff
+ * both fit their transport limits. No field can therefore be transmitted without
+ * also appearing in the user's review — and equally, a report the user reviewed
+ * can never be one the hosted page and Worker would reject as too long.
  */
 export function fitSupportTicketPayload(payload: SupportTicketPayload): SupportTicketPayload {
   let fitted = payload;
 
-  while (
-    fitted.diagnostics.attention.length > 0 &&
-    (renderCompleteSupportReport(fitted).length > SUPPORT_REPORT_MAX_LENGTH ||
-      encodeSupportFragment(fitted).length > SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH)
-  ) {
+  while (fitted.diagnostics.attention.length > 0 && exceedsTransport(fitted)) {
     fitted = {
       ...fitted,
       diagnostics: {
@@ -349,6 +501,12 @@ export function fitSupportTicketPayload(payload: SupportTicketPayload): SupportT
         attention: fitted.diagnostics.attention.slice(0, -1),
       },
     };
+  }
+
+  while (exceedsTransport(fitted)) {
+    const shrunk = shrinkFreeText(fitted, Math.max(reportOverflow(fitted), 1));
+    if (!shrunk) break;
+    fitted = shrunk;
   }
 
   return fitted;
@@ -363,8 +521,9 @@ export function buildSupportReport(input: SupportReportInput): string {
 }
 
 export function buildSupportHandoffUrl(payload: SupportTicketPayload): string | null {
-  const fragment = encodeSupportFragment(fitSupportTicketPayload(payload));
-  return fragment.length <= SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH
-    ? `${SUPPORT_HANDOFF_URL}#${fragment}`
-    : null;
+  const fitted = fitSupportTicketPayload(payload);
+  // Refuse rather than hand the browser a report the hosted page would reject:
+  // a dead end after consent is worse than the copy/manual fallback.
+  if (exceedsTransport(fitted)) return null;
+  return `${SUPPORT_HANDOFF_URL}#${encodeSupportFragment(fitted)}`;
 }

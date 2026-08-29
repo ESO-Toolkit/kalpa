@@ -5,9 +5,15 @@ import {
   buildSupportHandoffUrl,
   buildSupportReport,
   buildSupportTicketPayload,
+  fitSupportTicketPayload,
+  normalizeArchitecture,
+  normalizeOsVersion,
+  normalizeRuntimeVersion,
+  normalizeWebviewLabel,
   renderSupportReport,
   SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH,
   SUPPORT_REPORT_MAX_LENGTH,
+  UNKNOWN_SUPPORT_ENVIRONMENT,
   type SupportTicketPayload,
   type SupportReportInput,
 } from "../support-report";
@@ -56,6 +62,12 @@ function input(overrides: Partial<SupportReportInput> = {}): SupportReportInput 
     description: "Minion updated it, but Kalpa still shows an update.",
     appVersion: "0.1.0-beta.18",
     platform: "windows",
+    environment: {
+      osVersion: "10.0.26200",
+      arch: "x86_64",
+      tauri: "2.9.1",
+      webview: "Chromium 138",
+    },
     generatedAt: new Date("2026-08-28T12:00:00.000Z"),
     isOffline: false,
     checkingUpdates: false,
@@ -77,10 +89,94 @@ function decodeHandoff(url: string): SupportTicketPayload {
 }
 
 describe("buildSupportReport", () => {
-  it("renders the shared client/server contract fixture exactly", () => {
-    expect(renderSupportReport(supportContractFixture.payload as SupportTicketPayload)).toBe(
-      supportContractFixture.report
+  it.each(supportContractFixture.cases.map((entry) => [entry.name, entry] as const))(
+    "renders the shared client/server contract fixture exactly: %s",
+    (_name, entry) => {
+      expect(renderSupportReport(entry.payload as SupportTicketPayload)).toBe(entry.report);
+    }
+  );
+
+  it("reports the allow-listed environment and nothing else", () => {
+    const payload = buildSupportTicketPayload(input());
+    const report = renderSupportReport(payload);
+
+    expect(payload.version).toBe(2);
+    expect(Object.keys(payload.environment!).sort()).toEqual([
+      "arch",
+      "osVersion",
+      "tauri",
+      "webview",
+    ]);
+    expect(report).toContain("- OS build: 10.0.26200");
+    expect(report).toContain("- CPU architecture: x86_64");
+    expect(report).toContain("- App runtime: Tauri 2.9.1, web view Chromium 138");
+  });
+
+  it("falls back to unknown instead of guessing when collection fails", () => {
+    const report = buildSupportReport(input({ environment: UNKNOWN_SUPPORT_ENVIRONMENT }));
+
+    expect(report).toContain("- OS build: unknown");
+    expect(report).toContain("- CPU architecture: unknown");
+    expect(report).toContain("- App runtime: Tauri unknown, web view unknown");
+  });
+
+  it("drops any environment value that is not a bounded allow-listed shape", () => {
+    const payload = buildSupportTicketPayload(
+      input({
+        environment: {
+          osVersion: "Windows 11 Home on DESKTOP-ABC123",
+          arch: "quantum",
+          tauri: "nightly-build",
+          webview: "Chromium 138.0.3296.62",
+        },
+      })
     );
+
+    expect(payload.environment).toEqual(UNKNOWN_SUPPORT_ENVIRONMENT);
+    expect(renderSupportReport(payload)).not.toContain("DESKTOP-ABC123");
+  });
+
+  it("normalizes each environment field independently", () => {
+    expect(normalizeOsVersion("10.0.26200")).toBe("10.0.26200");
+    expect(normalizeOsVersion("14.5")).toBe("14.5");
+    expect(normalizeOsVersion("6.8.0-51-generic")).toBe("unknown");
+    expect(normalizeOsVersion("DESKTOP-ABC123")).toBe("unknown");
+    expect(normalizeArchitecture("x86_64")).toBe("x86_64");
+    expect(normalizeArchitecture("AArch64")).toBe("aarch64");
+    expect(normalizeArchitecture("")).toBe("unknown");
+    expect(normalizeRuntimeVersion("2.9.1")).toBe("2.9.1");
+    expect(normalizeRuntimeVersion("2.9.1-beta.2")).toBe("2.9.1-beta.2");
+    expect(normalizeRuntimeVersion("../../etc/passwd")).toBe("unknown");
+    expect(
+      normalizeWebviewLabel(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+      )
+    ).toBe("Chromium 138");
+    expect(
+      normalizeWebviewLabel(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+      )
+    ).toBe("WebKit 605");
+    expect(normalizeWebviewLabel(undefined)).toBe("unknown");
+  });
+
+  it("never carries an identifying environment field through the handoff", () => {
+    const encoded = JSON.stringify(buildSupportTicketPayload(input()));
+
+    for (const forbidden of [
+      "hostname",
+      "username",
+      "machineId",
+      "deviceId",
+      "serialNumber",
+      "macAddress",
+      "ipAddress",
+      "locale",
+      "discordUserId",
+      "savedVariables",
+    ]) {
+      expect(encoded).not.toContain(forbidden);
+    }
   });
 
   it("summarizes the state support needs for a stale addon report", () => {
@@ -227,6 +323,54 @@ describe("buildSupportReport", () => {
       expect(report).toContain(`- ${item.name} (${item.folder}):`);
     }
     expect(report).not.toContain("...and");
+  });
+
+  it("shrinks the reviewed free text so a maximal report still fits the transport", () => {
+    const payload = buildSupportTicketPayload(
+      input({
+        description: "Beim Aktualisieren erscheint eine unerwartete Fehlermeldung. ".repeat(20),
+        instanceLabel: "Live — NA (Steam) — sehr langer Instanzname zum Testen",
+        lastError: "Ein unerwarteter Fehler ist aufgetreten. ".repeat(10),
+        addons: [],
+        updateResults: [],
+      })
+    );
+    const report = renderSupportReport(payload);
+
+    expect(report.length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
+    // What was shortened is shortened in the review the user reads, not silently
+    // on the way out, so the reviewed and transmitted reports still match.
+    expect(report).toContain(payload.description);
+    expect(report).toContain(payload.diagnostics.lastError!);
+    expect(buildSupportHandoffUrl(payload)).not.toBeNull();
+    expect(decodeHandoff(buildSupportHandoffUrl(payload)!)).toEqual(payload);
+  });
+
+  it("refuses the handoff instead of preparing a report the hosted page would reject", () => {
+    const payload = buildSupportTicketPayload(input());
+    const oversized: SupportTicketPayload = {
+      ...payload,
+      instanceLabel: "x".repeat(80),
+      appVersion: "y".repeat(40),
+      platform: "z".repeat(40),
+      diagnostics: {
+        ...payload.diagnostics,
+        attention: Array.from({ length: 12 }, () => ({
+          name: "n".repeat(80),
+          folder: "f".repeat(80),
+          currentVersion: "1.0",
+          availableVersion: "2.0",
+          missingDependencies: 9999,
+          outdatedDependencies: 9999,
+          modifiedFiles: 9999,
+        })),
+      },
+    };
+
+    expect(renderSupportReport(oversized).length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
+    expect(renderSupportReport(fitSupportTicketPayload(oversized))).toBe(
+      renderSupportReport(oversized)
+    );
   });
 
   it("fits a worst-case Unicode payload within the actual fragment limit", () => {
