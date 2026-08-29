@@ -485,7 +485,12 @@ mod tests {
         let a = LockKey::for_path(&direct).unwrap();
         let b = LockKey::for_path(&dotted).unwrap();
         assert_eq!(a, b);
-        assert_eq!(a.lock_path(), nested.join(".settings.json.kalpa.lock"));
+        assert_eq!(
+            a.lock_path(),
+            dunce::canonicalize(&nested)
+                .unwrap()
+                .join(".settings.json.kalpa.lock")
+        );
     }
 
     #[test]
