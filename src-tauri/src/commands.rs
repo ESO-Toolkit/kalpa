@@ -1474,7 +1474,10 @@ pub async fn remove_addon(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        crate::install_txn::recover_staging(&addons_dir)?;
+        // Keep the cross-process lock across the existence snapshot, both
+        // deletions, and metadata publication. Otherwise another Kalpa process
+        // could publish a replacement after the snapshot and have it deleted.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
         // Remove both the enabled and disabled copies if they exist.
         // If only one exists, remove that one. Handles the edge case where
@@ -1484,10 +1487,10 @@ pub async fn remove_addon(
         let disabled_exists = addons_dir.join(&disabled_name).is_dir();
 
         if enabled_exists {
-            installer::remove_addon(&addons_dir, &folder_name)?;
+            installer::remove_addon_locked(&addons_dir, &folder_name)?;
         }
         if disabled_exists {
-            installer::remove_addon(&addons_dir, &disabled_name)?;
+            installer::remove_addon_locked(&addons_dir, &disabled_name)?;
         }
         if !enabled_exists && !disabled_exists {
             return Err(format!("Addon folder not found: {folder_name}"));
@@ -4106,7 +4109,9 @@ pub async fn batch_remove_addons(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        crate::install_txn::recover_staging(&addons_dir)?;
+        // One lock covers the whole batch and its metadata commit. Calling the
+        // public remover here would release the lock between entries.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
         let mut store = metadata::load_metadata(&addons_dir);
         let mut removed: Vec<String> = Vec::new();
@@ -4114,7 +4119,7 @@ pub async fn batch_remove_addons(
         let mut errors: HashMap<String, String> = HashMap::new();
 
         for name in &folder_names {
-            match installer::remove_addon(&addons_dir, name) {
+            match installer::remove_addon_locked(&addons_dir, name) {
                 Ok(()) => {
                     metadata::remove_entry(&mut store, name);
                     removed.push(name.clone());

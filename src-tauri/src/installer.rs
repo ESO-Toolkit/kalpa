@@ -672,9 +672,18 @@ fn extract_addon_zip_inner(
     Ok(folders)
 }
 
+#[cfg(test)]
 pub fn remove_addon(addons_dir: &Path, folder_name: &str) -> Result<(), String> {
     let _transaction = crate::install_txn::lock_and_recover(addons_dir)?;
+    remove_addon_locked(addons_dir, folder_name)
+}
 
+/// Remove one addon while the caller holds the AddOns transaction lock.
+///
+/// Compound operations use this helper so their existence checks, deletion,
+/// and metadata update share one cross-process critical section. Callers that
+/// do not already hold the lock must use [`remove_addon`] instead.
+pub(crate) fn remove_addon_locked(addons_dir: &Path, folder_name: &str) -> Result<(), String> {
     // Validate folder name — no path traversal
     if folder_name.contains("..")
         || folder_name.contains('/')

@@ -250,6 +250,7 @@ impl Drop for InstallTransaction {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn recover_staging(addons_dir: &Path) -> Result<(), String> {
     let _guard = lock_and_recover(addons_dir)?;
     Ok(())

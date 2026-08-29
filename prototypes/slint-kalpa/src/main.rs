@@ -13751,7 +13751,10 @@ fn set_addon_disabled_on_disk(
 }
 
 fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), String> {
-    install_txn::recover_staging(addons_root)?;
+    // Retain the cross-process guard across the existence snapshot, both
+    // deletions, and metadata cleanup so a concurrent publisher cannot place a
+    // replacement into the gap and have this operation delete it.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     validate_addon_folder_name(folder_name)?;
 
     let enabled_exists = addons_root.join(folder_name).is_dir();
@@ -13759,10 +13762,10 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     let disabled_exists = addons_root.join(&disabled_name).is_dir();
 
     if enabled_exists {
-        installer::remove_addon(addons_root, folder_name)?;
+        installer::remove_addon_locked(addons_root, folder_name)?;
     }
     if disabled_exists {
-        installer::remove_addon(addons_root, &disabled_name)?;
+        installer::remove_addon_locked(addons_root, &disabled_name)?;
     }
     if !enabled_exists && !disabled_exists {
         return Err(format!("Addon folder not found: {folder_name}"));
