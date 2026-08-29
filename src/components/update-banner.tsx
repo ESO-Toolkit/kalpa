@@ -10,9 +10,11 @@ import {
   DownloadIcon,
   ListChecksIcon,
   PackageIcon,
+  ScrollTextIcon,
   SearchIcon,
   XIcon,
 } from "lucide-react";
+import { ChangelogDialog } from "@/components/changelog-dialog";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { Slide } from "@/components/animate-ui/primitives/effects/slide";
 import { AutoHeight } from "@/components/animate-ui/primitives/effects/auto-height";
@@ -26,6 +28,8 @@ export interface BannerUpdate {
   title: string;
   currentVersion: string;
   remoteVersion: string;
+  /** Present when the addon is ESOUI-tracked — gates the changelog button. */
+  esouiId?: number;
 }
 
 interface UpdateBannerProps {
@@ -96,10 +100,14 @@ function ChooserRow({
   update,
   checked,
   onToggle,
+  onShowChangelog,
+  isOffline,
 }: {
   update: BannerUpdate;
   checked: boolean;
   onToggle: () => void;
+  onShowChangelog: () => void;
+  isOffline?: boolean;
 }) {
   return (
     <label
@@ -134,6 +142,32 @@ function ChooserRow({
           {update.remoteVersion || "—"}
         </span>
       </span>
+      {update.esouiId !== undefined && (
+        // Gated on connectivity like the update actions beside it and the
+        // addon-detail changelog button: on a cold cache the dialog would fetch
+        // immediately and show nothing but a network error.
+        <SimpleTooltip
+          content={isOffline ? "Changelogs require an internet connection" : "View changelog"}
+        >
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={isOffline}
+            className="size-6 shrink-0 p-0"
+            // Inside the row's <label>, so a plain click would also toggle the
+            // checkbox: preventDefault stops the label forwarding the
+            // activation, stopPropagation keeps it off the row itself.
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onShowChangelog();
+            }}
+            aria-label={`View changelog for ${update.title}`}
+          >
+            <ScrollTextIcon className="h-3.5 w-3.5" />
+          </Button>
+        </SimpleTooltip>
+      )}
     </label>
   );
 }
@@ -154,6 +188,9 @@ function UpdateBannerBase({
 
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Folder name of the row whose changelog is open — one piece of state for the
+  // whole list, so a single dialog instance serves every row.
+  const [changelogFolder, setChangelogFolder] = useState<string | null>(null);
 
   // Reset the picker whenever an update run begins from ANY source — a button
   // click here or a parent-driven auto-update — so the panel can't spring back
@@ -241,6 +278,12 @@ function UpdateBannerBase({
       }),
     [addonStatuses]
   );
+
+  // Resolved from the live list, so a row that finishes updating drops its
+  // dialog rather than leaving a stale one open.
+  const changelogUpdate = changelogFolder
+    ? (updates.find((u) => u.folderName === changelogFolder) ?? null)
+    : null;
 
   if (availableCount === 0 && !updatingAll) return null;
 
@@ -395,6 +438,8 @@ function UpdateBannerBase({
                       update={update}
                       checked={effectiveSelected.has(update.folderName)}
                       onToggle={() => toggleOne(update.folderName)}
+                      onShowChangelog={() => setChangelogFolder(update.folderName)}
+                      isOffline={isOffline}
                     />
                   ))}
                 </div>
@@ -440,6 +485,19 @@ function UpdateBannerBase({
               </div>
             )}
           </div>
+        )}
+
+        {changelogUpdate?.esouiId !== undefined && changelogUpdate && (
+          <ChangelogDialog
+            esouiId={changelogUpdate.esouiId}
+            title={changelogUpdate.title}
+            currentVersion={changelogUpdate.currentVersion}
+            remoteVersion={changelogUpdate.remoteVersion}
+            open
+            onOpenChange={(next) => {
+              if (!next) setChangelogFolder(null);
+            }}
+          />
         )}
       </div>
     </Slide>
