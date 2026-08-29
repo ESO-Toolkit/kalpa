@@ -25,7 +25,16 @@ import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-react";
+import {
+  ExternalLink,
+  Trash2,
+  Check,
+  Power,
+  Files,
+  FileText,
+  Globe,
+  ScrollText,
+} from "lucide-react";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
 
@@ -38,6 +47,17 @@ const AddonFileBrowser = lazy(() =>
 
 const UpdateConflictPanel = lazy(() =>
   import("@/components/update-conflict-panel").then((m) => ({ default: m.UpdateConflictPanel }))
+);
+
+// The ESOUI tab pulls in the screenshot carousel and description renderer, and
+// the changelog dialog is only ever opened deliberately — neither belongs in
+// AddonDetail's first paint.
+const EsouiTab = lazy(() =>
+  import("@/components/esoui-tab").then((m) => ({ default: m.EsouiTab }))
+);
+
+const ChangelogDialog = lazy(() =>
+  import("@/components/changelog-dialog").then((m) => ({ default: m.ChangelogDialog }))
 );
 
 function relativeDate(ts: number): string {
@@ -93,6 +113,11 @@ function AddonDetailBase({
   const [customTagInput, setCustomTagInput] = useState("");
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
+  // The ESOUI tab fetches on mount, so it must not mount until the user actually
+  // opens that tab. Base UI unmounts inactive panels by default, but this flag
+  // makes the "no request on addon select" guarantee independent of that.
+  const [esouiTabOpened, setEsouiTabOpened] = useState(false);
+  const [changelogOpen, setChangelogOpen] = useState(false);
   const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
   // Per-file extraction progress for THIS addon's in-flight update, correlated
   // by operation id. Drives the "Extracting N of M" label and the Stop button.
@@ -472,14 +497,44 @@ function AddonDetailBase({
               </Button>
             </div>
           ) : (
-            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-              <Button onClick={handleUpdate} disabled={isOffline} size="sm">
-                Update
-              </Button>
-            </SimpleTooltip>
+            <div className="flex items-center gap-2">
+              {addon.esouiId && (
+                <SimpleTooltip
+                  content={isOffline ? "Changelogs require an internet connection" : ""}
+                >
+                  <Button
+                    onClick={() => setChangelogOpen(true)}
+                    disabled={isOffline}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <ScrollText className="size-4 mr-1.5" />
+                    What&rsquo;s new
+                  </Button>
+                </SimpleTooltip>
+              )}
+              <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+                <Button onClick={handleUpdate} disabled={isOffline} size="sm">
+                  Update
+                </Button>
+              </SimpleTooltip>
+            </div>
           )}
         </GlassPanel>
       ) : null}
+
+      {changelogOpen && addon.esouiId && (
+        <Suspense fallback={null}>
+          <ChangelogDialog
+            esouiId={addon.esouiId}
+            title={addon.title}
+            currentVersion={updateResult?.currentVersion}
+            remoteVersion={updateResult?.remoteVersion}
+            open={changelogOpen}
+            onOpenChange={setChangelogOpen}
+          />
+        </Suspense>
+      )}
 
       {updateError && (
         <Alert variant="destructive" className="mb-4">
@@ -556,7 +611,12 @@ function AddonDetailBase({
         </div>
       )}
 
-      <Tabs defaultValue="details">
+      <Tabs
+        defaultValue="details"
+        onValueChange={(value) => {
+          if (value === "esoui") setEsouiTabOpened(true);
+        }}
+      >
         <TabsList>
           <TabsIndicator />
           <TabsTrigger value="details">Details</TabsTrigger>
@@ -564,6 +624,13 @@ function AddonDetailBase({
             <Files className="h-3.5 w-3.5" />
             Files
           </TabsTrigger>
+          {/* Side-loaded addons have no ESOUI page, so they get no tab at all. */}
+          {addon.esouiId && (
+            <TabsTrigger value="esoui">
+              <Globe className="h-3.5 w-3.5" />
+              ESOUI
+            </TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="details" className="pt-4">
@@ -940,6 +1007,27 @@ function AddonDetailBase({
             <AddonFileBrowser addonsPath={addonsPath} folderName={addon.folderName} />
           </Suspense>
         </TabsContent>
+
+        {addon.esouiId && (
+          <TabsContent value="esoui" className="pt-4">
+            {esouiTabOpened && (
+              <Suspense
+                fallback={
+                  <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+                    <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+                    Loading details...
+                  </div>
+                }
+              >
+                <EsouiTab
+                  esouiId={addon.esouiId}
+                  isOffline={isOffline}
+                  installedVersion={addon.version}
+                />
+              </Suspense>
+            )}
+          </TabsContent>
+        )}
       </Tabs>
 
       <div className="mt-6 border-t border-structure-06 pt-4 space-y-3">
