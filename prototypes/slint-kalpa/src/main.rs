@@ -18889,9 +18889,11 @@ fn read_settings_store_key_from_path(
 fn read_settings_store_object_from_path(
     path: &Path,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    Ok(read_settings_store_value_from_path(path)?
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default())
+    match read_settings_store_value_from_path(path)? {
+        None => Ok(serde_json::Map::default()),
+        Some(serde_json::Value::Object(object)) => Ok(object),
+        Some(_) => Err("Failed to parse settings store: root must be a JSON object".to_string()),
+    }
 }
 
 fn read_settings_store_value_from_path(path: &Path) -> Result<Option<serde_json::Value>, String> {
@@ -18944,21 +18946,7 @@ fn read_native_settings() -> NativeSettings {
 }
 
 fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(NativeSettings::default());
-        }
-        Err(error) => return Err(format!("Failed to read native settings: {error}")),
-    };
-
-    let contents = json_without_bom(&contents);
-    if contents.trim().is_empty() {
-        return Ok(NativeSettings::default());
-    }
-
-    let value = serde_json::from_str::<serde_json::Value>(contents)
-        .map_err(|error| format!("Failed to parse native settings: {error}"))?;
+    let value = serde_json::Value::Object(read_settings_store_object_from_path(path)?);
     Ok(native_settings_from_store_value(&value))
 }
 
@@ -19005,7 +18993,7 @@ fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Re
     let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
         .map_err(|error| error.to_string())?;
     let settings = normalize_native_settings(settings.clone());
-    let existing = read_settings_store_value_from_path(path)?;
+    let existing = read_settings_store_object_from_path(path)?;
     let store_value = native_settings_to_store_value(&settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
@@ -19022,7 +19010,7 @@ fn persist_native_settings_delta_to_path(
         .map_err(|error| error.to_string())?;
     let baseline = normalize_native_settings(baseline.clone());
     let settings = normalize_native_settings(settings.clone());
-    let existing = read_settings_store_value_from_path(path)?;
+    let existing = read_settings_store_object_from_path(path)?;
     let store_value = native_settings_delta_to_store_value(&baseline, &settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
@@ -19125,11 +19113,9 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
 #[cfg(test)]
 fn native_settings_to_store_value(
     settings: &NativeSettings,
-    existing: Option<serde_json::Value>,
+    existing: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut object = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut object = existing;
 
     object.remove("warnEsoRunning");
     object.remove("officialUploader");
@@ -19176,11 +19162,9 @@ fn native_settings_to_store_value(
 fn native_settings_delta_to_store_value(
     baseline: &NativeSettings,
     settings: &NativeSettings,
-    existing: Option<serde_json::Value>,
+    existing: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut object = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut object = existing;
 
     if baseline.auto_update != settings.auto_update {
         object.insert(
@@ -20795,6 +20779,41 @@ mod tests {
 
         assert!(error.contains("Failed to parse settings store"));
         assert_eq!(fs::read(&path).unwrap(), malformed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_writers_reject_non_object_roots_without_overwriting_them() {
+        let root = test_temp_dir("settings-non-object-root");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        for invalid in [b"[]".as_slice(), b"null", b"42", br#""scalar""#] {
+            fs::write(&path, invalid).expect("seed non-object settings store");
+            let error = update_settings_store_object_to_path(&path, |object| {
+                object.insert("autoUpdate".to_string(), serde_json::Value::Bool(true));
+                Ok(())
+            })
+            .expect_err("semantic settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = match read_native_settings_from_path(&path) {
+                Ok(_) => panic!("native settings reads must reject a non-object root"),
+                Err(error) => error,
+            };
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+                .expect_err("native settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+        }
+
         let _ = fs::remove_dir_all(root);
     }
 
