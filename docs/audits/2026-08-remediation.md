@@ -23,7 +23,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
-| H2 | pr-open | `fix/audit-h2-theme-provenance` | [#383](https://github.com/ESO-Toolkit/kalpa/pull/383) (draft) | - | not required | REVISE x2; all verified findings addressed | Root check; frontend check; 490 tests | Evidence supports treating the directory as local visual-review output; ignore narrowly without modifying it. |
+| H2 | pr-open | `fix/audit-h2-theme-provenance` | [#383](https://github.com/ESO-Toolkit/kalpa/pull/383) | - | not required | REVISE x2; all verified findings addressed | Root check; frontend check; 490 tests | Evidence supports treating the directory as local visual-review output; ignore narrowly without modifying it. |
 | H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
