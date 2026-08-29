@@ -5723,6 +5723,26 @@ fn load_profiles_with_mirror(
     metadata::load_json_with_backup(&primary)
 }
 
+fn load_profiles_read_only_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+) -> ProfileStore {
+    let primary = profiles_path(addons_dir);
+    let primary_gone = !primary.exists()
+        && !primary.with_extension("json.tmp").exists()
+        && !primary.with_extension("json.bak").exists();
+    if primary_gone {
+        if let Some(mirror) = mirror {
+            if let Ok(content) = fs::read_to_string(mirror) {
+                if let Ok(store) = serde_json::from_str::<ProfileStore>(&content) {
+                    return store;
+                }
+            }
+        }
+    }
+    metadata::load_json_read_only_with_backup(&primary)
+}
+
 fn save_profiles_with_mirror(
     addons_dir: &std::path::Path,
     mirror: Option<&std::path::Path>,
@@ -5787,6 +5807,13 @@ fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     )
 }
 
+fn load_profiles_read_only(addons_dir: &std::path::Path) -> ProfileStore {
+    load_profiles_read_only_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+    )
+}
+
 fn save_profiles(addons_dir: &std::path::Path, store: &ProfileStore) -> Result<(), String> {
     save_profiles_with_mirror(
         addons_dir,
@@ -5803,7 +5830,7 @@ pub fn list_profiles(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
     let _transaction = profile_read_transaction_guard(&addons_dir)?;
-    let store = load_profiles(&addons_dir);
+    let store = load_profiles_read_only(&addons_dir);
     Ok((store.profiles, store.active_profile))
 }
 
@@ -6207,7 +6234,7 @@ pub async fn preview_profile(
         let store = {
             let _guard = profile_store_guard();
             let _transaction = profile_read_transaction_guard(&addons_dir)?;
-            load_profiles(&addons_dir)
+            load_profiles_read_only(&addons_dir)
         };
         let profile = store
             .profiles
@@ -11343,6 +11370,32 @@ mod tests {
 
         let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
         assert_eq!(loaded.profiles[0].name, "newer");
+    }
+
+    #[test]
+    fn read_only_profile_load_does_not_promote_legacy_recovery_file() {
+        let addons = tempfile::tempdir().unwrap();
+        let primary = profiles_path(addons.path());
+        let legacy_tmp = primary.with_extension("json.tmp");
+        let store = ProfileStore {
+            profiles: vec![profile_of(&["Recovered"])],
+            active_profile: Some("test".to_string()),
+        };
+        fs::write(&legacy_tmp, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let loaded = load_profiles_read_only_with_mirror(addons.path(), None);
+
+        assert_eq!(loaded.profiles[0].name, "test");
+        assert_eq!(loaded.profiles[0].enabled_addons, vec!["Recovered"]);
+        assert_eq!(loaded.active_profile.as_deref(), Some("test"));
+        assert!(
+            !primary.exists(),
+            "a read-only load must not publish a primary"
+        );
+        assert!(
+            legacy_tmp.exists(),
+            "a read-only load must not remove the recovery file"
+        );
     }
 
     #[test]

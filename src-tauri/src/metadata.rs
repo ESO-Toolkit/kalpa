@@ -108,6 +108,26 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
     T::default()
 }
 
+/// Load the primary, legacy recovery file, or backup without modifying disk.
+///
+/// This preserves the same recovery order as [`load_json_with_backup`] for
+/// callers that hold only a shared lock or have no write access. In particular,
+/// a valid legacy `.json.tmp` may be observed but is never promoted or removed.
+pub(crate) fn load_json_read_only_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
+    for candidate in [
+        path.to_path_buf(),
+        path.with_extension("json.tmp"),
+        path.with_extension("json.bak"),
+    ] {
+        if let Ok(content) = fs::read_to_string(candidate) {
+            if let Ok(data) = serde_json::from_str(&content) {
+                return data;
+            }
+        }
+    }
+    T::default()
+}
+
 /// Save data as JSON with atomic write and automatic backup.
 ///
 /// Writes and fsyncs a uniquely owned sibling staging file, copies the current
