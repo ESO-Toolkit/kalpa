@@ -562,12 +562,28 @@ pub fn create_pre_migration_snapshot(
     Ok(manifest)
 }
 
+fn minion_addons_for_migration<'a>(
+    minion_addons: &'a [crate::commands::MinionAddon],
+    addons_dir: &Path,
+) -> Vec<&'a crate::commands::MinionAddon> {
+    let has_scoped_entries = minion_addons
+        .iter()
+        .any(|addon| addon.addons_path.is_some());
+    minion_addons
+        .iter()
+        .filter(|addon| {
+            crate::commands::minion_addon_is_for_root(addon, addons_dir, has_scoped_entries)
+        })
+        .collect()
+}
+
 /// Phase 2: Dry-run migration — compare Minion data with disk state.
 pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
     let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
     let content =
         fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
     let minion_addons = crate::commands::parse_minion_addons(&content);
+    let minion_addons = minion_addons_for_migration(&minion_addons, addons_dir);
 
     let store = metadata::load_metadata(addons_dir);
 
@@ -653,6 +669,7 @@ pub fn execute_migration(addons_dir: &Path) -> Result<MigrationResult, String> {
     let content =
         fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
     let minion_addons = crate::commands::parse_minion_addons(&content);
+    let minion_addons = minion_addons_for_migration(&minion_addons, addons_dir);
 
     let mut store = metadata::load_metadata(addons_dir);
     let mut imported: u32 = 0;
@@ -1123,6 +1140,35 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minion_migration_uses_only_the_selected_addons_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_addons_dir = tmp.path().join("live").join("AddOns");
+        let pts_addons_dir = tmp.path().join("pts").join("AddOns");
+        fs::create_dir_all(&live_addons_dir).unwrap();
+        fs::create_dir_all(&pts_addons_dir).unwrap();
+
+        let minion_addons = vec![
+            crate::commands::MinionAddon {
+                uid: 123,
+                version: "1.0".to_string(),
+                folders: vec!["MyAddon".to_string()],
+                addons_path: Some(pts_addons_dir),
+            },
+            crate::commands::MinionAddon {
+                uid: 123,
+                version: "2.0".to_string(),
+                folders: vec!["MyAddon".to_string()],
+                addons_path: Some(live_addons_dir.clone()),
+            },
+        ];
+
+        let selected = minion_addons_for_migration(&minion_addons, &live_addons_dir);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].version, "2.0");
+    }
 
     #[test]
     fn snapshot_id_is_unique() {
