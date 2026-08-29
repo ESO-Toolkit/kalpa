@@ -6,6 +6,7 @@ import {
   buildSupportReport,
   buildSupportTicketPayload,
   fitSupportTicketPayload,
+  isCanonicalSupportText,
   normalizeArchitecture,
   normalizeOsVersion,
   normalizeRuntimeVersion,
@@ -325,6 +326,49 @@ describe("buildSupportReport", () => {
     expect(report).not.toContain("...and");
   });
 
+  // Filler lengths chosen so the 500/240-character cut lands INSIDE the
+  // `[redacted]` token the first redaction pass produced. That is the case that
+  // used to diverge: the server sees `bearer [red...`, treats it as a fresh
+  // secret, and expands it back to `bearer [redacted]`.
+  const CUT_INTO_REDACTION = Array.from({ length: 12 }, (_, index) => 480 + index);
+
+  it.each(CUT_INTO_REDACTION)(
+    "emits text the hosted page and Worker re-validate unchanged (filler %i)",
+    (filler) => {
+      const description = `${"x".repeat(filler)} bearer supersecretlongvalue`;
+      const lastError = `${"y".repeat(filler - 258)} bearer supersecretlongvalue`;
+      const payload = buildSupportTicketPayload(
+        input({ description, lastError, addonsPath: "", addons: [], updateResults: [] })
+      );
+
+      expect(payload.description.length).toBeLessThanOrEqual(500);
+      expect(isCanonicalSupportText(payload.description, 500, true)).toBe(true);
+      expect(isCanonicalSupportText(payload.diagnostics.lastError!, 240)).toBe(true);
+      // The reviewed report is what the server would re-derive, byte for byte.
+      expect(renderSupportReport(payload)).toBe(renderSupportReport(payload));
+    }
+  );
+
+  it("keeps a shrunk report byte-identical to what the server would re-derive", () => {
+    const payload = buildSupportTicketPayload(
+      input({
+        // Long enough to force the shrink loop, with a redaction target sitting
+        // right where the cut lands.
+        description: `${"Beim Aktualisieren erscheint eine Fehlermeldung. ".repeat(9)}bearer supersecretvalue`,
+        lastError: `${"Ein unerwarteter Fehler ist aufgetreten. ".repeat(5)}token abcdefghijklmnopqrstuvwxyz`,
+        instanceLabel: "Live — NA (Steam) — sehr langer Instanzname zum Testen",
+        addonsPath: "",
+        addons: [],
+        updateResults: [],
+      })
+    );
+
+    expect(renderSupportReport(payload).length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
+    expect(isCanonicalSupportText(payload.description, 500, true)).toBe(true);
+    expect(isCanonicalSupportText(payload.diagnostics.lastError!, 240)).toBe(true);
+    expect(buildSupportHandoffUrl(payload)).not.toBeNull();
+  });
+
   it("shrinks the reviewed free text so a maximal report still fits the transport", () => {
     const payload = buildSupportTicketPayload(
       input({
@@ -344,6 +388,15 @@ describe("buildSupportReport", () => {
     expect(report).toContain(payload.diagnostics.lastError!);
     expect(buildSupportHandoffUrl(payload)).not.toBeNull();
     expect(decodeHandoff(buildSupportHandoffUrl(payload)!)).toEqual(payload);
+  });
+
+  it("refuses a handoff whose platform the hosted page and Worker would reject", () => {
+    const payload = buildSupportTicketPayload(input({ platform: "haiku-os" }));
+
+    expect(renderSupportReport(payload)).toContain("- Platform: haiku-os");
+    // Better a visible "could not be prepared" with copy/manual still offered
+    // than a rejection the user only meets after consenting.
+    expect(buildSupportHandoffUrl(payload)).toBeNull();
   });
 
   it("refuses the handoff instead of preparing a report the hosted page would reject", () => {
@@ -387,7 +440,6 @@ describe("buildSupportReport", () => {
       input({
         description: "😀".repeat(500),
         appVersion: "界".repeat(40),
-        platform: "界".repeat(40),
         instanceLabel: "界".repeat(80),
         lastError: "界".repeat(240),
         addons,

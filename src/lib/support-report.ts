@@ -267,16 +267,68 @@ function redactSensitiveText(value: string, addonsPath: string): string {
   );
 }
 
+function collapseLines(value: string): string {
+  return value.replace(/\s*[\r\n]+\s*/g, " ").trim();
+}
+
+function normalizeLines(value: string): string {
+  return value.replace(/\r\n?/g, "\n").trim();
+}
+
+/**
+ * Produce text that is already a fixed point of the shared redaction rules and
+ * within the length bound, so re-running the identical validation on the hosted
+ * page and in the Worker changes nothing.
+ *
+ * Redacting and then truncating is not enough, because the cut can create a NEW
+ * match. `bearer [redacted]` cut short leaves `bearer [redac`, which the server
+ * expands straight back to `bearer [redacted]` - longer than what the user
+ * reviewed, and long enough to push a maximal report past the Discord cap and
+ * have it rejected after consent. Cutting a 23-digit run down to 20 digits
+ * likewise turns it into an account ID the server then replaces.
+ *
+ * So the limit is walked down until the result survives its own rules
+ * unchanged. The check deliberately runs without the AddOns-folder rule,
+ * because that rule is Kalpa's alone: the invariant that has to hold is
+ * equality with what the *server* would compute. The loop always terminates -
+ * the empty string is a fixed point - and in practice the full value already is
+ * one, so it exits on the first pass.
+ */
+function clampRedacted(
+  value: string,
+  maxLength: number,
+  addonsPath: string,
+  normalize: (text: string) => string
+): string {
+  const full = normalize(redactSensitiveText(value, addonsPath));
+  for (let limit = maxLength; limit > 0; limit -= 1) {
+    const candidate = truncate(full, limit);
+    if (normalize(redactSensitiveText(candidate, "")) === candidate) return candidate;
+  }
+  return "";
+}
+
+/**
+ * True when `value` would survive the hosted page's and the Worker's identical
+ * validation unchanged — that is, when the report the user reviewed is exactly
+ * the report that gets posted to Discord. The AddOns-folder rule is excluded on
+ * purpose: it is Kalpa's alone and the servers never run it.
+ */
+export function isCanonicalSupportText(
+  value: string,
+  maxLength: number,
+  multiline = false
+): boolean {
+  const normalize = multiline ? normalizeLines : collapseLines;
+  return value.length <= maxLength && normalize(redactSensitiveText(value, "")) === value;
+}
+
 function cleanSingleLine(value: string, maxLength: number, addonsPath = ""): string {
-  const clean = redactSensitiveText(value, addonsPath)
-    .replace(/\s*[\r\n]+\s*/g, " ")
-    .trim();
-  return truncate(clean, maxLength);
+  return clampRedacted(value, maxLength, addonsPath, collapseLines);
 }
 
 function cleanMultiline(value: string, maxLength: number, addonsPath = ""): string {
-  const clean = redactSensitiveText(value, addonsPath).replace(/\r\n?/g, "\n").trim();
-  return truncate(clean, maxLength);
+  return clampRedacted(value, maxLength, addonsPath, normalizeLines);
 }
 
 function boundedCount(value: number): number {
@@ -473,10 +525,15 @@ function shrinkFreeText(
   const current = shrinkDescription ? payload.description : lastError;
   if (current.length <= MIN_FREE_TEXT_LENGTH) return null;
 
-  const next = truncate(
+  // Re-clamp rather than plain truncate: the cut must not resurrect a redaction
+  // match that the server would then expand differently.
+  const next = clampRedacted(
     current,
-    Math.max(MIN_FREE_TEXT_LENGTH, current.length - Math.max(overflow, 1))
+    Math.max(MIN_FREE_TEXT_LENGTH, current.length - Math.max(overflow, 1)),
+    "",
+    shrinkDescription ? normalizeLines : collapseLines
   );
+  if (next === current) return null;
   return shrinkDescription
     ? { ...payload, description: next }
     : { ...payload, diagnostics: { ...payload.diagnostics, lastError: next } };
@@ -520,10 +577,28 @@ export function buildSupportReport(input: SupportReportInput): string {
   return renderSupportReport(buildSupportTicketPayload(input));
 }
 
+/** Platform values the hosted page and Worker accept. */
+const HANDOFF_PLATFORMS: readonly string[] = ["windows", "macos", "linux"];
+
+/**
+ * Everything the server validates that Kalpa can check locally. Today
+ * `osType()` cannot return anything else, but a future default of "unknown"
+ * would otherwise only surface as a rejection after the user had consented and
+ * switched to their browser.
+ */
+function isServerAcceptable(payload: SupportTicketPayload): boolean {
+  return (
+    payload.version === 2 &&
+    payload.environment !== undefined &&
+    HANDOFF_PLATFORMS.includes(payload.platform) &&
+    SUPPORT_ISSUES.some((issue) => issue.id === payload.issueId)
+  );
+}
+
 export function buildSupportHandoffUrl(payload: SupportTicketPayload): string | null {
   const fitted = fitSupportTicketPayload(payload);
   // Refuse rather than hand the browser a report the hosted page would reject:
   // a dead end after consent is worse than the copy/manual fallback.
-  if (exceedsTransport(fitted)) return null;
+  if (exceedsTransport(fitted) || !isServerAcceptable(fitted)) return null;
   return `${SUPPORT_HANDOFF_URL}#${encodeSupportFragment(fitted)}`;
 }
