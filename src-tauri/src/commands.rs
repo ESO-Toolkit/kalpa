@@ -1326,6 +1326,7 @@ pub async fn set_addon_tags(
                         installed_at: String::new(),
                         tags,
                         esoui_last_update: 0,
+                        esoui_marker_installed: false,
                     },
                 );
             }
@@ -1815,10 +1816,11 @@ fn check_for_updates_metadata(
             .or_else(|| api_entry.version.trim().strip_prefix('V'))
             .unwrap_or(api_entry.version.trim());
 
-        let has_update = artifact_is_newer(
+        let has_update = artifact_is_newer_with_marker_state(
             local_ver,
             remote_ver,
             meta.esoui_last_update,
+            meta.esoui_marker_installed,
             api_entry.last_update,
         );
 
@@ -1838,6 +1840,18 @@ fn check_for_updates_metadata(
                 entry.installed_version = api_entry.version.clone();
                 metadata_changed = true;
             }
+            // A matching version observation establishes that a legacy marker
+            // belongs to the artifact on disk. Until then, markers loaded from
+            // pre-v2 metadata remain observation-only and cannot suppress a
+            // version mismatch.
+            if !local_ver.is_empty()
+                && !remote_ver.is_empty()
+                && local_ver == remote_ver
+                && !entry.esoui_marker_installed
+            {
+                entry.esoui_marker_installed = true;
+                metadata_changed = true;
+            }
             // A marker is the publication identity of the installed artifact.
             // Learn it from a matching filelist observation, but leave it
             // untouched while an update is pending: recording the remote
@@ -1845,6 +1859,7 @@ fn check_for_updates_metadata(
             // installed on the next check.
             if !has_update && api_entry.last_update > entry.esoui_last_update {
                 entry.esoui_last_update = api_entry.last_update;
+                entry.esoui_marker_installed = true;
                 metadata_changed = true;
             }
         }
@@ -2145,6 +2160,23 @@ fn downloaded_artifact_version<'a>(observed_version: &'a str, fetched_version: &
     }
 }
 
+/// Compare the version strings used for local/API identity checks. ESOUI may
+/// include a leading `v` or surrounding whitespace, but an empty value is not
+/// evidence that the installed artifact matches the API entry.
+fn versions_match(local_version: &str, remote_version: &str) -> bool {
+    let local = local_version.trim();
+    let remote = remote_version.trim();
+    let local = local
+        .strip_prefix('v')
+        .or_else(|| local.strip_prefix('V'))
+        .unwrap_or(local);
+    let remote = remote
+        .strip_prefix('v')
+        .or_else(|| remote.strip_prefix('V'))
+        .unwrap_or(remote);
+    !local.is_empty() && !remote.is_empty() && local == remote
+}
+
 /// Compare a local artifact with a filelist observation. A filelist marker at
 /// or before the marker recorded with the installed artifact is not allowed to
 /// trigger an update: ESOUI can briefly serve an older filelist after the
@@ -2155,10 +2187,26 @@ fn artifact_is_newer(
     installed_marker: u64,
     remote_marker: u64,
 ) -> bool {
+    artifact_is_newer_with_marker_state(
+        local_version,
+        remote_version,
+        installed_marker,
+        true,
+        remote_marker,
+    )
+}
+
+fn artifact_is_newer_with_marker_state(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
     if local_version.is_empty() || remote_version.is_empty() {
         return false;
     }
-    if installed_marker > 0 && remote_marker <= installed_marker {
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
         return false;
     }
     remote_version != local_version
@@ -4193,10 +4241,12 @@ fn auto_link_addons_blocking(
             let needs_update = match already_tracked {
                 Some(meta) => {
                     // Update existing entries: fill in missing esoui_id or a
-                    // newer publication marker. A stale filelist response
-                    // must not trigger metadata churn or regress the marker.
+                    // newer publication marker when its version matches the
+                    // artifact on disk. A stale filelist response must not
+                    // trigger metadata churn or regress the marker.
                     (meta.esoui_id == 0 && api_entry.esoui_id > 0)
-                        || api_entry.last_update > meta.esoui_last_update
+                        || (versions_match(&meta.installed_version, &api_entry.version)
+                            && api_entry.last_update > meta.esoui_last_update)
                 }
                 None => true,
             };
@@ -4214,14 +4264,23 @@ fn auto_link_addons_blocking(
                         installed_at: String::new(),
                         tags: Vec::new(),
                         esoui_last_update: 0,
+                        esoui_marker_installed: false,
                     }
                 });
-                metadata::reconcile_addon(
-                    entry,
-                    api_entry.esoui_id,
-                    api_entry.last_update,
-                    &api_entry.file_info_uri,
-                );
+                if versions_match(&entry.installed_version, &api_entry.version) {
+                    metadata::reconcile_addon(
+                        entry,
+                        api_entry.esoui_id,
+                        api_entry.last_update,
+                        &api_entry.file_info_uri,
+                    );
+                } else {
+                    metadata::reconcile_addon_identity(
+                        entry,
+                        api_entry.esoui_id,
+                        &api_entry.file_info_uri,
+                    );
+                }
                 linked.push(folder_name);
             }
         } else if !store.addons.contains_key(&folder_name) {
@@ -4342,6 +4401,7 @@ pub async fn batch_set_tags(
                             installed_at: String::new(),
                             tags: entry.tags,
                             esoui_last_update: 0,
+                            esoui_marker_installed: false,
                         },
                     );
                 }
@@ -10776,6 +10836,82 @@ mod tests {
     }
 
     #[test]
+    fn update_check_keeps_legacy_observation_marker_from_hiding_version_update() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store.version = 1;
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
+    fn auto_link_does_not_advance_marker_for_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addon_dir = tmp.path().join("Addon");
+        fs::create_dir(&addon_dir).unwrap();
+        fs::write(
+            addon_dir.join("Addon.txt"),
+            "## Title: Addon\n## Version: v1\n",
+        )
+        .unwrap();
+
+        // This models a legacy pending observation: the identity is not yet
+        // linked, and marker 100 was observed but was not proven to belong to
+        // the local v1 artifact.
+        let mut store = metadata::MetadataStore::default();
+        store.addons.insert(
+            "Addon".to_string(),
+            metadata::AddonMetadata {
+                esoui_id: 0,
+                installed_version: "v1".to_string(),
+                download_url: String::new(),
+                installed_at: String::new(),
+                tags: Vec::new(),
+                esoui_last_update: 100,
+                esoui_marker_installed: false,
+            },
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 7,
+                title: "Addon".to_string(),
+                version: "v2".to_string(),
+                author: "Test".to_string(),
+                last_update: 200,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+
+        let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+        assert_eq!(result.linked, vec!["Addon"]);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_id, 7);
+        assert_eq!(addon.installed_version, "v1");
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
     fn prune_auto_snapshots_keeps_newest_removes_oldest() {
         // Names embed epoch timestamps and are sorted lexicographically, so an
         // inverted sort would delete the newest snapshots instead of the oldest.
@@ -11602,6 +11738,7 @@ mod tests {
                 installed_at: String::new(),
                 tags: vec!["favorite".to_string()],
                 esoui_last_update: 0,
+                esoui_marker_installed: false,
             },
         );
         metadata::save_metadata(src.path(), &store).unwrap();

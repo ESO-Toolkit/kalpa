@@ -18,11 +18,23 @@ pub struct AddonMetadata {
     /// ESOUI last-updated timestamp in epoch milliseconds (from the API).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub esoui_last_update: u64,
+    /// Whether `esoui_last_update` is known to belong to the artifact installed
+    /// locally. Metadata written before this flag existed only recorded an API
+    /// observation, so it must not suppress a version mismatch until a matching
+    /// observation or real install establishes the marker's provenance.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub esoui_marker_installed: bool,
 }
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+const CURRENT_METADATA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataStore {
@@ -33,7 +45,7 @@ pub struct MetadataStore {
 impl Default for MetadataStore {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: CURRENT_METADATA_VERSION,
             addons: HashMap::new(),
         }
     }
@@ -202,7 +214,28 @@ pub fn format_timestamp(secs: u64) -> String {
 }
 
 pub fn load_metadata(addons_path: &Path) -> MetadataStore {
-    load_json_with_backup(&metadata_path(addons_path))
+    let path = metadata_path(addons_path);
+    let mut store: MetadataStore = load_json_with_backup(&path);
+
+    // Version 1 stored every filelist marker as if it belonged to the local
+    // artifact, even when the user deferred the corresponding update. Keep the
+    // value for diagnostics/relearning, but do not let it veto a version
+    // mismatch until a post-migration install or matching observation confirms
+    // its provenance.
+    if store.version < CURRENT_METADATA_VERSION {
+        for addon in store.addons.values_mut() {
+            addon.esoui_marker_installed = false;
+        }
+        store.version = CURRENT_METADATA_VERSION;
+        if let Err(e) = save_json_with_backup(&path, &store) {
+            eprintln!(
+                "Warning: failed to persist metadata migration for {}: {e}",
+                path.display()
+            );
+        }
+    }
+
+    store
 }
 
 pub fn save_metadata(addons_path: &Path, store: &MetadataStore) -> Result<(), String> {
@@ -257,6 +290,7 @@ pub fn record_install_ext(
             installed_at,
             tags: existing_tags,
             esoui_last_update: last_update,
+            esoui_marker_installed: true,
         },
     );
 }
@@ -272,15 +306,24 @@ pub fn reconcile_addon(
     esoui_last_update: u64,
     download_url: &str,
 ) {
+    reconcile_addon_identity(meta, esoui_id, download_url);
+
+    // Reconciliation can observe an older filelist entry than the marker
+    // captured when the artifact was downloaded. Never regress the marker.
+    meta.esoui_last_update = meta.esoui_last_update.max(esoui_last_update);
+    meta.esoui_marker_installed = true;
+}
+
+/// Reconcile API identity fields without attaching a publication marker.
+/// Auto-link uses this when the observed API version differs from the local
+/// artifact: linking an addon must not make a pending update look installed.
+pub fn reconcile_addon_identity(meta: &mut AddonMetadata, esoui_id: u32, download_url: &str) {
     if esoui_id > 0 {
         meta.esoui_id = esoui_id;
     }
     if meta.download_url.is_empty() && !download_url.is_empty() {
         meta.download_url = download_url.to_string();
     }
-    // Reconciliation can observe an older filelist entry than the marker
-    // captured when the artifact was downloaded. Never regress the marker.
-    meta.esoui_last_update = meta.esoui_last_update.max(esoui_last_update);
 }
 
 pub fn remove_entry(store: &mut MetadataStore, folder_name: &str) {
@@ -302,7 +345,7 @@ mod tests {
         save_json_with_backup(&path, &store).unwrap();
 
         let loaded: MetadataStore = load_json_with_backup(&path);
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, CURRENT_METADATA_VERSION);
         assert_eq!(loaded.addons.len(), 1);
         assert_eq!(loaded.addons["TestAddon"].esoui_id, 123);
         assert_eq!(loaded.addons["TestAddon"].installed_version, "1.0.0");
@@ -311,8 +354,44 @@ mod tests {
     #[test]
     fn load_returns_default_for_missing_file() {
         let loaded: MetadataStore = load_json_with_backup(Path::new("/nonexistent/path.json"));
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, CURRENT_METADATA_VERSION);
         assert!(loaded.addons.is_empty());
+    }
+
+    #[test]
+    fn load_metadata_migrates_observation_only_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = metadata_path(tmp.path());
+
+        // Version 1 metadata could not distinguish a filelist observation
+        // from a marker belonging to the artifact installed on disk.
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "addons": {
+                    "Addon": {
+                        "esouiId": 7,
+                        "installedVersion": "v1",
+                        "downloadUrl": "https://example.invalid/addon.zip",
+                        "installedAt": "",
+                        "esouiLastUpdate": 42
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_metadata(tmp.path());
+        assert_eq!(loaded.version, CURRENT_METADATA_VERSION);
+        assert_eq!(loaded.addons["Addon"].esoui_last_update, 42);
+        assert!(!loaded.addons["Addon"].esoui_marker_installed);
+
+        // Migration is persisted so a later process does not re-enter the
+        // ambiguous legacy state.
+        let persisted: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(persisted.version, CURRENT_METADATA_VERSION);
+        assert!(!persisted.addons["Addon"].esoui_marker_installed);
     }
 
     #[test]
