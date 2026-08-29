@@ -123,6 +123,15 @@ function truncate(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength - 3)}...`;
 }
 
+function stripNonPrintingControlCharacters(value: string): string {
+  return Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const isAllowedWhitespace = codePoint === 9 || codePoint === 10 || codePoint === 13;
+    const isControlCharacter = codePoint < 32 || (codePoint >= 127 && codePoint <= 159);
+    return isControlCharacter && !isAllowedWhitespace ? "" : character;
+  }).join("");
+}
+
 function redactSensitiveText(value: string, addonsPath: string): string {
   let redacted = neutralizeDiscordMentions(value);
   const escaped = addonsPath
@@ -134,17 +143,19 @@ function redactSensitiveText(value: string, addonsPath: string): string {
     redacted = redacted.replace(new RegExp(escaped.join("[\\\\/]+"), "gi"), "[AddOns folder]");
   }
 
-  return redacted
-    .replace(
-      /(?:[A-Za-z]:[\\/]+Users|[\\/]+(?:Users|home))[\\/]+[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/gi,
-      "[local path]"
-    )
-    .replace(/\\\\[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/g, "[local path]")
-    .replace(
-      /\b(authorization|bearer|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret)\b(?:\s*[:=]\s*|\s+)[^\s,;]{6,}|\b(token)\b(?:\s*[:=]\s*[^\s,;]+|\s+[A-Za-z0-9._~+/=-]{16,})/gi,
-      "$1$2 [redacted]"
-    )
-    .replace(/\b\d{17,20}\b/g, "[account-id]");
+  return stripNonPrintingControlCharacters(
+    redacted
+      .replace(
+        /(?:[A-Za-z]:[\\/]+|[\\/]+(?:Users|home|mnt|opt|var|tmp|etc|srv|Volumes)[\\/]+)[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/gi,
+        "[local path]"
+      )
+      .replace(/\\\\[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/g, "[local path]")
+      .replace(
+        /\b(authorization|bearer|access[_ -]?token|refresh[_ -]?token|api[_ -]?key|client[_ -]?secret)\b(?:\s*[:=]\s*|\s+)[^\s,;]{6,}|\b(token)\b(?:\s*[:=]\s*[^\s,;]+|\s+[A-Za-z0-9._~+/=-]{16,})/gi,
+        "$1$2 [redacted]"
+      )
+      .replace(/\b\d{17,20}\b/g, "[account-id]")
+  );
 }
 
 function cleanSingleLine(value: string, maxLength: number, addonsPath = ""): string {

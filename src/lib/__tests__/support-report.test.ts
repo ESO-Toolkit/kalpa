@@ -134,6 +134,19 @@ describe("buildSupportReport", () => {
     expect(report).not.toContain("OtherName");
   });
 
+  it("redacts non-home absolute paths and removes non-printing control characters", () => {
+    const report = buildSupportReport(
+      input({
+        description: "Install failed at D:\\Games\\ESO\\AddOns and /opt/eso/private\u0007",
+      })
+    );
+
+    expect(report.match(/\[local path\]/g)).toHaveLength(2);
+    expect(report).not.toContain("Games");
+    expect(report).not.toContain("/opt/");
+    expect(report).not.toContain("\u0007");
+  });
+
   it("preserves useful description paragraphs and explains category-specific collection", () => {
     const report = buildSupportReport(
       input({
