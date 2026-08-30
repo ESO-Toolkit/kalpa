@@ -1092,6 +1092,7 @@ pub async fn scan_installed_addons(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+
         scan_installed_addons_blocking(&addons_dir, &cache_dir)
     })
     .await
@@ -1334,6 +1335,7 @@ pub async fn set_addon_tags(
                         installed_at: String::new(),
                         tags,
                         esoui_last_update: 0,
+                        esoui_marker_installed: false,
                     },
                 );
             }
@@ -1853,7 +1855,13 @@ fn check_for_updates_metadata(
         // Normalize versions: strip leading "v"/"V" and trim whitespace
         let local_ver = normalized_version(&meta.installed_version);
 
-        let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
+        let has_update = artifact_is_newer_with_marker_state(
+            local_ver,
+            remote_ver,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(folder_name) {
             // Sync the raw string only when both sides are real versions that
@@ -1866,13 +1874,34 @@ fn check_for_updates_metadata(
                 && api_ids_match
                 && !remote_ver.is_empty()
                 && !local_ver.is_empty()
+                && remote_ver == local_ver
                 && meta.installed_version != api_entry.version
             {
                 entry.installed_version = api_entry.version.clone();
                 metadata_changed = true;
             }
-            if entry.esoui_last_update != api_entry.last_update {
+            // A matching version observation establishes that a legacy marker
+            // belongs to the artifact on disk. Until then, markers loaded from
+            // pre-v2 metadata remain observation-only and cannot suppress a
+            // version mismatch.
+            if !local_ver.is_empty()
+                && !remote_ver.is_empty()
+                && local_ver == remote_ver
+                && api_entry.last_update > 0
+                && api_entry.last_update == entry.esoui_last_update
+                && !entry.esoui_marker_installed
+            {
+                entry.esoui_marker_installed = true;
+                metadata_changed = true;
+            }
+            // A marker is the publication identity of the installed artifact.
+            // Learn it from a matching filelist observation, but leave it
+            // untouched while an update is pending: recording the remote
+            // marker before download would make an ignored update appear
+            // installed on the next check.
+            if !has_update && api_entry.last_update > entry.esoui_last_update {
                 entry.esoui_last_update = api_entry.last_update;
+                entry.esoui_marker_installed = true;
                 metadata_changed = true;
             }
         }
@@ -2151,17 +2180,32 @@ fn update_addon_blocking(
     // Extract the downloaded ZIP
     let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
 
-    // Store the API version (from filelist.json) when available, since
-    // check_for_updates compares against the API version. Using the
-    // HTML-scraped version here caused perpetual "update available" when
-    // the two sources returned slightly different version strings.
-    let version = api_version.unwrap_or(&info.version);
+    // Store the version from the checksum-bound filedetails descriptor that
+    // supplied this artifact. The earlier filelist value is only an observation
+    // and may be stale if ESOUI publishes between check and download.
+    let artifact_version =
+        downloaded_artifact_version(api_version.unwrap_or_default(), &info.version);
+
+    // Keep a known local version if both remote sources are empty. In
+    // particular, never let an empty filedetails version erase the installed
+    // artifact marker or hash-manifest version.
+    let mut store = metadata::load_metadata(addons_dir);
+    let fallback_version = store
+        .addons
+        .values()
+        .find(|m| m.esoui_id == esoui_id)
+        .map(|m| m.installed_version.clone())
+        .unwrap_or_default();
+    let version = if artifact_version.is_empty() {
+        fallback_version.as_str()
+    } else {
+        artifact_version
+    };
 
     file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
 
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
-    let mut store = metadata::load_metadata(addons_dir);
     let old_folders: Vec<String> = store
         .addons
         .iter()
@@ -2181,12 +2225,12 @@ fn update_addon_blocking(
         version,
         &info.title,
         &info.download_url,
-        0, // preserved from existing metadata
+        info.last_update,
     );
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -2205,6 +2249,86 @@ pub struct BatchUpdateEntry {
     pub esoui_id: u32,
     pub folder_name: String,
     pub api_version: String,
+}
+
+/// Choose the version persisted for an update after the backend has fetched the
+/// artifact descriptor. The fetched version and its checksum/download URL form
+/// one provenance tuple; the frontend value is only the earlier observation
+/// that caused the update request.
+fn downloaded_artifact_version<'a>(observed_version: &'a str, fetched_version: &'a str) -> &'a str {
+    let fetched_version = fetched_version.trim();
+    if !fetched_version.is_empty() {
+        fetched_version
+    } else {
+        observed_version.trim()
+    }
+}
+
+/// Compare the version strings used for local/API identity checks. ESOUI may
+/// include a leading `v` or surrounding whitespace, but an empty value is not
+/// evidence that the installed artifact matches the API entry.
+fn versions_match(local_version: &str, remote_version: &str) -> bool {
+    let local = local_version.trim();
+    let remote = remote_version.trim();
+    let local = local
+        .strip_prefix('v')
+        .or_else(|| local.strip_prefix('V'))
+        .unwrap_or(local);
+    let remote = remote
+        .strip_prefix('v')
+        .or_else(|| remote.strip_prefix('V'))
+        .unwrap_or(remote);
+    !local.is_empty() && !remote.is_empty() && local == remote
+}
+
+/// Compare a local artifact with a filelist observation. A filelist marker at
+/// or before the marker recorded with the installed artifact is not allowed to
+/// trigger an update: ESOUI can briefly serve an older filelist after the
+/// filedetails endpoint has published a new artifact.
+#[cfg(test)]
+fn artifact_is_newer(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    remote_marker: u64,
+) -> bool {
+    artifact_is_newer_with_marker_state(
+        local_version,
+        remote_version,
+        installed_marker,
+        true,
+        remote_marker,
+    )
+}
+
+fn artifact_is_newer_with_marker_state(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+/// Persist metadata for an applied update, then discard the pre-download
+/// filelist observation. If filedetails advanced between check and download,
+/// the next check must fetch a current filelist rather than compare the newly
+/// installed version against the stale version that initiated this request.
+fn save_applied_update_metadata(
+    addons_dir: &Path,
+    store: &metadata::MetadataStore,
+    applied: bool,
+) -> Result<(), String> {
+    metadata::save_metadata(addons_dir, store)?;
+    esoui::invalidate_filelist_cache_if_applied(applied);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2302,11 +2426,13 @@ fn batch_download_addons(
                             total,
                         },
                     );
+                    let artifact_version =
+                        downloaded_artifact_version(&entry.api_version, &info.version).to_string();
                     BatchDownloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
-                        api_version: entry.api_version.clone(),
+                        api_version: artifact_version,
                         index: i,
                     }
                 });
@@ -2364,13 +2490,23 @@ fn batch_extract_and_record(
                     failed.push(folder_name);
                 }
                 Ok(installed_folders) => {
-                    let version = &dl.api_version;
+                    let fallback_version = store
+                        .addons
+                        .values()
+                        .find(|m| m.esoui_id == dl.esoui_id)
+                        .map(|m| m.installed_version.clone())
+                        .unwrap_or_default();
+                    let version = if dl.api_version.trim().is_empty() {
+                        fallback_version
+                    } else {
+                        dl.api_version.trim().to_string()
+                    };
 
                     if let Err(e) = file_hashes::record_hashes_for_folders(
                         addons_dir,
                         &installed_folders,
                         dl.esoui_id,
-                        version,
+                        &version,
                     ) {
                         // Files are on disk, but the hash baseline didn't persist.
                         // Don't record this addon in metadata — leaving metadata
@@ -2408,10 +2544,10 @@ fn batch_extract_and_record(
                         addons_dir,
                         &installed_folders,
                         dl.esoui_id,
-                        version,
+                        &version,
                         &dl.info.title,
                         &dl.info.download_url,
-                        0,
+                        dl.info.last_update,
                     );
                     let _ = app.emit(
                         "batch-update-progress",
@@ -2428,7 +2564,7 @@ fn batch_extract_and_record(
         }
     }
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, !completed.is_empty())?;
 
     Ok(BatchUpdateResult {
         completed,
@@ -2619,17 +2755,24 @@ pub async fn scan_update_conflicts(
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
 
+        let stored_version = metadata::load_metadata(&addons_dir)
+            .addons
+            .values()
+            .find(|m| m.esoui_id == esoui_id)
+            .map(|m| m.installed_version.clone())
+            .unwrap_or_default();
+        let version = if info.version.trim().is_empty() {
+            stored_version
+        } else {
+            info.version.trim().to_string()
+        };
+
         // Keep the ZIP hash map: the apply step (update_addon_with_decisions)
         // reuses it as the new baseline instead of re-decompressing and
         // re-hashing the whole archive a second time — the big saving on
         // many-file addons.
-        let (report, zip_hashes) = build_conflict_report(
-            &addons_dir,
-            &folder_name,
-            &kept_path,
-            &info.version,
-            &session_id,
-        )?;
+        let (report, zip_hashes) =
+            build_conflict_report(&addons_dir, &folder_name, &kept_path, &version, &session_id)?;
 
         if let Ok(mut map) = pending_clone.lock() {
             map.insert(
@@ -2638,7 +2781,8 @@ pub async fn scan_update_conflicts(
                     zip_path: kept_path,
                     folder_name: folder_name.clone(),
                     esoui_id,
-                    update_version: info.version,
+                    update_version: version,
+                    artifact_last_update: info.last_update,
                     zip_hashes: Arc::new(zip_hashes),
                 },
             );
@@ -2722,6 +2866,7 @@ pub async fn scan_batch_conflicts(
             kept_path: PathBuf,
             esoui_id: u32,
             api_version: String,
+            artifact_last_update: u64,
         }
 
         let app_clone = app.clone();
@@ -2732,7 +2877,7 @@ pub async fn scan_batch_conflicts(
                     .enumerate()
                     .map(|(i, entry)| {
                         let result = fetch_and_download_with_retry(entry.esoui_id).and_then(
-                            |(tmp, _info)| {
+                            |(tmp, info)| {
                                 let _ = app_clone.emit(
                                     "batch-update-progress",
                                     BatchUpdateProgress {
@@ -2745,10 +2890,14 @@ pub async fn scan_batch_conflicts(
                                 let (_, kept_path) = tmp
                                     .keep()
                                     .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 Ok(Downloaded {
                                     kept_path,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
+                                    artifact_last_update: info.last_update,
                                 })
                             },
                         );
@@ -2808,6 +2957,7 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
+                                        artifact_last_update: dl.artifact_last_update,
                                         zip_hashes: Arc::new(zip_hashes),
                                     },
                                 );
@@ -2962,11 +3112,14 @@ pub async fn update_batch_with_decisions(
                     .for_each_with(tx, |tx, (i, entry)| {
                         let result =
                             fetch_and_download_with_retry(entry.esoui_id).map(|(zip, info)| {
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 StreamedDownload {
                                     zip,
                                     info,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
                                 }
                             });
                         let phase = if result.is_ok() {
@@ -3079,13 +3232,26 @@ fn extract_streamed_downloads(
         };
 
         let session_id = generate_session_id(&folder_name);
+        // A filedetails response can omit its version temporarily. Keep the
+        // installed version for conflict/backup/hash metadata in that case;
+        // persisting an empty version makes the next update ambiguous.
+        let version = if dl.api_version.trim().is_empty() {
+            store
+                .addons
+                .values()
+                .find(|m| m.esoui_id == dl.esoui_id)
+                .map(|m| m.installed_version.clone())
+                .unwrap_or_default()
+        } else {
+            dl.api_version.trim().to_string()
+        };
         // Keep the ZIP hash map: this addon is extracted right below, so the map
         // doubles as the new hash baseline (no second decompression to re-hash).
         let (report, zip_hashes) = match build_conflict_report(
             addons_dir,
             &folder_name,
             dl.zip.path(),
-            &dl.api_version,
+            &version,
             &session_id,
         ) {
             Ok(r) => r,
@@ -3121,7 +3287,8 @@ fn extract_streamed_downloads(
                         zip_path: kept_path,
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
-                        update_version: dl.api_version.clone(),
+                        update_version: version.clone(),
+                        artifact_last_update: dl.info.last_update,
                         zip_hashes: Arc::new(zip_hashes),
                     },
                 );
@@ -3163,7 +3330,7 @@ fn extract_streamed_downloads(
                 &folder_name,
                 &files_to_backup,
                 &from_version,
-                &dl.api_version,
+                &version,
             ) {
                 emit_phase(&folder_name, "failed", index);
                 errors.insert(folder_name.clone(), e);
@@ -3220,7 +3387,7 @@ fn extract_streamed_downloads(
             &folder_name,
             &zip_hashes,
             dl.esoui_id,
-            &dl.api_version,
+            &version,
             hash_overrides.as_ref(),
         ) {
             emit_phase(&folder_name, "failed", index);
@@ -3248,10 +3415,10 @@ fn extract_streamed_downloads(
             addons_dir,
             &installed_folders,
             dl.esoui_id,
-            &dl.api_version,
+            &version,
             &dl.info.title,
             &dl.info.download_url,
-            0,
+            dl.info.last_update,
         );
 
         for f in &installed_folders {
@@ -3286,6 +3453,8 @@ fn extract_streamed_downloads(
             errors.insert(folder.clone(), reason.clone());
             failed.push(folder);
         }
+    } else if !completed.is_empty() {
+        esoui::invalidate_filelist_cache();
     }
 
     StreamingBatchResult {
@@ -3551,10 +3720,17 @@ fn update_with_decisions_inner(
         }
     }
 
-    // Get current version from hash manifest for backup metadata
+    // Get current version from hash manifest for backup metadata. Pending
+    // entries created before version tracking (or from an empty API response)
+    // must not erase this known version when they are applied.
     let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
         .map(|m| m.installed_version)
         .unwrap_or_default();
+    let update_version = if pu.update_version.trim().is_empty() {
+        from_version.clone()
+    } else {
+        pu.update_version.clone()
+    };
 
     // Back up files before overwriting
     if !files_to_backup.is_empty() {
@@ -3563,7 +3739,7 @@ fn update_with_decisions_inner(
             &pu.folder_name,
             &files_to_backup,
             &from_version,
-            &pu.update_version,
+            &update_version,
         )?;
     }
 
@@ -3595,7 +3771,7 @@ fn update_with_decisions_inner(
         &pu.folder_name,
         &zip_hashes,
         pu.esoui_id,
-        &pu.update_version,
+        &update_version,
         hash_overrides.as_ref(),
     )?;
 
@@ -3627,15 +3803,15 @@ fn update_with_decisions_inner(
         addons_dir,
         &installed_folders,
         pu.esoui_id,
-        &pu.update_version,
+        &update_version,
         &pu.folder_name,
         &download_url,
-        0,
+        pu.artifact_last_update,
     );
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -4163,10 +4339,13 @@ fn auto_link_addons_blocking(
 
             let needs_update = match already_tracked {
                 Some(meta) => {
-                    // Update existing entries: fill in missing esoui_id or last_update
+                    // Update existing entries: fill in missing esoui_id or a
+                    // newer publication marker when its version matches the
+                    // artifact on disk. A stale filelist response must not
+                    // trigger metadata churn or regress the marker.
                     (meta.esoui_id == 0 && api_entry.esoui_id > 0)
-                        || meta.esoui_last_update == 0
-                        || meta.esoui_last_update != api_entry.last_update
+                        || (versions_match(&meta.installed_version, &api_entry.version)
+                            && api_entry.last_update > meta.esoui_last_update)
                 }
                 None => true,
             };
@@ -4184,14 +4363,23 @@ fn auto_link_addons_blocking(
                         installed_at: String::new(),
                         tags: Vec::new(),
                         esoui_last_update: 0,
+                        esoui_marker_installed: false,
                     }
                 });
-                metadata::reconcile_addon(
-                    entry,
-                    api_entry.esoui_id,
-                    api_entry.last_update,
-                    &api_entry.file_info_uri,
-                );
+                if versions_match(&entry.installed_version, &api_entry.version) {
+                    metadata::reconcile_addon(
+                        entry,
+                        api_entry.esoui_id,
+                        api_entry.last_update,
+                        &api_entry.file_info_uri,
+                    );
+                } else {
+                    metadata::reconcile_addon_identity(
+                        entry,
+                        api_entry.esoui_id,
+                        &api_entry.file_info_uri,
+                    );
+                }
                 linked.push(folder_name);
             }
         } else if !store.addons.contains_key(&folder_name) {
@@ -4312,6 +4500,7 @@ pub async fn batch_set_tags(
                             installed_at: String::new(),
                             tags: entry.tags,
                             esoui_last_update: 0,
+                            esoui_marker_installed: false,
                         },
                     );
                 }
@@ -10683,6 +10872,197 @@ mod tests {
     }
 
     #[test]
+    fn downloaded_artifact_version_uses_fetched_descriptor_after_publish_race() {
+        // The UI observed v1, then v2 was published before the backend fetched
+        // the descriptor and downloaded its checksum-bound artifact.
+        assert_eq!(downloaded_artifact_version("v1", "v2"), "v2");
+    }
+
+    #[test]
+    fn downloaded_artifact_version_falls_back_to_observation_when_fetched_version_empty() {
+        assert_eq!(downloaded_artifact_version("v1", ""), "v1");
+        assert_eq!(downloaded_artifact_version(" v1 ", "   "), "v1");
+    }
+
+    #[test]
+    fn artifact_comparison_ignores_lagging_filelist() {
+        // The downloaded filedetails artifact is v2, while the eventually
+        // consistent filelist still reports v1.
+        assert!(!artifact_is_newer("v2", "v1", 200, 100));
+    }
+
+    #[test]
+    fn artifact_comparison_accepts_newer_filelist_release() {
+        assert!(artifact_is_newer("v1", "v2", 100, 200));
+    }
+
+    fn update_check_fixture(
+        installed_version: &str,
+        installed_marker: u64,
+        remote_version: &str,
+        remote_marker: u64,
+    ) -> (
+        tempfile::TempDir,
+        HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("Addon")).unwrap();
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "Addon",
+            1,
+            installed_version,
+            "https://example.invalid/addon.zip",
+            installed_marker,
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 1,
+                title: "Addon".to_string(),
+                version: remote_version.to_string(),
+                author: "Test".to_string(),
+                last_update: remote_marker,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+        (tmp, lookup)
+    }
+
+    #[test]
+    fn update_check_does_not_downgrade_installed_artifact_from_lagging_filelist() {
+        let (tmp, lookup) = update_check_fixture("v2", 200, "v1", 100);
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.installed_version, "v2");
+        assert_eq!(addon.esoui_last_update, 200);
+    }
+
+    #[test]
+    fn update_check_detects_newer_artifact_from_filelist() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 200);
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.installed_version, "v1");
+        // The remote marker is only persisted once its artifact is actually
+        // downloaded and installed.
+        assert_eq!(addon.esoui_last_update, 100);
+    }
+
+    #[test]
+    fn update_check_keeps_legacy_observation_marker_from_hiding_version_update() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store.version = 1;
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
+    fn lagging_matching_observation_does_not_claim_retained_legacy_marker() {
+        let (tmp, mut lookup) = update_check_fixture("v1", 200, "v1", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert!(!pending[0].has_update);
+        assert!(!metadata::load_metadata(tmp.path()).addons["Addon"].esoui_marker_installed);
+
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).version = "v2".to_string();
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).last_update = 200;
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert!(pending[0].has_update);
+    }
+
+    #[test]
+    fn auto_link_does_not_advance_marker_for_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addon_dir = tmp.path().join("Addon");
+        fs::create_dir(&addon_dir).unwrap();
+        fs::write(
+            addon_dir.join("Addon.txt"),
+            "## Title: Addon\n## Version: v1\n",
+        )
+        .unwrap();
+
+        // This models a legacy pending observation: the identity is not yet
+        // linked, and marker 100 was observed but was not proven to belong to
+        // the local v1 artifact.
+        let mut store = metadata::MetadataStore::default();
+        store.addons.insert(
+            "Addon".to_string(),
+            metadata::AddonMetadata {
+                esoui_id: 0,
+                installed_version: "v1".to_string(),
+                download_url: String::new(),
+                installed_at: String::new(),
+                tags: Vec::new(),
+                esoui_last_update: 100,
+                esoui_marker_installed: false,
+            },
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 7,
+                title: "Addon".to_string(),
+                version: "v2".to_string(),
+                author: "Test".to_string(),
+                last_update: 200,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+
+        let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+        assert_eq!(result.linked, vec!["Addon"]);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_id, 7);
+        assert_eq!(addon.installed_version, "v1");
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
     fn prune_auto_snapshots_keeps_newest_removes_oldest() {
         // Names embed epoch timestamps and are sorted lexicographically, so an
         // inverted sort would delete the newest snapshots instead of the oldest.
@@ -11896,6 +12276,7 @@ mod tests {
                 installed_at: String::new(),
                 tags: vec!["favorite".to_string()],
                 esoui_last_update: 0,
+                esoui_marker_installed: false,
             },
         );
         metadata::save_metadata(src.path(), &store).unwrap();
