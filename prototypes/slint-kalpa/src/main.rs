@@ -2525,6 +2525,9 @@ fn real_addon_draft(addon_dir: &Path) -> Result<RealAddonDraft, String> {
         entry.badge3 = "Disabled".into();
         entry.badge3_kind = 5;
     }
+    entry.protected_edits_baseline = addon_dir.parent().is_some_and(|addons_root| {
+        file_hashes::load_hash_manifest(addons_root, &folder_name).is_some()
+    });
 
     Ok(RealAddonDraft {
         entry,
@@ -2973,6 +2976,39 @@ fn apply_addon_update_check_results(
     }
 
     available
+}
+
+fn unprotected_update_count(models: &AddonModels) -> usize {
+    models
+        .all
+        .borrow()
+        .iter()
+        .filter(|addon| addon_has_update(addon) && !addon.protected_edits_baseline)
+        .count()
+}
+
+fn unprotected_target_count(addons_root: &Path, targets: &[NativeAddonUpdateTarget]) -> usize {
+    targets
+        .iter()
+        .filter(|target| {
+            file_hashes::load_hash_manifest(addons_root, &target.folder_name).is_none()
+        })
+        .count()
+}
+
+fn update_start_message(targets: &[NativeAddonUpdateTarget], unprotected: usize) -> String {
+    if unprotected > 0 {
+        format!(
+            "Protected Edits unavailable for {unprotected} addon{}: no trusted file baseline exists, so Kalpa cannot detect changed files. Updating may overwrite edits.",
+            if unprotected == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Applying {} addon update{}...",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )
+    }
 }
 
 fn native_update_targets(models: &AddonModels) -> Vec<NativeAddonUpdateTarget> {
@@ -4137,6 +4173,7 @@ fn addon_entry(
         selected: false,
         is_library,
         disabled,
+        protected_edits_baseline: true,
         state,
         badge: badge.into(),
         badge_kind,
@@ -10602,6 +10639,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         let available = apply_addon_update_check_results(&update_finished_models, &update_rows);
         ui.set_checking_updates(false);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&update_finished_models) as i32);
         apply_addon_view(&ui, &update_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10617,6 +10655,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_checking_updates(false);
         ui.set_pending_conflict_count(conflict_count);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&apply_finished_models) as i32);
         apply_addon_view(&ui, &apply_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10934,11 +10973,9 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 let eso_running = addon_write_eso_running_warning_active(&ui);
                 ui.set_checking_updates(true);
-                let message = format!(
-                    "Applying {} safe addon update{}...",
-                    targets.len(),
-                    if targets.len() == 1 { "" } else { "s" }
-                );
+                let unprotected = unprotected_target_count(&addons_root, &targets);
+                ui.set_unprotected_update_count(unprotected as i32);
+                let message = update_start_message(&targets, unprotected);
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -11311,13 +11348,24 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_checking_updates(true);
+        let targets = vec![target];
+        let unprotected = unprotected_target_count(&addons_root, &targets);
+        ui.set_unprotected_update_count(unprotected as i32);
         ui.set_status_error_message(
-            addon_write_status_message(format!("Updating {}...", addon.title), eso_running).into(),
+            addon_write_status_message(
+                if unprotected > 0 {
+                    update_start_message(&targets, unprotected)
+                } else {
+                    format!("Updating {}...", addon.title)
+                },
+                eso_running,
+            )
+            .into(),
         );
         start_native_addon_update_apply(
             ui.as_weak(),
             addons_root,
-            vec![target],
+            targets,
             ui.get_settings_conflict_policy().clamp(0, 2),
             eso_running,
         );
@@ -12922,6 +12970,63 @@ fn normalized_addon_version(version: &str) -> &str {
         .unwrap_or(version.trim())
 }
 
+fn native_artifact_has_update(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    let local_version = normalized_addon_version(local_version);
+    let remote_version = normalized_addon_version(remote_version);
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+fn reconcile_native_update_observation(
+    entry: &mut metadata::AddonMetadata,
+    remote_version: &str,
+    remote_marker: u64,
+    has_update: bool,
+) -> bool {
+    let local_version = normalized_addon_version(&entry.installed_version);
+    let remote_version_normalized = normalized_addon_version(remote_version);
+
+    // A filelist observation is not proof that its artifact was installed.
+    // Only attach its version and publication marker when it matches the
+    // non-empty version already on disk.
+    if has_update
+        || local_version.is_empty()
+        || remote_version_normalized.is_empty()
+        || local_version != remote_version_normalized
+    {
+        return false;
+    }
+
+    let mut changed = false;
+    if entry.installed_version != remote_version {
+        entry.installed_version = remote_version.to_string();
+        changed = true;
+    }
+    if remote_marker > entry.esoui_last_update {
+        entry.esoui_last_update = remote_marker;
+        entry.esoui_marker_installed = true;
+        changed = true;
+    } else if remote_marker > 0
+        && remote_marker == entry.esoui_last_update
+        && !entry.esoui_marker_installed
+    {
+        entry.esoui_marker_installed = true;
+        changed = true;
+    }
+    changed
+}
+
 fn check_native_addon_updates_blocking(
     addons_dir: &Path,
 ) -> Result<Vec<NativeAddonUpdateCheck>, String> {
@@ -12948,21 +13053,21 @@ fn check_native_addon_updates_blocking(
             continue;
         };
 
-        let local_version = normalized_addon_version(&meta.installed_version);
-        let remote_version = normalized_addon_version(&api_entry.version);
-        let has_update = !remote_version.is_empty()
-            && !local_version.is_empty()
-            && remote_version != local_version;
+        let has_update = native_artifact_has_update(
+            &meta.installed_version,
+            &api_entry.version,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(&folder_name) {
-            if !has_update && entry.installed_version != api_entry.version {
-                entry.installed_version = api_entry.version.clone();
-                metadata_changed = true;
-            }
-            if entry.esoui_last_update != api_entry.last_update {
-                entry.esoui_last_update = api_entry.last_update;
-                metadata_changed = true;
-            }
+            metadata_changed |= reconcile_native_update_observation(
+                entry,
+                &api_entry.version,
+                api_entry.last_update,
+                has_update,
+            );
         }
 
         results.push(NativeAddonUpdateCheck {
@@ -14133,6 +14238,7 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    esoui_marker_installed: false,
                 },
             );
         }
@@ -23084,6 +23190,7 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            esoui_marker_installed: true,
         };
 
         hydrate_addon_from_metadata(&mut entry, &meta);
@@ -23096,6 +23203,53 @@ CombatMetrics_SavedVariables = {
         assert!(entry.favorite);
         assert!(tag_model_has_active(&entry.tags, "favorite"));
         assert!(tag_model_has_active(&entry.tags, "pvp-build"));
+    }
+
+    #[test]
+    fn native_pending_update_preserves_installed_publication_marker() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: true,
+        };
+
+        assert!(!reconcile_native_update_observation(
+            &mut meta, "v2", 200, true
+        ));
+        assert_eq!(meta.installed_version, "v1");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn native_update_check_rejects_a_stale_filelist_downgrade() {
+        assert!(!native_artifact_has_update("v2", "v1", 200, true, 100));
+        assert!(native_artifact_has_update("v1", "v2", 100, true, 200));
+        assert!(native_artifact_has_update("v2", "v1", 200, false, 100));
+    }
+
+    #[test]
+    fn native_matching_observation_can_establish_marker_provenance() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: false,
+        };
+
+        assert!(reconcile_native_update_observation(
+            &mut meta, " 1 ", 100, false
+        ));
+        assert_eq!(meta.installed_version, " 1 ");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
     }
 
     #[test]
@@ -23142,6 +23296,7 @@ CombatMetrics_SavedVariables = {
             "",
             0,
         );
+        stale.protected_edits_baseline = false;
         stale.last_updated = "Jan 1, 2025".into();
         let models = test_addon_models(vec![current, stale]);
         let updates = vec![
@@ -23160,15 +23315,34 @@ CombatMetrics_SavedVariables = {
         ];
 
         let available = apply_addon_update_check_results(&models, &updates);
+        let unprotected = unprotected_update_count(&models);
         let addons = models.all.borrow();
 
         assert_eq!(available, 1);
+        assert_eq!(unprotected, 1);
         assert_eq!(addons[0].badge.as_str(), "");
         assert_eq!(addons[0].state, 0);
         assert_eq!(addons[0].last_updated.as_str(), "Jul 1, 2026");
         assert_eq!(addons[1].state, 1);
         assert_eq!(addons[1].badge.as_str(), "Update");
         assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
+    }
+
+    #[test]
+    fn native_update_start_copy_discloses_missing_baseline_without_claiming_safety() {
+        let targets = vec![NativeAddonUpdateTarget {
+            folder_name: "MigratedAddon".to_string(),
+            esoui_id: 42,
+        }];
+
+        let disclosed = update_start_message(&targets, 1);
+        assert!(disclosed.contains("Protected Edits unavailable"));
+        assert!(disclosed.contains("no trusted file baseline"));
+        assert!(!disclosed.to_ascii_lowercase().contains("safe"));
+
+        let covered = update_start_message(&targets, 0);
+        assert_eq!(covered, "Applying 1 addon update...");
+        assert!(!covered.to_ascii_lowercase().contains("safe"));
     }
 
     #[test]

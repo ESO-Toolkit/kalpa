@@ -279,6 +279,10 @@ const FILTERS: [FilterMode, string][] = [
   ["disabled", "Disabled"],
 ];
 
+export function isAddonContextMenuShortcut(key: string, shiftKey: boolean): boolean {
+  return key === "ContextMenu" || (shiftKey && key === "F10");
+}
+
 interface InstalledAddonRowsProps {
   addons: AddonManifest[];
   loading: boolean;
@@ -297,6 +301,7 @@ interface InstalledAddonRowsProps {
   onActiveTagFilterChange: (tag: string | null) => void;
   onViewModeChange: (mode: ViewMode) => void;
   onDiscoverTabChange: (tab: DiscoverTab) => void;
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>;
 }
 
 function InstalledAddonRows({
@@ -317,8 +322,8 @@ function InstalledAddonRows({
   onActiveTagFilterChange,
   onViewModeChange,
   onDiscoverTabChange,
+  scrollContainerRef,
 }: InstalledAddonRowsProps) {
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const batchMode = selectedFolders.size > 0;
 
   // Keep the virtualizer in the same component lifecycle as its scroll element.
@@ -363,9 +368,17 @@ function InstalledAddonRows({
         e.preventDefault();
         onSelect(addons[addons.length - 1]!);
         rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
+      } else if (isAddonContextMenuShortcut(e.key, e.shiftKey)) {
+        e.preventDefault();
+        if (currentIndex >= 0) {
+          const addon = addons[currentIndex]!;
+          const row = document.getElementById(`addon-${addon.folderName}`);
+          const rect = (row ?? e.currentTarget).getBoundingClientRect();
+          onRightClick(addon, { x: rect.left + 24, y: rect.top + 24 });
+        }
       }
     },
-    [addons, selectedAddon, onSelect, rowVirtualizer]
+    [addons, selectedAddon, onSelect, onRightClick, rowVirtualizer]
   );
 
   return (
@@ -587,6 +600,7 @@ function AddonListBase({
   }, [allAddons]);
 
   const batchMode = selectedFolders.size > 0;
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [ctxMenu, setCtxMenu] = useState<{
     addon: AddonManifest;
@@ -605,7 +619,7 @@ function AddonListBase({
 
     if (hasUpdate && onUpdateAddon) {
       items.push({
-        label: "Update",
+        label: "Review Update",
         icon: RefreshCw,
         onClick: () => onUpdateAddon(addon.folderName),
         disabled: isOffline,
@@ -862,6 +876,7 @@ function AddonListBase({
               onActiveTagFilterChange={onActiveTagFilterChange}
               onViewModeChange={onViewModeChange}
               onDiscoverTabChange={onDiscoverTabChange}
+              scrollContainerRef={scrollContainerRef}
             />
           </motion.div>
         ) : (
@@ -888,7 +903,14 @@ function AddonListBase({
       </AnimatePresence>
 
       {ctxMenu && ctxMenuItems.length > 0 && (
-        <ContextMenu items={ctxMenuItems} position={ctxMenu.pos} onClose={() => setCtxMenu(null)} />
+        <ContextMenu
+          items={ctxMenuItems}
+          position={ctxMenu.pos}
+          onClose={() => {
+            setCtxMenu(null);
+            scrollContainerRef.current?.focus();
+          }}
+        />
       )}
     </div>
   );
