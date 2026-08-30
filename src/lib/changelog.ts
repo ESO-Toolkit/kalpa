@@ -227,10 +227,11 @@ function hasMultipleVersionTokens(value: string): boolean {
  * Find the entry that corresponds to the installed `version`, for decoration
  * only — a "you have this one" marker next to a single row.
  *
- * Matching is a *containment* test on normalised text, because headers carry
- * author noise the version field does not (`version 1.7.8:`, `2.0 r43
- * (consoles only)`, `v2.5.49 ~DakJaniels`). It hits roughly 84% of the time,
- * and a miss must be completely unremarkable in the UI.
+ * Matching is an exact token test for ordinary versions, with a containment
+ * fallback only for compound versions whose parts are separated by whitespace
+ * (`2.0 r43`). Headers carry author noise the version field does not
+ * (`version 1.7.8:`, `2.0 r43 (consoles only)`, `v2.5.49 ~DakJaniels`). A
+ * miss must be completely unremarkable in the UI.
  *
  * IMPORTANT: callers must NEVER hide, slice or truncate entries based on this
  * index. In the sampled set at least one addon's reported version was *ahead*
