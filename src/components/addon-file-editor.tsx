@@ -76,13 +76,24 @@ export function AddonFileEditor({
   // (the Protected-Edits unlock, the loaded content and its dirty state) must
   // reset with it, or Save could write the previous file's text to the new path.
   const [renderedPath, setRenderedPath] = useState(relativePath);
+  const [renderedModified, setRenderedModified] = useState(isModified);
   if (renderedPath !== relativePath) {
     setRenderedPath(relativePath);
+    setRenderedModified(isModified);
     setLoadState(isBinary ? "done" : "loading");
     setContent(null);
     setOriginalContent(null);
     setEditable(isModified);
     setError(null);
+  } else if (renderedModified !== isModified) {
+    // The unlock is scoped to the file's modified/stock status too, not just
+    // its path: a revert-and-save or backup restore can turn the open file
+    // stock again, and a stock file must be behind "Enable Editing". Never
+    // re-lock underneath unsaved edits, though — that would strand text the
+    // user typed.
+    setRenderedModified(isModified);
+    const clean = content === null || content === originalContent;
+    if (clean) setEditable(isModified);
   }
 
   useEffect(() => {

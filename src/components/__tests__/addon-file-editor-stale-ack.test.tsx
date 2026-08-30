@@ -190,4 +190,39 @@ describe("Addon file editor stale acknowledgment behavior", () => {
 
     expect(await screen.findByLabelText("addon file contents")).toHaveValue("second file text");
   });
+
+  it("re-locks editing when the open file turns stock, unless there are unsaved edits", async () => {
+    const user = userEvent.setup();
+    mocks.invokeOrThrow.mockImplementation((command: string) => {
+      if (command !== "read_addon_file") {
+        throw new Error(`Unexpected command: ${command}`);
+      }
+      return Promise.resolve("file text");
+    });
+
+    const props = {
+      addonsPath: "C:/ESO/AddOns",
+      folderName: "DemoAddon",
+      onClose: vi.fn(),
+      onSaved: vi.fn(),
+      relativePath: "Same.lua",
+    };
+    const { rerender } = render(<AddonFileEditor {...props} isModified={true} />);
+
+    expect(await screen.findByLabelText("addon file contents")).toHaveValue("file text");
+    expect(screen.queryByRole("button", { name: "Enable Editing" })).not.toBeInTheDocument();
+
+    // Clean buffer + the file turning stock re-arms the acknowledgment.
+    rerender(<AddonFileEditor {...props} isModified={false} />);
+    expect(screen.getByRole("button", { name: "Enable Editing" })).toBeInTheDocument();
+    expect(screen.getByLabelText("addon file contents")).toHaveAttribute("readonly");
+
+    // Unlock again and type: unsaved edits must survive a status flip.
+    await user.click(screen.getByRole("button", { name: "Enable Editing" }));
+    await user.type(screen.getByLabelText("addon file contents"), "!");
+    rerender(<AddonFileEditor {...props} isModified={true} />);
+    rerender(<AddonFileEditor {...props} isModified={false} />);
+    expect(screen.queryByRole("button", { name: "Enable Editing" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("addon file contents")).toHaveValue("file text!");
+  });
 });
