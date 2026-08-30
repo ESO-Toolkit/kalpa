@@ -107,7 +107,11 @@ describe("IPC command-name contract", () => {
     // below vacuously pass, so assert it saw a realistic surface.
     expect(invoked.size).toBeGreaterThan(80);
     expect([...invoked.keys()]).toEqual(
-      expect.arrayContaining(["scan_installed_addons", "update_addon", "uploader_upload_log"])
+      expect.arrayContaining([
+        "scan_installed_addons",
+        "update_addon_with_decisions",
+        "uploader_upload_log",
+      ])
     );
   });
 

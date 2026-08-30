@@ -26,6 +26,9 @@ export interface AddonManifest {
   installedAt: string;
   disabled: boolean;
   modifiedFileCount: number;
+  /** False when no trusted pre-update baseline exists, so Protected Edits
+   * cannot tell user changes from upstream files. */
+  hasProtectedEditsBaseline?: boolean;
 }
 
 export interface EsouiAddonInfo {
@@ -169,6 +172,17 @@ export interface EsouiAddonDetail {
   created: string;
   screenshots: string[];
   downloadUrl: string;
+  /** Full version history, newest first. Empty when the author published none. */
+  changeLog: string;
+  /** Upload dates for past releases. The current version is not included — its
+   * date is `updated`. Empty when the author archives nothing. */
+  archivedVersions: ArchivedVersion[];
+}
+
+export interface ArchivedVersion {
+  version: string;
+  /** As ESOUI renders it, e.g. `04/23/26 01:16 PM`. */
+  date: string;
 }
 
 export interface EsouiCategory {
@@ -595,6 +609,7 @@ export interface ConflictReport {
   safeFiles: string[];
   autoKeptFiles: string[];
   conflicts: FileConflict[];
+  hasHashBaseline: boolean;
 }
 
 export interface DiffData {

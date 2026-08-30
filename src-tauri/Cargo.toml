@@ -1,6 +1,6 @@
 [package]
 name = "kalpa"
-version = "0.1.0-beta.18"
+version = "0.1.0-beta.20"
 edition = "2021"
 description = "A source-available desktop addon manager for Elder Scrolls Online"
 license = "BUSL-1.1"
@@ -60,6 +60,7 @@ notify = "8"
 # then rejects. dunce::canonicalize keeps paths in drive-letter form. Already in
 # the lock file as a transitive dep, so this adds no new compilation.
 dunce = "1"
+fs4 = { version = "1.1.0", features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

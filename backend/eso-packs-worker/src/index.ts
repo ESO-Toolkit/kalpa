@@ -1,6 +1,7 @@
 import type { Env, Pack, PackType, PackStatus, PackView, VoteRecord, VoteResponse } from "./types";
 import {
   getPackIndex,
+  getPack,
   putPack,
   getVotedPackIds,
   getVote,
@@ -8,33 +9,30 @@ import {
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
-import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
+import { redactAnonymousPack } from "./redact";
 import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+import { reconcileD1, recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
 export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
-// directly to roster-hub-db (D1) so every KV mutation is atomically
-// mirrored — no async sync, no reconciliation, no deployment ordering.
+// directly to roster-hub-db (D1), mirrors live mutations through the Pack
+// Index Durable Object, and runs a guarded scheduled reconciliation for drift.
 
-async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
+export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;
   const isPublished = (pack.status ?? "published") === "published";
   try {
     if (isPublished) {
-      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
-        esouiId: a.esouiId,
-        name: a.name,
-        required: a.required,
-        note: a.note,
-      })));
+      const row = toD1PackRow(pack);
       await env.ROSTER_HUB_DB
         .prepare(
           `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
+             author_id = excluded.author_id,
              title = excluded.title,
              description = excluded.description,
              pack_type = excluded.pack_type,
@@ -45,21 +43,21 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
              updated_at = datetime('now')`,
         )
         .bind(
-          pack.id,
-          pack.author_id,
+          row.id,
+          row.author_id,
           // The D1 mirror feeds the ESO Toolkit website; never hand it the
           // real display name of an anonymous pack's author. author_id stays
           // for ownership joins but is not rendered there.
-          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
-          pack.is_anonymous ? 1 : 0,
-          pack.title,
-          pack.description,
-          pack.pack_type,
-          addonsJson,
+          row.author_name,
+          row.is_anonymous,
+          row.title,
+          row.description,
+          row.pack_type,
+          row.addons,
           // Inserting a literal 0 here (and omitting vote_count from the
           // upsert) froze the website's counters at zero and reset them on
           // every author edit.
-          pack.vote_count ?? 0,
+          row.vote_count,
         )
         .run();
 
@@ -79,23 +77,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
     }
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
-  }
-}
-
-/**
- * Mirror a counter bump into D1. The vote endpoint goes through the DO rather
- * than d1UpsertPack, so without this the website's vote counts never move.
- * Best-effort, like the other D1 writes.
- */
-async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  try {
-    await env.ROSTER_HUB_DB
-      .prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
-      .bind(voteCount, id)
-      .run();
-  } catch (err) {
-    console.error(`D1 vote_count sync failed [${id}]:`, err);
+    await recordD1MirrorFailure(env, isPublished ? "upsert" : "delete", pack.id, err);
   }
 }
 
@@ -105,14 +87,14 @@ function json(
   request: Request,
   data: unknown,
   status = 200,
-  cacheMaxAge = 0,
+  cacheMaxAge?: number,
   cacheScope: "public" | "private" = "public",
 ): Response {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...corsHeaders(request),
   };
-  if (cacheMaxAge > 0) {
+  if (cacheMaxAge !== undefined) {
     headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
   }
   return new Response(JSON.stringify(data), { status, headers });
@@ -145,23 +127,10 @@ function requireAuth(request: Request, env: Env): boolean {
   return crypto.subtle.timingSafeEqual(keyBytes, expectedBytes);
 }
 
-/**
- * The single cache key the default landing view is stored under.
- *
- * The incoming URL for that view varies (`sort` and `page` may be omitted, or
- * spelled in either order) but the Cache API matches on the full URL including
- * the query string, so caching under the request URL and deleting a bare
- * "/packs" never lined up — mutations silently failed to invalidate. Every
- * match/put/delete goes through this one canonical key instead.
- */
-function defaultViewCacheKey(url: URL): Request {
-  return new Request(new URL("/packs?default=1", url.origin));
-}
-
-/** Purge the CDN-cached pack list after a mutation. Exported so tests can
- *  reset the shared cache between cases. */
-export async function invalidatePackListCache(url: URL): Promise<void> {
-  await caches.default.delete(defaultViewCacheKey(url));
+/** Manual Cache API entries cannot be invalidated safely across Worker
+ * isolates. Keep only bounded response Cache-Control below. */
+export async function invalidatePackListCache(_url: URL): Promise<void> {
+  // Compatibility hook for mutation callers; there is no manual list cache.
 }
 
 /** Get the singleton PackIndexDO stub for atomic index mutations. */
@@ -181,18 +150,16 @@ function slugify(title: string): string {
 
 // ── GET /packs ─────────────────────────────────────────────────────
 async function handleListPacks(request: Request, env: Env, url: URL): Promise<Response> {
+  const hasAuthorization = request.headers.has("Authorization");
   const hasFilters =
     url.searchParams.has("type") ||
     url.searchParams.has("tag") ||
     url.searchParams.has("q") ||
     url.searchParams.has("status") ||
     url.searchParams.has("author");
-  const cache = caches.default;
 
-  // Only the default landing view is cacheable: no filters, page 1, and the
-  // client's default sort (pack-constants.ts sends sort=votes&page=1). Every
-  // spelling of that view shares one canonical cache key — see
-  // defaultViewCacheKey.
+  // Only the default landing view receives a short public Cache-Control TTL.
+  // Manual Cache API storage is avoided because cross-isolate invalidation is unsafe.
   const sortParam = url.searchParams.get("sort");
   const pageParam = url.searchParams.get("page");
   const isDefaultView =
@@ -201,24 +168,10 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     (sortParam === null || sortParam === "votes");
 
   // Resolve the viewer up front: draft/all filtering, the author filter,
-  // anonymity redaction and user_voted all key off it, and whether the shared
-  // cache may be used depends on it. Free when no Authorization header is
+  // anonymity redaction and user_voted all key off it. Free when no Authorization header is
   // present (validateBearerToken returns null without an upstream call).
   const viewer = await validateBearerToken(request);
   const viewerId = viewer ? String(viewer.id) : undefined;
-
-  // Only an anonymous, origin-less request may read or populate the shared
-  // entry: an authed response carries that viewer's user_voted (and possibly
-  // their own anonymous packs), and corsHeaders echoes the caller's Origin, so
-  // either would be replayed to the wrong caller. The desktop client — the
-  // only consumer today — sends neither.
-  const isSharedCacheable =
-    isDefaultView && viewerId === undefined && request.headers.get("Origin") === null;
-
-  if (isSharedCacheable) {
-    const cached = await cache.match(defaultViewCacheKey(url));
-    if (cached) return cached;
-  }
 
   const index = await getPackIndexDO(env).getIndex();
 
@@ -291,12 +244,8 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const start = (page - 1) * PACKS_PER_PAGE;
   const paginated = packs.slice(start, start + PACKS_PER_PAGE);
 
-  // Enforce anonymity at the edge. A shared-cacheable response is always fully
-  // redacted regardless of who populated the cache; the owner exception only
-  // applies to responses served to one identified viewer.
-  const redacted = paginated.map((p) =>
-    redactAnonymousPack(p, isSharedCacheable ? undefined : viewerId),
-  );
+  // Enforce anonymity at the edge; only an identified owner gets the exception.
+  const redacted = paginated.map((p) => redactAnonymousPack(p, viewerId));
 
   // Tell the viewer which of these they have already voted on. Without it the
   // client renders every pack as unvoted and its toggle deletes real votes.
@@ -308,17 +257,17 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
 
-  const response = json(request, { packs: visible, page, sort }, 200, 30);
-
-  if (isSharedCacheable && request.method === "GET") {
-    cache.put(defaultViewCacheKey(url), response.clone()).catch(console.error);
-  }
-
-  return response;
+  return json(
+    request,
+    { packs: visible, page, sort },
+    200,
+    isDefaultView && !hasAuthorization ? 30 : 0,
+  );
 }
 
 // ── GET /packs/:id ─────────────────────────────────────────────────
 async function handleGetPack(request: Request, env: Env, id: string): Promise<Response> {
+  const hasAuthorization = request.headers.has("Authorization");
   const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
@@ -340,9 +289,16 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     return json(request, { pack: view }, 200, 0);
   }
 
-  // Anonymous viewer: the redacted pack is identical for everyone, so it stays
-  // safe to cache.
-  return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
+  // Only a request that did not attempt authentication is safely anonymous.
+  // A transient identity-provider failure must not cache a redacted fallback
+  // for a bearer token that may validate on its next request.
+  return json(
+    request,
+    { pack: redactAnonymousPack(pack) },
+    200,
+    hasAuthorization ? 0 : 300,
+    "public",
+  );
 }
 
 // ── POST /packs ────────────────────────────────────────────────────
@@ -422,7 +378,6 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   }
 
   await invalidatePackListCache(url);
-
   return json(request, { pack: added.pack }, 201);
 }
 
@@ -486,8 +441,6 @@ async function handleUpdatePack(
   const updated = result.pack;
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, updated);
-
   return json(request, { pack: updated });
 }
 
@@ -587,7 +540,6 @@ async function handleVotePack(
   await invalidatePackListCache(url);
 
   const voteCount = updated.vote_count;
-  await d1UpdateVoteCount(env, id, voteCount);
 
   const response: VoteResponse = { voted, voteCount };
   return json(request, response);
@@ -600,7 +552,9 @@ async function handleInstallPack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  const pack = await getPackIndexDO(env).getPack(id);
+  const detail = await getPack(env, id);
+  const index = getPackIndexDO(env);
+  const pack = await index.getPack(id);
   if (!pack) {
     return notFound(request);
   }
@@ -612,27 +566,38 @@ async function handleInstallPack(
     return notFound(request);
   }
 
-  // Rate limit: one install track per IP per pack per hour
+  // Honor limiter records written by the previous release until their KV TTL
+  // expires, avoiding a one-time rollout double count.
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  const rateLimitKey = `install-rate:${id}:${ip}`;
-  const existing = await env.ESO_PACKS.get(rateLimitKey);
-  if (existing) {
-    return json(request, { installCount: pack.install_count ?? 0 });
+  if (
+    detail?.created_at === pack.created_at &&
+    await env.ESO_PACKS.get(`install-rate:${id}:${ip}`)
+  ) {
+    return json(request, { installCount: pack.install_count });
   }
-  // Increment inside the DO (fresh, single-threaded) instead of writing back a
-  // possibly-stale cached snapshot, which would lose concurrent installs and
-  // revert recent author edits. The DO also syncs the per-pack KV detail.
-  const updated = await getPackIndexDO(env).bumpPackCounter(
+
+  // Atomically count one install per IP+pack per hour inside the DO. A keyed
+  // identifier prevents offline IPv4 enumeration and public cross-user lookup.
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(env.ADMIN_API_KEY),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign("HMAC", key, encoder.encode(ip));
+  const identity = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const updated = await index.recordInstall(
     id,
-    "install_count",
-    1,
+    identity,
     pack.created_at,
   );
   if (!updated) {
     return notFound(request);
   }
-  await env.ESO_PACKS.put(rateLimitKey, "1", { expirationTtl: 3600 });
-
   await invalidatePackListCache(url);
 
   const installCount = updated.install_count;
@@ -649,31 +614,9 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
     // KV read failed
   }
 
-  const index = await getPackIndex(env);
-  const packCount = index?.packs.length ?? 0;
-
-  // Surface scheduled-backup health so monitoring can detect a silently
-  // failing cron even with Workers observability disabled.
-  let lastBackupAt: string | null = null;
-  let lastBackupOk = false;
-  try {
-    const meta = await env.ESO_PACKS.get<BackupMeta>("backup:meta", "json");
-    if (meta?.last_success) {
-      lastBackupAt = new Date(meta.last_success).toISOString();
-      // Cron runs daily; allow slack for a missed/delayed run before flagging
-      // the backup as stale.
-      lastBackupOk = Date.now() - meta.last_success < 36 * 3600 * 1000;
-    }
-  } catch {
-    // backup:meta read failed — leave last_backup_at null / last_backup_ok false
-  }
-
   return json(request, {
     status: kvOk ? "ok" : "degraded",
     kv: kvOk,
-    packCount,
-    last_backup_at: lastBackupAt,
-    last_backup_ok: lastBackupOk,
     timestamp: new Date().toISOString(),
   });
 }
@@ -692,12 +635,17 @@ async function packDetailWitnessIds(env: Env): Promise<string[]> {
   return ids;
 }
 
-async function migrationWitnessIds(env: Env): Promise<string[]> {
+export async function migrationWitnessIds(
+  env: Env,
+  unownedD1Ids: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
   const ids = new Set(await packDetailWitnessIds(env));
 
   if (env.ROSTER_HUB_DB) {
     const rows = await env.ROSTER_HUB_DB.prepare("SELECT id FROM packs").all<{ id: string }>();
-    for (const row of rows.results) if (row.id) ids.add(row.id);
+    for (const row of rows.results) {
+      if (row.id && !unownedD1Ids.has(row.id)) ids.add(row.id);
+    }
   }
 
   // Dated snapshots deliberately retain deleted data for 90 days, so treating
@@ -727,12 +675,37 @@ async function handleMigrationParity(request: Request, env: Env): Promise<Respon
 async function handleMigrationAuthority(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) return unauthorized(request);
   let authority: "kv" | "do";
+  let unownedD1Ids = new Set<string>();
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    if (parsed.reason === "too-large") {
+      return json(request, { error: "Request body is too large" }, 413);
+    }
+    return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
+  }
   try {
-    const body = (await request.json()) as { authority?: unknown };
+    const body = parsed.body as {
+      authority?: unknown;
+      unowned_d1_ids?: unknown;
+    };
     if (body.authority !== "kv" && body.authority !== "do") {
       return badRequest(request, [{ field: "authority", message: 'authority must be "kv" or "do"' }]);
     }
+    if (
+      body.unowned_d1_ids !== undefined &&
+      (!Array.isArray(body.unowned_d1_ids) ||
+        body.unowned_d1_ids.length > 100 ||
+        body.unowned_d1_ids.some(
+          (id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id),
+        ))
+    ) {
+      return badRequest(request, [{
+        field: "unowned_d1_ids",
+        message: "unowned_d1_ids must contain at most 100 valid, manually adjudicated ids",
+      }]);
+    }
     authority = body.authority;
+    unownedD1Ids = new Set((body.unowned_d1_ids ?? []) as string[]);
   } catch {
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
@@ -740,7 +713,7 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
   try {
     const result = await getPackIndexDO(env).setAuthority(
       authority,
-      await migrationWitnessIds(env),
+      await migrationWitnessIds(env, unownedD1Ids),
     );
     return result.ok
       ? json(request, result.parity)
@@ -753,23 +726,26 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
 
 async function handleMigrationAdopt(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) return unauthorized(request);
-  try {
-    const body = (await request.json()) as { ids?: unknown };
-    if (
-      !Array.isArray(body.ids) ||
-      body.ids.length === 0 ||
-      body.ids.length > 100 ||
-      body.ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id))
-    ) {
-      return badRequest(request, [{
-        field: "ids",
-        message: "ids must contain 1 to 100 valid pack ids",
-      }]);
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    if (parsed.reason === "too-large") {
+      return json(request, { error: "Request body is too large" }, 413);
     }
-    return json(request, await getPackIndexDO(env).adoptWitnesses(body.ids as string[]));
-  } catch {
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
+  const body = parsed.body as { ids?: unknown };
+  if (
+    !Array.isArray(body?.ids) ||
+    body.ids.length === 0 ||
+    body.ids.length > 100 ||
+    body.ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id))
+  ) {
+    return badRequest(request, [{
+      field: "ids",
+      message: "ids must contain 1 to 100 valid pack ids",
+    }]);
+  }
+  return json(request, await getPackIndexDO(env).adoptWitnesses(body.ids as string[]));
 }
 
 // ── Scheduled backup ──────────────────────────────────────────────
@@ -1121,13 +1097,16 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   let cursorInput: unknown;
   let limitInput: unknown;
   let tokenInput: unknown;
-  try {
-    const body = (await request.json()) as Record<string, unknown> | null;
+  const parsed = await readJsonBody(request);
+  if (parsed.ok) {
+    const body = parsed.body as Record<string, unknown> | null;
     dateInput = body?.date;
     cursorInput = body?.cursor;
     limitInput = body?.limit;
     tokenInput = body?.token;
-  } catch {
+  } else if (parsed.reason === "too-large") {
+    return json(request, { error: "Request body is too large" }, 413);
+  } else {
     // No/invalid JSON body — fall back to backup:latest below.
   }
 
@@ -1472,8 +1451,8 @@ export default {
     } catch (err) {
       console.error("Scheduled backup failed:", err);
       // Observability may be disabled in production, so persist a durable
-      // breadcrumb — otherwise a failing cron is invisible until /health's
-      // last_backup_ok staleness check trips up to ~36h later.
+      // breadcrumb for authenticated operator inspection; /health deliberately
+      // exposes only availability and does not publish backup timing.
       try {
         await env.ESO_PACKS.put(
           "backup:last_error",
@@ -1485,6 +1464,11 @@ export default {
       } catch (writeErr) {
         console.error("Failed to record backup:last_error:", writeErr);
       }
+    }
+    try {
+      await reconcileD1(env);
+    } catch (err) {
+      console.error("D1 reconciliation failed unexpectedly:", err);
     }
   },
 } satisfies ExportedHandler<Env>;

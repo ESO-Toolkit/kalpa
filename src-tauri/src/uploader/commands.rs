@@ -1432,8 +1432,8 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
-            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
-            // blocking thread instead of the async executor. build_evidence stays
+            // Extraction re-parses the vetted prefix (up to the native size cap), so run
+            // it on a blocking thread instead of the async executor. build_evidence stays
             // synchronous here so it can still ride back in the record + UploadDispatch.
             let build_evidence = if use_native {
                 match report.as_ref() {
@@ -1441,19 +1441,22 @@ pub async fn uploader_upload_log(
                         let safe = safe.clone();
                         let code = report.code.clone();
                         match tokio::task::spawn_blocking(move || {
-                            super::native::build_evidence::extract_from_file(&safe, Some(code)).map(
-                                |mut evidence| {
-                                    if !evidence.players.is_empty() {
-                                        // Best-effort: attach the logging player's ESOTK
-                                        // Companion snapshots (read from SavedVariables).
-                                        // Never blocks the sidecar; stays on this blocking
-                                        // thread because it reads files too.
-                                        evidence.companion =
-                                            super::native::companion::read_for_upload(&evidence);
-                                    }
-                                    evidence
-                                },
+                            super::native::build_evidence::extract_from_file(
+                                &safe,
+                                scanned_len,
+                                Some(code),
                             )
+                            .map(|mut evidence| {
+                                if !evidence.players.is_empty() {
+                                    // Best-effort: attach the logging player's ESOTK
+                                    // Companion snapshots (read from SavedVariables).
+                                    // Never blocks the sidecar; stays on this blocking
+                                    // thread because it reads files too.
+                                    evidence.companion =
+                                        super::native::companion::read_for_upload(&evidence);
+                                }
+                                evidence
+                            })
                         })
                         .await
                         {
