@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LogFileInfo, LogPathDetection, TransportInfo } from "@/types/uploader";
@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   open: vi.fn(),
   toastError: vi.fn(),
+  toastSuccess: vi.fn(),
   dragHandler: null as null | ((event: { payload: { type: string; paths?: string[] } }) => void),
 }));
 
@@ -33,7 +34,7 @@ vi.mock("sonner", () => ({
   toast: {
     error: mocks.toastError,
     info: vi.fn(),
-    success: vi.fn(),
+    success: mocks.toastSuccess,
   },
 }));
 
@@ -87,11 +88,11 @@ const transport: TransportInfo = {
   activeTransport: "native",
 };
 
-function log(path: string): LogFileInfo {
+function log(path: string, sizeBytes = 1): LogFileInfo {
   return {
     path,
     fileName: `${path}.log`,
-    sizeBytes: 1,
+    sizeBytes,
     modifiedAtMs: 1,
     isActive: false,
   };
@@ -401,5 +402,210 @@ describe("UploaderWorkspace log-directory sequencing", () => {
       "aria-pressed",
       "false"
     );
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it("does not report import success when its deferred preflight becomes stale", async () => {
+    const importedPreflight = deferred<{
+      sessions: never[];
+      fights: never[];
+      scannedLen: number;
+      fileSize: number;
+    }>();
+    let listCalls = 0;
+
+    mocks.invoke.mockImplementation(
+      (command: string, args?: { logsDir?: string; filePath?: string }) => {
+        if (command === "uploader_detect_path") return Promise.resolve(detection);
+        if (command === "uploader_transport_info") return Promise.resolve(transport);
+        if (command === "uploader_list_logs" && args?.logsDir === "A") {
+          listCalls++;
+          return Promise.resolve(
+            listCalls === 1 ? [log("A-other")] : [log("A-other"), log("A-imported")]
+          );
+        }
+        if (command === "uploader_import_log") return Promise.resolve("A-imported");
+        if (command === "uploader_preflight" && args?.filePath === "A-imported") {
+          return importedPreflight.promise;
+        }
+        if (command === "uploader_preflight") {
+          return Promise.resolve({ sessions: [], fights: [], scannedLen: 1, fileSize: 1 });
+        }
+        if (command === "uploader_list_history") return Promise.resolve([]);
+        if (command === "uploader_has_session") return Promise.resolve(false);
+        if (command === "settings_tainted") return Promise.resolve(false);
+        return Promise.resolve(null);
+      }
+    );
+
+    render(
+      <UploaderWorkspace
+        open
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    await screen.findByText("A-other.log");
+    await waitFor(() => expect(mocks.dragHandler).not.toBeNull());
+    mocks.dragHandler!({ payload: { type: "drop", paths: ["outside.log"] } });
+
+    await screen.findByText("A-imported.log");
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("uploader_preflight", {
+        filePath: "A-imported",
+      })
+    );
+
+    fireEvent.click(document.querySelector<HTMLButtonElement>('[data-log-path="A-other"]')!);
+    await waitFor(() =>
+      expect(document.querySelector('[data-log-path="A-other"]')).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
+    importedPreflight.resolve({ sessions: [], fights: [], scannedLen: 1, fileSize: 1 });
+
+    await waitFor(() =>
+      expect(screen.queryByText(/Adding log to your folder/)).not.toBeInTheDocument()
+    );
+    expect(mocks.toastSuccess).not.toHaveBeenCalledWith(expect.stringContaining("Log added"));
+  });
+
+  it("does not report import success when selecting the imported log errors", async () => {
+    let listCalls = 0;
+    mocks.invoke.mockImplementation(
+      (command: string, args?: { logsDir?: string; filePath?: string }) => {
+        if (command === "uploader_detect_path") return Promise.resolve(detection);
+        if (command === "uploader_transport_info") return Promise.resolve(transport);
+        if (command === "uploader_list_logs" && args?.logsDir === "A") {
+          listCalls++;
+          return Promise.resolve(listCalls === 1 ? [] : [log("A-imported")]);
+        }
+        if (command === "uploader_import_log") return Promise.resolve("A-imported");
+        if (command === "uploader_preflight") return Promise.reject(new Error("preflight failed"));
+        if (command === "uploader_list_history") return Promise.resolve([]);
+        if (command === "uploader_has_session") return Promise.resolve(false);
+        if (command === "settings_tainted") return Promise.resolve(false);
+        return Promise.resolve(null);
+      }
+    );
+
+    render(
+      <UploaderWorkspace
+        open
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    await waitFor(() => expect(mocks.dragHandler).not.toBeNull());
+    mocks.dragHandler!({ payload: { type: "drop", paths: ["outside.log"] } });
+    await waitFor(() =>
+      expect(mocks.toastError).toHaveBeenCalledWith("Couldn't read that log: preflight failed")
+    );
+    expect(mocks.toastSuccess).not.toHaveBeenCalledWith(expect.stringContaining("Log added"));
+  });
+
+  it("uses refreshed metadata when an imported path already existed in the prior render", async () => {
+    const largeSize = 257 * 1024 * 1024;
+    let listCalls = 0;
+
+    mocks.invoke.mockImplementation((command: string, args?: { logsDir?: string }) => {
+      if (command === "uploader_detect_path") return Promise.resolve(detection);
+      if (command === "uploader_transport_info") return Promise.resolve(transport);
+      if (command === "uploader_list_logs" && args?.logsDir === "A") {
+        listCalls++;
+        return Promise.resolve([log("A-imported", listCalls === 1 ? largeSize : 1)]);
+      }
+      if (command === "uploader_import_log") return Promise.resolve("A-imported");
+      if (command === "uploader_preflight") {
+        return Promise.resolve({
+          path: "A-imported",
+          sizeBytes: 1,
+          sessions: [],
+          totalFights: 0,
+          fights: [],
+          fightsOmitted: false,
+          recommendSplit: false,
+        });
+      }
+      if (command === "uploader_list_history") return Promise.resolve([]);
+      if (command === "uploader_has_session") return Promise.resolve(false);
+      if (command === "settings_tainted") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+
+    render(
+      <UploaderWorkspace
+        open
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    await screen.findByText("A-imported.log");
+    await waitFor(() => expect(mocks.dragHandler).not.toBeNull());
+    await act(async () => {
+      mocks.dragHandler!({ payload: { type: "drop", paths: ["A-imported.log"] } });
+    });
+
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("uploader_preflight", {
+        filePath: "A-imported",
+      })
+    );
+  });
+
+  it("defers full preflight for a newly imported large log from the refreshed list", async () => {
+    const largeSize = 257 * 1024 * 1024;
+    let listCalls = 0;
+
+    mocks.invoke.mockImplementation((command: string, args?: { logsDir?: string }) => {
+      if (command === "uploader_detect_path") return Promise.resolve(detection);
+      if (command === "uploader_transport_info") return Promise.resolve(transport);
+      if (command === "uploader_list_logs" && args?.logsDir === "A") {
+        listCalls++;
+        return Promise.resolve(listCalls === 1 ? [] : [log("A-imported", largeSize)]);
+      }
+      if (command === "uploader_import_log") return Promise.resolve("A-imported");
+      if (command === "uploader_list_history") return Promise.resolve([]);
+      if (command === "uploader_has_session") return Promise.resolve(false);
+      if (command === "settings_tainted") return Promise.resolve(false);
+      return Promise.resolve(null);
+    });
+
+    render(
+      <UploaderWorkspace
+        open
+        authUser={null}
+        onAuthChange={vi.fn()}
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
+    );
+
+    await waitFor(() => expect(mocks.dragHandler).not.toBeNull());
+    await act(async () => {
+      mocks.dragHandler!({ payload: { type: "drop", paths: ["outside.log"] } });
+    });
+
+    await screen.findByText("A-imported.log");
+    await waitFor(() =>
+      expect(document.querySelector('[data-log-path="A-imported"]')).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      )
+    );
+    expect(mocks.invoke).not.toHaveBeenCalledWith("uploader_preflight", {
+      filePath: "A-imported",
+    });
+    expect(screen.getByText(/Full scan is deferred for 257 MB/)).toBeInTheDocument();
   });
 });
