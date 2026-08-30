@@ -100,6 +100,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "support"
   | "shortcuts"
   | "log-upload"
   | null;
@@ -2088,6 +2089,7 @@ function App() {
   const handleOpenProfiles = useCallback(() => setActiveDialog("profiles"), []);
   const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
   const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
+  const handleOpenSupport = useCallback(() => setActiveDialog("support"), []);
   const handleOpenLogUpload = useCallback(() => {
     dismissUploaderIntro();
     setLogUploaderMounted(true);
@@ -2361,6 +2363,7 @@ function App() {
             onOpenProfiles={handleOpenProfiles}
             onOpenSavedVars={handleOpenSavedVars}
             onOpenSettings={handleOpenSettings}
+            onOpenSupport={handleOpenSupport}
             onOpenLogUpload={handleOpenLogUpload}
             onAuthChange={handleAuthChange}
             onRefresh={handleRefresh}
@@ -2495,6 +2498,9 @@ function App() {
             deepLinkPackId={deepLinkPackId}
             deepLinkShareCode={deepLinkShareCode}
             knownInstances={knownInstances}
+            checkingUpdates={checkingUpdates}
+            isOffline={isOffline}
+            lastError={error}
             logUploaderMounted={logUploaderMounted}
             onAuthChange={handleAuthChange}
             onCheckForAppUpdate={handleCheckForAppUpdateClick}
@@ -2503,6 +2509,7 @@ function App() {
             onPathChange={handlePathChangeClick}
             onRefresh={handleRefresh}
             onShowDialog={handleOpenDialog}
+            updateResults={updateResults}
           />
 
           <EsoRunningDialog

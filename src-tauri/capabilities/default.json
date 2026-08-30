@@ -45,6 +45,9 @@
         },
         {
           "url": "https://discord.gg/*"
+        },
+        {
+          "url": "https://discord.com/channels/1375703719995244686/*"
         }
       ]
     },
@@ -61,6 +64,10 @@
     },
     "opener:allow-reveal-item-in-dir",
     "notification:default",
-    "os:allow-platform"
+    "core:app:allow-version",
+    "core:app:allow-tauri-version",
+    "os:allow-platform",
+    "os:allow-version",
+    "os:allow-arch"
   ]
 }
