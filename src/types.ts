@@ -26,6 +26,9 @@ export interface AddonManifest {
   installedAt: string;
   disabled: boolean;
   modifiedFileCount: number;
+  /** False when no trusted pre-update baseline exists, so Protected Edits
+   * cannot tell user changes from upstream files. */
+  hasProtectedEditsBaseline?: boolean;
 }
 
 export interface EsouiAddonInfo {
@@ -611,6 +614,7 @@ export interface ConflictReport {
   safeFiles: string[];
   autoKeptFiles: string[];
   conflicts: FileConflict[];
+  hasHashBaseline: boolean;
 }
 
 export interface DiffData {

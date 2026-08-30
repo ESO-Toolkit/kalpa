@@ -10,6 +10,11 @@ const STORE_PATH = "settings.json";
  * src-tauri/src/settings_store.rs. */
 const STORE_RELOADED_SIGNAL = "settings-store-reloaded";
 
+/** The atomic disk publication succeeded, but the native cache refresh failed.
+ * This batch is durable and already present in the JS cache, so it must not be
+ * rolled back or reported as a failed save. Keep in sync with Rust. */
+const STORE_COMMITTED_SIGNAL = "settings-store-committed";
+
 let storePromise: ReturnType<typeof load> | null = null;
 
 /** Serializes all writes (set + save) so they never interleave. Because autoSave
@@ -145,9 +150,13 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
       for (const [key, value] of Object.entries(entries)) {
         await store.set(key, value);
       }
-      await invoke("flush_settings");
+      await invoke("flush_settings", { entries });
       return true;
     } catch (err) {
+      if (String(err).includes(STORE_COMMITTED_SIGNAL)) {
+        console.warn("[store] Settings were saved, but the native cache reload failed:", err);
+        return true;
+      }
       if (String(err).includes(STORE_RELOADED_SIGNAL)) {
         // The store was reloaded from disk (it had opened over a transiently
         // unreadable file). The plugin cache was replaced, so this batch's rollback

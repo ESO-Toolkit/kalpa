@@ -20,9 +20,11 @@ import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/compo
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting } from "@/lib/store";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
+import { PROTECTED_EDITS_UNAVAILABLE } from "@/lib/protected-edits";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import {
@@ -213,6 +215,7 @@ function AddonDetailBase({
       operationId: beginOperation(),
       dependencyPolicy,
     });
+    reportDependencyFailures(result.failedDeps);
     // Empty unless the policy is "ask". The picker is app-level and owns the
     // install + refresh from here, so this update's busy state can clear. Hand it
     // the same `addonsPath` this update ran against (closure-captured, so it stays
@@ -292,6 +295,12 @@ function AddonDetailBase({
         folderName: addon.folderName,
         esouiId: addon.esouiId,
       });
+
+      // Trust the just-completed preflight over scan-time UI state: the baseline
+      // may have been removed or become invalid since the addon list loaded.
+      if (!report.hasHashBaseline) {
+        toast.warning(PROTECTED_EDITS_UNAVAILABLE);
+      }
 
       if (report.conflicts.length > 0) {
         const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
@@ -417,6 +426,7 @@ function AddonDetailBase({
       } else {
         toast.success(`Installed ${depName}`);
       }
+      reportDependencyFailures(result.failedDeps);
       setJustInstalledDeps((prev) => new Set(prev).add(depName));
       onRefresh(); // refresh addon list, keeping this addon selected
     } catch (e) {
@@ -475,11 +485,20 @@ function AddonDetailBase({
       ) : updateResult?.hasUpdate ? (
         <GlassPanel
           variant="subtle"
-          className="mb-4 flex items-center justify-between gap-3 border-status-warning-strong/20! bg-status-warning-strong/[0.04]! p-3"
+          className="mb-4 flex items-start justify-between gap-3 border-status-warning-strong/20! bg-status-warning-strong/[0.04]! p-3"
         >
-          <span className="text-sm text-status-warning">
-            Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
-          </span>
+          <div className="min-w-0">
+            <p className="text-sm text-status-warning">
+              Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
+            </p>
+            {addon.hasProtectedEditsBaseline !== true && (
+              <p role="status" className="mt-1 max-w-2xl text-xs text-status-warning">
+                <span className="font-semibold">Protected Edits unavailable:</span> this addon has
+                no trusted file baseline, so Kalpa cannot detect which files you changed. Updating
+                may overwrite those edits.
+              </p>
+            )}
+          </div>
           {updating ? (
             <div className="flex items-center gap-2">
               <span className="text-xs tabular-nums text-muted-foreground">
@@ -1022,7 +1041,7 @@ function AddonDetailBase({
                 <EsouiTab
                   esouiId={addon.esouiId}
                   isOffline={isOffline}
-                  installedVersion={addon.version}
+                  installedVersion={updateResult?.currentVersion ?? addon.version}
                 />
               </Suspense>
             )}
