@@ -42,6 +42,18 @@ describe("useControlledState", () => {
     expect(result.current[0]).toBe("second");
   });
 
+  it("keeps rendering the supplied value when a controlled parent vetoes a change", () => {
+    const onChange = vi.fn();
+    const { result } = renderHook(() => useControlledState({ value: "parent-value", onChange }));
+
+    act(() => {
+      result.current[1]("requested-value");
+    });
+
+    expect(onChange).toHaveBeenCalledWith("requested-value");
+    expect(result.current[0]).toBe("parent-value");
+  });
+
   it("works with numeric types", () => {
     const { result } = renderHook(() => useControlledState({ defaultValue: 0 }));
     expect(result.current[0]).toBe(0);
