@@ -34,6 +34,10 @@ struct Journal {
     pre_existing: Vec<String>,
     #[serde(default)]
     hash_folders: Vec<String>,
+    #[serde(default)]
+    root_files: Vec<String>,
+    #[serde(default)]
+    pre_existing_root_files: Vec<String>,
 }
 
 pub(crate) struct InstallTransaction {
@@ -87,6 +91,8 @@ impl InstallTransaction {
                         folders: Vec::new(),
                         pre_existing: Vec::new(),
                         hash_folders: Vec::new(),
+                        root_files: Vec::new(),
+                        pre_existing_root_files: Vec::new(),
                     },
                 )
             });
@@ -108,17 +114,51 @@ impl InstallTransaction {
         self.root.join("stage")
     }
 
+    #[allow(dead_code)]
     pub(crate) fn commit(
+        self,
+        folders: &[String],
+        manifests: &[(String, Vec<u8>)],
+    ) -> Result<Vec<String>, String> {
+        self.commit_with_root_files(folders, &[], manifests)
+    }
+
+    pub(crate) fn commit_with_root_files(
         mut self,
         folders: &[String],
+        root_files: &[String],
         manifests: &[(String, Vec<u8>)],
     ) -> Result<Vec<String>, String> {
         let mut folders = folders.to_vec();
         folders.sort();
         folders.dedup();
+        let mut root_files = root_files.to_vec();
+        root_files.sort();
+        root_files.dedup();
+        for relative in &root_files {
+            crate::installer::validate_top_folder_name(relative).map_err(|error| {
+                format!("Invalid AddOns-root file in install transaction: {error}")
+            })?;
+            if !self.root.join("stage").join(relative).is_file() {
+                return Err(format!(
+                    "Staged AddOns-root file {relative:?} is missing from this install."
+                ));
+            }
+            let live = self.addons_dir.join(relative);
+            if live.exists() && !live.is_file() {
+                return Err(format!(
+                    "Cannot replace AddOns-root file {relative:?} because that path is not a file."
+                ));
+            }
+        }
         let pre_existing: Vec<String> = folders
             .iter()
             .filter(|folder| self.addons_dir.join(folder).exists())
+            .cloned()
+            .collect();
+        let pre_existing_root_files: Vec<String> = root_files
+            .iter()
+            .filter(|relative| self.addons_dir.join(relative).is_file())
             .cloned()
             .collect();
         let mut hash_folders = Vec::with_capacity(manifests.len());
@@ -142,6 +182,8 @@ impl InstallTransaction {
             folders: folders.clone(),
             pre_existing,
             hash_folders,
+            root_files: root_files.clone(),
+            pre_existing_root_files,
         };
         write_journal(&self.root, &journal)?;
 
@@ -186,9 +228,53 @@ impl InstallTransaction {
             landed.push(folder.clone());
         }
 
+        let mut landed_root_files = Vec::new();
+        for relative in &root_files {
+            let live = self.addons_dir.join(relative);
+            let stage = self.root.join("stage").join(relative);
+            let tombstone = self.root.join("tombstone").join(relative);
+            let had_live = live.exists();
+            self.swap_started = true;
+            if had_live {
+                if let Err(error) = rename_with_retries(&live, &tombstone) {
+                    let rollback = rollback_root_files(&self, &landed_root_files)
+                        .and_then(|()| rollback_landed(&self, &landed));
+                    let recovered = rollback.is_ok();
+                    let message = root_swap_error(relative, &error, rollback);
+                    if recovered {
+                        let _ = fs::remove_dir_all(&self.root);
+                        cleanup_empty_staging(&self.addons_dir);
+                        self.finished = true;
+                    }
+                    return Err(message);
+                }
+            }
+            if let Err(error) = rename_with_retries(&stage, &live) {
+                let restore = if had_live {
+                    rename_with_retries(&tombstone, &live)
+                        .map_err(|e| format!("failed to restore {relative}: {e}"))
+                } else {
+                    Ok(())
+                };
+                let rollback = restore
+                    .and_then(|()| rollback_root_files(&self, &landed_root_files))
+                    .and_then(|()| rollback_landed(&self, &landed));
+                let recovered = rollback.is_ok();
+                let message = root_swap_error(relative, &error, rollback);
+                if recovered {
+                    let _ = fs::remove_dir_all(&self.root);
+                    cleanup_empty_staging(&self.addons_dir);
+                    self.finished = true;
+                }
+                return Err(message);
+            }
+            landed_root_files.push(relative.clone());
+        }
+
         journal.phase = Phase::Swapped;
         if let Err(error) = write_journal(&self.root, &journal) {
-            let rollback = rollback_landed(&self, &landed);
+            let rollback = rollback_root_files(&self, &landed_root_files)
+                .and_then(|()| rollback_landed(&self, &landed));
             if rollback.is_ok() {
                 let _ = fs::remove_dir_all(&self.root);
                 cleanup_empty_staging(&self.addons_dir);
@@ -312,6 +398,11 @@ fn recover_staging_locked(addons_dir: &Path) -> Result<(), String> {
                         || !addons_dir.join(folder).exists()
                         || (journal.pre_existing.contains(folder)
                             && !root.join("tombstone").join(folder).exists())
+                }) || journal.root_files.iter().any(|relative| {
+                    root.join("stage").join(relative).exists()
+                        || !addons_dir.join(relative).is_file()
+                        || (journal.pre_existing_root_files.contains(relative)
+                            && !root.join("tombstone").join(relative).is_file())
                 });
                 if rename_lost {
                     rollback_journal(addons_dir, &root, &journal)?;
@@ -393,11 +484,52 @@ fn validate_journal(journal: &Journal) -> Result<(), String> {
             format!("Invalid folder in abandoned installer transaction: {error}")
         })?;
     }
+    for relative in journal
+        .root_files
+        .iter()
+        .chain(&journal.pre_existing_root_files)
+    {
+        crate::installer::validate_top_folder_name(relative).map_err(|error| {
+            format!("Invalid root file in abandoned installer transaction: {error}")
+        })?;
+    }
     Ok(())
 }
 
 fn rollback_journal(addons_dir: &Path, root: &Path, journal: &Journal) -> Result<(), String> {
     let mut first_error = None;
+    for relative in journal.root_files.iter().rev() {
+        let live = addons_dir.join(relative);
+        let stage = root.join("stage").join(relative);
+        let tombstone = root.join("tombstone").join(relative);
+        if !stage.exists() && live.is_file() {
+            if journal.pre_existing_root_files.contains(relative) && tombstone.is_file() {
+                if let Err(error) = fs::remove_file(&live) {
+                    first_error.get_or_insert_with(|| {
+                        format!("Failed to remove incomplete root file {relative}: {error}")
+                    });
+                    continue;
+                }
+                if let Err(error) = rename_with_retries(&tombstone, &live) {
+                    first_error.get_or_insert_with(|| {
+                        format!("Failed to restore root file {relative}: {error}")
+                    });
+                }
+            } else if !journal.pre_existing_root_files.contains(relative) {
+                if let Err(error) = fs::remove_file(&live) {
+                    first_error.get_or_insert_with(|| {
+                        format!("Failed to remove incomplete root file {relative}: {error}")
+                    });
+                }
+            }
+        } else if !live.exists() && tombstone.is_file() {
+            if let Err(error) = rename_with_retries(&tombstone, &live) {
+                first_error.get_or_insert_with(|| {
+                    format!("Failed to restore root file {relative}: {error}")
+                });
+            }
+        }
+    }
     for folder in journal.folders.iter().rev() {
         let live = addons_dir.join(folder);
         let stage = root.join("stage").join(folder);
@@ -458,6 +590,30 @@ fn rollback_landed(txn: &InstallTransaction, landed: &[String]) -> Result<(), St
     } else {
         Ok(())
     }
+}
+
+fn rollback_root_files(txn: &InstallTransaction, landed: &[String]) -> Result<(), String> {
+    let mut first_error = None;
+    for relative in landed.iter().rev() {
+        let live = txn.addons_dir.join(relative);
+        let tombstone = txn.root.join("tombstone").join(relative);
+        if live.is_file() {
+            if let Err(error) = fs::remove_file(&live) {
+                first_error.get_or_insert_with(|| {
+                    format!("failed to remove replacement root file {relative}: {error}")
+                });
+                continue;
+            }
+        }
+        if tombstone.is_file() {
+            if let Err(error) = rename_with_retries(&tombstone, &live) {
+                first_error.get_or_insert_with(|| {
+                    format!("failed to restore root file {relative}: {error}")
+                });
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn promote_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> Result<(), String> {
@@ -549,6 +705,16 @@ fn swap_error(folder: &str, error: &io::Error, rollback: Result<(), String>) -> 
     format!("Could not replace addon folder {folder}: {error}. Close ESO and any editor or antivirus window using files in the AddOns folder, then try again.{rollback}")
 }
 
+fn root_swap_error(relative: &str, error: &io::Error, rollback: Result<(), String>) -> String {
+    let rollback = rollback
+        .err()
+        .map(|e| format!(" Rollback also failed: {e}"))
+        .unwrap_or_default();
+    format!(
+        "Could not replace AddOns-root file {relative}: {error}. Close ESO and any editor or antivirus window using files in the AddOns folder, then try again.{rollback}"
+    )
+}
+
 fn cleanup_empty_staging(addons_dir: &Path) {
     let staging = addons_dir.join(STAGING_DIR);
     if fs::read_dir(&staging)
@@ -604,6 +770,61 @@ mod tests {
     }
 
     #[test]
+    fn commit_replaces_addons_root_files_with_the_folder() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        write_addon(&addons_dir.join("Example"), "old");
+        fs::write(addons_dir.join("README.txt"), "root-old").expect("write old root file");
+
+        let transaction = InstallTransaction::begin(&addons_dir, None).expect("begin transaction");
+        write_addon(&transaction.stage_dir().join("Example"), "new");
+        fs::write(transaction.stage_dir().join("README.txt"), "root-new")
+            .expect("write staged root file");
+        transaction
+            .commit_with_root_files(&["Example".to_string()], &["README.txt".to_string()], &[])
+            .expect("commit transaction");
+
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("Example/main.lua")).expect("read live addon"),
+            "new"
+        );
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("README.txt")).expect("read root file"),
+            "root-new"
+        );
+        assert!(!addons_dir.join(STAGING_DIR).exists());
+    }
+
+    #[test]
+    fn recovery_restores_a_partially_swapped_root_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "partial-root");
+        fs::write(addons_dir.join("README.txt"), "root-new").expect("write published root file");
+        fs::write(root.join("tombstone/README.txt"), "root-old").expect("write root tombstone");
+        write_journal(
+            &root,
+            &Journal {
+                phase: Phase::Staged,
+                folders: Vec::new(),
+                pre_existing: Vec::new(),
+                hash_folders: Vec::new(),
+                root_files: vec!["README.txt".to_string()],
+                pre_existing_root_files: vec!["README.txt".to_string()],
+            },
+        )
+        .expect("write journal");
+
+        recover_staging(&addons_dir).expect("recover transaction");
+
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("README.txt")).expect("read restored root file"),
+            "root-old"
+        );
+        assert!(!addons_dir.join(STAGING_DIR).exists());
+    }
+
+    #[test]
     fn recovery_rolls_back_a_partially_swapped_staged_transaction() {
         let temp = tempfile::tempdir().expect("tempdir");
         let addons_dir = temp.path().join("AddOns");
@@ -623,6 +844,8 @@ mod tests {
                 folders: vec!["Example".to_string(), "Second".to_string()],
                 pre_existing: vec!["Example".to_string(), "Second".to_string()],
                 hash_folders: Vec::new(),
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
             },
         )
         .expect("write journal");
@@ -655,6 +878,8 @@ mod tests {
                         folders: Vec::new(),
                         pre_existing: Vec::new(),
                         hash_folders: Vec::new(),
+                        root_files: Vec::new(),
+                        pre_existing_root_files: Vec::new(),
                     },
                 )
                 .expect("write preparing journal"),
@@ -717,6 +942,8 @@ mod tests {
                 folders: vec!["Example".to_string()],
                 pre_existing: vec!["Example".to_string()],
                 hash_folders: vec!["Example".to_string()],
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
             },
         )
         .expect("write journal");
@@ -748,6 +975,8 @@ mod tests {
                 folders: vec!["Example".to_string()],
                 pre_existing: vec!["Example".to_string()],
                 hash_folders: Vec::new(),
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
             },
         )
         .expect("write journal");
@@ -776,6 +1005,8 @@ mod tests {
                 folders: vec!["Example".to_string()],
                 pre_existing: vec!["Example".to_string()],
                 hash_folders: vec!["Example".to_string()],
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
             },
         )
         .expect("write journal");
@@ -802,6 +1033,8 @@ mod tests {
                 folders: vec!["../Outside".to_string()],
                 pre_existing: Vec::new(),
                 hash_folders: Vec::new(),
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
             },
         )
         .expect("write journal");
@@ -826,6 +1059,8 @@ mod tests {
                 folders: vec!["Example".to_string()],
                 pre_existing: vec!["Example".to_string()],
                 hash_folders: vec!["Example".to_string()],
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
             },
         )
         .expect("write journal");

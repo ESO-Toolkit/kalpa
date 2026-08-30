@@ -2737,8 +2737,17 @@ pub struct FileConflict {
 #[serde(rename_all = "camelCase")]
 pub struct ConflictReport {
     pub session_id: String,
+    /// The archive primary. Retained for metadata carry-forward and display;
+    /// it is no longer the only folder the report covers.
     pub folder_name: String,
+    /// Every top-level folder this archive writes, sorted. The UI groups rows
+    /// by folder when there is more than one.
+    pub folders: Vec<String>,
     pub update_version: String,
+    /// Paths in these three lists are **folder-qualified** (`Folder/rel`).
+    /// They cross the folder boundary, so a bare path would be ambiguous once
+    /// an archive touches more than one folder - two siblings shipping
+    /// `init.lua` would collide.
     pub safe_files: Vec<String>,
     pub auto_kept_files: Vec<String>,
     pub conflicts: Vec<FileConflict>,
@@ -2847,22 +2856,188 @@ fn classify_update_files(
     })
 }
 
-/// Build a conflict report for one addon folder against a downloaded ZIP, and
-/// return the ZIP hash map alongside it so an immediately-following extraction
-/// can reuse it as the new hash baseline instead of re-hashing the folder.
+/// Classify every folder an archive writes, qualifying the results.
+///
+/// [`classify_update_files`] stays per-folder and bare, because it compares
+/// against a single `.kalpa-hashes/<Folder>.json`. This wrapper is what makes
+/// bundled siblings participate at all: previously only the primary folder was
+/// classified, so a modified sibling file was overwritten with no prompt and no
+/// backup even though it had a baseline and was displayed as modified.
+fn classify_update_archive(
+    addons_dir: &Path,
+    primary_folder: &str,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Result<ClassifiedFiles, String> {
+    let mut safe_files = Vec::new();
+    let mut auto_kept_files = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut has_hash_baseline = false;
+
+    for (folder, hashes) in &zip_hashes.folders {
+        let classified = classify_update_files(addons_dir, folder, hashes)?;
+        if folder == primary_folder {
+            has_hash_baseline = classified.has_hash_baseline;
+        }
+        safe_files.extend(
+            classified
+                .safe_files
+                .iter()
+                .map(|rel| file_hashes::qualify(folder, rel)),
+        );
+        auto_kept_files.extend(
+            classified
+                .auto_kept_files
+                .iter()
+                .map(|rel| file_hashes::qualify(folder, rel)),
+        );
+        conflicts.extend(
+            classified
+                .conflicts
+                .into_iter()
+                .map(|conflict| FileConflict {
+                    relative_path: file_hashes::qualify(folder, &conflict.relative_path),
+                    ..conflict
+                }),
+        );
+    }
+
+    // Foldered archives may also write loose files directly under AddOns. They
+    // are owned by the primary folder for baseline/provenance purposes, but
+    // their live path is the AddOns root rather than AddOns/<folder>.
+    if !zip_hashes.root_files.is_empty() {
+        let stored = file_hashes::load_hash_manifest(addons_dir, primary_folder);
+        let stored_files = stored.as_ref().map(|m| &m.root_files);
+        let mut root_safe = Vec::new();
+        let mut root_auto_kept = Vec::new();
+        let mut root_conflicts = Vec::new();
+        for (relative, zip_hash) in &zip_hashes.root_files {
+            let stored_hash = stored_files.and_then(|f| f.get(relative));
+            let path = addons_dir.join(relative);
+            let disk_hash = if stored.is_some() && path.is_file() {
+                Some(file_hashes::file_signature(relative, &path)?)
+            } else {
+                None
+            };
+            let user_modified = match (stored_hash, disk_hash.as_ref()) {
+                (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
+                (Some(_), None) => true,
+                (None, Some(disk)) => !file_hashes::signatures_match(disk, zip_hash),
+                (None, None) => false,
+            };
+            let upstream_changed = stored_hash != Some(zip_hash);
+            let qualified = file_hashes::qualify(primary_folder, relative);
+            match (user_modified, upstream_changed) {
+                (false, _) => root_safe.push(qualified),
+                (true, false) => root_auto_kept.push(qualified),
+                (true, true) => root_conflicts.push(FileConflict {
+                    relative_path: qualified,
+                    user_hash: disk_hash.unwrap_or_default(),
+                    upstream_hash: zip_hash.clone(),
+                }),
+            }
+        }
+        safe_files.extend(root_safe);
+        auto_kept_files.extend(root_auto_kept);
+        conflicts.extend(root_conflicts);
+    }
+
+    safe_files.sort();
+    auto_kept_files.sort();
+    conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(ClassifiedFiles {
+        safe_files,
+        auto_kept_files,
+        conflicts,
+        has_hash_baseline,
+    })
+}
+
+/// Upstream hashes for kept-mine files, grouped by folder.
+///
+/// A kept file keeps the user's bytes on disk but records the *upstream* hash
+/// as its baseline, so the edit stays detectable on the next update instead of
+/// re-conflicting forever. Grouped by folder because manifests are per folder.
+fn build_hash_overrides(
+    kept_files: &[String],
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Option<BTreeMap<String, HashMap<String, String>>> {
+    let mut overrides: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    for key in kept_files {
+        let Some((folder, relative)) = file_hashes::split_qualified(key) else {
+            continue;
+        };
+        if let Some(hash) = zip_hashes.folders.get(folder).and_then(|m| m.get(relative)) {
+            overrides
+                .entry(folder.to_string())
+                .or_default()
+                .insert(relative.to_string(), hash.clone());
+        }
+    }
+    (!overrides.is_empty()).then_some(overrides)
+}
+
+/// Convert UI-facing folder-qualified keep keys into the archive-relative keys
+/// consumed by the extractor. Loose files at the AddOns root are qualified by
+/// the primary folder in reports, but their ZIP entry is bare. Converting them
+/// here avoids ambiguous basename matching inside the extractor (for example,
+/// `LibFoo/init.lua` must never suppress a distinct root `init.lua`).
+fn build_extraction_skip_files(
+    kept_files: &[String],
+    primary_folder: &str,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> HashSet<String> {
+    kept_files
+        .iter()
+        .map(|key| {
+            file_hashes::split_qualified(key)
+                .filter(|(folder, relative)| {
+                    *folder == primary_folder && zip_hashes.root_files.contains_key(*relative)
+                })
+                .map_or_else(|| key.clone(), |(_, relative)| relative.to_string())
+        })
+        .collect()
+}
+
+/// Upstream hashes for kept files written directly under AddOns. Root entries
+/// are qualified with the primary folder for the conflict UI, while their
+/// persisted baseline lives in that folder's manifest under `root_files`.
+fn build_root_hash_overrides(
+    kept_files: &[String],
+    primary_folder: &str,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Option<HashMap<String, String>> {
+    let mut overrides = HashMap::new();
+    for key in kept_files {
+        let Some((folder, relative)) = file_hashes::split_qualified(key) else {
+            continue;
+        };
+        if folder == primary_folder {
+            if let Some(hash) = zip_hashes.root_files.get(relative) {
+                overrides.insert(relative.to_string(), hash.clone());
+            }
+        }
+    }
+    (!overrides.is_empty()).then_some(overrides)
+}
+
+/// Build a conflict report for a downloaded ZIP, covering every folder it
+/// writes, and return the archive hash set alongside it so an immediately-
+/// following extraction can reuse it as the new baseline instead of re-hashing.
 fn build_conflict_report(
     addons_dir: &Path,
     folder_name: &str,
     zip_path: &Path,
     update_version: &str,
     session_id: &str,
-) -> Result<(ConflictReport, HashMap<String, String>), String> {
-    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
-    let classified = classify_update_files(addons_dir, folder_name, &zip_hashes)?;
+) -> Result<(ConflictReport, file_hashes::ZipHashSet), String> {
+    let zip_hashes = file_hashes::hash_zip_entries_by_folder(zip_path)?;
+    let classified = classify_update_archive(addons_dir, folder_name, &zip_hashes)?;
 
     let report = ConflictReport {
         session_id: session_id.to_string(),
         folder_name: folder_name.to_string(),
+        folders: zip_hashes.folders.keys().cloned().collect(),
         update_version: update_version.to_string(),
         safe_files: classified.safe_files,
         auto_kept_files: classified.auto_kept_files,
@@ -2925,6 +3100,11 @@ pub async fn scan_update_conflicts(
             build_conflict_report(&addons_dir, &folder_name, &kept_path, &version, &session_id)?;
 
         if let Ok(mut map) = pending_clone.lock() {
+            let reviewed_conflicts = report
+                .conflicts
+                .iter()
+                .map(|conflict| conflict.relative_path.clone())
+                .collect();
             map.insert(
                 session_id.clone(),
                 crate::PendingUpdate {
@@ -2933,6 +3113,7 @@ pub async fn scan_update_conflicts(
                     esoui_id,
                     update_version: version,
                     artifact_last_update: info.last_update,
+                    reviewed_conflicts,
                     zip_hashes: Arc::new(zip_hashes),
                 },
             );
@@ -3100,6 +3281,11 @@ pub async fn scan_batch_conflicts(
                         // the baseline instead of re-hashing the archive.
                         Ok((report, zip_hashes)) => {
                             if let Ok(mut map) = pending_clone.lock() {
+                                let reviewed_conflicts = report
+                                    .conflicts
+                                    .iter()
+                                    .map(|conflict| conflict.relative_path.clone())
+                                    .collect();
                                 map.insert(
                                     session_id.clone(),
                                     crate::PendingUpdate {
@@ -3108,6 +3294,7 @@ pub async fn scan_batch_conflicts(
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
                                         artifact_last_update: dl.artifact_last_update,
+                                        reviewed_conflicts,
                                         zip_hashes: Arc::new(zip_hashes),
                                     },
                                 );
@@ -3431,6 +3618,11 @@ fn extract_streamed_downloads(
                 }
             };
             if let Ok(mut map) = pending.lock() {
+                let reviewed_conflicts = report
+                    .conflicts
+                    .iter()
+                    .map(|conflict| conflict.relative_path.clone())
+                    .collect();
                 map.insert(
                     session_id.clone(),
                     crate::PendingUpdate {
@@ -3439,6 +3631,7 @@ fn extract_streamed_downloads(
                         esoui_id: dl.esoui_id,
                         update_version: version.clone(),
                         artifact_last_update: dl.info.last_update,
+                        reviewed_conflicts,
                         zip_hashes: Arc::new(zip_hashes),
                     },
                 );
@@ -3467,46 +3660,89 @@ fn extract_streamed_downloads(
         // path keeps. A failed backup fails the addon rather than proceeding to
         // destroy the edits it was supposed to preserve.
         if has_conflicts && conflict_policy == "take_update" {
-            let files_to_backup: Vec<String> = report
-                .conflicts
-                .iter()
-                .map(|c| c.relative_path.clone())
-                .collect();
-            let from_version = file_hashes::load_hash_manifest(addons_dir, &folder_name)
-                .map(|m| m.installed_version)
-                .unwrap_or_default();
-            if let Err(e) = crate::edit_backups::backup_user_files(
-                addons_dir,
-                &folder_name,
-                &files_to_backup,
-                &from_version,
-                &version,
-            ) {
+            // Conflicts can now come from more than one folder, and backups are
+            // stored per folder under `.kalpa-backups/<folder>/`. Group first,
+            // and read each folder's own recorded version - using the primary's
+            // for a sibling would label the backup with the wrong "from".
+            let by_folder = file_hashes::group_by_folder(
+                &report
+                    .conflicts
+                    .iter()
+                    .filter(|c| {
+                        file_hashes::split_qualified(&c.relative_path).is_some_and(
+                            |(folder, relative)| {
+                                !(folder == folder_name
+                                    && zip_hashes.root_files.contains_key(relative))
+                            },
+                        )
+                    })
+                    .map(|c| c.relative_path.clone())
+                    .collect::<Vec<_>>(),
+            );
+            let mut backup_error = None;
+            for (conflict_folder, files) in &by_folder {
+                let from_version = file_hashes::load_hash_manifest(addons_dir, conflict_folder)
+                    .map(|m| m.installed_version)
+                    .unwrap_or_default();
+                if let Err(e) = crate::edit_backups::backup_user_files(
+                    addons_dir,
+                    conflict_folder,
+                    files,
+                    &from_version,
+                    &version,
+                ) {
+                    backup_error = Some(e);
+                    break;
+                }
+            }
+            if let Some(e) = backup_error {
                 emit_phase(&folder_name, "failed", index);
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
                 continue;
             }
+            let root_files: Vec<String> = report
+                .conflicts
+                .iter()
+                .filter_map(|c| {
+                    let (folder, relative) = file_hashes::split_qualified(&c.relative_path)?;
+                    (folder == folder_name && zip_hashes.root_files.contains_key(relative))
+                        .then(|| relative.to_string())
+                })
+                .collect();
+            if !root_files.is_empty() {
+                let from_version = file_hashes::load_hash_manifest(addons_dir, &folder_name)
+                    .map(|m| m.installed_version)
+                    .unwrap_or_default();
+                if let Err(e) = crate::edit_backups::backup_root_files(
+                    addons_dir,
+                    &folder_name,
+                    &root_files,
+                    &from_version,
+                    &dl.api_version,
+                ) {
+                    emit_phase(&folder_name, "failed", index);
+                    errors.insert(folder_name.clone(), e);
+                    failed.push(folder_name);
+                    continue;
+                }
+            }
         }
 
-        let skip_files: HashSet<String> = kept_files
-            .iter()
-            .map(|p| format!("{folder_name}/{p}"))
-            .collect();
+        let skip_files = build_extraction_skip_files(&kept_files, &folder_name, &zip_hashes);
 
         // For kept files, store the upstream hash as the new baseline so the
         // user's edit stays detectable on the next update. The ZIP hashes were
         // already computed for the conflict report above — reuse them here
         // instead of decompressing the ZIP a second time.
-        let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
-            None
-        } else {
-            let overrides: HashMap<String, String> = kept_files
-                .iter()
-                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-                .collect();
-            (!overrides.is_empty()).then_some(overrides)
-        };
+        let hash_overrides = build_hash_overrides(&kept_files, &zip_hashes);
+        let root_hash_overrides = build_root_hash_overrides(&kept_files, &folder_name, &zip_hashes);
+        let root_baseline =
+            (!zip_hashes.root_files.is_empty()).then_some(installer::RootHashBaseline {
+                owner_folder: &folder_name,
+                hashes: &zip_hashes.root_files,
+                overrides: root_hash_overrides.as_ref(),
+            });
 
         // Record the baseline straight from the ZIP hash map (plus a disk pass
         // over only the files the ZIP didn't provide), rather than re-hashing
@@ -3514,16 +3750,16 @@ fn extract_streamed_downloads(
         // don't write metadata for this addon: a folder tracked in metadata but
         // missing its hash baseline would let the next update silently overwrite
         // user edits. Surface it as a failed addon instead.
-        let empty_overrides = HashMap::new();
-        let installed_folders = match installer::install_addon_zip_selective_with_hashes(
+        let empty_overrides = BTreeMap::new();
+        let installed_folders = match installer::install_addon_zip_selective_with_hashes_and_root(
             dl.zip.path(),
             addons_dir,
             &skip_files,
             installer::ExtractHooks::NONE,
             dl.esoui_id,
             &version,
-            &folder_name,
             hash_overrides.as_ref().unwrap_or(&empty_overrides),
+            root_baseline,
         ) {
             Ok(folders) => folders,
             Err(e) => {
@@ -3628,15 +3864,30 @@ pub async fn get_conflict_diff(
     let pending_clone = pending.0.clone();
 
     tokio::task::spawn_blocking(move || {
-        let (zip_path, folder_name) = {
+        let (zip_path, primary_folder, zip_hashes) = {
             let map = pending_clone
                 .lock()
                 .map_err(|_| "Failed to access pending updates".to_string())?;
             let pu = map
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {session_id} not found"))?;
-            (pu.zip_path.clone(), pu.folder_name.clone())
+            (
+                pu.zip_path.clone(),
+                pu.folder_name.clone(),
+                Arc::clone(&pu.zip_hashes),
+            )
         };
+
+        // The requested path names its own folder. It used to be re-qualified
+        // with the pending update's primary folder, so a diff for a bundled
+        // sibling looked for the file under the wrong folder on both sides.
+        let (folder_name, relative_path) = file_hashes::split_qualified(&relative_path)
+            .filter(|(folder, relative)| {
+                zip_hashes.has_folder(folder)
+                    || (*folder == primary_folder.as_str()
+                        && zip_hashes.root_files.contains_key(*relative))
+            })
+            .ok_or_else(|| format!("Path does not belong to this update: {relative_path}"))?;
 
         const MAX_DIFF_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 
@@ -3645,7 +3896,13 @@ pub async fn get_conflict_diff(
         // every platform, while rewriting them to backslashes would name a
         // single literal-backslash component on macOS/Linux and silently render
         // the user's side of the diff as empty.
-        let user_file_path = addons_dir.join(&folder_name).join(&relative_path);
+        let is_root_file =
+            folder_name == primary_folder && zip_hashes.root_files.contains_key(relative_path);
+        let user_file_path = if is_root_file {
+            addons_dir.join(relative_path)
+        } else {
+            addons_dir.join(folder_name).join(relative_path)
+        };
         let user_content = if user_file_path.exists() {
             let meta = fs::metadata(&user_file_path)
                 .map_err(|e| format!("Failed to read user file: {e}"))?;
@@ -3670,7 +3927,14 @@ pub async fn get_conflict_diff(
         let file = fs::File::open(&zip_path).map_err(|e| format!("Failed to open ZIP: {e}"))?;
         let mut archive =
             zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {e}"))?;
-        let zip_entry_name = format!("{folder_name}/{relative_path}");
+        // A flat archive's entries carry no folder prefix - the folder only
+        // exists after extraction re-roots them - so the entry name cannot be
+        // rebuilt by string concatenation.
+        let zip_entry_name = if is_root_file {
+            relative_path.to_string()
+        } else {
+            zip_hashes.zip_entry_name(folder_name, relative_path)
+        };
         let mut entry = archive
             .by_name(&zip_entry_name)
             .map_err(|e| format!("File not found in ZIP: {e}"))?;
@@ -3708,6 +3972,44 @@ pub async fn get_conflict_diff(
 pub struct FileDecision {
     pub relative_path: String,
     pub action: String, // "keep_mine" | "take_update"
+}
+
+const CONFLICTS_CHANGED_PREFIX: &str = "Conflicts changed while the update was open";
+
+/// Complete the lifecycle claimed by `update_addon_with_decisions`.
+///
+/// Revalidation errors are deliberately retryable at the UI level: the old
+/// review must remain cancellable while the user closes it and starts a fresh
+/// scan. All other outcomes consume the session, matching the command's
+/// historical cleanup guarantee.
+fn finish_pending_update(
+    pending: &Mutex<HashMap<String, crate::PendingUpdate>>,
+    session_id: &str,
+    zip_path: &Path,
+    outcome: Result<InstallResult, String>,
+) -> Result<InstallResult, String> {
+    if outcome
+        .as_ref()
+        .is_err_and(|error| error.starts_with(CONFLICTS_CHANGED_PREFIX))
+    {
+        return outcome;
+    }
+
+    // Delete the kept temp ZIP first, then drop the pending entry. If the
+    // delete genuinely fails (e.g. another process briefly holds the file),
+    // keep the entry so `cancel_pending_update` can retry cleanup later. A
+    // file that's already gone counts as removed.
+    let removed = match fs::remove_file(zip_path) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if removed {
+        if let Ok(mut map) = pending.lock() {
+            map.remove(session_id);
+        }
+    }
+
+    outcome
 }
 
 #[tauri::command]
@@ -3751,10 +4053,16 @@ pub async fn update_addon_with_decisions(
 
         // Run the fallible work in a helper so that, once the session is claimed,
         // the pending entry and kept temp ZIP are cleaned up whether that work
-        // succeeds OR fails. The temp ZIP was `.keep()`-ed (no auto-delete), so an
-        // early `?` return inside the helper (backup, hashing, extraction,
-        // recording, metadata save) would otherwise orphan it and leave a stale
-        // pending entry that blocks re-resolving the conflict.
+        // succeeds OR fails. The one exception is apply-time revalidation: no
+        // writes have happened yet, and the visible conflict panel still owns the
+        // session so the user can close it (which calls `cancel_pending_update`)
+        // and run a fresh scan. Consuming the session there leaves the panel with
+        // a dead id and makes its next diff/apply fail with "Session not found".
+        //
+        // The temp ZIP was `.keep()`-ed (no auto-delete), so an early `?` return
+        // inside the helper (backup, hashing, extraction, recording, metadata
+        // save) would otherwise orphan it and leave a stale pending entry that
+        // blocks re-resolving the conflict.
         //
         // The only exits before this point are the lock-poisoned and
         // session-not-found errors above, where there is nothing to clean up: no
@@ -3773,21 +4081,7 @@ pub async fn update_addon_with_decisions(
         };
         let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks, dep_policy);
 
-        // Delete the kept temp ZIP first, then drop the pending entry. If the
-        // delete genuinely fails (e.g. another process briefly holds the file),
-        // keep the entry so `cancel_pending_update` can retry cleanup later. A
-        // file that's already gone counts as removed.
-        let removed = match fs::remove_file(&pu.zip_path) {
-            Ok(()) => true,
-            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-        };
-        if removed {
-            if let Ok(mut map) = pending_clone.lock() {
-                map.remove(&session_id);
-            }
-        }
-
-        outcome
+        finish_pending_update(&pending_clone, &session_id, &pu.zip_path, outcome)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -3810,11 +4104,8 @@ fn update_with_decisions_inner(
     // This map becomes the staged transaction's new baseline and supplies the
     // upstream hashes for kept "keep_mine" files so the user's edit stays
     // detectable on the next update.
-    let zip_hashes = if pu.zip_hashes.is_empty() {
-        Arc::new(file_hashes::hash_zip_entries(
-            &pu.zip_path,
-            &pu.folder_name,
-        )?)
+    let zip_hashes = if pu.zip_hashes.folders.is_empty() {
+        Arc::new(file_hashes::hash_zip_entries_by_folder(&pu.zip_path)?)
     } else {
         Arc::clone(&pu.zip_hashes)
     };
@@ -3824,11 +4115,73 @@ fn update_with_decisions_inner(
     // files are never sent as decisions in the first place (the UI appends them
     // by convention, and one forgetful caller would silently destroy them), and
     // a file edited during the user's deliberation carries no decision at all.
-    let classified = classify_update_files(addons_dir, &pu.folder_name, &zip_hashes)?;
+    // Across EVERY folder the archive writes, not just the primary: a sibling
+    // edited while the user deliberated would otherwise carry no decision and
+    // no conflict, and be overwritten silently.
+    let classified = classify_update_archive(addons_dir, &pu.folder_name, &zip_hashes)?;
+
+    // A decision must name a folder this archive actually writes. The
+    // classification is re-derived server-side precisely so the client cannot
+    // steer it; extending that guard to the folder axis keeps a crafted or
+    // stale decision from reaching an unrelated addon's files.
+    for decision in decisions {
+        if !matches!(decision.action.as_str(), "keep_mine" | "take_update") {
+            return Err(format!(
+                "Invalid update decision for {}: {}",
+                decision.relative_path, decision.action
+            ));
+        }
+        match file_hashes::split_qualified(&decision.relative_path) {
+            Some((folder, relative))
+                if zip_hashes.has_folder(folder)
+                    || (folder == pu.folder_name
+                        && zip_hashes.root_files.contains_key(relative)) => {}
+            _ => {
+                return Err(format!(
+                    "Update decision does not belong to this archive: {}",
+                    decision.relative_path
+                ));
+            }
+        }
+    }
+
+    // Honour a decision only for a file that is STILL conflicting. The
+    // classification above is re-derived from the current disk state, so a
+    // decision can be stale: the user marks a conflict keep-mine, then reverts
+    // the file to its baseline before applying. Trusting the stale decision
+    // would skip that file during extraction - leaving it on the old version
+    // while the update reports success - and then record the upstream hash as
+    // its baseline, so the staleness would never be noticed again.
+    let still_conflicting: HashSet<&str> = classified
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.relative_path.as_str())
+        .collect();
+
+    let reviewed_conflicts: HashSet<&str> =
+        pu.reviewed_conflicts.iter().map(String::as_str).collect();
+    let newly_conflicting: Vec<&str> = classified
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.relative_path.as_str())
+        .filter(|path| {
+            !reviewed_conflicts.contains(*path)
+                || !decisions
+                    .iter()
+                    .any(|decision| decision.relative_path.as_str() == *path)
+        })
+        .collect();
+    if !newly_conflicting.is_empty() {
+        return Err(format!(
+            "{CONFLICTS_CHANGED_PREFIX}; close this review and run Update again: {}",
+            newly_conflicting.join(", ")
+        ));
+    }
 
     let mut kept_files: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "keep_mine")
+        .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
     for path in &classified.auto_kept_files {
@@ -3837,26 +4190,15 @@ fn update_with_decisions_inner(
         }
     }
 
-    // Collect files to skip during extraction (full ZIP path with folder prefix)
-    let skip_files: HashSet<String> = kept_files
-        .iter()
-        .map(|p| format!("{}/{}", pu.folder_name, p))
-        .collect();
+    let skip_files = build_extraction_skip_files(&kept_files, &pu.folder_name, &zip_hashes);
 
-    // Collect files to back up: the ones the user chose "take_update" on, plus
-    // any edit that appeared after the scan and therefore has no decision — both
-    // are about to be overwritten.
-    let mut files_to_backup: Vec<String> = decisions
+    // Back up only current conflicts the user explicitly chose to overwrite.
+    let files_to_backup: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "take_update")
+        .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
-    for conflict in &classified.conflicts {
-        let path = &conflict.relative_path;
-        if !files_to_backup.contains(path) && !kept_files.contains(path) {
-            files_to_backup.push(path.clone());
-        }
-    }
 
     // Get current version from hash manifest for backup metadata. Pending
     // entries created before version tracking (or from an empty API response)
@@ -3870,38 +4212,72 @@ fn update_with_decisions_inner(
         pu.update_version.clone()
     };
 
-    // Back up files before overwriting
-    if !files_to_backup.is_empty() {
+    // Back up before overwriting, one call per folder. Backups live under
+    // `.kalpa-backups/<folder>/`, and each folder records its own installed
+    // version - labelling a sibling's backup with the primary's "from" version
+    // would misreport what the user is restoring from.
+    let root_files_to_backup: Vec<String> = files_to_backup
+        .iter()
+        .filter_map(|key| {
+            let (folder, relative) = file_hashes::split_qualified(key)?;
+            (folder == pu.folder_name && zip_hashes.root_files.contains_key(relative))
+                .then(|| relative.to_string())
+        })
+        .collect();
+    let non_root_files_to_backup: Vec<String> = files_to_backup
+        .iter()
+        .filter(|key| {
+            file_hashes::split_qualified(key).is_some_and(|(folder, relative)| {
+                !(folder == pu.folder_name && zip_hashes.root_files.contains_key(relative))
+            })
+        })
+        .cloned()
+        .collect();
+    for (backup_folder, files) in file_hashes::group_by_folder(&non_root_files_to_backup) {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &backup_folder)
+            .map(|m| m.installed_version)
+            .unwrap_or_default();
         crate::edit_backups::backup_user_files(
             addons_dir,
+            &backup_folder,
+            &files,
+            &from_version,
+            &update_version,
+        )?;
+    }
+    if !root_files_to_backup.is_empty() {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
+            .map(|m| m.installed_version)
+            .unwrap_or_default();
+        crate::edit_backups::backup_root_files(
+            addons_dir,
             &pu.folder_name,
-            &files_to_backup,
+            &root_files_to_backup,
             &from_version,
             &update_version,
         )?;
     }
 
-    let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
-        None
-    } else {
-        let overrides: HashMap<String, String> = kept_files
-            .iter()
-            .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-            .collect();
-        (!overrides.is_empty()).then_some(overrides)
-    };
+    let hash_overrides = build_hash_overrides(&kept_files, &zip_hashes);
+    let root_hash_overrides = build_root_hash_overrides(&kept_files, &pu.folder_name, &zip_hashes);
+    let root_baseline =
+        (!zip_hashes.root_files.is_empty()).then_some(installer::RootHashBaseline {
+            owner_folder: &pu.folder_name,
+            hashes: &zip_hashes.root_files,
+            overrides: root_hash_overrides.as_ref(),
+        });
 
     // Extract with selective skipping (cancellable, progress-reporting)
-    let empty_overrides = HashMap::new();
-    let installed_folders = installer::install_addon_zip_selective_with_hashes(
+    let empty_overrides = BTreeMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes_and_root(
         &pu.zip_path,
         addons_dir,
         &skip_files,
         hooks,
         pu.esoui_id,
         &update_version,
-        &pu.folder_name,
         hash_overrides.as_ref().unwrap_or(&empty_overrides),
+        root_baseline,
     )?;
 
     // Update metadata
@@ -12626,7 +13002,7 @@ mod tests {
 
         assert_eq!(report.auto_kept_files, Vec::<String>::new());
         assert_eq!(report.conflicts.len(), 1);
-        assert_eq!(report.conflicts[0].relative_path, "icons/a.dds");
+        assert_eq!(report.conflicts[0].relative_path, "MediaAddon/icons/a.dds");
     }
 
     #[test]
@@ -12677,10 +13053,13 @@ mod tests {
             build_conflict_report(&addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
 
         assert_eq!(report.conflicts.len(), 1);
-        assert_eq!(report.conflicts[0].relative_path, "extra.lua");
+        assert_eq!(report.conflicts[0].relative_path, "MyAddon/extra.lua");
         assert_eq!(
             report.safe_files,
-            vec!["same.lua".to_string(), "stock.lua".to_string()]
+            vec![
+                "MyAddon/same.lua".to_string(),
+                "MyAddon/stock.lua".to_string()
+            ]
         );
         assert!(report.has_hash_baseline);
     }
@@ -13074,6 +13453,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tracked_title_match_cannot_become_another_addons_primary() {
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "ExactTitle", 77, "1.0", "u", 0);
+        let candidates = vec!["ExactTitle".to_string(), "NewPrimary".to_string()];
+
+        assert_eq!(
+            determine_primary_folder(&store, &candidates, 3, "ExactTitle"),
+            "NewPrimary",
+            "a title match must not steal a folder tracked under another ESOUI id"
+        );
+    }
+
     /// Removing the parent must not disturb the library it happened to ship.
     #[test]
     fn removing_a_bundling_addon_leaves_the_library_tracked() {
@@ -13196,6 +13588,386 @@ mod tests {
             .addons
             .contains_key("AddonA"));
         assert!(result.cleanup_warnings["AddonA"].contains("hash manifest"));
+    }
+
+    /// The R5 bug, end to end. A bundled sibling folder has a hash baseline and
+    /// its edits are already shown as modified in the file browser - but the
+    /// conflict pipeline only ever classified the archive primary, so the edit
+    /// was overwritten on update with no prompt and no backup.
+    #[test]
+    fn a_modified_file_in_a_bundled_sibling_folder_conflicts() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+
+        for folder in ["MainAddon", "LibFoo"] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), b"-- original").unwrap();
+        }
+        // The user edited the LIBRARY, not the primary.
+        fs::write(addons_dir.join("LibFoo").join("init.lua"), b"-- my edit").unwrap();
+        // The same archive also writes a loose root file. Keep its baseline
+        // with the primary addon, while the conflict key remains qualified so
+        // it can coexist with the sibling conflict in one report.
+        fs::write(addons_dir.join("readme.txt"), b"-- my root edit").unwrap();
+
+        // Both folders have a baseline recording the original bytes.
+        for folder in ["MainAddon", "LibFoo"] {
+            let mut files = HashMap::new();
+            files.insert(
+                "init.lua".to_string(),
+                file_hashes::file_signature(
+                    "init.lua",
+                    &addons_dir.join("MainAddon").join("init.lua"),
+                )
+                .unwrap(),
+            );
+            file_hashes::save_hash_manifest(
+                addons_dir,
+                &file_hashes::HashManifest {
+                    addon_folder: folder.to_string(),
+                    esoui_ids: vec![123],
+                    recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                    installed_version: "1.0".to_string(),
+                    files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut primary = file_hashes::load_hash_manifest(addons_dir, "MainAddon").unwrap();
+        primary.root_files.insert(
+            "readme.txt".to_string(),
+            file_hashes::file_signature("readme.txt", &addons_dir.join("readme.txt")).unwrap(),
+        );
+        file_hashes::save_hash_manifest(addons_dir, &primary).unwrap();
+        fs::write(addons_dir.join("readme.txt"), b"-- my root edit v2").unwrap();
+
+        // The update ships new bytes for both folders.
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("MainAddon/MainAddon.txt", options)
+            .unwrap();
+        archive.write_all(b"## Title: MainAddon").unwrap();
+        archive.start_file("MainAddon/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream v2").unwrap();
+        archive.start_file("LibFoo/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream lib v2").unwrap();
+        archive.start_file("readme.txt", options).unwrap();
+        archive.write_all(b"-- upstream readme v2").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(addons_dir, "MainAddon", &zip_path, "2.0", "session").unwrap();
+
+        assert_eq!(
+            report.folders,
+            vec!["LibFoo".to_string(), "MainAddon".to_string()],
+            "the report must cover every folder the archive writes"
+        );
+        assert_eq!(
+            report.conflicts.len(),
+            2,
+            "sibling and AddOns-root edits must be offered to the user, not silently overwritten"
+        );
+        assert_eq!(
+            report
+                .conflicts
+                .iter()
+                .map(|c| c.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["LibFoo/init.lua", "MainAddon/readme.txt"]
+        );
+        // The primary was untouched by the user, so it updates without asking.
+        assert_eq!(
+            report.safe_files,
+            vec![
+                "MainAddon/MainAddon.txt".to_string(),
+                "MainAddon/init.lua".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_apply_rejects_a_sibling_conflict_that_appeared_after_scan() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        for folder in ["MainAddon", "LibFoo"] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), b"-- baseline").unwrap();
+            file_hashes::record_hashes_for_folders(addons_dir, &[folder.to_string()], 123, "1.0")
+                .unwrap();
+        }
+        fs::write(addons_dir.join("MainAddon/init.lua"), b"-- main edit").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MainAddon/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream main v2").unwrap();
+        archive.start_file("LibFoo/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream lib v2").unwrap();
+        archive.finish().unwrap();
+
+        let (report, zip_hashes) =
+            build_conflict_report(addons_dir, "MainAddon", &zip_path, "2.0", "session").unwrap();
+        assert_eq!(report.conflicts[0].relative_path, "MainAddon/init.lua");
+        let pending = crate::PendingUpdate {
+            zip_path,
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 123,
+            update_version: "2.0".to_string(),
+            artifact_last_update: 0,
+            reviewed_conflicts: report
+                .conflicts
+                .iter()
+                .map(|conflict| conflict.relative_path.clone())
+                .collect(),
+            zip_hashes: Arc::new(zip_hashes),
+        };
+
+        fs::write(addons_dir.join("LibFoo/init.lua"), b"-- fresh lib edit").unwrap();
+        let decisions = vec![FileDecision {
+            relative_path: "MainAddon/init.lua".to_string(),
+            action: "take_update".to_string(),
+        }];
+        let error = update_with_decisions_inner(
+            addons_dir,
+            &pending,
+            &decisions,
+            installer::ExtractHooks::NONE,
+            DependencyPolicy::Skip,
+        )
+        .expect_err("a newly-conflicting sibling must stop the apply");
+
+        assert!(
+            error.contains("LibFoo/init.lua"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("close this review and run Update again"));
+
+        // Exercise the command wrapper's lifecycle boundary, not only the
+        // classifier: this specific error must leave both resources alive so
+        // the still-visible panel can cancel its session before a fresh scan.
+        let pending_store = Mutex::new(HashMap::from([("session".to_string(), pending.clone())]));
+        let outcome =
+            finish_pending_update(&pending_store, "session", &pending.zip_path, Err(error));
+        assert!(outcome.is_err());
+        assert!(pending.zip_path.is_file(), "the pending ZIP must survive");
+        assert!(
+            pending_store.lock().unwrap().contains_key("session"),
+            "the visible conflict panel must retain a cancellable session"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("MainAddon/init.lua")).unwrap(),
+            b"-- main edit"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("LibFoo/init.lua")).unwrap(),
+            b"-- fresh lib edit"
+        );
+    }
+
+    #[test]
+    fn synthetic_auto_kept_decision_cannot_approve_a_new_real_conflict() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        let addon_dir = addons_dir.join("MyAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+        file_hashes::record_hashes_for_folders(addons_dir, &["MyAddon".to_string()], 7, "1.0")
+            .unwrap();
+
+        // Upstream still matches the baseline, while the user's bytes do not:
+        // this is auto-kept at scan time and the UI synthesizes keep_mine.
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MyAddon/main.lua", options).unwrap();
+        archive.write_all(b"-- baseline").unwrap();
+        archive.finish().unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- user edit").unwrap();
+
+        let (report, zip_hashes) =
+            build_conflict_report(addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
+        assert!(report.conflicts.is_empty());
+        assert_eq!(report.auto_kept_files, vec!["MyAddon/main.lua"]);
+
+        let pending = crate::PendingUpdate {
+            zip_path,
+            folder_name: "MyAddon".to_string(),
+            esoui_id: 7,
+            update_version: "2.0".to_string(),
+            artifact_last_update: 0,
+            reviewed_conflicts: Vec::new(),
+            zip_hashes: Arc::new(zip_hashes),
+        };
+
+        // Simulate another locked operation advancing the stored baseline while
+        // the review is open. The same live bytes now genuinely conflict with
+        // the pending ZIP, but the synthetic decision was never user review.
+        let mut manifest = file_hashes::load_hash_manifest(addons_dir, "MyAddon").unwrap();
+        manifest.files.insert(
+            "main.lua".to_string(),
+            "sha256:different-upstream".to_string(),
+        );
+        file_hashes::save_hash_manifest(addons_dir, &manifest).unwrap();
+
+        let decisions = vec![FileDecision {
+            relative_path: "MyAddon/main.lua".to_string(),
+            action: "keep_mine".to_string(),
+        }];
+        let error = update_with_decisions_inner(
+            addons_dir,
+            &pending,
+            &decisions,
+            installer::ExtractHooks::NONE,
+            DependencyPolicy::Skip,
+        )
+        .expect_err("a synthetic decision must not approve an unseen conflict");
+
+        assert!(error.starts_with(CONFLICTS_CHANGED_PREFIX), "{error}");
+        assert!(error.contains("MyAddon/main.lua"), "{error}");
+        assert_eq!(
+            fs::read(addon_dir.join("main.lua")).unwrap(),
+            b"-- user edit",
+            "revalidation must reject before extraction writes anything"
+        );
+    }
+
+    /// Two folders shipping the same relative filename must stay distinct all
+    /// the way through. With bare keys they collided: one decision, one backup
+    /// path and one diff lookup for two genuinely different files.
+    #[test]
+    fn identically_named_files_in_two_folders_do_not_collide() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+
+        for (folder, body) in [("AddonA", "-- a edit"), ("AddonB", "-- b edit")] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), body.as_bytes()).unwrap();
+            let mut files = HashMap::new();
+            files.insert("init.lua".to_string(), "sha256:stale".to_string());
+            file_hashes::save_hash_manifest(
+                addons_dir,
+                &file_hashes::HashManifest {
+                    addon_folder: folder.to_string(),
+                    esoui_ids: vec![1],
+                    recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                    installed_version: "1.0".to_string(),
+                    files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("AddonA/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream a").unwrap();
+        archive.start_file("AddonB/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream b").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(addons_dir, "AddonA", &zip_path, "2.0", "session").unwrap();
+
+        let paths: Vec<&str> = report
+            .conflicts
+            .iter()
+            .map(|c| c.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["AddonA/init.lua", "AddonB/init.lua"]);
+    }
+
+    /// A decision is only ever advisory: the server re-derives the
+    /// classification from current disk state at apply time.
+    ///
+    /// The gap this closes: the user marks a conflict keep-mine, then reverts
+    /// the file to its baseline before applying. Reclassification now says the
+    /// file is safe to update, but the stale decision used to still skip it
+    /// during extraction - leaving the old bytes on disk while the update
+    /// reported success - and then record the upstream hash as its baseline, so
+    /// the divergence would never be flagged again.
+    #[test]
+    fn a_stale_keep_mine_decision_does_not_survive_reclassification() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        let addon_dir = addons_dir.join("MyAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+
+        // Baseline records the pristine bytes.
+        let mut files = HashMap::new();
+        files.insert(
+            "main.lua".to_string(),
+            file_hashes::file_signature("main.lua", &addon_dir.join("main.lua")).unwrap(),
+        );
+        file_hashes::save_hash_manifest(
+            addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "MyAddon".to_string(),
+                esoui_ids: vec![7],
+                recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                installed_version: "1.0".to_string(),
+                files,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MyAddon/main.lua", options).unwrap();
+        archive.write_all(b"-- upstream v2").unwrap();
+        archive.finish().unwrap();
+
+        // While the file is edited it genuinely conflicts.
+        fs::write(addon_dir.join("main.lua"), b"-- user edit").unwrap();
+        let (report, _) =
+            build_conflict_report(addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].relative_path, "MyAddon/main.lua");
+
+        // The user then reverts it, so at apply time nothing conflicts.
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+        let zip_hashes = file_hashes::hash_zip_entries_by_folder(&zip_path).unwrap();
+        let classified = classify_update_archive(addons_dir, "MyAddon", &zip_hashes).unwrap();
+        assert!(
+            classified.conflicts.is_empty(),
+            "reverting the edit must clear the conflict"
+        );
+        assert_eq!(classified.safe_files, vec!["MyAddon/main.lua".to_string()]);
+
+        // The stale keep-mine decision must therefore be ignored: the file is
+        // no longer in the conflict set, so it must not be added to the skip
+        // set that would leave it un-updated.
+        let still_conflicting: HashSet<&str> = classified
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.relative_path.as_str())
+            .collect();
+        assert!(!still_conflicting.contains("MyAddon/main.lua"));
     }
 
     fn profile_of(names: &[&str]) -> AddonProfile {
