@@ -25,7 +25,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | pr-open | `fix/audit-h2-theme-provenance` | [#383](https://github.com/ESO-Toolkit/kalpa/pull/383) | - | not required | REVISE x2; all verified findings addressed | Root check; frontend check; 490 tests | Evidence supports treating the directory as local visual-review output; ignore narrowly without modifying it. |
 | H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
-| H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
+| H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) | - | D-H5-1 | APPROVE after one follow-up; refreshed 2026-08-28 | `npm run check`; `git diff --check`; freshness guard | Point-in-time proposal; PR now targets `main` directly; no branches deleted. |
 | H6 | pr-open | `fix/audit-h6-quick-xml-advisory` | [#387](https://github.com/ESO-Toolkit/kalpa/pull/387) (draft, stacked on W1) | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
 
 ## Decisions
@@ -190,6 +190,14 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 ## Session Log
 
+### 2026-08-28 — Codex (H5 evidence refresh)
+
+- At that time, rebased PR #385 onto the W1 base `origin/fix/audit-w1-worker-consistency`; the PR was later retargeted to `main` after W1 merged.
+- Refreshed the inventory against `origin/main` `fb92cb92` after `git fetch origin --prune`: 38 local safe, 57 local retain, 56 local review; 17 remote safe, 47 remote retain, 59 remote review (274 refs total).
+- GitHub reported no protected branches; open PR heads and all attached worktrees were retained. No branch, ref, worktree, or commit was deleted or moved.
+- Updated the H5 proposal and this tracker; safe candidates are 55 local/remote refs counted separately. Review refs remain explicitly non-candidates pending maintainer inspection.
+- Verification at that time: `git diff --check` and `npm run check` passed; the branch was pushed with force-with-lease. GitHub then reported PR #385 open/draft, `mergeable=true`, `mergeable_state=clean`, base `16f76144`, head `4d3c57f3`; no checks were reported for the docs-only branch. These values are historical observations, not current PR metadata.
+
 ### 2026-08-26 — Codex (F4)
 
 - Active branch: `fix/audit-f4-logout-invalidation`; draft stacked PR [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) targets `fix/audit-f1-import-sequencing`.
@@ -221,6 +229,18 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Environment limitations: two single-job full Slint test attempts reached the final link and were terminated by Windows/LLVM memory exhaustion; the same crate passes strict clippy and its optimized native sidecar build completes. Destructive sandbox verification is blocked because PID 52768 is a user-owned Kalpa process in another T3 worktree and the runner cannot isolate app state; it was not terminated.
 - Review: adversarial Sol review returned REVISE for unguarded live AddOns mutations in the manual editor, Protected Edits restore, cross-instance copy, and batch enable/disable paths. All verified sites were migrated to the shared transaction guard; the final focused follow-up returned APPROVE with no findings, missing tests, or wire-contract changes.
 - Handoff: opened stacked draft PR [#399](https://github.com/ESO-Toolkit/kalpa/pull/399) against `fix/audit-p0-a2-cross-process-locking`. No merge or deployment was performed; the next action is review and merge in stack order after P0-A2.
+
+### 2026-08-26 — Codex (H5)
+
+- Active branch at that time: `fix/audit-h5-branch-pruning-proposal` (then stacked on W1; now retargeted to `main`).
+- Completed: refreshed and pruned stale remote-tracking refs; inventoried 129 local and 111 remote branches against `origin/main`; correlated open PR heads and all attached worktrees; classified 54 safe candidates, 76 retain refs, and 110 needs-human-review refs in `2026-08-h5-branch-pruning-proposal.md`. Refreshed the snapshot after concurrent H1 PR #384, the H3 worktree, and this published H5 branch appeared.
+- Safety: no local or remote branch was deleted, and no branch tip or worktree was moved.
+- Reviews: initial Sol verdict `REVISE` after concurrent H1 PR #384 made the snapshot stale. Refreshed H1 and H3 state, added a mandatory freshness guard, and clarified protection/worktree-counterpart handling. The single follow-up verdict was `APPROVE` with exact count and candidate-set parity.
+- Verification: `npm run check` and `git diff --check` pass after installing locked dependencies in the isolated worktree.
+- Handoff: the final freshness guard matched the proposal exactly, then draft PR [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) was opened against W1.
+- Active work: maintainer review of the proposal only; no cleanup is authorized by this PR.
+- Blockers: none for the proposal. A final pre-PR freshness guard must remain clean; any later cleanup requires explicit maintainer approval naming the branches and another fresh guard recheck.
+- Exact next action: maintainer reviews the 54 proposed candidates and explicitly approves all or a named subset, after which a separate cleanup operation must rerun every guard.
 - Blockers: final Slint test linking and destructive sandbox execution are externally blocked as described above; no implementation blocker.
 ### D-H6-1 — Adopt compatible upstream quick-xml fixes
 
