@@ -18,6 +18,7 @@ mod safe_migration;
 mod saved_variables;
 mod settings_store;
 mod token_store;
+mod transaction_lock;
 pub mod uploader;
 
 // Benchmark-only heap tracker (see `bench_alloc`). Installed solely under the

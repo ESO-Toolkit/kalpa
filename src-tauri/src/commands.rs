@@ -13,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -6018,6 +6018,26 @@ fn load_profiles_with_mirror(
     metadata::load_json_with_backup(&primary)
 }
 
+fn load_profiles_read_only_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+) -> ProfileStore {
+    let primary = profiles_path(addons_dir);
+    let primary_gone = !primary.exists()
+        && !primary.with_extension("json.tmp").exists()
+        && !primary.with_extension("json.bak").exists();
+    if primary_gone {
+        if let Some(mirror) = mirror {
+            if let Ok(content) = fs::read_to_string(mirror) {
+                if let Ok(store) = serde_json::from_str::<ProfileStore>(&content) {
+                    return store;
+                }
+            }
+        }
+    }
+    metadata::load_json_read_only_with_backup(&primary)
+}
+
 fn save_profiles_with_mirror(
     addons_dir: &std::path::Path,
     mirror: Option<&std::path::Path>,
@@ -6055,8 +6075,35 @@ fn profile_store_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn profile_transaction_guard(
+    addons_dir: &std::path::Path,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire(
+        profiles_path(addons_dir),
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn profile_read_transaction_guard(
+    addons_dir: &std::path::Path,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire_read(
+        profiles_path(addons_dir),
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     load_profiles_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+    )
+}
+
+fn load_profiles_read_only(addons_dir: &std::path::Path) -> ProfileStore {
+    load_profiles_read_only_with_mirror(
         addons_dir,
         default_profile_mirror_path(addons_dir).as_deref(),
     )
@@ -6076,7 +6123,9 @@ pub fn list_profiles(
     addons_path: String,
 ) -> Result<(Vec<AddonProfile>, Option<String>), String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let store = load_profiles(&addons_dir);
+    let _guard = profile_store_guard();
+    let _transaction = profile_read_transaction_guard(&addons_dir)?;
+    let store = load_profiles_read_only(&addons_dir);
     Ok((store.profiles, store.active_profile))
 }
 
@@ -6129,6 +6178,7 @@ pub async fn create_profile(
         let enabled_addons = snapshot_enabled_addons(&addons_dir);
 
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
 
         if store.profiles.iter().any(|p| p.name == profile_name) {
@@ -6437,6 +6487,7 @@ pub async fn activate_profile(
     tokio::task::spawn_blocking(move || {
         let profile = {
             let _guard = profile_store_guard();
+            let _transaction = profile_transaction_guard(&addons_dir)?;
             let store = load_profiles(&addons_dir);
             store
                 .profiles
@@ -6453,6 +6504,7 @@ pub async fn activate_profile(
         // Re-load rather than writing the pre-apply snapshot back: a profile
         // created, renamed or deleted while the renames ran must survive.
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
@@ -6474,7 +6526,11 @@ pub async fn preview_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        let store = load_profiles(&addons_dir);
+        let store = {
+            let _guard = profile_store_guard();
+            let _transaction = profile_read_transaction_guard(&addons_dir)?;
+            load_profiles_read_only(&addons_dir)
+        };
         let profile = store
             .profiles
             .iter()
@@ -6503,6 +6559,7 @@ pub async fn update_profile(
         let enabled = snapshot_enabled_addons(&addons_dir);
 
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
 
         let profile = store
@@ -6533,6 +6590,7 @@ pub fn rename_profile(
     validate_name(&new_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let mut store = load_profiles(&addons_dir);
 
     if old_name == new_name {
@@ -6564,6 +6622,7 @@ pub fn delete_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let mut store = load_profiles(&addons_dir);
 
     store.profiles.retain(|p| p.name != profile_name);
@@ -10091,8 +10150,11 @@ pub fn update_tray_tooltip(
 /// instead of the plugin-store `save()` so writes are crash-safe (write-temp +
 /// fsync + atomic rename); see `settings_store`.
 #[tauri::command]
-pub async fn flush_settings(app: tauri::AppHandle) -> Result<(), String> {
-    crate::settings_store::flush(&app)
+pub async fn flush_settings(
+    app: tauri::AppHandle,
+    entries: BTreeMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    crate::settings_store::flush_entries(&app, entries)
 }
 
 /// Whether the settings store opened TAINTED (empty over an unreadable settings
@@ -10530,6 +10592,16 @@ fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String
 /// trap the user in a no-UI crash loop. Best-effort: an unreadable settings
 /// file simply leaves the gate to fail open into the webview next launch.
 fn revert_performance_mode_to_webview(settings_path: &Path) {
+    let _transaction = match crate::transaction_lock::acquire(
+        settings_path,
+        crate::transaction_lock::LockOptions::default(),
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("Could not lock settings while reverting native mode: {error}");
+            return;
+        }
+    };
     let Ok(content) = fs::read_to_string(settings_path) else {
         return;
     };
@@ -12210,6 +12282,32 @@ mod tests {
 
         let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
         assert_eq!(loaded.profiles[0].name, "newer");
+    }
+
+    #[test]
+    fn read_only_profile_load_does_not_promote_legacy_recovery_file() {
+        let addons = tempfile::tempdir().unwrap();
+        let primary = profiles_path(addons.path());
+        let legacy_tmp = primary.with_extension("json.tmp");
+        let store = ProfileStore {
+            profiles: vec![profile_of(&["Recovered"])],
+            active_profile: Some("test".to_string()),
+        };
+        fs::write(&legacy_tmp, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let loaded = load_profiles_read_only_with_mirror(addons.path(), None);
+
+        assert_eq!(loaded.profiles[0].name, "test");
+        assert_eq!(loaded.profiles[0].enabled_addons, vec!["Recovered"]);
+        assert_eq!(loaded.active_profile.as_deref(), Some("test"));
+        assert!(
+            !primary.exists(),
+            "a read-only load must not publish a primary"
+        );
+        assert!(
+            legacy_tmp.exists(),
+            "a read-only load must not remove the recovery file"
+        );
     }
 
     #[test]

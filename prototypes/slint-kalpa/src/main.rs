@@ -4,6 +4,8 @@ slint::include_modules!();
 
 #[path = "../../../src-tauri/src/atomic_file.rs"]
 mod atomic_file;
+#[path = "../../../src-tauri/src/transaction_lock.rs"]
+mod transaction_lock;
 
 #[path = "native_char_backup.rs"]
 mod char_backup;
@@ -500,7 +502,7 @@ struct NativeCustomThemeStore {
     themes: Vec<CatalogTheme>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct NativeSettings {
     auto_update: bool,
@@ -7098,7 +7100,11 @@ fn pack_iso_date_label(value: &str) -> Option<String> {
 }
 
 fn apply_initial_native_settings(ui: &KalpaWindow) {
-    apply_native_settings(ui, &read_native_settings());
+    let settings = read_native_settings();
+    *native_settings_baseline()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(settings.clone());
+    apply_native_settings(ui, &settings);
     ui.set_settings_addons_path(configured_addons_path_display().into());
 }
 
@@ -10227,10 +10233,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         set_theme_draft_color_fields(&ui, &draft.colors);
         set_theme_draft_contrast(&ui, &draft.colors);
 
-        let mut custom_themes = save_custom_themes.borrow_mut();
-        upsert_custom_theme(&mut custom_themes, draft.clone());
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let saved_draft = draft.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            upsert_custom_theme(themes, saved_draft);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme save failed: {error}").into());
+                return;
+            }
+        };
+        *save_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &save_custom_themes.borrow());
         set_theme_draft(&ui, &draft, false);
         *save_draft.borrow_mut() = draft.clone();
         apply_theme_selection(
@@ -10291,10 +10305,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         };
 
         let theme_id = theme_id.to_string();
-        let mut custom_themes = delete_custom_themes.borrow_mut();
-        custom_themes.retain(|theme| theme.id != theme_id);
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let deleted_theme_id = theme_id.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            themes.retain(|theme| theme.id != deleted_theme_id);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme delete failed: {error}").into());
+                return;
+            }
+        };
+        *delete_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &delete_custom_themes.borrow());
         ui.set_settings_editor_open(false);
 
         if ui.get_active_theme_id().as_str() == theme_id {
@@ -10390,10 +10412,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
             return;
         };
 
-        let mut custom_themes = import_custom_themes.borrow_mut();
-        upsert_custom_theme(&mut custom_themes, theme.clone());
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let imported_theme = theme.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            upsert_custom_theme(themes, imported_theme);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme import failed: {error}").into());
+                return;
+            }
+        };
+        *import_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &import_custom_themes.borrow());
         apply_theme_selection(
             &ui,
             &ThemeSelection::with_skin(theme.colors.clone(), theme.skin_id.as_deref()),
@@ -15200,12 +15230,13 @@ fn persist_addons_path(addons_path: &str) -> Result<(), String> {
 }
 
 fn persist_addons_path_to_settings_path(path: &Path, addons_path: &str) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_ADDONS_PATH.to_string(),
-        serde_json::Value::String(addons_path.to_string()),
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_ADDONS_PATH.to_string(),
+            serde_json::Value::String(addons_path.to_string()),
+        );
+        Ok(())
+    })
 }
 
 fn read_installed_pack_refs() -> Vec<NativeInstalledPackRef> {
@@ -15233,24 +15264,40 @@ fn read_installed_pack_refs_from_settings_path(
         .map_err(|error| format!("Failed to parse installed packs: {error}"))
 }
 
-fn persist_installed_pack_refs(refs: &[NativeInstalledPackRef]) -> Result<(), String> {
-    let Some(path) = native_settings_store_path() else {
-        return Err("settings store path was not available".to_string());
-    };
-    persist_installed_pack_refs_to_settings_path(&path, refs)
-}
-
-fn persist_installed_pack_refs_to_settings_path(
+fn update_installed_pack_refs_to_settings_path(
     path: &Path,
-    refs: &[NativeInstalledPackRef],
-) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_INSTALLED_PACKS.to_string(),
-        serde_json::to_value(normalize_installed_pack_refs(refs.to_vec()))
-            .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
-    );
-    write_settings_store_object_to_path(path, object)
+    fallback_paths: &[PathBuf],
+    mutate: impl FnOnce(&mut Vec<NativeInstalledPackRef>),
+) -> Result<Vec<NativeInstalledPackRef>, String> {
+    update_settings_store_object_to_path(path, |object| {
+        let mut refs = match object.get(STORE_KEY_INSTALLED_PACKS).cloned() {
+            Some(value) => serde_json::from_value::<Vec<NativeInstalledPackRef>>(value)
+                .map(normalize_installed_pack_refs)
+                .map_err(|error| format!("Failed to parse installed packs: {error}"))?,
+            None => {
+                let mut fallback = Vec::new();
+                for fallback_path in fallback_paths {
+                    match read_installed_pack_refs_from_settings_path(fallback_path)? {
+                        Some(refs) => {
+                            fallback = refs;
+                            break;
+                        }
+                        None => continue,
+                    }
+                }
+                fallback
+            }
+        };
+
+        mutate(&mut refs);
+        refs = normalize_installed_pack_refs(refs);
+        object.insert(
+            STORE_KEY_INSTALLED_PACKS.to_string(),
+            serde_json::to_value(&refs)
+                .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
+        );
+        Ok(refs)
+    })
 }
 
 fn normalize_installed_pack_refs(refs: Vec<NativeInstalledPackRef>) -> Vec<NativeInstalledPackRef> {
@@ -15286,21 +15333,24 @@ fn upsert_installed_pack_ref(entry: &PackHubEntry) -> Result<Vec<NativeInstalled
         installed_at: current_iso_utc(),
     };
 
-    let mut refs = read_installed_pack_refs();
-    refs.retain(|existing| existing.pack_id != reference.pack_id);
-    refs.insert(0, reference);
-    persist_installed_pack_refs(&refs)?;
-    Ok(refs)
+    let paths = native_settings_store_paths();
+    let Some((path, fallback_paths)) = paths.split_first() else {
+        return Err("settings store path was not available".to_string());
+    };
+    update_installed_pack_refs_to_settings_path(path, fallback_paths, |refs| {
+        refs.retain(|existing| existing.pack_id != reference.pack_id);
+        refs.insert(0, reference);
+    })
 }
 
 fn remove_installed_pack_ref(pack_id: &str) -> Result<Vec<NativeInstalledPackRef>, String> {
-    let mut refs = read_installed_pack_refs();
-    let before = refs.len();
-    refs.retain(|reference| reference.pack_id != pack_id);
-    if refs.len() != before {
-        persist_installed_pack_refs(&refs)?;
-    }
-    Ok(refs)
+    let paths = native_settings_store_paths();
+    let Some((path, fallback_paths)) = paths.split_first() else {
+        return Err("settings store path was not available".to_string());
+    };
+    update_installed_pack_refs_to_settings_path(path, fallback_paths, |refs| {
+        refs.retain(|reference| reference.pack_id != pack_id);
+    })
 }
 
 fn parse_addon_count_label(label: &str) -> usize {
@@ -18908,12 +18958,13 @@ fn persist_active_theme_id(theme_id: &str) {
 }
 
 fn persist_active_theme_id_to_settings_path(path: &Path, theme_id: &str) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_ACTIVE_THEME.to_string(),
-        serde_json::Value::String(theme_id.to_string()),
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_ACTIVE_THEME.to_string(),
+            serde_json::Value::String(theme_id.to_string()),
+        );
+        Ok(())
+    })
 }
 
 fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), String> {
@@ -18966,32 +19017,64 @@ fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String
         .map_err(|error| format!("Failed to parse custom themes: {error}"))
 }
 
-fn persist_custom_themes(custom_themes: &[CatalogTheme]) {
-    if let Some(path) = native_settings_store_path() {
-        if let Err(error) = persist_custom_themes_to_settings_path(&path, custom_themes) {
-            eprintln!("Failed to persist native custom themes: {error}");
-        }
-        return;
+fn update_custom_themes(
+    mutate: impl FnOnce(&mut Vec<CatalogTheme>),
+) -> Result<Vec<CatalogTheme>, String> {
+    let settings_paths = native_settings_store_paths();
+    if let Some((path, fallback_paths)) = settings_paths.split_first() {
+        return update_custom_themes_in_settings_path(path, fallback_paths, mutate);
     }
 
-    if let Some(path) = custom_theme_store_path() {
-        if let Err(error) = persist_custom_themes_to_path(&path, custom_themes) {
-            eprintln!("Failed to persist native custom themes: {error}");
-        }
-    }
+    let Some(path) = custom_theme_store_path() else {
+        return Err("custom theme store path was not available".to_string());
+    };
+    let _transaction = transaction_lock::acquire(&path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let mut themes = read_custom_themes_from_path(&path)?;
+    mutate(&mut themes);
+    themes = normalize_custom_themes(themes);
+    persist_custom_themes_to_path(&path, &themes)?;
+    Ok(themes)
 }
 
-fn persist_custom_themes_to_settings_path(
+fn update_custom_themes_in_settings_path(
     path: &Path,
-    custom_themes: &[CatalogTheme],
-) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_CUSTOM_THEMES.to_string(),
-        serde_json::to_value(normalize_custom_themes(custom_themes.to_vec()))
-            .map_err(|error| format!("Failed to serialize production custom themes: {error}"))?,
-    );
-    write_settings_store_object_to_path(path, object)
+    fallback_paths: &[PathBuf],
+    mutate: impl FnOnce(&mut Vec<CatalogTheme>),
+) -> Result<Vec<CatalogTheme>, String> {
+    update_settings_store_object_to_path(path, |object| {
+        let mut themes = match object.get(STORE_KEY_CUSTOM_THEMES).cloned() {
+            Some(value) => serde_json::from_value::<Vec<CatalogTheme>>(value)
+                .map(normalize_custom_themes)
+                .map_err(|error| format!("Failed to parse production custom themes: {error}"))?,
+            None => {
+                let mut fallback = None;
+                for fallback_path in fallback_paths {
+                    if let Some(themes) = read_custom_themes_from_settings_path(fallback_path)? {
+                        fallback = Some(themes);
+                        break;
+                    }
+                }
+                match fallback {
+                    Some(themes) => themes,
+                    None => custom_theme_store_path()
+                        .map(|fallback_path| read_custom_themes_from_path(&fallback_path))
+                        .transpose()?
+                        .unwrap_or_default(),
+                }
+            }
+        };
+
+        mutate(&mut themes);
+        themes = normalize_custom_themes(themes);
+        object.insert(
+            STORE_KEY_CUSTOM_THEMES.to_string(),
+            serde_json::to_value(&themes).map_err(|error| {
+                format!("Failed to serialize production custom themes: {error}")
+            })?,
+        );
+        Ok(themes)
+    })
 }
 
 fn persist_custom_themes_to_path(
@@ -19028,20 +19111,28 @@ fn read_settings_store_key_from_path(
 fn read_settings_store_object_from_path(
     path: &Path,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match read_settings_store_value_from_path(path)? {
+        None => Ok(serde_json::Map::default()),
+        Some(serde_json::Value::Object(object)) => Ok(object),
+        Some(_) => Err("Failed to parse settings store: root must be a JSON object".to_string()),
+    }
+}
+
+fn read_settings_store_value_from_path(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Failed to read settings store: {error}")),
     };
 
     let contents = json_without_bom(&contents);
     if contents.trim().is_empty() {
-        return Ok(Default::default());
+        return Ok(None);
     }
 
     serde_json::from_str::<serde_json::Value>(contents)
         .map_err(|error| format!("Failed to parse settings store: {error}"))
-        .map(|value| value.as_object().cloned().unwrap_or_default())
+        .map(Some)
 }
 
 fn write_settings_store_object_to_path(
@@ -19051,6 +19142,18 @@ fn write_settings_store_object_to_path(
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(object))
         .map_err(|error| format!("Failed to serialize settings store: {error}"))?;
     write_string_atomic(path, &json)
+}
+
+fn update_settings_store_object_to_path<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let mut object = read_settings_store_object_from_path(path)?;
+    let result = mutate(&mut object)?;
+    write_settings_store_object_to_path(path, object)?;
+    Ok(result)
 }
 
 fn read_native_settings() -> NativeSettings {
@@ -19065,21 +19168,7 @@ fn read_native_settings() -> NativeSettings {
 }
 
 fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(NativeSettings::default());
-        }
-        Err(error) => return Err(format!("Failed to read native settings: {error}")),
-    };
-
-    let contents = json_without_bom(&contents);
-    if contents.trim().is_empty() {
-        return Ok(NativeSettings::default());
-    }
-
-    let value = serde_json::from_str::<serde_json::Value>(contents)
-        .map_err(|error| format!("Failed to parse native settings: {error}"))?;
+    let value = serde_json::Value::Object(read_settings_store_object_from_path(path)?);
     Ok(native_settings_from_store_value(&value))
 }
 
@@ -19092,20 +19181,59 @@ fn persist_native_settings(settings: &NativeSettings) {
         return;
     };
 
-    if let Err(error) = persist_native_settings_to_path(&path, settings) {
+    // The settings callback supplies the whole UI snapshot even though one
+    // control changed. Compare it to this shell's last snapshot, then merge only
+    // those changed fields into the latest disk object under the OS lock. This
+    // prevents a stale, unchanged Slint field from erasing a newer Tauri value.
+    let mut baseline = native_settings_baseline()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let before = baseline
+        .clone()
+        .unwrap_or_else(|| read_native_settings_from_path(&path).unwrap_or_default());
+    if let Err(error) = persist_native_settings_delta_to_path(&path, &before, settings) {
         eprintln!("Failed to persist native settings: {error}");
+    } else {
+        *baseline = Some(normalize_native_settings(settings.clone()));
     }
 }
 
-fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
-    let mut settings = settings.clone();
+fn native_settings_baseline() -> &'static Mutex<Option<NativeSettings>> {
+    static BASELINE: OnceLock<Mutex<Option<NativeSettings>>> = OnceLock::new();
+    BASELINE.get_or_init(|| Mutex::new(None))
+}
+
+fn normalize_native_settings(mut settings: NativeSettings) -> NativeSettings {
     settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
     settings.uploader_region = settings.uploader_region.clamp(1, 2);
     settings.uploader_visibility = settings.uploader_visibility.clamp(0, 2);
-    let existing = fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+    settings
+}
+
+#[cfg(test)]
+fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let settings = normalize_native_settings(settings.clone());
+    let existing = read_settings_store_object_from_path(path)?;
     let store_value = native_settings_to_store_value(&settings, existing);
+    let json = serde_json::to_string_pretty(&store_value)
+        .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
+    write_string_atomic(path, &json)
+        .map_err(|error| format!("Failed to write native settings: {error}"))
+}
+
+fn persist_native_settings_delta_to_path(
+    path: &Path,
+    baseline: &NativeSettings,
+    settings: &NativeSettings,
+) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let baseline = normalize_native_settings(baseline.clone());
+    let settings = normalize_native_settings(settings.clone());
+    let existing = read_settings_store_object_from_path(path)?;
+    let store_value = native_settings_delta_to_store_value(&baseline, &settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
     write_string_atomic(path, &json)
@@ -19204,13 +19332,12 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
     }
 }
 
+#[cfg(test)]
 fn native_settings_to_store_value(
     settings: &NativeSettings,
-    existing: Option<serde_json::Value>,
+    existing: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut object = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut object = existing;
 
     object.remove("warnEsoRunning");
     object.remove("officialUploader");
@@ -19250,6 +19377,71 @@ fn native_settings_to_store_value(
         "uploaderVisibility".to_string(),
         serde_json::Value::Number(settings.uploader_visibility.clamp(0, 2).into()),
     );
+
+    serde_json::Value::Object(object)
+}
+
+fn native_settings_delta_to_store_value(
+    baseline: &NativeSettings,
+    settings: &NativeSettings,
+    existing: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut object = existing;
+
+    if baseline.auto_update != settings.auto_update {
+        object.insert(
+            "autoUpdate".to_string(),
+            serde_json::Value::Bool(settings.auto_update),
+        );
+    }
+    if baseline.warn_eso_running != settings.warn_eso_running {
+        object.remove("warnEsoRunning");
+        object.insert(
+            "suppressEsoRunningWarning".to_string(),
+            serde_json::Value::Bool(!settings.warn_eso_running),
+        );
+    }
+    if baseline.native_performance_mode != settings.native_performance_mode {
+        object.insert(
+            STORE_KEY_PERFORMANCE_MODE.to_string(),
+            native_performance_mode_to_store_value(settings.native_performance_mode),
+        );
+    }
+    if baseline.official_uploader != settings.official_uploader {
+        object.remove("officialUploader");
+        object.insert(
+            "manualUseOfficialUploader".to_string(),
+            serde_json::Value::Bool(settings.official_uploader),
+        );
+        object.insert(
+            "liveUseOfficialUploader".to_string(),
+            serde_json::Value::Bool(settings.official_uploader),
+        );
+    }
+    if baseline.auto_open_analysis != settings.auto_open_analysis {
+        object.insert(
+            "autoOpenAnalysis".to_string(),
+            serde_json::Value::Bool(settings.auto_open_analysis),
+        );
+    }
+    if baseline.conflict_policy != settings.conflict_policy {
+        object.insert(
+            "conflictPolicy".to_string(),
+            conflict_policy_to_store_value(settings.conflict_policy),
+        );
+    }
+    if baseline.uploader_region != settings.uploader_region {
+        object.insert(
+            "uploaderRegion".to_string(),
+            serde_json::Value::Number(settings.uploader_region.into()),
+        );
+    }
+    if baseline.uploader_visibility != settings.uploader_visibility {
+        object.insert(
+            "uploaderVisibility".to_string(),
+            serde_json::Value::Number(settings.uploader_visibility.into()),
+        );
+    }
 
     serde_json::Value::Object(object)
 }
@@ -19783,7 +19975,7 @@ mod tests {
         fs::write(&path, r#"{"conflictPolicy":"ask"}"#).expect("seed settings store");
         let theme = sample_custom_theme("custom-one", "Custom One");
 
-        persist_custom_themes_to_settings_path(&path, std::slice::from_ref(&theme))
+        update_custom_themes_in_settings_path(&path, &[], |themes| themes.push(theme.clone()))
             .expect("persist custom themes");
         let themes = read_custom_themes_from_settings_path(&path)
             .expect("read production custom themes")
@@ -19869,6 +20061,50 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_native_settings_writers_preserve_both_keys() {
+        let root = test_temp_dir("settings-concurrent-writers");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            for _ in 0..10 {
+                persist_addons_path_to_settings_path(&left_path, "D:/ESO/live/AddOns")?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok::<(), String>(())
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            for _ in 0..10 {
+                persist_active_theme_id_to_settings_path(&right_path, "apocrypha-ink")?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok::<(), String>(())
+        });
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let object = read_settings_store_object_from_path(&path).unwrap();
+        assert_eq!(
+            object
+                .get(STORE_KEY_ADDONS_PATH)
+                .and_then(serde_json::Value::as_str),
+            Some("D:/ESO/live/AddOns")
+        );
+        assert_eq!(
+            object
+                .get(STORE_KEY_ACTIVE_THEME)
+                .and_then(serde_json::Value::as_str),
+            Some("apocrypha-ink")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn installed_pack_refs_round_trip_through_production_settings_key() {
         let root = test_temp_dir("installed-packs-production");
         let path = root.join("settings.json");
@@ -19893,8 +20129,10 @@ mod tests {
             },
         ];
 
-        persist_installed_pack_refs_to_settings_path(&path, &refs)
-            .expect("persist installed packs");
+        update_installed_pack_refs_to_settings_path(&path, &[], |installed| {
+            installed.extend(refs.clone());
+        })
+        .expect("persist installed packs");
         let restored = read_installed_pack_refs_from_settings_path(&path)
             .expect("read installed packs")
             .expect("installed packs key exists");
@@ -19916,6 +20154,91 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .is_some());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_installed_pack_mutations_preserve_both_updates() {
+        let root = test_temp_dir("installed-packs-concurrent-mutations");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+
+        let make_ref = |pack_id: &str| NativeInstalledPackRef {
+            pack_id: pack_id.to_string(),
+            title: format!("Pack {pack_id}"),
+            pack_type: "addon-pack".to_string(),
+            author_name: "Kalpa".to_string(),
+            addon_count: 1,
+            installed_at: "2026-08-29T00:00:00Z".to_string(),
+        };
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_ref = make_ref("left");
+        let right_ref = make_ref("right");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            update_installed_pack_refs_to_settings_path(&left_path, &[], |refs| {
+                refs.push(left_ref);
+            })
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            update_installed_pack_refs_to_settings_path(&right_path, &[], |refs| {
+                refs.push(right_ref);
+            })
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let restored = read_installed_pack_refs_from_settings_path(&path)
+            .unwrap()
+            .unwrap();
+        let ids = restored
+            .iter()
+            .map(|reference| reference.pack_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["left", "right"]));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_custom_theme_mutations_preserve_both_updates() {
+        let root = test_temp_dir("custom-themes-concurrent-mutations");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_theme = sample_custom_theme("left", "Left");
+        let right_theme = sample_custom_theme("right", "Right");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            update_custom_themes_in_settings_path(&left_path, &[], |themes| {
+                upsert_custom_theme(themes, left_theme);
+            })
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            update_custom_themes_in_settings_path(&right_path, &[], |themes| {
+                upsert_custom_theme(themes, right_theme);
+            })
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let restored = read_custom_themes_from_settings_path(&path)
+            .unwrap()
+            .unwrap();
+        let ids = restored
+            .iter()
+            .map(|theme| theme.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["left", "right"]));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -20621,6 +20944,152 @@ mod tests {
         assert!(object.get("warnEsoRunning").is_none());
         assert!(object.get("officialUploader").is_none());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_preserves_newer_tauri_field() {
+        let root = test_temp_dir("native-settings-delta");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        fs::write(
+            &path,
+            serde_json::json!({
+                "autoUpdate": true,
+                "suppressEsoRunningWarning": false
+            })
+            .to_string(),
+        )
+        .expect("seed newer Tauri setting");
+        let mut desired = baseline.clone();
+        desired.warn_eso_running = false;
+
+        persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect("persist unrelated Slint setting");
+
+        let object = read_settings_store_object_from_path(&path).unwrap();
+        assert_eq!(
+            object
+                .get("autoUpdate")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the stale Slint snapshot must not overwrite Tauri's newer field"
+        );
+        assert_eq!(
+            object
+                .get("suppressEsoRunningWarning")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_rejects_malformed_store_without_overwriting_it() {
+        let root = test_temp_dir("native-settings-malformed-store");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let malformed = br#"{"autoUpdate": true"#;
+        fs::write(&path, malformed).expect("seed malformed settings store");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect_err("malformed settings must stop the transaction");
+
+        assert!(error.contains("Failed to parse settings store"));
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_writers_reject_non_object_roots_without_overwriting_them() {
+        let root = test_temp_dir("settings-non-object-root");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        for invalid in [b"[]".as_slice(), b"null", b"42", br#""scalar""#] {
+            fs::write(&path, invalid).expect("seed non-object settings store");
+            let error = update_settings_store_object_to_path(&path, |object| {
+                object.insert("autoUpdate".to_string(), serde_json::Value::Bool(true));
+                Ok(())
+            })
+            .expect_err("semantic settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = match read_native_settings_from_path(&path) {
+                Ok(_) => panic!("native settings reads must reject a non-object root"),
+                Err(error) => error,
+            };
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+                .expect_err("native settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_rejects_read_failure_without_replacing_target() {
+        let root = test_temp_dir("native-settings-read-failure");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&path).expect("create directory at settings path");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect_err("unreadable settings target must stop the transaction");
+
+        assert!(error.contains("Failed to read settings store"));
+        assert!(
+            path.is_dir(),
+            "the failed transaction must not replace the target"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_full_native_snapshots_merge_independent_changes() {
+        let root = test_temp_dir("native-settings-full-snapshot-race");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let baseline = NativeSettings::default();
+        let mut left = baseline.clone();
+        left.auto_update = true;
+        let mut right = baseline.clone();
+        right.uploader_visibility = 0;
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_baseline = baseline.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left_writer = std::thread::spawn(move || {
+            left_start.wait();
+            persist_native_settings_delta_to_path(&left_path, &left_baseline, &left)
+        });
+        let right_writer = std::thread::spawn(move || {
+            start.wait();
+            persist_native_settings_delta_to_path(&right_path, &baseline, &right)
+        });
+
+        left_writer.join().unwrap().unwrap();
+        right_writer.join().unwrap().unwrap();
+
+        let saved = read_native_settings_from_path(&path).unwrap();
+        assert!(saved.auto_update);
+        assert_eq!(saved.uploader_visibility, 0);
         let _ = fs::remove_dir_all(root);
     }
 

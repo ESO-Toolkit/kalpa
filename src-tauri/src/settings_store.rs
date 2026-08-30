@@ -54,6 +54,11 @@ const STORE_FILE: &str = "settings.json";
 /// sync with `STORE_RELOADED_SIGNAL` in `src/lib/store.ts`.
 const STORE_RELOADED_SIGNAL: &str = "settings-store-reloaded";
 
+/// Publication already succeeded, but refreshing the plugin cache did not.
+/// The frontend must preserve its attempted values and report success because
+/// rolling them back would make memory disagree with the committed file.
+const STORE_COMMITTED_SIGNAL: &str = "settings-store-committed";
+
 /// Attempts to (re)load the settings file at startup before giving up and
 /// tainting. A transient lock on this tiny file clears well within this window,
 /// so the frontend never sees the empty cache in the realistic case.
@@ -130,9 +135,8 @@ fn staging_files(main: &Path) -> Vec<PathBuf> {
 /// would need a platform-specific write-through replace (e.g. `MoveFileExW` with
 /// `MOVEFILE_WRITE_THROUGH`).
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    // This mutex orders in-process settings saves only. The shared publisher
-    // prevents torn files; P0-A2 adds the cross-process RMW transaction lock.
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Callers that perform read-modify-write take WRITE_LOCK and the shared
+    // transaction lock before reaching this crash-safe publisher.
     crate::atomic_file::atomic_write(path, bytes)
 }
 
@@ -227,7 +231,13 @@ fn settings_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 /// store is first opened, so the repaired file is what the plugin's load() reads.
 pub fn recover<R: Runtime>(app: &AppHandle<R>) {
     if let Some(path) = settings_path(app) {
-        recover_path(&path);
+        match crate::transaction_lock::acquire(
+            &path,
+            crate::transaction_lock::LockOptions::default(),
+        ) {
+            Ok(_guard) => recover_path(&path),
+            Err(error) => eprintln!("[settings_store] recovery skipped: {error}"),
+        }
     }
 }
 
@@ -289,7 +299,10 @@ pub fn ensure_loaded<R: Runtime>(app: &AppHandle<R>) {
 /// replacing the plugin's non-atomic `Store::save`. Errors (rather than silently
 /// succeeding) if the store isn't open — which only happens after shutdown
 /// detach — so a caller can tell its write was not persisted.
-pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+pub fn flush_entries<R: Runtime>(
+    app: &AppHandle<R>,
+    entries: BTreeMap<String, JsonValue>,
+) -> Result<(), String> {
     let Some(store) = app.get_store(STORE_FILE) else {
         // The store is only absent after `detach_on_exit` removes it during
         // shutdown. Report a real error rather than a false success, so a write
@@ -299,6 +312,14 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     };
 
     let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
+
+    // Local callers always take WRITE_LOCK before the OS lock. Both shells use
+    // this exact sibling lock identity, so the disk reload and atomic publish
+    // below are one cross-process transaction.
+    let _local = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _transaction =
+        crate::transaction_lock::acquire(&path, crate::transaction_lock::LockOptions::default())
+            .map_err(|e| e.to_string())?;
 
     if SETTINGS_TAINTED.load(Ordering::SeqCst) {
         // The store opened empty over a file that may hold real settings. The cache
@@ -316,14 +337,41 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Err(STORE_RELOADED_SIGNAL.to_string());
     }
 
-    // Snapshot the cache into a sorted map: deterministic key order keeps the
-    // on-disk file stable across saves (smaller diffs) and is still exactly what
-    // the plugin deserialises back. 2-space pretty output matches the plugin's
-    // default serializer, so the file format is unchanged.
-    let cache: BTreeMap<String, JsonValue> = store.entries().into_iter().collect();
-    let bytes = serde_json::to_vec_pretty(&cache).map_err(|e| e.to_string())?;
+    let mut current = match fs::read(&path) {
+        Ok(bytes) => parse_settings_map(&bytes).map_err(|e| e.to_string())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(format!("could not read current settings: {error}")),
+    };
+    current.extend(entries);
+    let bytes = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
+    atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
+    store
+        .reload_ignore_defaults()
+        .map_err(|e| format!("{STORE_COMMITTED_SIGNAL}: cache reload failed: {e}"))
+}
 
-    atomic_write(&path, &bytes).map_err(|e| e.to_string())
+pub fn delete_entries<R: Runtime>(app: &AppHandle<R>, keys: &[&str]) -> Result<(), String> {
+    let Some(store) = app.get_store(STORE_FILE) else {
+        return Err("settings store is not open".to_string());
+    };
+    let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
+    let _local = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _transaction =
+        crate::transaction_lock::acquire(&path, crate::transaction_lock::LockOptions::default())
+            .map_err(|e| e.to_string())?;
+    let mut current = match fs::read(&path) {
+        Ok(bytes) => parse_settings_map(&bytes).map_err(|e| e.to_string())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(format!("could not read current settings: {error}")),
+    };
+    for key in keys {
+        current.remove(*key);
+    }
+    let bytes = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
+    atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
+    store
+        .reload_ignore_defaults()
+        .map_err(|e| format!("{STORE_COMMITTED_SIGNAL}: cache reload failed: {e}"))
 }
 
 /// Whether the settings store is currently TAINTED — it opened empty over a
