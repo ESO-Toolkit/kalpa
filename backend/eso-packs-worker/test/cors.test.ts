@@ -50,8 +50,10 @@ describe("corsHeaders", () => {
   });
 
   it("always varies on Origin so shared caches can't replay one origin's ACAO", () => {
-    expect(corsHeaders(requestWithOrigin(null)).Vary).toBe("Origin");
-    expect(corsHeaders(requestWithOrigin("http://localhost:1430")).Vary).toBe("Origin");
+    expect(corsHeaders(requestWithOrigin(null)).Vary).toBe("Origin, Authorization");
+    expect(corsHeaders(requestWithOrigin("http://localhost:1430")).Vary).toBe(
+      "Origin, Authorization",
+    );
   });
 });
 

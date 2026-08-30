@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use crate::install_txn::InstallTransaction;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -82,6 +83,7 @@ fn is_cancelled(hooks: &ExtractHooks) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_addon_zip_selective(
     zip_path: &Path,
     addons_dir: &Path,
@@ -91,13 +93,14 @@ pub fn extract_addon_zip_selective(
 }
 
 /// Like [`extract_addon_zip_selective`] but with cancellation/progress hooks.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_addon_zip_selective_with(
     zip_path: &Path,
     addons_dir: &Path,
     skip_files: &HashSet<String>,
     hooks: ExtractHooks,
 ) -> Result<Vec<String>, String> {
-    extract_with_rollback(zip_path, addons_dir, skip_files, hooks)
+    extract_with_rollback(zip_path, addons_dir, skip_files, hooks, None)
 }
 
 pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<String>, String> {
@@ -110,18 +113,71 @@ pub fn extract_addon_zip_with(
     addons_dir: &Path,
     hooks: ExtractHooks,
 ) -> Result<Vec<String>, String> {
-    extract_with_rollback(zip_path, addons_dir, &HashSet::new(), hooks)
+    extract_with_rollback(zip_path, addons_dir, &HashSet::new(), hooks, None)
 }
 
-/// Shared extraction driver: snapshot which top-level folders already exist, run
-/// the inner loop, and on ANY error (including a user cancel) remove only the
-/// folders that were newly created — never the user's pre-existing addon during a
-/// failed/cancelled update. An empty `skip_files` extracts everything.
+pub fn install_addon_zip_with_hashes(
+    zip_path: &Path,
+    addons_dir: &Path,
+    esoui_id: u32,
+    version: &str,
+    hooks: ExtractHooks,
+) -> Result<Vec<String>, String> {
+    extract_with_rollback(
+        zip_path,
+        addons_dir,
+        &HashSet::new(),
+        hooks,
+        Some(HashBaseline {
+            esoui_id,
+            version,
+            override_folder: None,
+            overrides: None,
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn install_addon_zip_selective_with_hashes(
+    zip_path: &Path,
+    addons_dir: &Path,
+    skip_files: &HashSet<String>,
+    hooks: ExtractHooks,
+    esoui_id: u32,
+    version: &str,
+    primary_folder: &str,
+    overrides: &HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    extract_with_rollback(
+        zip_path,
+        addons_dir,
+        skip_files,
+        hooks,
+        Some(HashBaseline {
+            esoui_id,
+            version,
+            override_folder: Some(primary_folder),
+            overrides: Some(overrides),
+        }),
+    )
+}
+
+struct HashBaseline<'a> {
+    esoui_id: u32,
+    version: &'a str,
+    override_folder: Option<&'a str>,
+    overrides: Option<&'a HashMap<String, String>>,
+}
+
+/// Shared extraction driver: recover abandoned work, extract into an isolated
+/// transaction, preserve residual live files in the staged tree, and publish
+/// complete addon folders only after extraction and baseline generation finish.
 fn extract_with_rollback(
     zip_path: &Path,
     addons_dir: &Path,
     skip_files: &HashSet<String>,
     hooks: ExtractHooks,
+    hash_baseline: Option<HashBaseline<'_>>,
 ) -> Result<Vec<String>, String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
 
@@ -142,40 +198,157 @@ fn extract_with_rollback(
         Some(ref name) => HashSet::from([name.clone()]),
         None => collect_zip_top_folders(&archive),
     };
+    validate_top_folders(&top_level)?;
 
-    let mut pre_existing: HashSet<String> = HashSet::new();
-    for folder in &top_level {
-        if addons_dir.join(folder).is_dir() {
-            pre_existing.insert(folder.clone());
-        }
-    }
-
-    let result = extract_addon_zip_inner(
+    let transaction = InstallTransaction::begin(addons_dir, hooks.cancel)?;
+    let stage_dir = transaction.stage_dir();
+    let mut installed = extract_addon_zip_inner(
         &mut archive,
-        addons_dir,
+        &stage_dir,
         skip_files,
         hooks,
         wrap_name.as_deref(),
-    );
+    )?;
+    installed.sort();
 
-    if let Err(ref err_msg) = result {
-        // Remove only folders that were newly created (not pre-existing) so a
-        // failed or cancelled update never destroys the user's existing addon.
-        let created = top_level;
-        for folder in &created {
-            if !pre_existing.contains(folder) {
-                let folder_path = addons_dir.join(folder);
-                if folder_path.is_dir() {
-                    eprintln!(
-                        "Cleaning up partially extracted folder {folder:?} after error: {err_msg}"
-                    );
-                    let _ = fs::remove_dir_all(&folder_path);
-                }
-            }
+    for folder in &installed {
+        let live = addons_dir.join(folder);
+        if live.exists() {
+            refuse_linked_addon(&live)?;
+            copy_residual_files(&live, &stage_dir.join(folder), &live)?;
         }
     }
 
-    result
+    let manifests = match hash_baseline {
+        Some(baseline) => {
+            let manifests = crate::file_hashes::build_hash_manifests_for_folders(
+                &stage_dir,
+                &installed,
+                baseline.esoui_id,
+                baseline.version,
+                None,
+            )?;
+            manifests_to_bytes(manifests, &baseline)?
+        }
+        None => Vec::new(),
+    };
+
+    transaction.commit(&installed, &manifests)
+}
+
+fn manifests_to_bytes(
+    mut manifests: Vec<crate::file_hashes::HashManifest>,
+    baseline: &HashBaseline<'_>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut serialized = Vec::with_capacity(manifests.len());
+    for manifest in &mut manifests {
+        if baseline.override_folder == Some(manifest.addon_folder.as_str()) {
+            if let Some(overrides) = baseline.overrides {
+                for (path, hash) in overrides {
+                    manifest.files.insert(path.clone(), hash.clone());
+                }
+                manifest.modified_files = overrides.keys().cloned().collect();
+                manifest.modified_files.sort();
+            }
+        }
+        let bytes = serde_json::to_vec_pretty(manifest)
+            .map_err(|e| format!("Failed to encode hash baseline: {e}"))?;
+        serialized.push((manifest.addon_folder.clone(), bytes));
+    }
+    Ok(serialized)
+}
+
+fn validate_top_folders(folders: &HashSet<String>) -> Result<(), String> {
+    for folder in folders {
+        validate_top_folder_name(folder)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_top_folder_name(folder: &str) -> Result<(), String> {
+    let invalid = folder.is_empty()
+        || folder == "."
+        || folder == ".."
+        || folder.contains(['/', '\\', '\0', ':']);
+    if invalid {
+        return Err(format!(
+            "ZIP archive contains an invalid addon folder name: {folder:?}."
+        ));
+    }
+    if is_reserved_state_folder(folder) {
+        return Err(format!(
+            "ZIP archive targets Kalpa's reserved state folder {folder:?}; installation was refused before any addon files were changed."
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn is_reserved_state_folder(name: &str) -> bool {
+    name.trim()
+        .trim_end_matches(['.', ' '])
+        .to_ascii_lowercase()
+        .starts_with(".kalpa-")
+}
+
+fn refuse_linked_addon(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("Failed to inspect existing addon folder {path:?}: {e}"))?;
+    if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) {
+        return Err(format!(
+            "Kalpa refused to update linked addon folder {path:?}. Symlink and junction addon folders are not supported because they can point outside the AddOns directory."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_: &fs::Metadata) -> bool {
+    false
+}
+
+fn copy_residual_files(
+    current: &Path,
+    stage_folder: &Path,
+    live_root: &Path,
+) -> Result<(), String> {
+    for entry in fs::read_dir(current)
+        .map_err(|e| format!("Failed to read existing addon folder {current:?}: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to inspect existing addon files: {e}"))?;
+        let source = entry.path();
+        let metadata = fs::symlink_metadata(&source)
+            .map_err(|e| format!("Failed to inspect existing addon file {source:?}: {e}"))?;
+        if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) {
+            return Err(format!(
+                "Kalpa refused to update {live_root:?} because it contains a symlink or junction at {source:?}."
+            ));
+        }
+        let relative = source
+            .strip_prefix(live_root)
+            .map_err(|_| format!("Existing addon path escaped its folder: {source:?}"))?;
+        let target = stage_folder.join(relative);
+        if metadata.is_dir() {
+            fs::create_dir_all(&target).map_err(|e| describe_write_error(&target, &e))?;
+            copy_residual_files(&source, stage_folder, live_root)?;
+        } else if metadata.is_file() && !target.exists() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
+            }
+            fs::copy(&source, &target).map_err(|e| describe_write_error(&target, &e))?;
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&target)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| describe_write_error(&target, &e))?;
+        }
+    }
+    Ok(())
 }
 
 /// The first path component of a ZIP entry name, or `None` when the name is
@@ -463,6 +636,17 @@ fn extract_addon_zip_inner(
             let bytes_written = io::copy(&mut entry, &mut outfile)
                 .map_err(|e| describe_extract_error(&out_path, &e))?;
 
+            if bytes_written != declared_size {
+                drop(outfile);
+                let _ = fs::remove_file(&out_path);
+                return Err(format!(
+                    "Failed to extract {out_path:?}: archive declared {declared_size} bytes but produced {bytes_written}; the archive may be corrupt."
+                ));
+            }
+            outfile
+                .sync_all()
+                .map_err(|e| describe_write_error(&out_path, &e))?;
+
             total_extracted += bytes_written;
 
             // Double-check actual bytes written against budget
@@ -483,10 +667,23 @@ fn extract_addon_zip_inner(
         return Err("ZIP archive contained no addon folders.".to_string());
     }
 
-    Ok(created_folders.into_iter().collect())
+    let mut folders: Vec<String> = created_folders.into_iter().collect();
+    folders.sort();
+    Ok(folders)
 }
 
+#[cfg(test)]
 pub fn remove_addon(addons_dir: &Path, folder_name: &str) -> Result<(), String> {
+    let _transaction = crate::install_txn::lock_and_recover(addons_dir)?;
+    remove_addon_locked(addons_dir, folder_name)
+}
+
+/// Remove one addon while the caller holds the AddOns transaction lock.
+///
+/// Compound operations use this helper so their existence checks, deletion,
+/// and metadata update share one cross-process critical section. Callers that
+/// do not already hold the lock must use [`remove_addon`] instead.
+pub(crate) fn remove_addon_locked(addons_dir: &Path, folder_name: &str) -> Result<(), String> {
     // Validate folder name — no path traversal
     if folder_name.contains("..")
         || folder_name.contains('/')
@@ -825,6 +1022,38 @@ mod tests {
             fs::read_to_string(addons_dir.join("TestAddon/test.txt")).unwrap(),
             "hello"
         );
+        assert!(!addons_dir.join(".kalpa-staging").exists());
+    }
+
+    #[test]
+    fn install_promotes_hash_baseline_with_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = create_test_zip(tmp.path(), "test.zip", "TestAddon", "hello");
+
+        install_addon_zip_with_hashes(&zip_path, &addons_dir, 42, "2.0", ExtractHooks::NONE)
+            .unwrap();
+
+        let manifest = crate::file_hashes::load_hash_manifest(&addons_dir, "TestAddon")
+            .expect("hash baseline should be promoted");
+        assert_eq!(manifest.esoui_ids, vec![42]);
+        assert_eq!(manifest.installed_version, "2.0");
+        assert!(manifest.files.contains_key("test.txt"));
+        assert!(!addons_dir.join(".kalpa-staging").exists());
+    }
+
+    #[test]
+    fn rejects_reserved_transaction_folder_before_publication() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = create_test_zip(tmp.path(), "bad.zip", ".KALPA-STAGING. ", "bad");
+
+        let error = extract_addon_zip(&zip_path, &addons_dir).unwrap_err();
+
+        assert!(error.contains("reserved state folder"));
+        assert!(!addons_dir.join(".KALPA-STAGING. ").exists());
     }
 
     #[test]
@@ -949,10 +1178,8 @@ mod tests {
 
     #[test]
     fn cancel_midway_preserves_pre_existing_addon_files() {
-        // Cancelling midway through an IN-PLACE update (the folder already
-        // exists) must never delete the user's addon — even though it is left
-        // partially updated. Data safety: no file is removed, only some are
-        // overwritten with the new version's bytes.
+        // Cancelling midway through staging an update must leave every live
+        // file byte-for-byte untouched.
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
         let existing = addons_dir.join("MyAddon");
@@ -983,11 +1210,13 @@ mod tests {
             "pre-existing addon must survive a midway cancel"
         );
         for n in 0..10 {
-            assert!(
-                existing.join(format!("file{n}.lua")).exists(),
-                "cancel must not delete the user's existing files"
+            assert_eq!(
+                fs::read_to_string(existing.join(format!("file{n}.lua"))).unwrap(),
+                "OLD",
+                "cancel must not alter the user's existing files"
             );
         }
+        assert!(!addons_dir.join(".kalpa-staging").exists());
     }
 
     #[test]
@@ -1049,6 +1278,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
         fs::create_dir_all(&addons_dir).unwrap();
+        fs::create_dir_all(addons_dir.join("MyAddon")).unwrap();
+        fs::write(addons_dir.join("MyAddon/b.lua"), "user edit").unwrap();
 
         let zip_path = tmp.path().join("s.zip");
         let file = fs::File::create(&zip_path).unwrap();
@@ -1065,9 +1296,10 @@ mod tests {
         extract_addon_zip_selective(&zip_path, &addons_dir, &skip).unwrap();
 
         assert!(addons_dir.join("MyAddon/a.lua").exists());
-        assert!(
-            !addons_dir.join("MyAddon/b.lua").exists(),
-            "a skipped (keep-mine) file must not be overwritten"
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("MyAddon/b.lua")).unwrap(),
+            "user edit",
+            "a skipped (keep-mine) file must be preserved"
         );
     }
 
