@@ -71,12 +71,27 @@ export function AddonFileEditor({
   const fileName = relativePath.split("/").pop() ?? relativePath;
   const [loadState, setLoadState] = useState<"loading" | "done">(isBinary ? "done" : "loading");
 
+  // The parent keys this component by file, but nothing in here may depend on
+  // that: if the path swaps in place, every acknowledgment tied to the old file
+  // (the Protected-Edits unlock, the loaded content and its dirty state) must
+  // reset with it, or Save could write the previous file's text to the new path.
+  const [renderedPath, setRenderedPath] = useState(relativePath);
+  if (renderedPath !== relativePath) {
+    setRenderedPath(relativePath);
+    setLoadState(isBinary ? "done" : "loading");
+    setContent(null);
+    setOriginalContent(null);
+    setEditable(isModified);
+    setError(null);
+  }
+
   useEffect(() => {
     if (isBinary) return;
     let cancelled = false;
     invokeOrThrow<string>("read_addon_file", { addonsPath, folderName, relativePath })
       .then((text) => {
         if (!cancelled) {
+          setError(null);
           setContent(text);
           setOriginalContent(text);
           setLoadState("done");
