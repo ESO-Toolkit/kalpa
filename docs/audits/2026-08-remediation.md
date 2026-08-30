@@ -22,7 +22,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F4 | pr-open | `fix/audit-f4-logout-invalidation` | [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) (draft, stacked on F1) | - | D-F4-1 | APPROVE | Focused 1 test; pack sequencing 4 tests; frontend check; 494 tests | Successful logout invalidates every private-list page request before clearing signed-in state; no wire/persisted-data change. |
 | F5 | pr-open | `fix/audit-f5-controlled-state-veto` | [#370](https://github.com/ESO-Toolkit/kalpa/pull/370) (draft, stacked on W1) | - | not required | APPROVE | Focused 10/10; frontend check; 493 tests | Controlled values remain authoritative when a parent vetoes a change; uncontrolled behavior is preserved. |
 | F6 | pr-open | `fix/audit-f6-optimistic-sequencing` | [#377](https://github.com/ESO-Toolkit/kalpa/pull/377) (draft, stacked) | - | D-F6-1; Luna PASS | REVISE follow-up; no findings, requested tests addressed | Frontend check; 500 tests | Sequenced optimistic settings/library state and latest-only SavedVariables file/character refreshes implemented. |
-| H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
+| H1 | pr-open | `fix/audit-h1-release-copy` | [#384](https://github.com/ESO-Toolkit/kalpa/pull/384) (draft, stacked on W1) | - | D-H1-1 | REVISE follow-up; all verified findings addressed | Release/Discord 16; frontend 490; check; versions | Generates exact tagged CHANGELOG copy; no tag, release, merge, or deployment. |
 | H2 | pr-open | `fix/audit-h2-theme-provenance` | [#383](https://github.com/ESO-Toolkit/kalpa/pull/383) | - | not required | REVISE x2; all verified findings addressed | Root check; frontend check; 490 tests | Evidence supports treating the directory as local visual-review output; ignore narrowly without modifying it. |
 | H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
 | H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) | - | D-H5-1 | APPROVE after one follow-up; refreshed 2026-08-28 | `npm run check`; `git diff --check`; freshness guard | Point-in-time proposal; PR now targets `main` directly; no branches deleted. |
@@ -74,6 +74,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Create retry by the same actor resumes the stored canonical create instead of returning duplicate. Success is acknowledged only after the KV detail step; an incomplete mirror returns a retryable failure while public detail reads use the DO and remain consistent with canonical lifecycle state.
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
  - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+
+### D-H1-1 — CHANGELOG is the release-copy authority
+
+- Chosen: a dependency-free Node generator selects the exact tagged `CHANGELOG.md` section, fails closed for missing, empty, malformed, or duplicate targets, and supplies the complete established release body to `tauri-action` through multiline `GITHUB_OUTPUT`. `Unreleased` is accepted only when explicitly requested for local preview/testing.
+- Markdown compatibility: content-owned trailing reference definitions are retained using CommonMark-style case-insensitive, whitespace-normalized labels; unrelated global changelog definitions are excluded. The existing `## Changed:` shape remains compatible with the Discord announcement helper.
+- Rejected: leaving per-release prose in shared workflow YAML, because it can silently publish the previous release's text. Rejected: permissive fallback to `Unreleased` or generic copy for a missing tagged section, because a release should stop rather than publish unmatched notes.
+- Scope: install, verification, known-issues, draft/publish, updater-manifest, application runtime, and Discord delivery behavior are unchanged. Rollback is a normal commit revert to the prior hand-maintained YAML body.
 
  ### D-R8-1 — Disclose missing coverage without blocking updates
 
@@ -197,6 +204,15 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - GitHub reported no protected branches; open PR heads and all attached worktrees were retained. No branch, ref, worktree, or commit was deleted or moved.
 - Updated the H5 proposal and this tracker; safe candidates are 55 local/remote refs counted separately. Review refs remain explicitly non-candidates pending maintainer inspection.
 - Verification at that time: `git diff --check` and `npm run check` passed; the branch was pushed with force-with-lease. GitHub then reported PR #385 open/draft, `mergeable=true`, `mergeable_state=clean`, base `16f76144`, head `4d3c57f3`; no checks were reported for the docs-only branch. These values are historical observations, not current PR metadata.
+
+### 2026-08-26 — Codex (H1)
+
+- Active branch: `fix/audit-h1-release-copy`, isolated worktree, stacked on `fix/audit-w1-worker-consistency`.
+- Completed: inventoried release, changelog, version, and Discord workflows; captured the missing-generator failure before implementation; added exact version/explicit `Unreleased` parsing and fail-closed validation; generated the stable release body around matching changelog copy; removed only redundant release-specific YAML text; updated CI and release instructions.
+- Sol: initial `REVISE` found stripped trailing content-owned reference definitions. The required follow-up `REVISE` found case/whitespace normalization gaps. Both were reproduced, fixed, and covered; follow-up wire contract was `OK` and bug-class sweep was `CLEAN`. See `docs/audits/consultations/h1-sol.md`.
+- Gates: release/Discord Node tests 16/16; root Vitest 37 files/490 tests; `npm run check`; `npm run check:versions` (6/6); beta.18 generator preview; `git diff --check`.
+- Handoff: pushed the branch and opened draft stacked PR [#384](https://github.com/ESO-Toolkit/kalpa/pull/384). No tag, release, merge, or deployment was performed.
+- Exact next action: land W1 first, retarget PR #384 to `main`, confirm CI remains green, then mark it ready for maintainer review.
 
 ### 2026-08-26 — Codex (F4)
 

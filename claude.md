@@ -242,9 +242,11 @@ When preparing a new release:
    opens with "See CHANGELOG.md for full details", so a missing entry sends
    users to a file that does not mention the release they just installed —
    which is how beta.15 shipped.
-3. Rewrite the per-release "Changed:" section of `releaseBody` in
-   `.github/workflows/release.yml`. It is shared by every tag, so it otherwise
-   ships the previous release's headline.
+3. Confirm the release section contains the complete user-facing copy. The
+   release workflow generates its `Changed:` section from the matching tagged
+   section in `CHANGELOG.md` and fails closed if that section is missing, empty,
+   malformed, or duplicated. Preview it with
+   `node .github/scripts/release-body.cjs --version v<version>`.
 4. Run the packaged build verification gate on Windows: `npm run test:packaged`.
    It is deliberately local-only because it needs WebView2, launches the debug
    packaged binary itself, and fails if it connects to the Vite dev server instead
