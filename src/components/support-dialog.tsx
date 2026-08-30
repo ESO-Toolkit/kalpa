@@ -60,7 +60,7 @@ export function SupportDialog({
 }: SupportDialogProps) {
   const [issueId, setIssueId] = useState<SupportIssueId>("addon-status");
   const [description, setDescription] = useState("");
-  const [consented, setConsented] = useState(false);
+  const [consentedReportSha256, setConsentedReportSha256] = useState<string | null>(null);
   const [openingHandoff, setOpeningHandoff] = useState(false);
   const [handoffOpened, setHandoffOpened] = useState(false);
   const [appVersion, setAppVersion] = useState("unknown");
@@ -112,11 +112,17 @@ export function SupportDialog({
     ]
   );
   const report = useMemo(() => renderSupportReport(payload), [payload]);
+  const reportIdentity = payload.reportSha256 ?? report;
+  const consented = consentedReportSha256 === reportIdentity;
   const handoffUrl = useMemo(() => buildSupportHandoffUrl(payload), [payload]);
   const copied = copiedReport === report;
+  const reportChangedSinceConsent =
+    consentedReportSha256 !== null && consentedReportSha256 !== reportIdentity;
   // A disabled primary action has to say what would enable it.
   const blockedReason = !consented
-    ? "Tick the consent box above to enable this."
+    ? reportChangedSinceConsent
+      ? "The report changed since you agreed. Review it and tick the box again."
+      : "Tick the consent box above to enable this."
     : isOffline
       ? "Kalpa is offline. Reconnect, or copy the report and use the manual ticket desk."
       : !handoffUrl
@@ -286,7 +292,7 @@ export function SupportDialog({
                   nativeButton
                   checked={consented}
                   onCheckedChange={(checked) => {
-                    setConsented(checked === true);
+                    setConsentedReportSha256(checked === true ? reportIdentity : null);
                   }}
                   aria-label="I agree to share the exact report shown below with ESO Toolkit support"
                 />
