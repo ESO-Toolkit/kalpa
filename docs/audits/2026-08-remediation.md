@@ -6,7 +6,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 |---|---|---|---|---|---|---|---|---|
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
 | W2 | pr-open | `fix/audit-w2-d1-reconciliation` | [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) (draft) | - | D-W2-1, D-W2-2 | Fresh REVISE; follow-up APPROVE | Worker check; 208 tests; Wrangler dry-run | Technically ready and stacked on W1. Draft/merge hold remains: deletion-capable code and later `apply` each require separate maintainer approval. |
-| W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
+| W3 | pr-open | `fix/audit-w3-worker-hardening` | [#379](https://github.com/ESO-Toolkit/kalpa/pull/379) (draft) | - | D-W3-1 reaccepted after reconsultation | Fresh REVISE; follow-up APPROVE | Worker check; 233 tests; Wrangler dry-run | Technically ready and stacked on refreshed W2/D-W2-2; remains draft with no real deployment. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
@@ -72,6 +72,15 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Serialize scheduled reconciliation with a token-owned, expiring lease in the existing PackIndexDO. Overlapping runs record `skipped-overlap`, and a stale token cannot release a newer lease.
 - Preserve per-pack lifecycle gates for writes/deletes, deterministic planning, dry-run default, existing-table-only SQL, and the separate merge/apply approval sequence from D-W2-1.
 
+### D-W3-1 — Bounded Worker edge state and disclosure
+
+- Chosen: stream and byte-count every JSON request body; bound vote and auth identity memos with oldest-entry eviction; and keep auth-cache generation checks so stale in-flight lookups cannot repopulate reset state.
+- Chosen: remove the manual Cache API list entry. Its invalidation could not coordinate across Worker isolates, and it is ineffective on the current `workers.dev` route. The unchanged list response uses a bounded 30-second `Cache-Control` TTL only.
+- Chosen: serialize each install claim and counter update in one Durable Object storage transaction. Claims use an admin-keyed HMAC identity, a fixed 5,000-slot oldest-eviction ring, an alarm-backed one-hour retention limit, lifecycle cleanup, and retry mirroring. Live legacy `install-rate:<pack>:<ip>` keys remain honored through their existing TTL, avoiding rollout double counts.
+- Chosen: public `/health` exposes only `status`, KV reachability, and timestamp. Corpus size and backup freshness remain operator data; the deploy workflow consumes only `status` and `kv`. This intentionally removes undocumented health fields but does not change Pack Hub/Rust response shapes or any D1 schema.
+- Fable reaccepted D-W3-1 after two verified Sol revisions. It clarified that rejected/aborted streams fail as invalid JSON, decoding happens only after bounded byte assembly, and viewer-bearing responses explicitly emit `max-age=0` and vary on `Authorization` and `Origin`.
+- The 5,000-slot claim ring is deliberately bounded idempotence: an identity may recount inside one hour only after 5,000 newer distinct claims evict it. Rotating `ADMIN_API_KEY` can likewise admit one extra count per identity until old claims expire; both are acceptable for a display counter and are not exact billing semantics.
+
 ## Session Log
 
 ### 2026-08-27 — W1 twice-reject escalation
@@ -82,6 +91,24 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### 2026-08-27 — Codex W3 revalidation
+
+- Merged updated W2 commit `4b2c18d0` forward with a normal merge. The authority-route conflict was resolved additively: W3's bounded streaming reader now protects W2's exact `authority` and `unowned_d1_ids` validation; D-W2-2 and W3 tracker history were both preserved.
+- Marked W3 blocked after its two verified Sol `REVISE` rounds and reconsulted Fable with both reviews, the final diff/tests, D-W2-2 dependency, and separate H3 package-version boundary. Fable accepted Candidate A and reaccepted D-W3-1.
+- Failing-before revalidation reproduced an escaped rejected body stream and missing explicit viewer cache metadata. Fixed by catching stream aborts as invalid JSON, decoding only the fully assembled bounded byte buffer, emitting explicit `public, max-age=0` for viewer-bearing list/detail responses, and varying all CORS responses on `Origin, Authorization`.
+- Focused body/list/CORS tests pass 146/146; full Worker tests pass 230/230; Worker check, Wrangler dry-run, name guard, and `git diff --check` pass. Repository search found no in-repo consumer of removed health detail fields; the deploy workflow reads only `status` and `kv`. No real deployment, merge, authority flip, schema change, or H3 version decision occurred.
+- Fresh Sol review: `REVISE`. It verified that list and detail routes chose their anonymous public TTL from failed `viewerId` resolution rather than the presence of an authentication attempt, so a transient ESO Logs failure could cache a redacted/no-vote fallback for a bearer token after recovery. Fixed by permitting anonymous TTLs only when the request has no `Authorization` header. Added both regressions plus the requested oversized W2 adjudication/no-authority-mutation case; full Worker tests now pass 233/233 and all Worker gates remain green.
+- Sol follow-up after those corrections: `APPROVE`. Findings: none. Missing tests: none. Wire contract: OK. Bug-class propagation sweep: CLEAN. W3 is technically ready on its refreshed W2 base but remains draft; no deployment or merge was performed.
+
+### 2026-08-26 — Codex W3
+
+- Active branch: `fix/audit-w3-worker-hardening`, stacked on W2.
+- Failing-before evidence: focused regressions failed for UTF-8 byte limits/stream cancellation, bounded memo eviction, stale auth repopulation, atomic install claiming, health disclosure, and oversized admin restore input before the implementation existed.
+- Implemented: incremental byte-bounded JSON reads across every Worker body route; bounded oldest eviction for vote/auth memos; auth-cache sequencing; transactional and time-bounded install idempotency; removal of isolate-unsafe manual list caching; awaited Worker background writes; and minimal public health output.
+- Initial Sol review: REVISE. Verified cross-isolate cache invalidation, aliased list wire results, missed seed/adopt invalidation, non-atomic install state, durable IP-derived retention, and legacy limiter rollout gaps. Addressed by removing manual list storage, using one DO transaction plus retry healing, keyed HMAC identities with alarm/deletion cleanup, exact 5,001st-slot coverage, and honoring legacy limiter keys until expiry.
+- Sol follow-up: REVISE. It reported public caching of personalized lists and non-atomic alarm scheduling from the snapshot it had read; both had already been corrected during the review by disabling authenticated list caching and moving alarm creation into the claim transaction. Its remaining verified legacy-limiter lifecycle finding was addressed by consulting canonical DO state, honoring a legacy key only when KV and DO lifecycles match, and adding tombstone/recreated-slug regressions. The review limit is exhausted, so no third review was requested.
+- Tests: focused 107/107 and full 218/218 pass, including personalized-list cache headers, transactional alarm persistence, multi-page claim expiry, and both legacy lifecycle cases; Worker check and Wrangler dry-run pass. Directly faulting a DO output-gate KV write makes Miniflare mark the object broken, so the alarm-before-mirror ordering is objectively covered by the single storage transaction plus persisted-alarm assertion rather than an artificial caught-failure test. Worker name remains `kalpa-pack-hub`; no schema change, real deployment, merge, or authority flip was performed.
+- Handoff: pushed the branch and opened draft stacked PR [#379](https://github.com/ESO-Toolkit/kalpa/pull/379) targeting `fix/audit-w2-d1-reconciliation`. No merge or deployment was performed.
 
 ### 2026-08-26 — Codex W2
 

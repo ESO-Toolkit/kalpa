@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env, Pack, PackIndex, VoteRecord } from "./types";
 import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
 import { recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
+import { rememberBounded } from "./bounded-map";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -31,6 +32,22 @@ interface BackupMeta {
   pack_count: number;
   pack_body_count: number;
   vote_count: number;
+}
+
+const INSTALL_WINDOW_MS = 60 * 60 * 1000;
+const INSTALL_RING_SIZE = 5000;
+const INSTALL_DELETE_BATCH_SIZE = 100;
+const INSTALL_SEQUENCE_KEY = "meta:install-sequence";
+const INSTALL_MARKER_PREFIX = "install-marker:";
+const INSTALL_SLOT_PREFIX = "install-slot:";
+
+interface InstallSlot {
+  markerKey: string;
+  recordedAt: number;
+}
+
+interface InstallMarker extends InstallSlot {
+  slotKey: string;
 }
 
 type Authority = "kv" | "do";
@@ -180,6 +197,99 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Atomically claim an install identity and increment its pack once per hour.
+   * The fixed-size persistent ring bounds DO storage. Eviction can admit an
+   * older identity before its hour elapses only after 5,000 newer identities,
+   * an explicit bound preferable to unbounded per-IP records.
+   */
+  async recordInstall(
+    id: string,
+    identity: string,
+    expectedLifecycle?: string | Pack | null,
+    now = Date.now(),
+  ): Promise<Pack | null> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const result = await this.ctx.storage.transaction(async (txn) => {
+        const pack = await txn.get<Pack>(this.packKey(id));
+        if (!this.lifecycleMatches(pack, expectedLifecycle)) return null;
+
+        const markerKey = `${INSTALL_MARKER_PREFIX}${id}:${pack!.created_at}:${identity}`;
+        const marker = await txn.get<InstallMarker>(markerKey);
+        if (marker && now - marker.recordedAt < INSTALL_WINDOW_MS) {
+          return { pack: pack!, claimed: false };
+        }
+
+        if (marker) await txn.delete(marker.slotKey);
+        const sequence = (await txn.get<number>(INSTALL_SEQUENCE_KEY)) ?? 0;
+        const slotKey = `${INSTALL_SLOT_PREFIX}${sequence % INSTALL_RING_SIZE}`;
+        const evicted = await txn.get<InstallSlot>(slotKey);
+        if (evicted) await txn.delete(evicted.markerKey);
+
+        const updated = { ...pack!, install_count: (pack!.install_count ?? 0) + 1 };
+        await txn.put(this.packKey(id), updated);
+        await txn.put(markerKey, { markerKey, recordedAt: now, slotKey } satisfies InstallMarker);
+        await txn.put(slotKey, { markerKey, recordedAt: now } satisfies InstallSlot);
+        await txn.put(INSTALL_SEQUENCE_KEY, sequence + 1);
+        const cleanupAt = Math.max(now, Date.now()) + INSTALL_WINDOW_MS;
+        const currentAlarm = await txn.getAlarm();
+        if (currentAlarm === null || currentAlarm > cleanupAt) await txn.setAlarm(cleanupAt);
+        return { pack: updated, claimed: true };
+      });
+      if (!result) return null;
+
+      if (result.claimed) {
+        await this.mirror(await this.getStoredPacks(), result.pack);
+      } else {
+        // A duplicate is normally a read-only idempotent response. Only
+        // repair a missing or stale detail mirror left by an earlier failure;
+        // harmless retries must not rewrite the KV index unconditionally.
+        const mirrored = await this.env.ESO_PACKS.get<Pack>(this.packKey(id), "json");
+        if (
+          !mirrored ||
+          mirrored.created_at !== result.pack.created_at ||
+          mirrored.updated_at !== result.pack.updated_at ||
+          mirrored.install_count !== result.pack.install_count
+        ) {
+          await this.mirror(await this.getStoredPacks(), result.pack);
+        }
+      }
+      return result.pack;
+    });
+  }
+
+  async cleanupInstallClaims(now = Date.now()): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let removed = 0;
+      let nextExpiry: number | undefined;
+      let startAfter: string | undefined;
+      while (true) {
+        const slots = await this.ctx.storage.list<InstallSlot>({
+          prefix: INSTALL_SLOT_PREFIX,
+          startAfter,
+          limit: 1000,
+        });
+        for (const [slotKey, slot] of slots) {
+          const expiresAt = slot.recordedAt + INSTALL_WINDOW_MS;
+          if (expiresAt <= now) {
+            const marker = await this.ctx.storage.get<InstallMarker>(slot.markerKey);
+            await this.ctx.storage.delete(slotKey);
+            if (marker?.slotKey === slotKey) await this.ctx.storage.delete(slot.markerKey);
+            removed += 1;
+          } else {
+            nextExpiry = Math.min(nextExpiry ?? expiresAt, expiresAt);
+          }
+        }
+        if (slots.size < 1000) break;
+        startAfter = [...slots.keys()].at(-1);
+      }
+      if (nextExpiry === undefined) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(nextExpiry);
+      return removed;
+    });
+  }
+
   async toggleVote(
     packId: string,
     userId: string,
@@ -199,8 +309,7 @@ export class PackIndexDO extends DurableObject<Env> {
       if (voted) await putVote(this.env, packId, userId);
       else await deleteVote(this.env, packId, userId);
 
-      if (this.voteMemo.size >= VOTE_MEMO_LIMIT) this.voteMemo.clear();
-      this.voteMemo.set(memoKey, voted);
+      rememberBounded(this.voteMemo, memoKey, voted, VOTE_MEMO_LIMIT);
       const pack = await this.applyCounter(existing!, "vote_count", voted ? 1 : -1);
       return { voted, pack };
     });
@@ -357,6 +466,7 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    await this.cleanupInstallClaims();
     await this.ctx.blockConcurrencyWhile(async () => {
       const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX });
       for (const operationId of pending.values()) {
@@ -666,6 +776,7 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async deleteD1Pack(id: string): Promise<boolean> {
     if (!this.env.ROSTER_HUB_DB) return true;
+
     try {
       await this.env.ROSTER_HUB_DB.batch([
         this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
@@ -681,6 +792,13 @@ export class PackIndexDO extends DurableObject<Env> {
       await recordD1MirrorFailure(this.env, "delete", id, error);
       return false;
     }
+  }
+
+  private async deleteStoredPack(id: string): Promise<void> {
+    await this.deleteInstallClaims(id);
+    await this.ctx.storage.delete(this.packKey(id));
+    await this.ctx.storage.put(this.tombstoneKey(id), new Date().toISOString());
+    this.forgetVotes(id);
   }
 
   private async mirrorD1Pack(pack: Pack): Promise<void> {
@@ -739,6 +857,28 @@ export class PackIndexDO extends DurableObject<Env> {
     const prefix = `${packId}:`;
     for (const key of this.voteMemo.keys()) {
       if (key.startsWith(prefix)) this.voteMemo.delete(key);
+    }
+  }
+
+  private async deleteInstallClaims(packId: string): Promise<void> {
+    let startAfter: string | undefined;
+    while (true) {
+      const markers = await this.ctx.storage.list<InstallMarker>({
+        prefix: `${INSTALL_MARKER_PREFIX}${packId}:`,
+        startAfter,
+        limit: 1000,
+      });
+      const keys = new Set<string>();
+      for (const [markerKey, marker] of markers) {
+        keys.add(markerKey);
+        if (marker.slotKey.startsWith(INSTALL_SLOT_PREFIX)) keys.add(marker.slotKey);
+      }
+      const deletions = [...keys];
+      for (let offset = 0; offset < deletions.length; offset += INSTALL_DELETE_BATCH_SIZE) {
+        await this.ctx.storage.delete(deletions.slice(offset, offset + INSTALL_DELETE_BATCH_SIZE));
+      }
+      if (markers.size < 1000) break;
+      startAfter = [...markers.keys()].at(-1);
     }
   }
 
@@ -902,6 +1042,18 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.scheduleRetry();
         return false;
       }
+    }
+    // Install claims are durable per-pack state too. Remove them before the
+    // delete journal can complete; deleteInstallClaims uses bounded batches so
+    // a pack with a full ring cannot turn this into thousands of sequential
+    // storage operations.
+    try {
+      await this.deleteInstallClaims(operation.packId);
+    } catch (error) {
+      console.error(`Install claim cleanup failed [${operation.packId}]:`, error);
+      await this.saveOperation(operation);
+      await this.scheduleRetry();
+      return false;
     }
     if (!operation.d1Done) {
       operation.d1Done = await this.deleteD1Pack(operation.packId);

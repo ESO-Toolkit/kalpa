@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { putPack, putVote } from "../src/kv";
 import type { Env, Pack } from "../src/types";
@@ -243,6 +243,179 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(result).toBeNull();
     expect((await index.getIndex()).packs.some(({ id }) => id === pack.id)).toBe(false);
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
+  });
+
+  it("counts concurrent installs from one identity only once", async () => {
+    const pack = makePack("w3-idempotent-install");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+
+    const results = await Promise.all([
+      index.recordInstall(pack.id, "same-identity", pack.created_at, 1_000),
+      index.recordInstall(pack.id, "same-identity", pack.created_at, 1_000),
+    ]);
+
+    expect(results.map((result) => result?.install_count)).toEqual([1, 1]);
+    expect(await index.getPack(pack.id)).toMatchObject({ install_count: 1 });
+  });
+
+  it("allows the same install identity after the one-hour window", async () => {
+    const pack = makePack("w3-install-window");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+
+    await index.recordInstall(pack.id, "repeat-identity", pack.created_at, 1_000);
+    const result = await index.recordInstall(
+      pack.id,
+      "repeat-identity",
+      pack.created_at,
+      1_000 + 3_600_001,
+    );
+
+    expect(result).toMatchObject({ install_count: 2 });
+  });
+
+  it("expires persisted install identity data after one hour", async () => {
+    const pack = makePack("w3-install-expiry");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "expiring-identity", pack.created_at, 1_000);
+
+    expect(await index.cleanupInstallClaims(1_000 + 3_600_001)).toBe(1);
+    const keys = await runInDurableObject(index, async (_instance, state) =>
+      [...(await state.storage.list({ prefix: "install-" })).keys()]);
+    expect(keys).toEqual([]);
+  });
+
+  it("expires install identities across durable-list page boundaries", async () => {
+    const index = packIndex();
+    await runInDurableObject(index, async (_instance, state) => {
+      const entries: Record<string, { markerKey: string; recordedAt: number }> = {};
+      for (let i = 0; i < 1_001; i++) {
+        const slotKey = `install-slot:${String(i).padStart(4, "0")}`;
+        entries[slotKey] = { markerKey: `missing-marker:${i}`, recordedAt: 1_000 };
+      }
+      await state.storage.put(entries);
+    });
+
+    expect(await index.cleanupInstallClaims(1_000 + 3_600_001)).toBe(1_001);
+    const remaining = await runInDurableObject(index, async (_instance, state) =>
+      state.storage.list({ prefix: "install-slot:" }));
+    expect(remaining.size).toBe(0);
+  });
+
+  it("evicts the oldest claim at the exact 5,001st ring slot", async () => {
+    const pack = makePack("w3-install-ring-boundary");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    const oldMarker = `install-marker:${pack.id}:${pack.created_at}:oldest`;
+    await runInDurableObject(index, async (_instance, state) => {
+      await state.storage.put("meta:install-sequence", 5_000);
+      await state.storage.put("install-slot:0", { markerKey: oldMarker, recordedAt: 1_000 });
+      await state.storage.put(oldMarker, {
+        markerKey: oldMarker,
+        recordedAt: 1_000,
+        slotKey: "install-slot:0",
+      });
+    });
+
+    await index.recordInstall(pack.id, "newest", pack.created_at, 2_000);
+    const claims = await runInDurableObject(index, async (_instance, state) => ({
+      old: await state.storage.get(oldMarker),
+      slot: await state.storage.get<{ markerKey: string }>("install-slot:0"),
+    }));
+    expect(claims.old).toBeUndefined();
+    expect(claims.slot?.markerKey).toContain(":newest");
+  });
+
+  it("does not rewrite the KV mirror for a duplicate claim", async () => {
+    const pack = makePack("w3-install-duplicate");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "duplicate-identity", pack.created_at, 1_000);
+    const put = vi.spyOn(e.ESO_PACKS, "put");
+
+    const retry = await index.recordInstall(pack.id, "duplicate-identity", pack.created_at, 2_000);
+
+    expect(retry).toMatchObject({ install_count: 1 });
+    expect(put).not.toHaveBeenCalled();
+    put.mockRestore();
+  });
+
+  it("heals the KV detail when a duplicate claim retries after mirror loss", async () => {
+    const pack = makePack("w3-install-heal");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "healing-identity", pack.created_at, 1_000);
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+
+    const retry = await index.recordInstall(pack.id, "healing-identity", pack.created_at, 2_000);
+
+    expect(retry).toMatchObject({ install_count: 1 });
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json"))
+      .toMatchObject({ install_count: 1 });
+  });
+
+  it("deletes install claims in bounded batches during pack cleanup", async () => {
+    const pack = makePack("w3-install-cleanup-batches");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await runInDurableObject(index, async (_instance, state) => {
+      for (let i = 0; i < 201; i++) {
+        const markerKey = `install-marker:${pack.id}:${pack.created_at}:identity-${i}`;
+        const slotKey = `install-slot:cleanup-${i}`;
+        await state.storage.put(markerKey, { markerKey, slotKey, recordedAt: 1_000 });
+        await state.storage.put(slotKey, { markerKey, recordedAt: 1_000 });
+      }
+    });
+
+    await index.removePack(pack.id);
+
+    const remaining = await runInDurableObject(index, async (_instance, state) => ({
+      markers: await state.storage.list({ prefix: `install-marker:${pack.id}:` }),
+      slots: await state.storage.list({ prefix: "install-slot:cleanup-" }),
+    }));
+    expect(remaining.markers.size).toBe(0);
+    expect(remaining.slots.size).toBe(0);
+  });
+
+  it("persists an expiry alarm with the install claim", async () => {
+    const pack = makePack("w3-install-alarm-atomic");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "alarm-identity", pack.created_at);
+    const state = await runInDurableObject(index, async (_instance, durableState) => ({
+      alarm: await durableState.storage.getAlarm(),
+      markerCount: (await durableState.storage.list({ prefix: "install-marker:" })).size,
+    }));
+
+    expect(state.alarm).not.toBeNull();
+    expect(state.markerCount).toBe(1);
+  });
+
+  it("does not carry install suppression into a recreated slug", async () => {
+    const oldPack = makePack("w3-install-reuse");
+    const newPack = makePack(oldPack.id, {
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [oldPack] });
+    await index.recordInstall(oldPack.id, "same-identity", oldPack.created_at, 1_000);
+    await index.removePack(oldPack.id);
+    await index.addPack(newPack);
+
+    const result = await index.recordInstall(
+      newPack.id,
+      "same-identity",
+      newPack.created_at,
+      2_000,
+    );
+
+    expect(result).toMatchObject({ install_count: 1 });
+    const oldClaims = await runInDurableObject(index, async (_instance, state) =>
+      state.storage.list({ prefix: `install-marker:${oldPack.id}:${oldPack.created_at}:` }));
+    expect(oldClaims.size).toBe(0);
   });
 
   it.each(["vote_count", "install_count"] as const)(
