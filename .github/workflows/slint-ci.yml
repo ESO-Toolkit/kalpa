@@ -57,6 +57,23 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path prototypes/slint-kalpa/Cargo.toml --all-targets -- -D warnings
 
+      # H6 removed RUSTSEC-2026-0194 / -0195 by moving every resolved quick-xml
+      # edge to 0.41.0. Keep this focused on that fixed bug class: the sidecar's
+      # other cargo-audit findings have separate upstream owners and remediation.
+      - name: quick-xml advisory regression
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --format-version 1 --manifest-path prototypes/slint-kalpa/Cargo.toml | ConvertFrom-Json
+          $versions = @($metadata.packages | Where-Object name -eq "quick-xml" | ForEach-Object { [version]$_.version })
+          if ($versions.Count -eq 0) {
+            throw "quick-xml is absent from the resolved Slint graph; update the H6 gate intentionally"
+          }
+          $vulnerable = @($versions | Where-Object { $_ -lt [version]"0.41.0" })
+          if ($vulnerable.Count -gt 0) {
+            throw "RUSTSEC-2026-0194/-0195: vulnerable quick-xml resolved: $($vulnerable -join ', ')"
+          }
+          Write-Host "quick-xml advisory floor satisfied: $($versions -join ', ')"
+
       - name: Rust tests
         run: cargo test --manifest-path prototypes/slint-kalpa/Cargo.toml
 
