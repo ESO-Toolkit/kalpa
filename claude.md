@@ -53,12 +53,21 @@ Use the existing architecture; extend it instead of inventing new patterns:
 
 ```text
 src/                        # React frontend
+  __mocks__/                # Shared frontend test mocks
+  __tests__/                # Frontend setup and source-hygiene tests
   components/               # Feature components (addon list, packs, settings)
+  components/__tests__/     # Feature-component tests
+  components/animate-ui/    # Motion primitives grouped by animate/base/buttons/effects/texts
   components/ui/            # shadcn-ui primitives
   components/uploader/      # ESO Logs uploader workspace
+  components/uploader/__tests__/ # Uploader component and reducer tests
   hooks/                    # Shared React hooks
+  hooks/__tests__/          # Shared hook tests
   lib/                      # Utilities, Tauri bindings, store, theme presets
+  lib/__tests__/            # Frontend utility and contract tests
   types.ts                  # Shared TypeScript interfaces
+
+e2e/                       # Windows WebView2 read-only and sandbox Playwright specs
 
 src-tauri/src/              # Rust backend
   commands.rs               # Tauri command handlers (except the uploader's)
@@ -90,6 +99,7 @@ backend/eso-packs-worker/   # Pack Hub Cloudflare Worker
   src/redact.ts             # Anonymous-pack author redaction
   src/seed.ts               # Seed data for a fresh namespace
   src/cors.ts               # CORS config
+  test/                     # Worker unit, route, Durable Object, and scheduled tests
   wrangler.toml             # Worker config — name MUST be "kalpa-pack-hub"
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar, shipped on Windows
@@ -232,9 +242,11 @@ When preparing a new release:
    opens with "See CHANGELOG.md for full details", so a missing entry sends
    users to a file that does not mention the release they just installed —
    which is how beta.15 shipped.
-3. Rewrite the per-release "Changed:" section of `releaseBody` in
-   `.github/workflows/release.yml`. It is shared by every tag, so it otherwise
-   ships the previous release's headline.
+3. Confirm the release section contains the complete user-facing copy. The
+   release workflow generates its `Changed:` section from the matching tagged
+   section in `CHANGELOG.md` and fails closed if that section is missing, empty,
+   malformed, or duplicated. Preview it with
+   `node .github/scripts/release-body.cjs --version v<version>`.
 4. Run the packaged build verification gate on Windows: `npm run test:packaged`.
    It is deliberately local-only because it needs WebView2, launches the debug
    packaged binary itself, and fails if it connects to the Vite dev server instead

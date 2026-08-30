@@ -11,7 +11,7 @@ user-added files need. Peak disk = new version + residual (not 2× the addon).
 
 1. New shared module `src-tauri/src/install_txn.rs`, added to the Slint `#[path]`
    list alongside installer.rs. Layout, all under `<addons_dir>/.kalpa-staging/`:
-     <txn>/journal.json                 phase + folder records + hash-manifest paths
+      <txn>/journal.json                 phase + folder records + hash-manifest paths
      <txn>/stage/<Folder>/...           new folder image
      <txn>/tombstone/<Folder>/...       old folder during swap
      <txn>/hashes/<Folder>.json         baseline to promote
