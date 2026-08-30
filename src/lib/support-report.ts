@@ -188,14 +188,20 @@ export interface SupportAttentionItem {
 }
 
 export interface SupportTicketPayload {
-  /** 1 kept only so a legacy report still renders; Kalpa now always emits 2. */
-  version: 1 | 2;
+  /** 1 and 2 kept only so an older report still renders; Kalpa now always emits 3. */
+  version: 1 | 2 | 3;
   issueId: SupportIssueId;
   description: string;
   appVersion: string;
   platform: string;
   /** Present from version 2 onward. A version-1 report omits the key entirely. */
   environment?: SupportEnvironment;
+  /**
+   * Lowercase hex SHA-256 of the rendered report this payload produces — the
+   * exact text the user reviewed. Present only on version 3. See
+   * `sealSupportTicketPayload` for what it is and is not.
+   */
+  reportSha256?: string;
   generatedAt: string;
   connection: "online" | "offline";
   updateState: "checking" | "complete";
@@ -219,6 +225,112 @@ export const SUPPORT_REPORT_MAX_LENGTH = 1950;
 export const SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH = 7000;
 export const SUPPORT_HANDOFF_URL = "https://esotk.com/kalpa/support";
 const MAX_ATTENTION_ITEMS = 12;
+
+/**
+ * Placeholder hash carried while a payload is being fitted.
+ *
+ * Fitting measures the base64url handoff fragment, so the hash has to already
+ * occupy its final size or the measurement would be short by 64 characters.
+ * A hex digest is fixed-width, so sealing swaps this for the real value without
+ * changing the fragment's length — and the hash is not part of the rendered
+ * report, so it cannot change the text it covers either.
+ */
+export const UNSEALED_REPORT_SHA256 = "0".repeat(64);
+
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function rotr(value: number, bits: number): number {
+  return (value >>> bits) | (value << (32 - bits));
+}
+
+/**
+ * SHA-256 of `text` as lowercase hex, over its UTF-8 bytes.
+ *
+ * Written out rather than delegated to `crypto.subtle` because that API is
+ * async, and the report, its hash and the handoff URL are all derived
+ * synchronously while the dialog renders. Going async would put the Create
+ * button into a third "still preparing" state for no gain.
+ *
+ * The Worker uses the platform digest, and the shared contract fixture pins one
+ * value for one report text, so this routine disagreeing with real SHA-256
+ * fails the contract test rather than shipping.
+ */
+export function sha256Hex(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  const padded = new Uint8Array((((bytes.length + 8) >> 6) + 1) << 6);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  const bitLength = bytes.length * 8;
+  view.setUint32(padded.length - 8, Math.floor(bitLength / 2 ** 32));
+  view.setUint32(padded.length - 4, bitLength >>> 0);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+  const schedule = new Uint32Array(64);
+  for (let block = 0; block < padded.length; block += 64) {
+    for (let i = 0; i < 16; i += 1) schedule[i] = view.getUint32(block + i * 4);
+    for (let i = 16; i < 64; i += 1) {
+      const previous = schedule[i - 15]!;
+      const recent = schedule[i - 2]!;
+      const s0 = rotr(previous, 7) ^ rotr(previous, 18) ^ (previous >>> 3);
+      const s1 = rotr(recent, 17) ^ rotr(recent, 19) ^ (recent >>> 10);
+      schedule[i] = schedule[i - 16]! + s0 + schedule[i - 7]! + s1;
+    }
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+    for (let i = 0; i < 64; i += 1) {
+      const t1 =
+        (h +
+          (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) +
+          ((e & f) ^ (~e & g)) +
+          SHA256_K[i]! +
+          schedule[i]!) >>>
+        0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + t1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((word) => word.toString(16).padStart(8, "0"))
+    .join("");
+}
 
 export function neutralizeDiscordMentions(value: string): string {
   return value
@@ -411,8 +523,9 @@ export function buildSupportTicketPayload(input: SupportReportInput): SupportTic
       };
     });
 
-  return fitSupportTicketPayload({
-    version: 2,
+  return sealSupportTicketPayload({
+    version: 3,
+    reportSha256: UNSEALED_REPORT_SHA256,
     issueId: input.issueId,
     description: cleanMultiline(input.description, 500, input.addonsPath),
     appVersion: cleanSingleLine(input.appVersion || "unknown", 40, input.addonsPath),
@@ -590,6 +703,25 @@ export function fitSupportTicketPayload(payload: SupportTicketPayload): SupportT
   return fitted;
 }
 
+/**
+ * Fit the payload, then stamp it with the SHA-256 of the report it renders.
+ *
+ * The hosted page and the Worker re-render from the parsed payload with their
+ * own hand-copied copies of these redaction and rendering rules. This hash is
+ * how they can tell that their copy still agrees with Kalpa's, before a ticket
+ * exists: the invariant is about the report *text* the user reviewed, so it is
+ * the text that is hashed, not the payload JSON.
+ *
+ * It is NOT an integrity control. The hash travels in the same URL fragment as
+ * the payload it describes, so anyone able to alter one can recompute the
+ * other. It detects drift between our own three implementations — nothing about
+ * server-side validation may be relaxed on the strength of it.
+ */
+export function sealSupportTicketPayload(payload: SupportTicketPayload): SupportTicketPayload {
+  const fitted = fitSupportTicketPayload(payload);
+  return { ...fitted, reportSha256: sha256Hex(renderCompleteSupportReport(fitted)) };
+}
+
 export function renderSupportReport(payload: SupportTicketPayload): string {
   return renderCompleteSupportReport(fitSupportTicketPayload(payload));
 }
@@ -609,17 +741,27 @@ const HANDOFF_PLATFORMS: readonly string[] = ["windows", "macos", "linux"];
  */
 function isServerAcceptable(payload: SupportTicketPayload): boolean {
   return (
-    payload.version === 2 &&
+    payload.version === 3 &&
     payload.environment !== undefined &&
+    // Both servers require version 3 to carry a hash, and reject one that does
+    // not match their own render. Checking it here too means a payload mutated
+    // after sealing falls back to copy-and-manual instead of dead-ending the
+    // user in their browser after they have already consented.
+    payload.reportSha256 === sha256Hex(renderCompleteSupportReport(payload)) &&
     HANDOFF_PLATFORMS.includes(payload.platform) &&
     SUPPORT_ISSUES.some((issue) => issue.id === payload.issueId)
   );
 }
 
+/**
+ * The payload is validated, never repaired: `buildSupportTicketPayload` already
+ * fitted and sealed it, so re-fitting or re-sealing here could only paper over a
+ * payload that no longer matches the report the user is looking at.
+ *
+ * Refuse rather than hand the browser a report the hosted page would reject: a
+ * dead end after consent is worse than the copy/manual fallback.
+ */
 export function buildSupportHandoffUrl(payload: SupportTicketPayload): string | null {
-  const fitted = fitSupportTicketPayload(payload);
-  // Refuse rather than hand the browser a report the hosted page would reject:
-  // a dead end after consent is worse than the copy/manual fallback.
-  if (exceedsTransport(fitted) || !isServerAcceptable(fitted)) return null;
-  return `${SUPPORT_HANDOFF_URL}#${encodeSupportFragment(fitted)}`;
+  if (exceedsTransport(payload) || !isServerAcceptable(payload)) return null;
+  return `${SUPPORT_HANDOFF_URL}#${encodeSupportFragment(payload)}`;
 }

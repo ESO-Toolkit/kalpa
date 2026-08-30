@@ -12,9 +12,12 @@ import {
   normalizeRuntimeVersion,
   normalizeWebviewLabel,
   renderSupportReport,
+  sealSupportTicketPayload,
+  sha256Hex,
   SUPPORT_HANDOFF_MAX_FRAGMENT_LENGTH,
   SUPPORT_REPORT_MAX_LENGTH,
   UNKNOWN_SUPPORT_ENVIRONMENT,
+  UNSEALED_REPORT_SHA256,
   type SupportTicketPayload,
   type SupportReportInput,
 } from "../support-report";
@@ -115,11 +118,95 @@ describe("buildSupportReport", () => {
     }
   );
 
+  it("hashes the report text with real SHA-256", () => {
+    // The Worker uses the platform digest; this one is written out because the
+    // dialog derives the report, its hash and the handoff URL synchronously.
+    // Fixed vectors are what keep the two the same function.
+    expect(sha256Hex("")).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    expect(sha256Hex("abc")).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    // Block-boundary and multi-block lengths, where a padding mistake hides.
+    expect(sha256Hex("a".repeat(55))).toBe(
+      "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"
+    );
+    expect(sha256Hex("a".repeat(56))).toBe(
+      "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"
+    );
+    expect(sha256Hex("a".repeat(1000))).toBe(
+      "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"
+    );
+    // Astral characters are hashed as UTF-8, the same bytes every consumer sees.
+    expect(sha256Hex("😀")).toBe(
+      "f0443a342c5ef54783a111b51ba56c938e474c32324d90c3a60c9c8e3a37e2d9"
+    );
+  });
+
+  it("seals every fixture case's hash against its own rendered report", () => {
+    // The cross-repository invariant. The hosted page and the Worker each hold
+    // their own hand-copied copy of these rules; the fixture pins one report
+    // text and one digest of it, so any implementation whose rules drift fails
+    // this assertion in its own repository.
+    for (const entry of supportContractFixture.cases) {
+      const payload = entry.payload as SupportTicketPayload;
+      if (!("reportSha256" in payload)) continue;
+      expect(payload.reportSha256).toBe(sha256Hex(entry.report));
+      expect(payload.reportSha256).toBe(sha256Hex(renderSupportReport(payload)));
+    }
+  });
+
+  it("seals the payload with the hash of the report the user reviewed", () => {
+    const payload = buildSupportTicketPayload(input());
+
+    expect(payload.version).toBe(3);
+    expect(payload.reportSha256).toMatch(/^[0-9a-f]{64}$/);
+    // The hash covers the rendered text, not the payload JSON: the invariant is
+    // about what the user read.
+    expect(payload.reportSha256).toBe(sha256Hex(renderSupportReport(payload)));
+    // Sealing is idempotent, so the handoff carries the same payload the review
+    // was built from rather than a second, subtly different one.
+    expect(sealSupportTicketPayload(payload)).toEqual(payload);
+  });
+
+  it("seals a payload that had to be shrunk to fit, not the one before shrinking", () => {
+    const payload = buildSupportTicketPayload(
+      input({
+        description: "Beim Aktualisieren erscheint eine unerwartete Fehlermeldung. ".repeat(20),
+        lastError: "Ein unerwarteter Fehler ist aufgetreten. ".repeat(10),
+        addons: [],
+        updateResults: [],
+      })
+    );
+
+    expect(renderSupportReport(payload).length).toBeLessThanOrEqual(SUPPORT_REPORT_MAX_LENGTH);
+    expect(payload.reportSha256).toBe(sha256Hex(renderSupportReport(payload)));
+  });
+
+  it("keeps the fragment the same size whether or not the hash is real yet", () => {
+    // Fitting measures the fragment while the hash is still the placeholder, so
+    // a placeholder of a different width would make every size decision wrong.
+    const payload = buildSupportTicketPayload(input());
+    const unsealed = { ...payload, reportSha256: UNSEALED_REPORT_SHA256 };
+
+    expect(UNSEALED_REPORT_SHA256).toHaveLength(64);
+    expect(JSON.stringify(unsealed)).toHaveLength(JSON.stringify(payload).length);
+  });
+
+  it("refuses the handoff when the hash no longer covers the report", () => {
+    // Stands in for a payload mutated after sealing. Both servers would reject
+    // it; refusing here turns that into the copy/manual fallback instead of a
+    // dead end the user only reaches after consenting in their browser.
+    const payload = buildSupportTicketPayload(input());
+
+    expect(buildSupportHandoffUrl({ ...payload, reportSha256: "0".repeat(64) })).toBeNull();
+    expect(buildSupportHandoffUrl({ ...payload, instanceLabel: "Some other instance" })).toBeNull();
+  });
+
   it("reports the allow-listed environment and nothing else", () => {
     const payload = buildSupportTicketPayload(input());
     const report = renderSupportReport(payload);
 
-    expect(payload.version).toBe(2);
+    expect(payload.version).toBe(3);
     expect(Object.keys(payload.environment!).sort()).toEqual([
       "arch",
       "osVersion",
