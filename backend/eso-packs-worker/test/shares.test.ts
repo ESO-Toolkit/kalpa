@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import worker from "../src/index";
-import { resetTokenCache } from "../src/shares";
+import { resetTokenCache, validateBearerToken } from "../src/shares";
 import type { Env } from "../src/types";
 import {
   TEST_USER,
@@ -135,6 +135,25 @@ describe("POST /shares", () => {
     expect(stored!.pack.addons).toEqual([
       { esouiId: 1, name: "Addon", required: true },
     ]);
+  });
+});
+
+describe("Bearer identity cache sequencing", () => {
+  it("does not let an older lookup repopulate after cache invalidation", async () => {
+    let resolveOld!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    fetchSpy.mockReturnValueOnce(oldResponse);
+    const request = authedRequest(`${BASE}/packs`);
+    const oldLookup = validateBearerToken(request);
+    await Promise.resolve();
+
+    resetTokenCache();
+    fetchSpy.mockResolvedValueOnce(esoLogsResponse({ id: 77, name: "new-identity" }));
+    expect(await validateBearerToken(request)).toMatchObject({ id: 77 });
+
+    resolveOld(esoLogsResponse({ id: 42, name: "old-identity" }));
+    expect(await oldLookup).toMatchObject({ id: 42 });
+    expect(await validateBearerToken(request)).toMatchObject({ id: 77 });
   });
 });
 

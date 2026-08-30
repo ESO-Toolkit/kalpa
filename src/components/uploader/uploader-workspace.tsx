@@ -114,6 +114,8 @@ type Mode = "manual" | "live";
 type HeaderPhase =
   "idle" | "scanning" | "ready" | "uploading" | "armed" | "live" | "attention" | "signedOut";
 
+type LogSelectionOutcome = "accepted" | "deferred" | "stale" | "blocked" | "error";
+
 const DEFAULT_OPTIONS: UploadOptions = {
   region: 1,
   guildId: null,
@@ -237,6 +239,7 @@ export function UploaderWorkspace({
   const [detection, setDetection] = useState<LogPathDetection | null>(null);
   const [logsDir, setLogsDir] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogFileInfo[]>([]);
+  const [listLoading, setListLoading] = useState(false);
   // Distinguish "folder read failed" from "folder is genuinely empty" so the
   // empty state doesn't misreport an access error as "No log files found" (L17).
   const [listError, setListError] = useState<string | null>(null);
@@ -269,6 +272,7 @@ export function UploaderWorkspace({
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
+  const importTokenRef = useRef(0);
   // The log queued for deletion (drives the DeleteLogConfirm dialog); null = no
   // pending delete. `deleting` guards the confirm button while the move runs.
   const [deleteTarget, setDeleteTarget] = useState<LogFileInfo | null>(null);
@@ -380,12 +384,32 @@ export function UploaderWorkspace({
   // Current selection, mirrored to a ref so loadLogs can reconcile it without
   // being re-created on every selection change.
   const selectedLogRef = useRef<string | null>(null);
+  // Directory list requests can overlap when detection, folder picking, or
+  // refreshes run close together. Track both identity dimensions: a newer load
+  // for the same directory supersedes the old one, and switching directories
+  // invalidates every request issued for the previous path.
+  const logsDirRef = useRef<string | null>(null);
+  const loadLogsSeqRef = useRef(0);
+  const detectLogsSeqRef = useRef(0);
+  const setActiveLogsDir = useCallback((dir: string | null) => {
+    const directoryChanged = logsDirRef.current !== dir;
+    logsDirRef.current = dir;
+    if (directoryChanged) {
+      importTokenRef.current++;
+      setImporting(false);
+    }
+    loadLogsSeqRef.current++;
+    detectLogsSeqRef.current++;
+    setLogsDir(dir);
+    setListLoading(false);
+  }, []);
   useEffect(() => {
     selectedLogRef.current = selectedLog;
   }, [selectedLog]);
 
   const clearSelection = useCallback(() => {
     selectTokenRef.current++; // drop any in-flight scan result
+    selectedLogRef.current = null;
     setSelectedLog(null);
     setPreflight(null);
     setFights([]);
@@ -414,8 +438,13 @@ export function UploaderWorkspace({
 
   const loadLogs = useCallback(
     async (dir: string) => {
+      if (logsDirRef.current !== dir) return null;
+      const operationId = ++loadLogsSeqRef.current;
+      const isCurrent = () => loadLogsSeqRef.current === operationId && logsDirRef.current === dir;
+      setListLoading(true);
       try {
         const files = await invokeOrThrow<LogFileInfo[]>("uploader_list_logs", { logsDir: dir });
+        if (!isCurrent()) return;
         setLogs(files);
         setListError(null);
         // If the previously-selected log is gone (rotated/deleted on relog or a
@@ -424,13 +453,18 @@ export function UploaderWorkspace({
         if (sel && !files.some((f) => f.path === sel)) {
           clearSelection();
         }
+        return files;
       } catch (e) {
+        if (!isCurrent()) return null;
         const msg = getTauriErrorMessage(e);
         // Record the failure so the empty state can show the real reason instead
         // of "No log files found"; also clear any stale list from a prior folder.
         setListError(msg);
         setLogs([]);
         toast.error(`Couldn't list logs: ${msg}`);
+        return null;
+      } finally {
+        if (isCurrent()) setListLoading(false);
       }
     },
     [clearSelection]
@@ -439,40 +473,52 @@ export function UploaderWorkspace({
   const applyDetectedLogs = useCallback(
     async (det: LogPathDetection) => {
       if (!det.path) {
-        setLogsDir(null);
+        setActiveLogsDir(null);
         setLogs([]);
         setListError(null);
         clearSelection();
         return;
       }
 
-      setLogsDir(det.path);
+      const sameDirectory = logsDirRef.current === det.path;
+      if (!sameDirectory) clearSelection();
+      setActiveLogsDir(det.path);
+      // A refresh re-detects the same folder before listing it again. Keep the
+      // last successful snapshot visible while that replacement request is in
+      // flight; only a directory switch should blank the old list immediately.
+      if (!sameDirectory) setLogs([]);
+      setListError(null);
       if (det.logsDirExists) {
         await loadLogs(det.path);
       } else {
-        setLogs([]);
+        if (!sameDirectory) setLogs([]);
         setListError(null);
         clearSelection();
       }
     },
-    [clearSelection, loadLogs]
+    [clearSelection, loadLogs, setActiveLogsDir]
   );
 
   // Initial detection + transport + history.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      const detectionOperationId = ++detectLogsSeqRef.current;
       try {
         const [det, tinfo] = await Promise.all([
           invokeOrThrow<LogPathDetection>("uploader_detect_path"),
           invokeOrThrow<TransportInfo>("uploader_transport_info"),
         ]);
         if (cancelled) return;
-        setDetection(det);
         setTransport(tinfo);
-        await applyDetectedLogs(det);
+        if (detectLogsSeqRef.current === detectionOperationId) {
+          setDetection(det);
+          await applyDetectedLogs(det);
+        }
       } catch (e) {
-        if (!cancelled) toast.error(getTauriErrorMessage(e));
+        if (!cancelled && detectLogsSeqRef.current === detectionOperationId) {
+          toast.error(getTauriErrorMessage(e));
+        }
       }
       if (!cancelled) await refreshHistory();
     })();
@@ -578,9 +624,14 @@ export function UploaderWorkspace({
     // fails; an OS dialog error must surface, not silently no-op.
     try {
       const picked = await openDialog({ directory: true, title: "Select your ESO Logs folder" });
-      if (typeof picked === "string" && picked !== logsDir) {
+      // The dialog can remain open while another detection/refresh changes the
+      // active folder. Read the ref after it resolves so selecting the folder
+      // that is already current does not restart its in-flight listing.
+      if (typeof picked === "string" && picked !== logsDirRef.current) {
         clearSelection(); // switching folders invalidates the current selection
-        setLogsDir(picked);
+        setActiveLogsDir(picked);
+        setLogs([]);
+        setListError(null);
         void loadLogs(picked);
       }
     } catch (e) {
@@ -602,23 +653,42 @@ export function UploaderWorkspace({
 
   const handleRefreshLogs = useCallback(async () => {
     if (!logsDir) {
+      const detectionOperationId = ++detectLogsSeqRef.current;
       try {
         const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
+        if (detectLogsSeqRef.current !== detectionOperationId || logsDirRef.current !== null) {
+          return;
+        }
         setDetection(det);
         await applyDetectedLogs(det);
       } catch (e) {
-        toast.error(getTauriErrorMessage(e));
+        if (detectLogsSeqRef.current === detectionOperationId && logsDirRef.current === null) {
+          toast.error(getTauriErrorMessage(e));
+        }
       }
       return;
     }
 
     if (detection?.path === logsDir) {
+      const activeDirectory = logsDir;
+      const detectionOperationId = ++detectLogsSeqRef.current;
       try {
         const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
+        if (
+          detectLogsSeqRef.current !== detectionOperationId ||
+          logsDirRef.current !== activeDirectory
+        ) {
+          return;
+        }
         setDetection(det);
         await applyDetectedLogs(det);
       } catch (e) {
-        toast.error(getTauriErrorMessage(e));
+        if (
+          detectLogsSeqRef.current === detectionOperationId &&
+          logsDirRef.current === activeDirectory
+        ) {
+          toast.error(getTauriErrorMessage(e));
+        }
       }
       return;
     }
@@ -705,19 +775,25 @@ export function UploaderWorkspace({
   }, [deleteTarget, restoreLog, logsDir, loadLogs, clearSelection]);
 
   const handleSelectLog = useCallback(
-    async (path: string) => {
+    async (path: string, freshLog?: LogFileInfo): Promise<LogSelectionOutcome> => {
       // The slice picker is keyed on the selected log, so switching while it is
       // cutting or uploading would remount it and abandon a batch that is still
       // writing multi-GB files — with no UI left to report what happened.
       if (slicePickerBusyRef.current) {
         toast.info("Finish or stop the current split before switching logs.");
-        return;
+        return "blocked";
       }
       // Guard against a slow scan of a previously-selected log resolving after a
       // newer selection and overwriting its results.
       const token = ++selectTokenRef.current;
-      const log = logs.find((l) => l.path === path);
+      const activeDirectory = logsDirRef.current;
+      const isCurrentSelection = () =>
+        selectTokenRef.current === token &&
+        logsDirRef.current === activeDirectory &&
+        selectedLogRef.current === path;
+      const log = freshLog ?? logs.find((l) => l.path === path);
       const deferFullScan = (log?.sizeBytes ?? 0) > DEFER_FULL_PREFLIGHT_BYTES;
+      selectedLogRef.current = path;
       setSelectedLog(path);
       setPreflight(null);
       setFights([]);
@@ -727,16 +803,16 @@ export function UploaderWorkspace({
       if (deferFullScan) {
         const sel = CSS.escape(path);
         setTimeout(() => {
-          if (selectTokenRef.current !== token) return;
+          if (!isCurrentSelection()) return;
           document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
         }, 0);
-        return;
+        return "deferred";
       }
       try {
         // A single preflight scan returns both the counts and (unless the log is
         // huge) the fight list — no second scan needed.
         const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
-        if (selectTokenRef.current !== token) return;
+        if (!isCurrentSelection()) return "stale";
         setPreflight(pre);
         setFights(pre.fights);
         setPreflightError(null);
@@ -744,21 +820,23 @@ export function UploaderWorkspace({
         // "Scanning" pill swap). Once this scan is still the current one, restore
         // focus to the selected row so keyboard users aren't stranded. Deferred a
         // tick so it runs after the post-setState re-render.
-        if (selectTokenRef.current === token) {
+        if (isCurrentSelection()) {
           const sel = CSS.escape(path);
           setTimeout(() => {
-            if (selectTokenRef.current !== token) return;
+            if (!isCurrentSelection()) return;
             document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
           }, 0);
         }
+        return "accepted";
       } catch (e) {
-        if (selectTokenRef.current !== token) return;
+        if (!isCurrentSelection()) return "stale";
         const message = getTauriErrorMessage(e);
         setPreflightError(message);
         setPreflightDeferred(true);
         toast.error(`Couldn't read that log: ${message}`);
+        return "error";
       } finally {
-        if (selectTokenRef.current === token) setScanning(false);
+        if (isCurrentSelection()) setScanning(false);
       }
     },
     [logs]
@@ -799,19 +877,38 @@ export function UploaderWorkspace({
         toast.error("Only .log files can be added.");
         return;
       }
+      const importToken = ++importTokenRef.current;
       setImporting(true);
+      const activeDirectory = logsDirRef.current;
+      const isCurrentImport = () =>
+        importTokenRef.current === importToken && logsDirRef.current === activeDirectory;
       try {
         const imported = await invokeOrThrow<string>("uploader_import_log", { srcPath });
-        if (logsDir) await loadLogs(logsDir);
-        await handleSelectLog(imported);
-        toast.success("Log added — scanning it now.");
+        if (!isCurrentImport()) return;
+        const refreshedLogs = activeDirectory ? await loadLogs(activeDirectory) : null;
+        if (!isCurrentImport()) return;
+        const importedLog = refreshedLogs?.find((log) => log.path === imported);
+        if (!refreshedLogs) return;
+        if (!importedLog) {
+          toast.info("Log added, but it isn't in this folder.");
+          return;
+        }
+        const selectionOutcome = await handleSelectLog(imported, importedLog);
+        if (!isCurrentImport() || selectedLogRef.current !== imported) return;
+        if (selectionOutcome !== "accepted" && selectionOutcome !== "deferred") return;
+        toast.success(
+          importedLog.sizeBytes > DEFER_FULL_PREFLIGHT_BYTES
+            ? "Log added — full scan deferred."
+            : "Log added — scanning it now."
+        );
       } catch (e) {
+        if (!isCurrentImport()) return;
         toast.error(`Couldn't add that log: ${getTauriErrorMessage(e)}`);
       } finally {
-        setImporting(false);
+        if (isCurrentImport()) setImporting(false);
       }
     },
-    [logsDir, loadLogs, handleSelectLog]
+    [loadLogs, handleSelectLog]
   );
 
   // Live mode has exactly one sensible target — the live Encounter.log ESO is writing
@@ -1659,6 +1756,7 @@ export function UploaderWorkspace({
               detection={detection}
               logsDir={logsDir}
               logs={logs}
+              listLoading={listLoading}
               listError={listError}
               selectedLog={selectedLog}
               scanning={scanning}
@@ -3020,6 +3118,7 @@ function LogPicker({
   detection,
   logsDir,
   logs,
+  listLoading,
   listError,
   selectedLog,
   scanning,
@@ -3037,6 +3136,7 @@ function LogPicker({
   detection: LogPathDetection | null;
   logsDir: string | null;
   logs: LogFileInfo[];
+  listLoading: boolean;
   listError: string | null;
   selectedLog: string | null;
   scanning: boolean;
@@ -3084,6 +3184,7 @@ function LogPicker({
     // a lighter fill, a luminous top edge (inset highlight), and a real outer
     // shadow. This is the one place the eye should land first.
     <div
+      aria-busy={listLoading}
       className={cn(
         "relative rounded-2xl border border-structure-10 bg-gradient-to-b from-structure-07 to-structure-025 p-3.5 transition-colors duration-150",
         "shadow-[0_12px_40px_-16px_var(--scrim-70),inset_0_1px_0_var(--structure-08)]",
@@ -3168,8 +3269,14 @@ function LogPicker({
         </div>
         <div className="flex shrink-0 gap-1">
           <SimpleTooltip content="Refresh logs" side="bottom">
-            <Button variant="ghost" size="icon-sm" onClick={onRefresh} aria-label="Refresh logs">
-              <RefreshCw className="size-3.5" />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onRefresh}
+              aria-label="Refresh logs"
+              disabled={listLoading}
+            >
+              <RefreshCw className={cn("size-3.5", listLoading && "animate-spin")} />
             </Button>
           </SimpleTooltip>
           <SimpleTooltip content="Open Logs folder in File Explorer" side="bottom">
