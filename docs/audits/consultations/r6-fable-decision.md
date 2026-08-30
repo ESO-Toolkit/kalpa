@@ -11,13 +11,16 @@ user-added files need. Peak disk = new version + residual (not 2× the addon).
 
 1. New shared module `src-tauri/src/install_txn.rs`, added to the Slint `#[path]`
    list alongside installer.rs. Layout, all under `<addons_dir>/.kalpa-staging/`:
-     <txn>/journal.json                 phase + folder list + hash-manifest paths
+      <txn>/journal.json                 phase + folder records + hash-manifest paths
      <txn>/stage/<Folder>/...           new folder image
      <txn>/tombstone/<Folder>/...       old folder during swap
      <txn>/hashes/<Folder>.json         baseline to promote
-   Everything a crash can leave behind lives in ONE dot-directory, so scan needs
-   one exclusion rule and recovery needs one directory listing. <txn> = pid +
-   monotonic counter + random suffix; never a timestamp alone (two binaries).
+   Each folder record includes `name` and `had_live`, captured before staging;
+   recovery must not infer whether a pre-image existed from paths that a rename
+   may already have consumed. Everything a crash can leave behind lives in ONE
+   dot-directory, so scan needs one exclusion rule and recovery needs one
+   directory listing. <txn> = pid + monotonic counter + random suffix; never a
+   timestamp alone (two binaries).
 2. Acquire the P0-A2 transaction lock on addons_dir for the whole txn
    (stage + swap + promote + cleanup). Run `recover_staging(addons_dir)` first,
    under the same lock (step 9). No new process-wide statics.
@@ -53,8 +56,10 @@ user-added files need. Peak disk = new version + residual (not 2× the addon).
 7. Swap, sequential, per folder, `finalize_backup_replace` shape with the
    AtomicFile retry loop (5×40ms on 5/32/33/PermissionDenied) around BOTH
    renames: live → tombstone, stage → live. Do NOT delete tombstones yet.
-   On any rename failure: restore every already-swapped folder from its
-   tombstone (reverse order), then remove `<txn>/`, then return the error
+   On any rename failure: roll back every already-swapped folder in reverse
+   order. For `had_live`, first remove/move aside the newly landed live folder,
+   then rename its tombstone back to live. For `!had_live`, remove the newly
+   landed live folder. Then remove `<txn>/` and return the error
    with the "close ESO / editor" hint. Journal phase → `swapped` only after
    every folder landed.
 8. Promote: `atomic_write` each `<txn>/hashes/<Folder>.json` →
@@ -103,14 +108,19 @@ recover_staging lists `.kalpa-staging/*`, under the P0-A2 lock, and for each txn
 reads journal.json (missing/unparseable ⇒ treat as phase < staged):
 1. phase < staged (kill mid-extract, disk full, ZIP error): remove `<txn>/`.
    Live folders untouched by construction. Deterministic rollback.
-2. phase == staged (kill anywhere during step 7): per folder, three-way
-   discriminator as in recover_orphaned_backups:
-     live exists & tombstone exists  → rename landed for this folder? Compare:
-       stage exists ⇒ swap not started; stage absent ⇒ swap landed.
-     live absent & tombstone exists → mid-swap: rename tombstone → live.
-     live absent & tombstone absent → folder was new (no pre-image): nothing.
-   Then ROLL BACK: every folder whose stage is absent (landed) gets tombstone →
-   live. Rationale: promotion never happened, so the stale baseline is still in
+2. phase == staged (kill anywhere during step 7): use each journal record's
+   `had_live` flag plus live/stage/tombstone existence, then ROLL BACK:
+     had_live & stage absent & live exists & tombstone exists → swap landed;
+       remove/move aside the new live folder, then tombstone → live.
+     had_live & live absent & tombstone exists → interrupted between renames;
+       tombstone → live (discard any remaining stage with the txn).
+     had_live & stage exists & live exists & tombstone absent → swap not begun;
+       leave live untouched.
+     !had_live & stage absent & live exists → new folder landed; remove live.
+     !had_live & stage exists & live absent → swap not begun; remove the txn.
+   Any impossible combination is an error and preserves the transaction for
+   diagnosis instead of deleting a possible pre-image. Rationale: promotion
+   never happened, so the stale baseline is still in
    force; rolling back is the only outcome consistent with it. Then remove
    `<txn>/`. Roll-forward is possible (stage is complete) but requires the same
    swap-retry path on a startup call site — choose rollback for determinism and
@@ -144,7 +154,10 @@ TESTS:
 2. Multi-folder: LibFoo pre-exists, MainAddon new; force rename failure on
    MainAddon (Windows: hold a file open in MainAddon's stage path; cross-platform:
    inject). Assert LibFoo restored byte-identical AND MainAddon absent AND stage
-   gone. (Failure mode 2 — today's code fails this.)
+   gone. Exercise both landed states explicitly: LibFoo has a new live folder
+   plus its tombstone and must remove the new live before restoration; MainAddon
+   has a live folder but no tombstone and must be deleted. (Failure mode 2 —
+   today's code fails this.)
 3. Keep-mine + user-added + upstream-removed: seed folder with edited a.lua
    (kept), user-only z.lua, and old.lua absent from the new ZIP. After update:
    a.lua bytes unchanged, z.lua present, old.lua present, baseline has a.lua =
@@ -155,8 +168,10 @@ TESTS:
    reports no modifications. Then the failure-mode-5 variant: stage still
    present + journal swapped → assert rollback, not promotion (a design that
    trusts the journal alone fails this).
-5. Simulate phase==staged with folder 1 landed and folder 2 not: assert both
-   folders at pre-image and `.kalpa-hashes` untouched.
+5. Simulate phase==staged with an existing folder landed, a new folder landed,
+   and a third folder not started: assert the existing folder is byte-identical
+   to its pre-image, the new folder is absent, the untouched folder is unchanged,
+   and `.kalpa-hashes` is untouched.
 6. Stale-baseline non-blessing: kill mid-extract, run scan → assert
    `modified_files` in the manifest is unchanged from before the update (the
    corruption chain's step 2 must not happen).
