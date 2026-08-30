@@ -25,6 +25,19 @@ import {
 const BASE = "https://kalpa-pack-hub.eso-toolkit.workers.dev";
 const e = env as unknown as Env;
 
+function packIndexForTest() {
+  return e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton"));
+}
+
+async function ensureD1MirrorTables(): Promise<void> {
+  await e.ROSTER_HUB_DB!.prepare(
+    "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, author_id TEXT, author_name TEXT, is_anonymous INTEGER, title TEXT, description TEXT, pack_type TEXT, addons TEXT, vote_count INTEGER, created_at TEXT, updated_at TEXT)"
+  ).run();
+  await e.ROSTER_HUB_DB!.prepare(
+    "CREATE TABLE IF NOT EXISTS pack_tags (pack_id TEXT, tag TEXT)"
+  ).run();
+}
+
 async function putPackIndex(testEnv: Env, index: PackIndex): Promise<void> {
   const id = testEnv.PACK_INDEX.idFromName("singleton");
   await testEnv.PACK_INDEX.get(id).replaceIndex(index);
@@ -47,9 +60,7 @@ beforeEach(async () => {
     return originalFetch(input);
   });
   globalThis.fetch = fetchSpy as typeof fetch;
-  // The worker memoizes resolved tokens per isolate, but these cases resolve
-  // the same token to different identities, and every spelling of the default
-  // list view now shares one cache entry.
+  // These cases resolve the same memoized token to different identities.
   resetTokenCache();
   await putPackIndex(e, { packs: [] });
   await invalidatePackListCache(new URL(BASE));
@@ -77,6 +88,16 @@ describe("GET /health", () => {
     expect(body.status).toBe("ok");
     expect(body.kv).toBe(true);
   });
+
+  it("does not expose corpus size or backup timing publicly", async () => {
+    await e.ESO_PACKS.put("backup:meta", JSON.stringify({ last_success: Date.now() }));
+    await putPackIndex(e, { packs: [makePack("private-health-detail")] });
+
+    const body = await (await call(new Request(`${BASE}/health`))).json<Record<string, unknown>>();
+    expect(body).not.toHaveProperty("packCount");
+    expect(body).not.toHaveProperty("last_backup_at");
+    expect(body).not.toHaveProperty("last_backup_ok");
+  });
 });
 
 // ── 404 ───────────────────────────────────────────────────────────
@@ -100,6 +121,28 @@ describe("OPTIONS preflight", () => {
 // ── GET /packs ────────────────────────────────────────────────────
 
 describe("GET /packs", () => {
+  it("does not populate an isolate-unsafe manual Cache API entry", async () => {
+    const key = new Request(`${BASE}/packs?default=1`);
+    await caches.default.delete(key);
+    await call(new Request(`${BASE}/packs?sort=votes&page=1`));
+    expect(await caches.default.match(key)).toBeUndefined();
+  });
+
+  it("keeps omitted-sort and votes-sort wire results distinct", async () => {
+    await putPackIndex(e, {
+      packs: [
+        makePack("recent-low", { vote_count: 1, updated_at: "2026-08-26T00:00:00.000Z" }),
+        makePack("old-high", { vote_count: 10, updated_at: "2026-01-01T00:00:00.000Z" }),
+      ],
+    });
+    const omitted = await (await call(new Request(`${BASE}/packs`)))
+      .json<{ packs: Array<{ id: string }>; sort: string }>();
+    const votes = await (await call(new Request(`${BASE}/packs?sort=votes&page=1`)))
+      .json<{ packs: Array<{ id: string }>; sort: string }>();
+    expect([omitted.sort, omitted.packs[0].id]).toEqual(["updated", "recent-low"]);
+    expect([votes.sort, votes.packs[0].id]).toEqual(["votes", "old-high"]);
+  });
+
   it("returns empty list when no index", async () => {
     const res = await call(new Request(`${BASE}/packs`));
     expect(res.status).toBe(200);
@@ -229,6 +272,8 @@ describe("GET /packs", () => {
     }>();
     expect(body.packs.find((p) => p.id === "list-voted")!.user_voted).toBe(true);
     expect(body.packs.find((p) => p.id === "list-unvoted")!.user_voted).toBe(false);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
   it("omits user_voted for anonymous callers", async () => {
@@ -237,6 +282,17 @@ describe("GET /packs", () => {
     const res = await call(new Request(`${BASE}/packs`));
     const body = await res.json<{ packs: Array<Record<string, unknown>> }>();
     expect(body.packs[0].user_voted).toBeUndefined();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=30");
+  });
+
+  it("does not cache an anonymous fallback for a failed bearer lookup", async () => {
+    await putPackIndex(e, { packs: [makePack("list-auth-outage")] });
+    fetchSpy.mockResolvedValueOnce(esoLogsUnauthorized());
+
+    const res = await call(authedRequest(`${BASE}/packs`));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
   });
 });
 
@@ -468,7 +524,8 @@ describe("GET /packs/:id", () => {
     const body = await res.json<{ pack: { user_voted: boolean } }>();
     expect(body.pack.user_voted).toBe(true);
     // Per-viewer state must never be cached.
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
   it("reports user_voted false for a signed-in viewer who has not voted", async () => {
@@ -484,6 +541,16 @@ describe("GET /packs/:id", () => {
     const body = await res.json<{ pack: Record<string, unknown> }>();
     expect(body.pack.user_voted).toBeUndefined();
     expect(res.headers.get("Cache-Control")).toContain("max-age=300");
+  });
+
+  it("does not cache redacted detail after a failed bearer lookup", async () => {
+    await putPackIndex(e, { packs: [makePack("detail-auth-outage")] });
+    fetchSpy.mockResolvedValueOnce(esoLogsUnauthorized());
+
+    const res = await call(authedRequest(`${BASE}/packs/detail-auth-outage`));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
   });
 });
 
@@ -564,7 +631,8 @@ describe("anonymous pack redaction", () => {
     }>();
     expect(body.pack.author_name).toBe(TEST_USER.name);
     expect(body.pack.author_id).toBe(String(TEST_USER.id));
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Vary")).toContain("Authorization");
   });
 });
 
@@ -830,6 +898,64 @@ describe("POST /packs/:id/vote", () => {
 // ── POST /packs/:id/install ───────────────────────────────────────
 
 describe("POST /packs/:id/install", () => {
+  it("honors a live limiter key written by the previous release", async () => {
+    const pack = makePack("legacy-install-limit", { install_count: 4 });
+    const ip = "4.3.2.1";
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+    await e.ESO_PACKS.put(`install-rate:${pack.id}:${ip}`, "1", { expirationTtl: 3600 });
+
+    const res = await call(new Request(`${BASE}/packs/${pack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": ip },
+    }));
+
+    expect(await res.json<{ installCount: number }>()).toEqual({ installCount: 4 });
+    expect(await packIndexForTest().getPack(pack.id)).toMatchObject({ install_count: 4 });
+  });
+
+  it("does not let a legacy limiter expose a tombstoned stale detail", async () => {
+    const pack = makePack("legacy-install-deleted", { install_count: 4 });
+    const ip = "4.3.2.2";
+    await putPackIndex(e, { packs: [pack] });
+    await packIndexForTest().removePack(pack.id);
+    await putPack(e, pack);
+    await e.ESO_PACKS.put(`install-rate:${pack.id}:${ip}`, "1", { expirationTtl: 3600 });
+
+    const res = await call(new Request(`${BASE}/packs/${pack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": ip },
+    }));
+
+    expect(res.status).toBe(404);
+  });
+
+  it("does not carry a legacy limiter into a recreated slug lifecycle", async () => {
+    const oldPack = makePack("legacy-install-recreated", { install_count: 9 });
+    const newPack = makePack(oldPack.id, {
+      install_count: 0,
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    });
+    const ip = "4.3.2.3";
+    await putPackIndex(e, { packs: [oldPack] });
+    await packIndexForTest().removePack(oldPack.id);
+    await packIndexForTest().addPack(newPack);
+    await putPack(e, oldPack);
+    await e.ESO_PACKS.put(`install-rate:${oldPack.id}:${ip}`, "1", { expirationTtl: 3600 });
+
+    const res = await call(new Request(`${BASE}/packs/${oldPack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": ip },
+    }));
+
+    expect(await res.json<{ installCount: number }>()).toEqual({ installCount: 1 });
+    expect(await packIndexForTest().getPack(oldPack.id)).toMatchObject({
+      created_at: newPack.created_at,
+      install_count: 1,
+    });
+  });
+
   it("increments install count", async () => {
     const pack = makePack("installable", { install_count: 0 });
     await putPack(e, pack);
@@ -869,6 +995,22 @@ describe("POST /packs/:id/install", () => {
     expect(body2.installCount).toBe(1);
   });
 
+  it("does not double-count concurrent requests from the same IP", async () => {
+    const pack = makePack("concurrent-install", { install_count: 0 });
+    await putPack(e, pack);
+    await putPackIndex(e, { packs: [pack] });
+    const request = () => new Request(`${BASE}/packs/${pack.id}/install`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": "6.7.8.9" },
+    });
+
+    const responses = await Promise.all([call(request()), call(request())]);
+    const bodies = await Promise.all(responses.map((response) => response.json<{ installCount: number }>()));
+
+    expect(bodies.map(({ installCount }) => installCount)).toEqual([1, 1]);
+    expect(await packIndexForTest().getPack(pack.id)).toMatchObject({ install_count: 1 });
+  });
+
   it("404s on a draft pack rather than bumping and disclosing its count", async () => {
     const pack = makePack("draft-install", { status: "draft", install_count: 0 });
     await putPack(e, pack);
@@ -906,10 +1048,76 @@ describe("POST /admin/seed", () => {
 
 // ── POST /admin/restore ─────────────────────────────────────────────
 
+describe("POST /admin/migration/authority", () => {
+  it("rejects an oversized adjudication without changing authority", async () => {
+    const index = packIndexForTest();
+    await index.setAuthority("kv", []);
+    const body = JSON.stringify({
+      authority: "do",
+      unowned_d1_ids: Array.from({ length: 100 }, (_, i) => `website-${i}`),
+      padding: "x".repeat(256_000),
+    });
+
+    const res = await call(apiKeyRequest(`${BASE}/admin/migration/authority`, {
+      method: "POST",
+      body,
+    }));
+
+    expect(res.status).toBe(413);
+    expect((await index.getReconciliationState()).authority).toBe("kv");
+  });
+
+  it("requires explicit adjudication before ignoring a shared-D1-only witness", async () => {
+    await e.ROSTER_HUB_DB!.prepare(
+      "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, author_id TEXT, author_name TEXT, is_anonymous INTEGER, title TEXT, description TEXT, pack_type TEXT, addons TEXT, vote_count INTEGER, created_at TEXT, updated_at TEXT)"
+    ).run();
+    await e.ROSTER_HUB_DB!.prepare(
+      "CREATE TABLE IF NOT EXISTS pack_tags (pack_id TEXT, tag TEXT)"
+    ).run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs").run();
+    await e.ROSTER_HUB_DB!.prepare(
+      "INSERT INTO packs VALUES ('website-only', 'website', 'Website', 0, 'Website row', '', 'addon-pack', '[]', 0, datetime('now'), datetime('now'))"
+    ).run();
+    const details = await e.ESO_PACKS.list({ prefix: "pack:" });
+    for (const { name } of details.keys) await e.ESO_PACKS.delete(name);
+    await e.ESO_PACKS.delete("backup:latest");
+    await putPackIndex(e, { packs: [] });
+
+    const blocked = await call(
+      apiKeyRequest(`${BASE}/admin/migration/authority`, {
+        method: "POST",
+        body: JSON.stringify({ authority: "do" }),
+      })
+    );
+    expect(blocked.status).toBe(409);
+
+    const adjudicated = await call(
+      apiKeyRequest(`${BASE}/admin/migration/authority`, {
+        method: "POST",
+        body: JSON.stringify({ authority: "do", unowned_d1_ids: ["website-only"] }),
+      })
+    );
+    expect(adjudicated.status).toBe(200);
+
+    await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).setAuthority("kv", []);
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs").run();
+  });
+});
+
 describe("POST /admin/restore", () => {
   it("rejects without API key", async () => {
     const res = await call(new Request(`${BASE}/admin/restore`, { method: "POST" }));
     expect(res.status).toBe(401);
+  });
+
+  it("rejects an oversized admin body before buffering it", async () => {
+    const res = await call(apiKeyRequest(`${BASE}/admin/restore`, {
+      method: "POST",
+      body: JSON.stringify({ ignored: "😀".repeat(70_000) }),
+    }));
+    expect(res.status).toBe(413);
   });
 
   it("404s when the requested backup snapshot doesn't exist", async () => {
@@ -1398,6 +1606,7 @@ describe("POST /admin/restore", () => {
     //
     // Pack records are required because restore deliberately rejects orphan
     // votes whose pack is absent from the snapshot corpus.
+    await ensureD1MirrorTables();
     const overCap = RESTORE_MAX_PAGE_SIZE + 1;
     const packs = Array.from({ length: overCap }, (_, i) => makePack(`cap-pack-${i}`));
     await e.ESO_PACKS.put(
@@ -1443,9 +1652,11 @@ describe("POST /admin/restore", () => {
         e.ESO_PACKS.delete(`pack:cap-pack-${i}`)
       )
     );
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id LIKE 'cap-pack-%'").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id LIKE 'cap-pack-%'").run();
     await e.ESO_PACKS.delete("backup:latest");
-    // 30s, not the 5s default: this case restores 300 pack records for real.
-  }, 30_000);
+    // 120s: this case restores 300 pack records and mirrors each one to D1.
+  }, 120_000);
 
   it("restores an empty snapshot without tripping the cursor guard", async () => {
     // start === 0 is always legitimate, including when there is nothing to do.

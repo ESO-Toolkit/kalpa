@@ -578,9 +578,9 @@ pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Resul
 /// the per-character backup/restore path, whose merged content may contain
 /// non-UTF8 SavedVariables bytes (caret keys, addon binary blobs).
 ///
-/// The new content is written to `<file>.tmp`, fsynced, and then `rename`d into
-/// place. `std::fs::rename` replaces the destination ATOMICALLY on both Unix
-/// (`rename(2)`) and Windows (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`), so
+/// The new content is written through the shared uniquely owned staging helper,
+/// fsynced, and then renamed into place. The rename replaces the destination
+/// atomically on both Unix and Windows, so
 /// the live file is never momentarily absent — there is no remove-then-rename
 /// crash window, and a failed write leaves the original file untouched. The
 /// `sync_all` before the rename is what makes that true across a power loss too:
@@ -591,23 +591,9 @@ pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Resul
 /// safety snapshot, so a lingering sidecar in the live folder (which later
 /// backups/snapshots would sweep up) is avoided.
 pub fn write_raw_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-
     let file_path = sv_dir.join(file_name);
-    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    let write_tmp = || -> std::io::Result<()> {
-        let mut f = fs::File::create(&tmp_path)?;
-        f.write_all(content)?;
-        f.sync_all()
-    };
-    write_tmp().map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to write temp file: {e}")
-    })?;
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })
+    crate::atomic_file::atomic_write(&file_path, content)
+        .map_err(|e| format!("Failed to write SavedVariables file: {e}"))
 }
 
 /// Restore a .bak file back to the original .lua file.
