@@ -131,11 +131,9 @@ impl LockKey {
         lock_name.push(name);
         lock_name.push(LOCK_SUFFIX);
         let lock_path = parent.join(lock_name);
-        let mut order_key = lock_path.to_string_lossy().into_owned();
+        let order_key = lock_path.to_string_lossy().into_owned();
         #[cfg(windows)]
-        {
-            order_key = order_key.to_lowercase();
-        }
+        let order_key = order_key.to_lowercase();
         Ok(Self {
             target,
             lock_path,
