@@ -167,13 +167,13 @@ fn canonicalize_with_missing_tail(path: &Path) -> io::Result<PathBuf> {
     let mut existing = path;
     let mut tail: Vec<OsString> = Vec::new();
     while !existing.exists() {
-        let Some(name) = existing.file_name() else {
+        let Some(component) = existing.components().next_back() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("no existing ancestor for {}", path.display()),
             ));
         };
-        tail.push(name.to_owned());
+        tail.push(component.as_os_str().to_owned());
         existing = existing.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
