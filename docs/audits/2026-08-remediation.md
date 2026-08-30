@@ -17,7 +17,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
 | R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
-| F2 | todo | - | - | - | - | - | Uploader log-directory sequencing. |
+| F2 | pr-open | `fix/audit-f2-log-directory-sequencing` | [#373](https://github.com/ESO-Toolkit/kalpa/pull/373) (draft) | - | D-F2-1 | REVISE x2; all verified findings addressed | Frontend check; 496 tests | Stacked on W1; no wire or persisted-data changes. |
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
 | F4 | pr-open | `fix/audit-f4-logout-invalidation` | [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) (draft, stacked on F1) | - | D-F4-1 | APPROVE | Focused 1 test; pack sequencing 4 tests; frontend check; 494 tests | Successful logout invalidates every private-list page request before clearing signed-in state; no wire/persisted-data change. |
 | F5 | pr-open | `fix/audit-f5-controlled-state-veto` | [#370](https://github.com/ESO-Toolkit/kalpa/pull/370) (draft, stacked on W1) | - | not required | APPROVE | Focused 10/10; frontend check; 493 tests | Controlled values remain authoritative when a parent vetoes a change; uncontrolled behavior is preserved. |
@@ -57,6 +57,12 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
 
+### D-F2-1 — Gate log-directory work by operation and directory
+
+- Chosen: mirror the active log directory synchronously and assign monotonically increasing IDs to list and detection requests. Apply list success, list error, selection reconciliation, loading completion, and detection errors only while both request ID and directory still match.
+- Directory changes immediately invalidate older list/detection work and clear incompatible list, error, and selection state. Deferred imports capture and re-check their directory before refreshing or selecting.
+- Rejected: checking only the directory. A same-directory refresh can still resolve out of order. Rejected: checking only an operation ID local to `loadLogs`; detection and import completion can independently reclaim stale directory or selection state.
+- Compatibility: frontend-only state sequencing; no IPC, wire-format, persisted-data, or backend behavior changes.
 ### D-F1-1 — One sequence owns every import source
 
 - Chosen: share-code resolution and `.esopack` import capture IDs from one component-scoped monotonic sequence; only the current ID may publish pack data, file settings, errors, or share loading cleanup. Opening the file picker, changing import methods, and Clear invalidate prior work.
@@ -195,6 +201,15 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Handoff: pushed `fix/audit-w1-worker-consistency` and opened PR [#369](https://github.com/ESO-Toolkit/kalpa/pull/369). All three GitHub CI jobs pass. No merge or deployment was performed; unrelated local `Cargo.toml` and theme-directory changes remain excluded.
 - Blockers: no implementation or CI blockers remain. Maintainer approval is still required because merge auto-deploys the Worker shadow phase. The authority flip remains a separate operator step after soak/parity checks.
 - Exact next action: maintainer reviews and merges PR #369 after accepting the shadow-mode rollback caveat, then monitors the production parity/authority-flip runbook.
+
+### 2026-08-26 — Codex (F2)
+
+- Active branch: `fix/audit-f2-log-directory-sequencing`, stacked on `fix/audit-w1-worker-consistency`.
+- Completed: captured the failing A → B reverse-resolution case; implemented D-F2-1; added stale success/rejection, late detection success/rejection, directory-change failure, and deferred-import regressions. Focused tests pass 6/6; `npm run check` passes; full frontend suite passes 38 files/496 tests.
+- Sol: initial `REVISE` verified stale selection on detected directory changes, late detection reclaiming a manual folder, and deferred import selecting an old path. The required single follow-up `REVISE` verified stale detection-error toasts in initial and refresh catches. Every finding was reproduced in code and addressed; wire contract remained `OK`.
+- Handoff: pushed the branch and opened draft PR [#373](https://github.com/ESO-Toolkit/kalpa/pull/373). No deployment, merge, dependency, IPC, or persisted-data change occurred.
+- Blockers: none. PR remains draft and must follow its stacked W1 base.
+- Exact next action: wait for stacked-base availability and green PR CI, then mark PR #373 ready for maintainer review.
 
 ### Sol review 1 — REVISE
 
