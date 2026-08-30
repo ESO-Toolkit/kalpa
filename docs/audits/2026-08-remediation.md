@@ -21,7 +21,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F3 | pr-open | `fix/audit-f3-fresh-import-metadata` | [#375](https://github.com/ESO-Toolkit/kalpa/pull/375) (draft) | - | D-F3-1 | APPROVE | Frontend check; 498 tests | Stacked on F2; no wire or persisted-data changes. |
 | F4 | pr-open | `fix/audit-f4-logout-invalidation` | [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) (draft, stacked on F1) | - | D-F4-1 | APPROVE | Focused 1 test; pack sequencing 4 tests; frontend check; 494 tests | Successful logout invalidates every private-list page request before clearing signed-in state; no wire/persisted-data change. |
 | F5 | pr-open | `fix/audit-f5-controlled-state-veto` | [#370](https://github.com/ESO-Toolkit/kalpa/pull/370) (draft, stacked on W1) | - | not required | APPROVE | Focused 10/10; frontend check; 493 tests | Controlled values remain authoritative when a parent vetoes a change; uncontrolled behavior is preserved. |
-| F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
+| F6 | pr-open | `fix/audit-f6-optimistic-sequencing` | [#377](https://github.com/ESO-Toolkit/kalpa/pull/377) (draft, stacked) | - | D-F6-1; Luna PASS | REVISE follow-up; no findings, requested tests addressed | Frontend check; 500 tests | Sequenced optimistic settings/library state and latest-only SavedVariables file/character refreshes implemented. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
@@ -56,6 +56,13 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Create retry by the same actor resumes the stored canonical create instead of returning duplicate. Success is acknowledged only after the KV detail step; an incomplete mirror returns a retryable failure while public detail reads use the DO and remain consistent with canonical lifecycle state.
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
 - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+### D-F6-1 — Persisted optimistic state tracks confirmed storage
+
+- Chosen: centralize optimistic setting and installed-pack reference mutations in a hook that assigns monotonically increasing operation IDs, composes functional updates against the latest visible value, and records every successful serialized store write as the rollback target. Only the newest failed operation may change UI or surface an error; rollback restores confirmed storage rather than inverting the submitted value or reinstating a captured array.
+- Settings hydration remains a confirmed rollback candidate while a user write is pending, but cannot replace the optimistic value and is ignored after any newer write confirms.
+- SavedVariables list refreshes use a separate latest-request sequence. Only the active request may apply files, errors, or loading completion; unmount invalidates outstanding requests.
+- Compatibility: no settings keys, persisted `installed_packs` shape, Tauri command arguments, or visible control structure changed.
+- Rollback: revert the F6 commit; persisted data remains readable because this change only alters frontend sequencing.
 
 ### D-F2-1 — Gate log-directory work by operation and directory
 
@@ -239,6 +246,18 @@ Verified findings:
 5. Account deletion leaves other users' vote records attached to removed pack IDs, so a reused ID can inherit votes.
 
 Wire contract verdict: OK. Bug-class sweep found the restore and account-deletion sites above.
+
+### 2026-08-26 — Codex F6
+
+- Active branch: `fix/audit-f6-optimistic-sequencing` in isolated worktree `Kalpa-wt-f6`, stacked on `fix/audit-w1-worker-consistency`.
+- Inventory: `Settings` mount hydration and direct optimistic persistence controls; `Packs` `installed_packs` hydration/install/removal; `SavedVariables.loadFiles` refresh application.
+- Failing-before evidence: focused Vitest run failed both new suites because the sequencing hooks did not exist. The tests cover late hydration after user intent, reverse-settled quick toggles, confirmed rollback after a newer failure, functional array rollback, reverse-settled refresh results, and stale refresh errors.
+- Passing-after evidence: focused 6/6 tests, full frontend 496/496 tests, and `npm run check` pass.
+- Decision: D-F6-1. No wire-format, persisted-shape, backend, Rust, Worker, or dependency changes.
+- Luna review: `PASS`. `TOKEN_VIOLATIONS: None`; `ACCESSIBILITY: None`; `STATE_FEEDBACK: None`; `RESPONSIVE_BEHAVIOR: None`.
+- Sol review: `REVISE`. Verified that `list_characters` still ran outside the latest-request/unmount guard and could apply path-A character state after a path-B switch. Addressed with an independent latest/unmount request gate. Added the requested unmount, late-hydration failure rollback, and pre-settlement functional-array composition tests. Focused 9/9 tests, full frontend 499/499 tests, and `npm run check` pass.
+- Sol follow-up: `REVISE` with no implementation findings, `WIRE_CONTRACT: OK`, and `BUG_CLASS_SWEEP: CLEAN`. It requested a rejected-after-unmount assertion and a late hydration value distinct from the constructor default. Both tests were strengthened; focused 10/10 tests, full frontend 500/500 tests, and `npm run check` pass. The one prescribed follow-up review is complete.
+- Handoff: pushed the branch and opened draft PR [#377](https://github.com/ESO-Toolkit/kalpa/pull/377), stacked on `fix/audit-w1-worker-consistency`. The CI workflow listens only to PRs targeting `main`, so this stacked draft has no remote checks until it is retargeted after W1 merges; local frontend gates are green. Do not merge the stack out of order.
 
 ## Open Questions
 

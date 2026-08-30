@@ -1816,11 +1816,6 @@ fn check_for_updates_metadata(
         // resolves to the same addon id we track locally; the filelist cache is
         // keyed by top-level folder name, so a stale or duplicate mapping should
         // not let unrelated external state rewrite this entry.
-        // Prefer direct disk evidence when the manifest already matches the
-        // current API version; this also handles manual/external installs.
-        // Never adopt an arbitrary manifest version: addon authors sometimes
-        // use a manifest version that differs from ESOUI's filelist version,
-        // which would recreate a perpetual false update after Kalpa installs it.
         let api_ids_match = api_entry.esoui_id == meta.esoui_id;
         let remote_ver = normalized_version(&api_entry.version);
         let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
@@ -1833,12 +1828,7 @@ fn check_for_updates_metadata(
                     meta.esoui_id,
                 )
                 .is_some_and(|version| normalized_version(version) == remote_ver);
-                let disk_version = read_local_version(addons_dir, folder_name);
-                let disk_matches_api = !disk_version.trim().is_empty()
-                    && !remote_ver.is_empty()
-                    && normalized_version(&disk_version) == remote_ver;
-
-                (minion_matches_api || disk_matches_api).then(|| api_entry.version.clone())
+                minion_matches_api.then(|| api_entry.version.clone())
             })
             .flatten();
 
@@ -11166,6 +11156,47 @@ mod tests {
         assert!(!results[0].has_update);
         let saved = metadata::load_metadata(&addons_dir);
         assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
+    }
+
+    #[test]
+    fn update_check_does_not_infer_external_update_from_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: 2.0\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
     }
 
     #[test]
