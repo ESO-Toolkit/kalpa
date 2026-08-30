@@ -906,6 +906,46 @@ describe("POST /admin/seed", () => {
 
 // ── POST /admin/restore ─────────────────────────────────────────────
 
+describe("POST /admin/migration/authority", () => {
+  it("requires explicit adjudication before ignoring a shared-D1-only witness", async () => {
+    await e.ROSTER_HUB_DB!.prepare(
+      "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, author_id TEXT, author_name TEXT, is_anonymous INTEGER, title TEXT, description TEXT, pack_type TEXT, addons TEXT, vote_count INTEGER, created_at TEXT, updated_at TEXT)"
+    ).run();
+    await e.ROSTER_HUB_DB!.prepare(
+      "CREATE TABLE IF NOT EXISTS pack_tags (pack_id TEXT, tag TEXT)"
+    ).run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs").run();
+    await e.ROSTER_HUB_DB!.prepare(
+      "INSERT INTO packs VALUES ('website-only', 'website', 'Website', 0, 'Website row', '', 'addon-pack', '[]', 0, datetime('now'), datetime('now'))"
+    ).run();
+    const details = await e.ESO_PACKS.list({ prefix: "pack:" });
+    for (const { name } of details.keys) await e.ESO_PACKS.delete(name);
+    await e.ESO_PACKS.delete("backup:latest");
+    await putPackIndex(e, { packs: [] });
+
+    const blocked = await call(
+      apiKeyRequest(`${BASE}/admin/migration/authority`, {
+        method: "POST",
+        body: JSON.stringify({ authority: "do" }),
+      })
+    );
+    expect(blocked.status).toBe(409);
+
+    const adjudicated = await call(
+      apiKeyRequest(`${BASE}/admin/migration/authority`, {
+        method: "POST",
+        body: JSON.stringify({ authority: "do", unowned_d1_ids: ["website-only"] }),
+      })
+    );
+    expect(adjudicated.status).toBe(200);
+
+    await e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton")).setAuthority("kv", []);
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs").run();
+  });
+});
+
 describe("POST /admin/restore", () => {
   it("rejects without API key", async () => {
     const res = await call(new Request(`${BASE}/admin/restore`, { method: "POST" }));

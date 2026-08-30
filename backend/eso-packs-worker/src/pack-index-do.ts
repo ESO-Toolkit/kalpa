@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, Pack, PackIndex, VoteRecord } from "./types";
 import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
+import { recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -11,6 +12,8 @@ const PENDING_PREFIX = "pending:";
 const DIRTY_MIRROR_PREFIX = "dirty:";
 const DELETED_AUTHOR_PREFIX = "deleted-author:";
 const AUTHORITY_KEY = "meta:authority";
+const RECONCILIATION_LEASE_KEY = "meta:d1-reconciliation-lease";
+const RECONCILIATION_LEASE_MS = 48 * 60 * 60 * 1000;
 const VOTE_MEMO_LIMIT = 5000;
 const RETRY_DELAY_MS = 30_000;
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
@@ -77,6 +80,17 @@ export interface WitnessAdoption {
   already_present: string[];
   tombstoned: string[];
   unavailable: string[];
+}
+
+export interface ReconciliationAuthority {
+  authority: Authority;
+  packs: Pack[];
+  tombstones: string[];
+}
+
+interface ReconciliationLease {
+  token: string;
+  expires_at: number;
 }
 
 /** Serializes mutations while migrating authority from KV to DO storage. */
@@ -147,6 +161,7 @@ export class PackIndexDO extends DurableObject<Env> {
       await this.ctx.storage.put(this.packKey(id), updated);
       await this.ctx.storage.put(this.ownershipKey(id), updated.updated_at);
       await this.mirrorChangedBestEffort(updated);
+      await this.mirrorD1Pack(updated);
       return { status: "ok", pack: updated };
     });
   }
@@ -376,6 +391,78 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
+  async getReconciliationState(): Promise<ReconciliationAuthority> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const packs = await this.loadPacks();
+      const authority = await this.getAuthority();
+      const entries = await this.ctx.storage.list<string>({ prefix: TOMBSTONE_PREFIX });
+      return {
+        authority,
+        packs,
+        tombstones: [...entries.keys()]
+          .map((key) => key.slice(TOMBSTONE_PREFIX.length))
+          .sort(),
+      };
+    });
+  }
+
+  async beginReconciliation(token: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = Date.now();
+      const current = await this.ctx.storage.get<ReconciliationLease>(RECONCILIATION_LEASE_KEY);
+      if (current && current.expires_at > now) return false;
+      await this.ctx.storage.put(RECONCILIATION_LEASE_KEY, {
+        token,
+        expires_at: now + RECONCILIATION_LEASE_MS,
+      } satisfies ReconciliationLease);
+      return true;
+    });
+  }
+
+  async endReconciliation(token: string): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.ctx.storage.get<ReconciliationLease>(RECONCILIATION_LEASE_KEY);
+      if (current?.token === token) await this.ctx.storage.delete(RECONCILIATION_LEASE_KEY);
+    });
+  }
+
+  /** Recheck liveness and remove an obsolete D1 row under the same lifecycle
+   * gate as create/update. This closes the check-then-delete window where a
+   * reused slug could otherwise be published between an RPC check and D1 I/O. */
+  async reconcileDeleteD1(id: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const current = await this.ctx.storage.get<Pack>(this.packKey(id));
+      if (current?.status === "published" || !this.env.ROSTER_HUB_DB) return false;
+      await this.env.ROSTER_HUB_DB.batch([
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+      ]);
+      return true;
+    });
+  }
+
+  async reconcileWriteD1(
+    id: string,
+    expectedLifecycle: string,
+    writePack: boolean,
+    writeTags: boolean,
+  ): Promise<{ upserted: boolean; tags_replaced: boolean }> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const current = await this.ctx.storage.get<Pack>(this.packKey(id));
+      if (
+        !current ||
+        current.status !== "published" ||
+        current.created_at !== expectedLifecycle ||
+        !this.env.ROSTER_HUB_DB
+      ) return { upserted: false, tags_replaced: false };
+      if (writePack) await this.upsertD1PackRow(current);
+      if (writeTags) await this.replaceD1Tags(current);
+      return { upserted: writePack, tags_replaced: writeTags };
+    });
+  }
+
   async migrationParity(witnessIds: string[]): Promise<MigrationParity> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const kv = await this.readKvIndex();
@@ -511,6 +598,7 @@ export class PackIndexDO extends DurableObject<Env> {
     await this.ctx.storage.put(this.packKey(pack.id), pack);
     await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
     await this.mirrorChangedBestEffort(pack);
+    if (field === "vote_count") await this.mirrorD1VoteCount(pack.id, pack.vote_count);
     return pack;
   }
 
@@ -589,8 +677,62 @@ export class PackIndexDO extends DurableObject<Env> {
       // Local/preview namespaces may bind an empty D1 database. There is no
       // external row to reconcile in that case; production's shared database
       // has both tables and every other failure remains journaled for retry.
-      return error instanceof Error && error.message.includes("no such table");
+      if (error instanceof Error && error.message.includes("no such table")) return true;
+      await recordD1MirrorFailure(this.env, "delete", id, error);
+      return false;
     }
+  }
+
+  private async mirrorD1Pack(pack: Pack): Promise<void> {
+    if (!this.env.ROSTER_HUB_DB) return;
+    try {
+      if (pack.status === "published") {
+        await this.upsertD1PackRow(pack);
+        await this.replaceD1Tags(pack);
+      } else {
+        await this.env.ROSTER_HUB_DB.batch([
+          this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+          this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id),
+        ]);
+      }
+    } catch (error) {
+      console.error(`D1 sync failed [${pack.id}]:`, error);
+      await recordD1MirrorFailure(this.env, pack.status === "published" ? "upsert" : "delete", pack.id, error);
+    }
+  }
+
+  private async mirrorD1VoteCount(id: string, voteCount: number): Promise<void> {
+    if (!this.env.ROSTER_HUB_DB) return;
+    try {
+      await this.env.ROSTER_HUB_DB.prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
+        .bind(voteCount, id)
+        .run();
+    } catch (error) {
+      console.error(`D1 vote_count sync failed [${id}]:`, error);
+      await recordD1MirrorFailure(this.env, "vote-count", id, error);
+    }
+  }
+
+  private async upsertD1PackRow(pack: Pack): Promise<void> {
+    const row = toD1PackRow(pack);
+    await this.env.ROSTER_HUB_DB!.prepare(
+      `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET author_id = excluded.author_id, author_name = excluded.author_name,
+         is_anonymous = excluded.is_anonymous, title = excluded.title, description = excluded.description,
+         pack_type = excluded.pack_type, addons = excluded.addons, vote_count = excluded.vote_count,
+         updated_at = datetime('now')`,
+    ).bind(row.id, row.author_id, row.author_name, row.is_anonymous, row.title, row.description,
+      row.pack_type, row.addons, row.vote_count).run();
+  }
+
+  private async replaceD1Tags(pack: Pack): Promise<void> {
+    await this.env.ROSTER_HUB_DB!.batch([
+      this.env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+      ...pack.tags.map((tag) => this.env.ROSTER_HUB_DB!.prepare(
+        "INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)",
+      ).bind(pack.id, tag)),
+    ]);
   }
 
   private forgetVotes(packId: string): void {
@@ -826,38 +968,8 @@ export class PackIndexDO extends DurableObject<Env> {
       if (pack.status !== "published") {
         return await this.deleteD1Pack(pack.id);
       }
-      const addons = JSON.stringify(pack.addons.map((addon) => ({
-        esouiId: addon.esouiId,
-        name: addon.name,
-        required: addon.required,
-        note: addon.note,
-      })));
-      await this.env.ROSTER_HUB_DB.prepare(
-        `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
-           pack_type = excluded.pack_type, addons = excluded.addons,
-           is_anonymous = excluded.is_anonymous, author_name = excluded.author_name,
-           vote_count = excluded.vote_count, updated_at = datetime('now')`,
-      ).bind(
-        pack.id,
-        pack.author_id,
-        pack.is_anonymous ? "Anonymous" : pack.author_name,
-        pack.is_anonymous ? 1 : 0,
-        pack.title,
-        pack.description,
-        pack.pack_type,
-        addons,
-        pack.vote_count ?? 0,
-      ).run();
-      await this.env.ROSTER_HUB_DB.batch([
-        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-        ...pack.tags.map((tag) =>
-          this.env.ROSTER_HUB_DB!.prepare(
-            "INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)",
-          ).bind(pack.id, tag),
-        ),
-      ]);
+      await this.upsertD1PackRow(pack);
+      await this.replaceD1Tags(pack);
       return true;
     } catch (error) {
       console.error(`D1 upsert failed [${pack.id}]:`, error);

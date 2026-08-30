@@ -8,33 +8,30 @@ import {
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
-import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
+import { redactAnonymousPack } from "./redact";
 import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+import { reconcileD1, recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
 export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
-// directly to roster-hub-db (D1) so every KV mutation is atomically
-// mirrored — no async sync, no reconciliation, no deployment ordering.
+// directly to roster-hub-db (D1), mirrors live mutations through the Pack
+// Index Durable Object, and runs a guarded scheduled reconciliation for drift.
 
-async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
+export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;
   const isPublished = (pack.status ?? "published") === "published";
   try {
     if (isPublished) {
-      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
-        esouiId: a.esouiId,
-        name: a.name,
-        required: a.required,
-        note: a.note,
-      })));
+      const row = toD1PackRow(pack);
       await env.ROSTER_HUB_DB
         .prepare(
           `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
+             author_id = excluded.author_id,
              title = excluded.title,
              description = excluded.description,
              pack_type = excluded.pack_type,
@@ -45,21 +42,21 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
              updated_at = datetime('now')`,
         )
         .bind(
-          pack.id,
-          pack.author_id,
+          row.id,
+          row.author_id,
           // The D1 mirror feeds the ESO Toolkit website; never hand it the
           // real display name of an anonymous pack's author. author_id stays
           // for ownership joins but is not rendered there.
-          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
-          pack.is_anonymous ? 1 : 0,
-          pack.title,
-          pack.description,
-          pack.pack_type,
-          addonsJson,
+          row.author_name,
+          row.is_anonymous,
+          row.title,
+          row.description,
+          row.pack_type,
+          row.addons,
           // Inserting a literal 0 here (and omitting vote_count from the
           // upsert) froze the website's counters at zero and reset them on
           // every author edit.
-          pack.vote_count ?? 0,
+          row.vote_count,
         )
         .run();
 
@@ -79,23 +76,7 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
     }
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
-  }
-}
-
-/**
- * Mirror a counter bump into D1. The vote endpoint goes through the DO rather
- * than d1UpsertPack, so without this the website's vote counts never move.
- * Best-effort, like the other D1 writes.
- */
-async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  try {
-    await env.ROSTER_HUB_DB
-      .prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
-      .bind(voteCount, id)
-      .run();
-  } catch (err) {
-    console.error(`D1 vote_count sync failed [${id}]:`, err);
+    await recordD1MirrorFailure(env, isPublished ? "upsert" : "delete", pack.id, err);
   }
 }
 
@@ -422,7 +403,6 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   }
 
   await invalidatePackListCache(url);
-
   return json(request, { pack: added.pack }, 201);
 }
 
@@ -486,8 +466,6 @@ async function handleUpdatePack(
   const updated = result.pack;
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, updated);
-
   return json(request, { pack: updated });
 }
 
@@ -587,7 +565,6 @@ async function handleVotePack(
   await invalidatePackListCache(url);
 
   const voteCount = updated.vote_count;
-  await d1UpdateVoteCount(env, id, voteCount);
 
   const response: VoteResponse = { voted, voteCount };
   return json(request, response);
@@ -692,12 +669,17 @@ async function packDetailWitnessIds(env: Env): Promise<string[]> {
   return ids;
 }
 
-async function migrationWitnessIds(env: Env): Promise<string[]> {
+export async function migrationWitnessIds(
+  env: Env,
+  unownedD1Ids: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
   const ids = new Set(await packDetailWitnessIds(env));
 
   if (env.ROSTER_HUB_DB) {
     const rows = await env.ROSTER_HUB_DB.prepare("SELECT id FROM packs").all<{ id: string }>();
-    for (const row of rows.results) if (row.id) ids.add(row.id);
+    for (const row of rows.results) {
+      if (row.id && !unownedD1Ids.has(row.id)) ids.add(row.id);
+    }
   }
 
   // Dated snapshots deliberately retain deleted data for 90 days, so treating
@@ -727,12 +709,30 @@ async function handleMigrationParity(request: Request, env: Env): Promise<Respon
 async function handleMigrationAuthority(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) return unauthorized(request);
   let authority: "kv" | "do";
+  let unownedD1Ids = new Set<string>();
   try {
-    const body = (await request.json()) as { authority?: unknown };
+    const body = (await request.json()) as {
+      authority?: unknown;
+      unowned_d1_ids?: unknown;
+    };
     if (body.authority !== "kv" && body.authority !== "do") {
       return badRequest(request, [{ field: "authority", message: 'authority must be "kv" or "do"' }]);
     }
+    if (
+      body.unowned_d1_ids !== undefined &&
+      (!Array.isArray(body.unowned_d1_ids) ||
+        body.unowned_d1_ids.length > 100 ||
+        body.unowned_d1_ids.some(
+          (id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id),
+        ))
+    ) {
+      return badRequest(request, [{
+        field: "unowned_d1_ids",
+        message: "unowned_d1_ids must contain at most 100 valid, manually adjudicated ids",
+      }]);
+    }
     authority = body.authority;
+    unownedD1Ids = new Set((body.unowned_d1_ids ?? []) as string[]);
   } catch {
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
@@ -740,7 +740,7 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
   try {
     const result = await getPackIndexDO(env).setAuthority(
       authority,
-      await migrationWitnessIds(env),
+      await migrationWitnessIds(env, unownedD1Ids),
     );
     return result.ok
       ? json(request, result.parity)
@@ -1485,6 +1485,11 @@ export default {
       } catch (writeErr) {
         console.error("Failed to record backup:last_error:", writeErr);
       }
+    }
+    try {
+      await reconcileD1(env);
+    } catch (err) {
+      console.error("D1 reconciliation failed unexpectedly:", err);
     }
   },
 } satisfies ExportedHandler<Env>;
