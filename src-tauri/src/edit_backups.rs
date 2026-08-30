@@ -18,6 +18,9 @@ pub struct BackupManifest {
     #[serde(alias = "update_to")]
     pub update_to: String,
     pub files: Vec<String>,
+    /// Files backed up from the AddOns root rather than an addon folder.
+    #[serde(default)]
+    pub root_files: Vec<String>,
 }
 
 fn backups_dir(addons_dir: &Path) -> std::path::PathBuf {
@@ -48,6 +51,42 @@ pub fn backup_user_files(
     from_version: &str,
     to_version: &str,
 ) -> Result<(), String> {
+    backup_files(
+        addons_dir,
+        folder_name,
+        files,
+        from_version,
+        to_version,
+        false,
+    )
+}
+
+/// Back up files written directly under AddOns by a foldered archive.
+pub fn backup_root_files(
+    addons_dir: &Path,
+    owner_folder: &str,
+    files: &[String],
+    from_version: &str,
+    to_version: &str,
+) -> Result<(), String> {
+    backup_files(
+        addons_dir,
+        owner_folder,
+        files,
+        from_version,
+        to_version,
+        true,
+    )
+}
+
+fn backup_files(
+    addons_dir: &Path,
+    folder_name: &str,
+    files: &[String],
+    from_version: &str,
+    to_version: &str,
+    root_files: bool,
+) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
     }
@@ -58,21 +97,28 @@ pub fn backup_user_files(
     fs::create_dir_all(&backup_root)
         .map_err(|e| format!("Failed to create backup directory: {e}"))?;
 
-    let addon_path = addons_dir.join(folder_name);
     let mut backed_up = Vec::new();
 
     for rel_path in files {
         // Relative paths are forward-slash normalized (see file_hashes::relative_key).
         // Join them verbatim: Windows accepts '/' as a separator, while rewriting to
         // '\' would make the whole path a single literal component on macOS/Linux.
-        let src = addon_path.join(rel_path);
+        let src = if root_files {
+            addons_dir.join(rel_path)
+        } else {
+            addons_dir.join(folder_name).join(rel_path)
+        };
         if !src.exists() {
             eprintln!(
                 "Warning: backup source not found for {folder_name}/{rel_path}, skipping: {rel_path}"
             );
             continue;
         }
-        let dest = backup_root.join(rel_path);
+        let dest = if root_files {
+            backup_root.join("root").join(rel_path)
+        } else {
+            backup_root.join(rel_path)
+        };
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create backup subdirectory: {e}"))?;
@@ -81,15 +127,28 @@ pub fn backup_user_files(
         backed_up.push(rel_path.clone());
     }
 
-    let manifest = BackupManifest {
-        addon_folder: folder_name.to_string(),
-        backed_up_at,
-        update_from: from_version.to_string(),
-        update_to: to_version.to_string(),
-        files: backed_up,
-    };
-
     let manifest_path = backup_root.join("manifest.json");
+    let mut manifest: BackupManifest = if manifest_path.exists() {
+        metadata::load_json_with_backup(&manifest_path)
+    } else {
+        BackupManifest {
+            addon_folder: folder_name.to_string(),
+            backed_up_at,
+            update_from: from_version.to_string(),
+            update_to: to_version.to_string(),
+            ..Default::default()
+        }
+    };
+    if root_files {
+        manifest.root_files.extend(backed_up);
+    } else {
+        manifest.files.extend(backed_up);
+    }
+    manifest.files.sort();
+    manifest.files.dedup();
+    manifest.root_files.sort();
+    manifest.root_files.dedup();
+
     metadata::save_json_with_backup(&manifest_path, &manifest)?;
 
     prune_old_backups(addons_dir, folder_name);
@@ -135,16 +194,32 @@ pub fn restore_backup_file(
     relative_path: &str,
 ) -> Result<(), String> {
     let timestamp_dir = backed_up_at.replace(':', "-");
-    let backup_file = backups_dir(addons_dir)
+    let backup_root = backups_dir(addons_dir)
         .join(folder_name)
-        .join(&timestamp_dir)
-        .join(relative_path);
+        .join(&timestamp_dir);
+
+    let manifest_path = backup_root.join("manifest.json");
+    let manifest: BackupManifest = if manifest_path.exists() {
+        metadata::load_json_with_backup(&manifest_path)
+    } else {
+        BackupManifest::default()
+    };
+    let is_root_file = manifest.root_files.iter().any(|path| path == relative_path);
+    let backup_file = if is_root_file {
+        backup_root.join("root").join(relative_path)
+    } else {
+        backup_root.join(relative_path)
+    };
 
     if !backup_file.exists() {
         return Err(format!("Backup file not found: {relative_path}"));
     }
 
-    let dest = addons_dir.join(folder_name).join(relative_path);
+    let dest = if is_root_file {
+        addons_dir.join(relative_path)
+    } else {
+        addons_dir.join(folder_name).join(relative_path)
+    };
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
@@ -294,6 +369,41 @@ mod tests {
 
         let restored = fs::read_to_string(addon_path.join("Libs/LibFoo/LAM.lua")).unwrap();
         assert_eq!(restored, "user edit");
+    }
+
+    #[test]
+    fn root_backup_and_restore_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        fs::write(addons_dir.join("readme.txt"), "user edit").unwrap();
+
+        backup_root_files(
+            &addons_dir,
+            "MainAddon",
+            &["readme.txt".to_string()],
+            "1.0",
+            "2.0",
+        )
+        .unwrap();
+
+        let manifest = list_backups(&addons_dir, "MainAddon")
+            .into_iter()
+            .next()
+            .expect("a root backup manifest");
+        assert_eq!(manifest.root_files, vec!["readme.txt"]);
+        fs::write(addons_dir.join("readme.txt"), "upstream").unwrap();
+        restore_backup_file(
+            &addons_dir,
+            "MainAddon",
+            &manifest.backed_up_at,
+            "readme.txt",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("readme.txt")).unwrap(),
+            "user edit"
+        );
     }
 
     #[test]
