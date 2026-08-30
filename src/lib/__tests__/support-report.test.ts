@@ -295,6 +295,31 @@ describe("buildSupportReport", () => {
     expect(report).toContain("2 locally modified file(s)");
   });
 
+  it("counts outdated-only addons as dependency warnings and attention items", () => {
+    const payload = buildSupportTicketPayload(
+      input({
+        addons: [
+          addon({
+            missingDependencies: [],
+            outdatedDependencies: ["LibAsync"],
+            modifiedFileCount: 0,
+          }),
+        ],
+        updateResults: [],
+      })
+    );
+
+    expect(payload.diagnostics.dependencyWarnings).toBe(1);
+    expect(payload.diagnostics.attention).toEqual([
+      expect.objectContaining({
+        folder: "MapPins",
+        missingDependencies: 0,
+        outdatedDependencies: 1,
+        modifiedFiles: 0,
+      }),
+    ]);
+  });
+
   it("never includes the full local path or local identity", () => {
     const report = buildSupportReport(input());
 

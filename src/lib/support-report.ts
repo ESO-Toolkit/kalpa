@@ -546,7 +546,9 @@ export function buildSupportTicketPayload(input: SupportReportInput): SupportTic
       checked: boundedCount(input.updateResults.length),
       updates: boundedCount(input.updateResults.filter((result) => result.hasUpdate).length),
       dependencyWarnings: boundedCount(
-        input.addons.filter((addon) => addon.missingDependencies.length > 0).length
+        input.addons.filter(
+          (addon) => addon.missingDependencies.length > 0 || addon.outdatedDependencies.length > 0
+        ).length
       ),
       modified: boundedCount(input.addons.filter((addon) => addon.modifiedFileCount > 0).length),
       lastError: input.lastError ? cleanSingleLine(input.lastError, 240, input.addonsPath) : null,
