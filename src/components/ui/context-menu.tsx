@@ -29,12 +29,19 @@ interface ContextMenuProps {
 
 export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [activeIndex, setActiveIndex] = useState(-1);
+  const [activeIndex, setActiveIndex] = useState(() =>
+    items.findIndex((item) => !isSeparator(item) && !item.disabled)
+  );
   const prefersReducedMotion = useReducedMotion();
 
   const actionItems = items
     .map((item, i) => (isSeparator(item) ? null : { item, index: i }))
     .filter(Boolean) as { item: ContextMenuItem; index: number }[];
+  const enabledItems = actionItems.filter(({ item }) => !item.disabled);
+
+  useEffect(() => {
+    menuRef.current?.focus();
+  }, []);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -47,22 +54,22 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActiveIndex((prev) => {
-          const currentPos = actionItems.findIndex((a) => a.index === prev);
-          const next = currentPos < actionItems.length - 1 ? currentPos + 1 : 0;
-          return actionItems[next]!.index;
+          const currentPos = enabledItems.findIndex((a) => a.index === prev);
+          const next = currentPos < enabledItems.length - 1 ? currentPos + 1 : 0;
+          return enabledItems[next]!.index;
         });
       }
 
       if (e.key === "ArrowUp") {
         e.preventDefault();
         setActiveIndex((prev) => {
-          const currentPos = actionItems.findIndex((a) => a.index === prev);
-          const next = currentPos > 0 ? currentPos - 1 : actionItems.length - 1;
-          return actionItems[next]!.index;
+          const currentPos = enabledItems.findIndex((a) => a.index === prev);
+          const next = currentPos > 0 ? currentPos - 1 : enabledItems.length - 1;
+          return enabledItems[next]!.index;
         });
       }
 
-      if (e.key === "Enter") {
+      if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         const active = actionItems.find((a) => a.index === activeIndex);
         if (active && !active.item.disabled) {
@@ -71,7 +78,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         }
       }
     },
-    [actionItems, activeIndex, onClose]
+    [actionItems, activeIndex, enabledItems, onClose]
   );
 
   useEffect(() => {
@@ -107,6 +114,8 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
       ref={menuRef}
       role="menu"
       aria-label="Addon actions"
+      aria-activedescendant={activeIndex >= 0 ? `addon-action-${activeIndex}` : undefined}
+      tabIndex={-1}
       initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={prefersReducedMotion ? { duration: 0 } : { duration: 0.1, ease: "easeOut" }}
@@ -122,7 +131,9 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         return (
           <button
             key={i}
+            id={`addon-action-${i}`}
             role="menuitem"
+            tabIndex={-1}
             disabled={entry.disabled}
             className={cn(
               "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors outline-none",

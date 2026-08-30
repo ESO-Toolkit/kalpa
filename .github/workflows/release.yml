@@ -86,6 +86,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
 
+      - name: Generate release notes from CHANGELOG
+        id: release-notes
+        run: node .github/scripts/release-body.cjs --version "${{ github.ref_name }}" --github-output
+
       # macOS code signing + notarization activate automatically once an Apple
       # Developer ID certificate is added to the repo secrets. The env vars are
       # injected ONLY when the certificate secret is non-empty: an unset GitHub
@@ -128,40 +132,9 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "${{ github.ref_name }}"
           args: ${{ matrix.args }}
-          # This body is shared by every tag, so the per-release "Changed:"
-          # section below has to be rewritten as part of the version bump.
-          # It is not, by default: beta.12's headline was still sitting here
-          # when beta.13 was cut, ready to tell users about a feature that had
-          # shipped a release earlier. Everything above it is version-agnostic.
-          releaseBody: |
-            See [CHANGELOG.md](https://github.com/ESO-Toolkit/kalpa/blob/main/CHANGELOG.md) for full details.
-
-            ## Install
-
-            **Windows** (stable): download the `.exe` installer and run it. Requires Windows 10 (1803+) or Windows 11; WebView2 is pre-installed on Windows 11 and bootstrapped automatically on Windows 10.
-
-            **macOS** (beta): download the `.dmg` (universal — Intel & Apple Silicon, macOS 10.15+). These builds are not yet notarized with Apple, so on first launch **right-click the app → Open → Open**. If macOS still reports the app as damaged, clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Kalpa.app`
-
-            **Linux** (beta): the `.AppImage` is recommended (`chmod +x` and run — it self-updates like the Windows build). `.deb` and `.rpm` packages are also provided but do **not** self-update; install new versions from this page. ESO under Steam Proton is detected automatically, including Flatpak Steam and secondary Steam libraries.
-
-            Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
-
-            ## Changed: read changelogs in-app, and a fix for the empty addon list
-            **My Addons has an ESOUI tab, and changelogs are readable without leaving Kalpa.** The tab shows the same screenshots, description and download stats Discover does, and a "What's new" button in the update panel and in each Update All row opens the addon's changelog.
-
-            Changelogs render as a scannable list of versions — latest expanded, each row dated from ESOUI's archived releases, the rest behind "Show all N versions" — instead of one long flat dump. Your installed version is marked, never used to hide older entries.
-
-            **Fixed: the addon list could come back empty after visiting Discover.** The list's virtualizer outlived the scroll container it measured, so returning from Discover left a correctly-sized but blank list until something forced a redraw.
-
-            ## Verify your download
-            Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
-
-            ## Known issues
-            None known — please report anything you hit.
-
-            ---
-
-            🐛 **Found a bug or have feedback?** Use the [Beta Feedback template](https://github.com/ESO-Toolkit/kalpa/issues/new?template=beta_feedback.md) so it's tagged `beta` for triage. Security issues: see [SECURITY.md](https://github.com/ESO-Toolkit/kalpa/blob/main/SECURITY.md).
+          # The matching tagged section is required and parsed fail-closed;
+          # release-specific copy now has one source of truth in CHANGELOG.md.
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           # Draft during the build so users never see a partially-assembled
           # release: the updater endpoint (releases/latest/download/latest.json)
           # cannot see drafts, and `releases/latest` never points at one. The

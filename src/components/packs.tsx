@@ -15,6 +15,7 @@ import type {
   SvImportResult,
 } from "../types";
 import { runBatchPackInstall } from "@/lib/pack-install";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { getSetting, setSetting } from "@/lib/store";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { PackTypeFilter, SortOption, TabMode } from "./pack-constants";
@@ -685,7 +686,10 @@ export function Packs({
     }
 
     // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
+    if (result) {
+      reportDependencyFailures(result.failedDeps);
+      void resolvePendingDeps(result.pendingDeps, addonsPath);
+    }
 
     // Apply SV settings from a v2 .esopack file after addons are installed
     if (importedFileSettings && Object.keys(importedFileSettings).length > 0) {
@@ -883,7 +887,10 @@ export function Packs({
     onRefresh();
 
     // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
+    if (result) {
+      reportDependencyFailures(result.failedDeps);
+      void resolvePendingDeps(result.pendingDeps, addonsPath);
+    }
   };
 
   // ── Voting ──────────────────────────────────────────────────────────

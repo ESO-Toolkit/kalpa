@@ -319,8 +319,7 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
         // autosave is off, so persist the plaintext deletion explicitly and
         // atomically (crash-safe) via settings_store, instead of relying on the
         // plugin's non-atomic truncate-write at exit.
-        let _ = store.delete("auth_tokens");
-        let _ = crate::settings_store::flush(app);
+        let _ = crate::settings_store::delete_entries(app, &["auth_tokens"]);
     } else {
         eprintln!(
             "[token_store] migration: commit/verify failed (committed={committed}, \

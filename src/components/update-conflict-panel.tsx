@@ -78,16 +78,14 @@ export function UpdateConflictPanel({
   const allDecided = conflicts.every((c) => decisions[c.relativePath]);
 
   const handleApply = () => {
-    const fileDecisions: FileDecision[] = [
-      ...autoKeptFiles.map((relativePath) => ({
-        relativePath,
-        action: "keep_mine" as const,
-      })),
-      ...conflicts.map((c) => ({
-        relativePath: c.relativePath,
-        action: decisions[c.relativePath] || "take_update",
-      })),
-    ];
+    // Only send choices the user actually made for reviewed conflicts. The
+    // backend reclassifies auto-kept files from current disk state at apply
+    // time; turning the scan-time list into synthetic keep-mine decisions here
+    // could hide a file that became a real conflict while this panel was open.
+    const fileDecisions: FileDecision[] = conflicts.map((c) => ({
+      relativePath: c.relativePath,
+      action: decisions[c.relativePath] || "take_update",
+    }));
     onResolve(fileDecisions);
   };
 

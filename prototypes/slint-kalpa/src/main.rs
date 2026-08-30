@@ -2,6 +2,11 @@
 
 slint::include_modules!();
 
+#[path = "../../../src-tauri/src/atomic_file.rs"]
+mod atomic_file;
+#[path = "../../../src-tauri/src/transaction_lock.rs"]
+mod transaction_lock;
+
 #[path = "native_char_backup.rs"]
 mod char_backup;
 
@@ -17,6 +22,8 @@ mod edit_backups;
 #[path = "../../../src-tauri/src/file_hashes.rs"]
 mod file_hashes;
 
+#[path = "../../../src-tauri/src/install_txn.rs"]
+mod install_txn;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/installer.rs"]
 mod installer;
@@ -28,6 +35,8 @@ mod manifest;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/metadata.rs"]
 mod metadata;
+#[path = "../../../src-tauri/src/native_boot.rs"]
+mod native_boot;
 
 #[allow(dead_code)]
 mod commands {
@@ -429,7 +438,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -497,7 +506,7 @@ struct NativeCustomThemeStore {
     themes: Vec<CatalogTheme>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct NativeSettings {
     auto_update: bool,
@@ -748,7 +757,10 @@ struct NativePendingConflict {
     conflicts: Vec<String>,
     decisions: HashMap<String, i32>,
     zip_path: PathBuf,
-    zip_hashes: HashMap<String, String>,
+    /// Every folder the archive writes. Archive-wide, like the Tauri app:
+    /// the apply step re-derives the classification for all of them, or a
+    /// sibling edited during deliberation is overwritten unnoticed.
+    zip_hashes: file_hashes::ZipHashSet,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -756,6 +768,15 @@ struct NativeImportResult {
     installed: Vec<String>,
     failed: Vec<String>,
     skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeDependencyInstallResult {
+    /// Folders written by the requested dependency, even when a transitive
+    /// dependency could not be installed. The caller must rescan these from
+    /// disk so the primary install remains visible in the UI.
+    folders: Vec<String>,
+    failed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -891,6 +912,25 @@ thread_local! {
 type NativePendingConflictStore = Arc<Mutex<HashMap<String, NativePendingConflict>>>;
 
 static PENDING_NATIVE_CONFLICTS: OnceLock<NativePendingConflictStore> = OnceLock::new();
+static NATIVE_AUTHORITY: OnceLock<Mutex<Option<native_boot::AuthorityGuard>>> = OnceLock::new();
+
+/// Set when this shell released UI authority and could not take it back.
+///
+/// The event loop is already quitting at that point. Callers consult it so they
+/// do not "restore" state on the way out: the settings toggle in particular
+/// would otherwise write `performanceMode` back to native, which is both a
+/// write after authority loss and the worse recovery value - leaving it on
+/// webview means the next launch boots the WebView, whose startup claim
+/// re-requests shutdown of whatever still holds the lock.
+static NATIVE_AUTHORITY_LOST: AtomicBool = AtomicBool::new(false);
+
+fn native_authority_was_lost() -> bool {
+    NATIVE_AUTHORITY_LOST.load(Ordering::SeqCst)
+}
+
+fn native_authority() -> &'static Mutex<Option<native_boot::AuthorityGuard>> {
+    NATIVE_AUTHORITY.get_or_init(|| Mutex::new(None))
+}
 
 /// Serializes every `.kalpa-metadata` read-modify-write inside this process.
 ///
@@ -1295,52 +1335,78 @@ enum NativeShellLock {
     /// This process holds the lock; keep the handle alive for the process
     /// lifetime (the OS releases it on ANY exit, including crashes, so no
     /// stale-lock sweeping is ever needed).
-    Held(#[allow(dead_code)] std::fs::File),
+    Held(#[allow(dead_code)] native_boot::AuthorityGuard),
     /// Another sidecar already holds the lock.
     AlreadyRunning,
-    /// The lock could not be evaluated (IO error); run unguarded rather than
-    /// refusing to start over a bookkeeping failure.
-    Unavailable,
+    /// The lock could not be evaluated (IO error); fail closed so this process
+    /// can never acknowledge readiness without exclusive writer authority.
+    Unavailable(String),
 }
 
 fn acquire_native_shell_lock() -> NativeShellLock {
     let dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("native-shell.lock");
-    #[cfg(windows)]
-    let attempt = {
-        use std::os::windows::fs::OpenOptionsExt;
-        // share_mode(0): while this handle lives, any second open fails with
-        // ERROR_SHARING_VIOLATION — the exact "already running" signal.
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .share_mode(0)
-            .open(&path)
-    };
-    #[cfg(not(windows))]
-    let attempt = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path);
-    match attempt {
-        Ok(file) => NativeShellLock::Held(file),
-        Err(error) if error.raw_os_error() == Some(32) => NativeShellLock::AlreadyRunning,
-        Err(_) => NativeShellLock::Unavailable,
+    let launch_id = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(native_boot::new_launch_id);
+    // A parent duplicate-authority probe can hold the OS lock for a few
+    // instructions while this child starts. Give that transient proof handle
+    // time to drain before classifying the launch as a duplicate.
+    match native_boot::try_claim_authority_with_grace(&dir, &launch_id, Duration::from_millis(100))
+    {
+        Ok(native_boot::AuthorityClaim::Held(guard)) => NativeShellLock::Held(guard),
+        Ok(native_boot::AuthorityClaim::AlreadyHeld) => NativeShellLock::AlreadyRunning,
+        Err(error) => {
+            eprintln!("[native-shell] authority lock unavailable: {error}");
+            NativeShellLock::Unavailable(error)
+        }
     }
 }
 
-/// The launcher (kalpa.exe) writes `native-boot.pending` into the state dir
-/// before exiting in favor of this process. Deleting it is the "native mode
-/// booted OK" acknowledgement: if this process dies before its event loop
-/// starts, the marker survives and the next kalpa.exe launch auto-falls back
-/// to the WebView UI instead of crash-looping with no window at all.
-fn confirm_native_boot_marker() {
-    if let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
-        let _ = std::fs::remove_file(dir.join("native-boot.pending"));
+/// Publish the matching half of the launcher's `native-boot.pending` record.
+/// This callback runs from Slint's event loop, so construction/show failures
+/// leave the pending record for the parent to handle without false readiness.
+fn confirm_native_boot_ready() {
+    let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) else {
+        eprintln!("[native-shell] no state directory; cannot acknowledge readiness");
+        return;
+    };
+    let Some(launch_id) = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("[native-shell] no launch ID; running without a parent handshake");
+        return;
+    };
+    match native_boot::signal_ready(&dir, &launch_id) {
+        Ok(true) => {
+            eprintln!("[native-shell] event loop ready launch_id={launch_id}");
+            match native_authority().lock() {
+                Ok(authority) => match authority.as_ref() {
+                    Some(guard) => match guard.signal_acquired() {
+                        Ok(true) => eprintln!(
+                            "[native-shell] authority acquired launch_id={launch_id}"
+                        ),
+                        Ok(false) => eprintln!(
+                            "[native-shell] authority proof rejected launch_id={launch_id}"
+                        ),
+                        Err(error) => eprintln!(
+                            "[native-shell] failed to publish authority launch_id={launch_id}: {error}"
+                        ),
+                    },
+                    None => eprintln!(
+                        "[native-shell] ready without authority launch_id={launch_id}"
+                    ),
+                },
+                Err(_) => eprintln!("[native-shell] authority state is unavailable"),
+            }
+        }
+        Ok(false) => eprintln!("[native-shell] rejected stale launch_id={launch_id}"),
+        Err(error) => {
+            eprintln!("[native-shell] failed to acknowledge launch_id={launch_id}: {error}")
+        }
     }
 }
 
@@ -1359,13 +1425,45 @@ fn main() -> Result<(), slint::PlatformError> {
     // while the shell is up) must not stack another full window. The running
     // instance is living proof native mode works, so this activation also
     // acknowledges the boot marker before bowing out.
-    let _instance_lock = match acquire_native_shell_lock() {
+    let handoff_launch_id = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (initial_authority, handoff_pending) = match acquire_native_shell_lock() {
         NativeShellLock::AlreadyRunning => {
-            confirm_native_boot_marker();
+            let active_kind = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+                .map(PathBuf::from)
+                .map(|dir| {
+                    (
+                        native_boot::native_authority_is_active(&dir),
+                        native_boot::webview_authority_is_active(&dir),
+                    )
+                })
+                .unwrap_or((false, false));
+            if active_kind.1 && handoff_launch_id.is_some() {
+                // The WebView parent deliberately retains authority until this
+                // child's event loop proves ready. Construct hidden, acknowledge,
+                // then acquire/show after the parent releases.
+                (None, true)
+            } else if active_kind.0 {
+                confirm_native_boot_ready();
+                return Ok(());
+            } else {
+                eprintln!("[native-shell] WebView retains UI authority; rejecting sidecar");
+                return Ok(());
+            }
+        }
+        NativeShellLock::Unavailable(error) => {
+            eprintln!("[native-shell] refusing unguarded startup: {error}");
             return Ok(());
         }
-        held_or_unavailable => held_or_unavailable,
+        NativeShellLock::Held(guard) => (Some(guard), false),
     };
+    if let Ok(mut authority) = native_authority().lock() {
+        *authority = initial_authority;
+    } else {
+        eprintln!("[native-shell] authority state is unavailable");
+        return Ok(());
+    }
 
     let render_config = native_render_config();
 
@@ -1449,12 +1547,117 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_open_migration();
     }
     start_native_app_update_check(ui.as_weak(), true);
+    let shutdown_timer = slint::Timer::default();
+    if let Some(state_dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
+        shutdown_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(50),
+            move || {
+                let launch_id = native_authority()
+                    .lock()
+                    .ok()
+                    .and_then(|authority| {
+                        authority
+                            .as_ref()
+                            .map(|guard| guard.launch_id().to_string())
+                    });
+                if let Some(launch_id) = launch_id {
+                    if native_boot::shutdown_requested(&state_dir, &launch_id) {
+                        eprintln!(
+                            "[native-shell] releasing UI authority launch_id={launch_id} for WebView"
+                        );
+                        let _ = slint::quit_event_loop();
+                    }
+                }
+            },
+        );
+    }
     // Everything is constructed and the event loop is about to take over:
     // acknowledge the launcher's boot marker so future launches keep native
     // mode. Anything that dies before this line leaves the marker in place,
     // and the next kalpa.exe start falls back to the WebView UI.
-    confirm_native_boot_marker();
-    let result = ui.run();
+    if handoff_pending {
+        let state_dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+            .map(PathBuf::from)
+            .expect("handoff launch has a native state directory");
+        let launch_id = handoff_launch_id.expect("handoff launch has an ID");
+        let handoff_ui = ui.as_weak();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            match native_boot::signal_ready(&state_dir, &launch_id) {
+                Ok(true) => eprintln!("[native-shell] event loop ready launch_id={launch_id}"),
+                Ok(false) => {
+                    eprintln!("[native-shell] rejected stale launch_id={launch_id}");
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[native-shell] failed to acknowledge launch_id={launch_id}: {error}"
+                    );
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+            }
+            match native_boot::claim_after_ready_release(
+                &state_dir,
+                &launch_id,
+                native_boot::READY_TIMEOUT,
+            ) {
+                Ok(guard) => {
+                    let mut authority = match native_authority().lock() {
+                        Ok(authority) => authority,
+                        Err(_) => {
+                            eprintln!("[native-shell] authority state is unavailable");
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    };
+                    *authority = Some(guard);
+                    if let Some(ui) = handoff_ui.upgrade() {
+                        if let Err(error) = ui.show() {
+                            eprintln!("[native-shell] failed to show ready UI: {error}");
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    }
+                    let proof = authority
+                        .as_ref()
+                        .expect("native authority was just stored")
+                        .signal_acquired();
+                    match proof {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            eprintln!(
+                                "[native-shell] rejected authority proof launch_id={launch_id}"
+                            );
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[native-shell] failed to publish authority launch_id={launch_id}: {error}"
+                            );
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[native-shell] authority transfer failed: {error}");
+                    let _ = slint::quit_event_loop();
+                }
+            }
+        });
+    } else {
+        slint::Timer::single_shot(Duration::ZERO, confirm_native_boot_ready);
+    }
+    let result = if handoff_pending {
+        slint::run_event_loop()
+    } else {
+        ui.run()
+    };
+    shutdown_timer.stop();
     // The sign-in WebView2 window is a separate process; close it with the shell
     // instead of leaving an orphaned login on screen.
     kill_login_subprocess();
@@ -2184,6 +2387,7 @@ struct RealAddonDraft {
 }
 
 fn real_addon_entries(addons_root: &Path) -> Result<Vec<AddonEntry>, String> {
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     let store = metadata::load_metadata(addons_root);
     let mut addon_dirs = fs::read_dir(addons_root)
         .map_err(|error| format!("Failed to read AddOns folder: {error}"))?
@@ -2336,6 +2540,9 @@ fn real_addon_draft(addon_dir: &Path) -> Result<RealAddonDraft, String> {
         entry.badge3 = "Disabled".into();
         entry.badge3_kind = 5;
     }
+    entry.protected_edits_baseline = addon_dir.parent().is_some_and(|addons_root| {
+        file_hashes::load_hash_manifest(addons_root, &folder_name).is_some()
+    });
 
     Ok(RealAddonDraft {
         entry,
@@ -2784,6 +2991,39 @@ fn apply_addon_update_check_results(
     }
 
     available
+}
+
+fn unprotected_update_count(models: &AddonModels) -> usize {
+    models
+        .all
+        .borrow()
+        .iter()
+        .filter(|addon| addon_has_update(addon) && !addon.protected_edits_baseline)
+        .count()
+}
+
+fn unprotected_target_count(addons_root: &Path, targets: &[NativeAddonUpdateTarget]) -> usize {
+    targets
+        .iter()
+        .filter(|target| {
+            file_hashes::load_hash_manifest(addons_root, &target.folder_name).is_none()
+        })
+        .count()
+}
+
+fn update_start_message(targets: &[NativeAddonUpdateTarget], unprotected: usize) -> String {
+    if unprotected > 0 {
+        format!(
+            "Protected Edits unavailable for {unprotected} addon{}: no trusted file baseline exists, so Kalpa cannot detect changed files. Updating may overwrite edits.",
+            if unprotected == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Applying {} addon update{}...",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )
+    }
 }
 
 fn native_update_targets(models: &AddonModels) -> Vec<NativeAddonUpdateTarget> {
@@ -3948,6 +4188,7 @@ fn addon_entry(
         selected: false,
         is_library,
         disabled,
+        protected_edits_baseline: true,
         state,
         badge: badge.into(),
         badge_kind,
@@ -6915,22 +7156,10 @@ fn apply_imported_pack_settings_blocking(
             }
         }
 
-        let temp = sv_dir.join(format!("{folder}.lua.tmp"));
-        if let Err(error) = fs::write(&temp, &substituted) {
+        if let Err(error) = atomic_file::atomic_write(&destination, substituted.as_bytes()) {
             result
                 .errors
                 .push(format!("{folder}: failed to write: {error}"));
-            continue;
-        }
-        // Rename straight over the destination: fs::rename replaces it
-        // atomically on Windows too (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
-        // so deleting it first would only open a window where the live
-        // SavedVariables file is missing.
-        if let Err(error) = fs::rename(&temp, &destination) {
-            let _ = fs::remove_file(&temp);
-            result
-                .errors
-                .push(format!("{folder}: failed to finalize write: {error}"));
             continue;
         }
 
@@ -7070,7 +7299,11 @@ fn pack_iso_date_label(value: &str) -> Option<String> {
 }
 
 fn apply_initial_native_settings(ui: &KalpaWindow) {
-    apply_native_settings(ui, &read_native_settings());
+    let settings = read_native_settings();
+    *native_settings_baseline()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(settings.clone());
+    apply_native_settings(ui, &settings);
     ui.set_settings_addons_path(configured_addons_path_display().into());
 }
 
@@ -9071,6 +9304,15 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
             }
+            Err(error) if native_authority_was_lost() => {
+                // This shell is on its way out and no longer owns the UI. Do
+                // not write `performanceMode` back to native: the value that
+                // recovers is webview, and the status message would never be
+                // rendered anyway.
+                eprintln!(
+                    "[native-shell] leaving performanceMode=webview after authority loss: {error}"
+                );
+            }
             Err(error) => {
                 ui.set_settings_native_performance_mode(true);
                 persist_native_settings(&native_settings_from_ui(&ui));
@@ -9612,7 +9854,10 @@ fn wire_safety_actions(ui: &KalpaWindow) {
         ui.set_status_error_message("Restoring snapshot...".into());
         spawn_maintenance_job(
             ui.as_weak(),
-            move || safe_migration::restore_snapshot(&addons_root, &snapshot_id),
+            move || {
+                let _transaction = install_txn::lock_and_recover(&addons_root)?;
+                safe_migration::restore_snapshot(&addons_root, &snapshot_id)
+            },
             |ui, result| match result {
                 Ok(count) => {
                     // Rescan through the shared refresh callback: the addon models
@@ -10199,10 +10444,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         set_theme_draft_color_fields(&ui, &draft.colors);
         set_theme_draft_contrast(&ui, &draft.colors);
 
-        let mut custom_themes = save_custom_themes.borrow_mut();
-        upsert_custom_theme(&mut custom_themes, draft.clone());
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let saved_draft = draft.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            upsert_custom_theme(themes, saved_draft);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme save failed: {error}").into());
+                return;
+            }
+        };
+        *save_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &save_custom_themes.borrow());
         set_theme_draft(&ui, &draft, false);
         *save_draft.borrow_mut() = draft.clone();
         apply_theme_selection(
@@ -10263,10 +10516,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         };
 
         let theme_id = theme_id.to_string();
-        let mut custom_themes = delete_custom_themes.borrow_mut();
-        custom_themes.retain(|theme| theme.id != theme_id);
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let deleted_theme_id = theme_id.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            themes.retain(|theme| theme.id != deleted_theme_id);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme delete failed: {error}").into());
+                return;
+            }
+        };
+        *delete_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &delete_custom_themes.borrow());
         ui.set_settings_editor_open(false);
 
         if ui.get_active_theme_id().as_str() == theme_id {
@@ -10362,10 +10623,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
             return;
         };
 
-        let mut custom_themes = import_custom_themes.borrow_mut();
-        upsert_custom_theme(&mut custom_themes, theme.clone());
-        persist_custom_themes(&custom_themes);
-        set_theme_gallery(&ui, &custom_themes);
+        let imported_theme = theme.clone();
+        let updated_themes = match update_custom_themes(move |themes| {
+            upsert_custom_theme(themes, imported_theme);
+        }) {
+            Ok(themes) => themes,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme import failed: {error}").into());
+                return;
+            }
+        };
+        *import_custom_themes.borrow_mut() = updated_themes;
+        set_theme_gallery(&ui, &import_custom_themes.borrow());
         apply_theme_selection(
             &ui,
             &ThemeSelection::with_skin(theme.colors.clone(), theme.skin_id.as_deref()),
@@ -10388,6 +10657,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         let available = apply_addon_update_check_results(&update_finished_models, &update_rows);
         ui.set_checking_updates(false);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&update_finished_models) as i32);
         apply_addon_view(&ui, &update_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10403,6 +10673,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_checking_updates(false);
         ui.set_pending_conflict_count(conflict_count);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&apply_finished_models) as i32);
         apply_addon_view(&ui, &apply_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10720,11 +10991,9 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 let eso_running = addon_write_eso_running_warning_active(&ui);
                 ui.set_checking_updates(true);
-                let message = format!(
-                    "Applying {} safe addon update{}...",
-                    targets.len(),
-                    if targets.len() == 1 { "" } else { "s" }
-                );
+                let unprotected = unprotected_target_count(&addons_root, &targets);
+                ui.set_unprotected_update_count(unprotected as i32);
+                let message = update_start_message(&targets, unprotected);
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -10752,13 +11021,17 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
 
             let mut removed = 0usize;
             let mut failed = Vec::new();
+            let mut cleanup_warnings = Vec::new();
             let eso_running = addon_write_eso_running_warning_active(&ui);
             for folder_name in selected_folders {
                 if let Some(addons_root) = disk_root_for_addon(&folder_name) {
                     match remove_addon_from_disk(&addons_root, &folder_name) {
-                        Ok(()) => {
+                        Ok(outcome) => {
                             remove_master_addon(&models, &folder_name);
                             removed += 1;
+                            if let Some(warning) = outcome.cleanup_warning {
+                                cleanup_warnings.push(format!("{folder_name}: {warning}"));
+                            }
                         }
                         Err(error) => failed.push(format!("{folder_name}: {error}")),
                     }
@@ -10769,7 +11042,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             }
 
             apply_addon_view(&ui, &models);
-            let message = if failed.is_empty() {
+            let mut message = if failed.is_empty() {
                 format!("Removed {removed} selected addons.")
             } else {
                 format!(
@@ -10778,6 +11051,12 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                     failed.join("; ")
                 )
             };
+            if !cleanup_warnings.is_empty() {
+                message.push_str(&format!(
+                    " Cleanup warnings: {}",
+                    cleanup_warnings.join("; ")
+                ));
+            }
             ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
         }
     });
@@ -10870,9 +11149,10 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let folder_name = addon.folder_name.to_string();
         let eso_running = addon_write_eso_running_warning_active(&ui);
+        let mut cleanup_warning = None;
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
-                Ok(()) => {}
+                Ok(outcome) => cleanup_warning = outcome.cleanup_warning,
                 Err(error) => {
                     ui.set_status_error_message(error.into());
                     return;
@@ -10882,9 +11162,11 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&models, &folder_name);
         apply_addon_view(&ui, &models);
-        ui.set_status_error_message(
-            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
-        );
+        let mut message = format!("Removed {folder_name}.");
+        if let Some(warning) = cleanup_warning {
+            message.push_str(&format!(" Cleanup warning: {warning}"));
+        }
+        ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
     });
 }
 
@@ -11049,9 +11331,10 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         let folder_name = addon.folder_name.to_string();
         let eso_running = addon_write_eso_running_warning_active(&ui);
+        let mut cleanup_warning = None;
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
-                Ok(()) => {}
+                Ok(outcome) => cleanup_warning = outcome.cleanup_warning,
                 Err(error) => {
                     ui.set_status_error_message(error.into());
                     return;
@@ -11061,9 +11344,11 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&remove_models, &folder_name);
         apply_addon_view(&ui, &remove_models);
-        ui.set_status_error_message(
-            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
-        );
+        let mut message = format!("Removed {folder_name}.");
+        if let Some(warning) = cleanup_warning {
+            message.push_str(&format!(" Cleanup warning: {warning}"));
+        }
+        ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
     });
 
     let update_addon_ui = ui.as_weak();
@@ -11097,13 +11382,24 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_checking_updates(true);
+        let targets = vec![target];
+        let unprotected = unprotected_target_count(&addons_root, &targets);
+        ui.set_unprotected_update_count(unprotected as i32);
         ui.set_status_error_message(
-            addon_write_status_message(format!("Updating {}...", addon.title), eso_running).into(),
+            addon_write_status_message(
+                if unprotected > 0 {
+                    update_start_message(&targets, unprotected)
+                } else {
+                    format!("Updating {}...", addon.title)
+                },
+                eso_running,
+            )
+            .into(),
         );
         start_native_addon_update_apply(
             ui.as_weak(),
             addons_root,
-            vec![target],
+            targets,
             ui.get_settings_conflict_policy().clamp(0, 2),
             eso_running,
         );
@@ -11143,15 +11439,15 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
                 };
                 ui.set_checking_updates(false);
                 match result {
-                    Ok(folders) => {
+                    Ok(result) => {
                         // Rescan from disk rather than flipping the dependency row:
                         // the row may only claim "installed" once the library is
                         // actually there.
                         ui.invoke_refresh_requested();
-                        let message = format!(
-                            "Installed {dep_name} ({} folder{} added).",
-                            folders.len(),
-                            if folders.len() == 1 { "" } else { "s" }
+                        let message = native_dependency_install_status(
+                            &dep_name,
+                            result.folders.len(),
+                            &result.failed,
                         );
                         ui.set_status_error_message(
                             addon_write_status_message(message, eso_running).into(),
@@ -11182,11 +11478,15 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
         match remove_addon_from_disk(&addons_root, &dep_name) {
-            Ok(()) => {
+            Ok(outcome) => {
                 remove_master_addon(&models, &dep_name);
                 apply_addon_view(&ui, &models);
+                let mut message = format!("Removed {dep_name}.");
+                if let Some(warning) = outcome.cleanup_warning {
+                    message.push_str(&format!(" Cleanup warning: {warning}"));
+                }
                 ui.set_status_error_message(
-                    addon_write_status_message(format!("Removed {dep_name}."), eso_running).into(),
+                    addon_write_status_message(message, eso_running).into(),
                 );
             }
             Err(error) => {
@@ -12495,18 +12795,42 @@ fn wire_discover(
         let eso_running = addon_write_eso_running_warning_active(&ui);
 
         match remove_addons_by_esoui_id(&remove_models, &esoui_id) {
-            Ok(removed) => {
-                if let Ok(mut ids) = remove_ids.lock() {
-                    ids.remove(&esoui_id);
+            Ok(outcome) => {
+                let still_installed = remove_models
+                    .all
+                    .borrow()
+                    .iter()
+                    .any(|addon| addon.esoui_id.as_str() == esoui_id);
+                if !still_installed {
+                    if let Ok(mut ids) = remove_ids.lock() {
+                        ids.remove(&esoui_id);
+                    }
+                    mark_discover_uninstalled_model(&model, &esoui_id);
                 }
-                mark_discover_uninstalled_model(&model, &esoui_id);
                 apply_addon_view(&ui, &remove_models);
-                let message = format!(
+                let mut message = format!(
                     "Removed {} addon folder{} for ESOUI {}.",
-                    removed.len(),
-                    if removed.len() == 1 { "" } else { "s" },
+                    outcome.removed.len(),
+                    if outcome.removed.len() == 1 { "" } else { "s" },
                     esoui_id
                 );
+                if !outcome.cleanup_warnings.is_empty() {
+                    message.push_str(&format!(
+                        " Cleanup warnings: {}",
+                        outcome.cleanup_warnings.join("; ")
+                    ));
+                }
+                if !outcome.failures.is_empty() {
+                    message.push_str(&format!(
+                        " Failed to remove: {}",
+                        outcome
+                            .failures
+                            .iter()
+                            .map(|(folder, error)| format!("{folder}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -12567,7 +12891,31 @@ fn mark_discover_uninstalled_model(discover_model: &ModelRc<DiscoverEntry>, esou
     }
 }
 
-fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec<String>, String> {
+struct RemoveByEsouiOutcome {
+    removed: Vec<String>,
+    cleanup_warnings: Vec<String>,
+    failures: Vec<(String, String)>,
+}
+
+fn remove_addons_by_esoui_id(
+    models: &AddonModels,
+    esoui_id: &str,
+) -> Result<RemoveByEsouiOutcome, String> {
+    remove_addons_by_esoui_id_with(models, esoui_id, |folder_name| {
+        let Some(addons_root) = disk_root_for_addon(folder_name) else {
+            // Demo/mock rows have no configured disk folder but still need to
+            // leave the model when the user removes them.
+            return Ok(None);
+        };
+        remove_addon_from_disk(&addons_root, folder_name).map(|outcome| outcome.cleanup_warning)
+    })
+}
+
+fn remove_addons_by_esoui_id_with(
+    models: &AddonModels,
+    esoui_id: &str,
+    mut remove_from_disk: impl FnMut(&str) -> Result<Option<String>, String>,
+) -> Result<RemoveByEsouiOutcome, String> {
     let targets = models
         .all
         .borrow()
@@ -12580,17 +12928,29 @@ fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec
         return Err(format!("No installed addon found for ESOUI {esoui_id}."));
     }
 
+    let mut removed = Vec::new();
+    let mut cleanup_warnings = Vec::new();
+    let mut failures = Vec::new();
     for folder_name in &targets {
-        if let Some(addons_root) = disk_root_for_addon(folder_name) {
-            remove_addon_from_disk(&addons_root, folder_name)?;
+        match remove_from_disk(folder_name) {
+            Ok(warning) => {
+                if let Some(warning) = warning {
+                    cleanup_warnings.push(format!("{folder_name}: {warning}"));
+                }
+                remove_master_addon(models, folder_name);
+                removed.push(folder_name.clone());
+            }
+            Err(error) => {
+                failures.push((folder_name.clone(), error));
+            }
         }
     }
 
-    for folder_name in &targets {
-        remove_master_addon(models, folder_name);
-    }
-
-    Ok(targets)
+    Ok(RemoveByEsouiOutcome {
+        removed,
+        cleanup_warnings,
+        failures,
+    })
 }
 
 fn discover_installed_snapshot(installed_ids: &Arc<Mutex<BTreeSet<String>>>) -> BTreeSet<String> {
@@ -12637,8 +12997,13 @@ fn install_downloaded_addon_blocking(
     version: &str,
     download_url: &str,
 ) -> Result<Vec<String>, String> {
-    let installed_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
-    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
+    let installed_folders = installer::install_addon_zip_with_hashes(
+        zip_path,
+        addons_dir,
+        esoui_id,
+        version,
+        installer::ExtractHooks::NONE,
+    )?;
 
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
@@ -12656,6 +13021,13 @@ fn install_downloaded_addon_blocking(
     Ok(installed_folders)
 }
 
+/// Mirror of the Tauri app's `record_installed_folders`.
+///
+/// The ownership rule itself lives in `metadata.rs`, which this crate shares
+/// verbatim, so only the primary/bundled dispatch is duplicated here. A folder
+/// the archive does not own goes through `record_bundled_folder`, which keeps a
+/// separately tracked library on its own ESOUI entry instead of demoting it to
+/// ID 0 and dropping it out of update checks.
 fn record_native_installed_folders(
     store: &mut metadata::MetadataStore,
     addons_dir: &Path,
@@ -12665,30 +13037,101 @@ fn record_native_installed_folders(
     esoui_title: &str,
     download_url: &str,
 ) {
-    let primary = determine_primary_folder(installed_folders, esoui_title);
+    let primary = determine_primary_folder(store, installed_folders, esoui_id, esoui_title);
     for folder in installed_folders {
-        let is_primary = *folder == primary;
-        let version = if is_primary && !esoui_version.is_empty() {
-            esoui_version.to_string()
+        let local_version = read_local_version(addons_dir, folder);
+        if *folder == primary {
+            let version = if esoui_version.is_empty() {
+                local_version
+            } else {
+                esoui_version.to_string()
+            };
+            metadata::record_install_ext(store, folder, esoui_id, &version, download_url, 0);
         } else {
-            read_local_version(addons_dir, folder)
-        };
-        metadata::record_install_ext(
-            store,
-            folder,
-            if is_primary { esoui_id } else { 0 },
-            &version,
-            download_url,
-            0,
-        );
+            metadata::record_bundled_folder(store, folder, esoui_id, download_url, &local_version);
+        }
     }
 }
 
-fn determine_primary_folder(installed_folders: &[String], esoui_title: &str) -> String {
+/// Mirror of the Tauri app's `determine_primary_folder`; see that function for
+/// why each step exists. Kept in sync deliberately: the two crates must agree
+/// on which folder an archive owns, or installing through one and updating
+/// through the other would hand ownership back and forth.
+fn determine_primary_folder(
+    store: &metadata::MetadataStore,
+    installed_folders: &[String],
+    esoui_id: u32,
+    esoui_title: &str,
+) -> String {
+    let same_id: Vec<&String> = if esoui_id == 0 {
+        Vec::new()
+    } else {
+        installed_folders
+            .iter()
+            .filter(|folder| {
+                store
+                    .addons
+                    .get(folder.as_str())
+                    .is_some_and(|meta| meta.esoui_id == esoui_id)
+            })
+            .collect()
+    };
+
+    // A single recorded owner is authoritative. Legacy installs, however,
+    // stamped the same ID onto every folder in a multi-folder archive, so the
+    // first match is not necessarily the archive's primary folder. Let the
+    // title disambiguate those duplicates below.
+    if same_id.len() == 1 {
+        return same_id[0].clone();
+    }
+
+    if same_id.len() > 1 {
+        let title = esoui_title.trim();
+        if let Some(exact) = same_id
+            .iter()
+            .find(|folder| folder.eq_ignore_ascii_case(title))
+        {
+            return (*exact).clone();
+        }
+
+        let mut contained: Vec<&String> = same_id
+            .iter()
+            .copied()
+            .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+            .collect();
+        contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        if let Some(best) = contained.first() {
+            return (*best).clone();
+        }
+    }
+
+    let eligible = |folder: &String| {
+        store
+            .addons
+            .get(folder.as_str())
+            .is_none_or(|meta| meta.esoui_id == 0)
+    };
+    let title = esoui_title.trim();
+    if let Some(exact) = installed_folders
+        .iter()
+        .find(|folder| eligible(folder) && folder.eq_ignore_ascii_case(title))
+    {
+        return exact.clone();
+    }
+
+    let mut contained: Vec<&String> = installed_folders
+        .iter()
+        .filter(|folder| eligible(folder) && !folder.is_empty() && title.contains(folder.as_str()))
+        .collect();
+    contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    if let Some(best) = contained.first() {
+        return (*best).clone();
+    }
+
     installed_folders
         .iter()
-        .find(|folder| esoui_title.contains(folder.as_str()))
-        .or(installed_folders.first())
+        .find(|folder| eligible(folder))
+        .or_else(|| installed_folders.first())
         .cloned()
         .unwrap_or_default()
 }
@@ -12706,6 +13149,63 @@ fn normalized_addon_version(version: &str) -> &str {
         .strip_prefix('v')
         .or_else(|| version.trim().strip_prefix('V'))
         .unwrap_or(version.trim())
+}
+
+fn native_artifact_has_update(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    let local_version = normalized_addon_version(local_version);
+    let remote_version = normalized_addon_version(remote_version);
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+fn reconcile_native_update_observation(
+    entry: &mut metadata::AddonMetadata,
+    remote_version: &str,
+    remote_marker: u64,
+    has_update: bool,
+) -> bool {
+    let local_version = normalized_addon_version(&entry.installed_version);
+    let remote_version_normalized = normalized_addon_version(remote_version);
+
+    // A filelist observation is not proof that its artifact was installed.
+    // Only attach its version and publication marker when it matches the
+    // non-empty version already on disk.
+    if has_update
+        || local_version.is_empty()
+        || remote_version_normalized.is_empty()
+        || local_version != remote_version_normalized
+    {
+        return false;
+    }
+
+    let mut changed = false;
+    if entry.installed_version != remote_version {
+        entry.installed_version = remote_version.to_string();
+        changed = true;
+    }
+    if remote_marker > entry.esoui_last_update {
+        entry.esoui_last_update = remote_marker;
+        entry.esoui_marker_installed = true;
+        changed = true;
+    } else if remote_marker > 0
+        && remote_marker == entry.esoui_last_update
+        && !entry.esoui_marker_installed
+    {
+        entry.esoui_marker_installed = true;
+        changed = true;
+    }
+    changed
 }
 
 fn check_native_addon_updates_blocking(
@@ -12734,21 +13234,21 @@ fn check_native_addon_updates_blocking(
             continue;
         };
 
-        let local_version = normalized_addon_version(&meta.installed_version);
-        let remote_version = normalized_addon_version(&api_entry.version);
-        let has_update = !remote_version.is_empty()
-            && !local_version.is_empty()
-            && remote_version != local_version;
+        let has_update = native_artifact_has_update(
+            &meta.installed_version,
+            &api_entry.version,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(&folder_name) {
-            if !has_update && entry.installed_version != api_entry.version {
-                entry.installed_version = api_entry.version.clone();
-                metadata_changed = true;
-            }
-            if entry.esoui_last_update != api_entry.last_update {
-                entry.esoui_last_update = api_entry.last_update;
-                metadata_changed = true;
-            }
+            metadata_changed |= reconcile_native_update_observation(
+                entry,
+                &api_entry.version,
+                api_entry.last_update,
+                has_update,
+            );
         }
 
         results.push(NativeAddonUpdateCheck {
@@ -12977,57 +13477,80 @@ fn apply_native_pending_conflict_files_blocking(
         return Err("Every conflicted file needs a decision.".to_string());
     }
 
-    let mut kept_files = pending.auto_kept_files.clone();
+    let zip_hashes = if pending.zip_hashes.folders.is_empty() {
+        file_hashes::hash_zip_entries_by_folder(&pending.zip_path)?
+    } else {
+        pending.zip_hashes.clone()
+    };
+
+    // Decisions describe the disk state shown in the conflict panel, not the
+    // state we are about to overwrite. Reclassify immediately before applying
+    // so a reverted edit is updated normally and a newly-created edit is
+    // backed up rather than silently lost.
+    let classified = classify_native_update_archive(addons_dir, &zip_hashes)?;
+
+    let newly_conflicting: Vec<&str> = classified
+        .conflicts
+        .iter()
+        .map(String::as_str)
+        .filter(|relative_path| !pending.decisions.contains_key(*relative_path))
+        .collect();
+    if !newly_conflicting.is_empty() {
+        return Err(format!(
+            "Conflicts changed while the update was open; review again: {}",
+            newly_conflicting.join(", ")
+        ));
+    }
+
+    let mut kept_files = classified.auto_kept_files;
     let mut files_to_backup = Vec::new();
-    for relative_path in &pending.conflicts {
+    for relative_path in &classified.conflicts {
         match pending.decisions.get(relative_path).copied() {
             Some(1) => kept_files.push(relative_path.clone()),
             Some(2) => files_to_backup.push(relative_path.clone()),
-            _ => return Err(format!("Missing conflict decision for {relative_path}.")),
+            Some(_) => return Err(format!("Invalid conflict decision for {relative_path}.")),
+            None => unreachable!("new conflicts are rejected before applying"),
         }
     }
     kept_files.sort();
     kept_files.dedup();
 
-    if !files_to_backup.is_empty() {
-        let from_version = file_hashes::load_hash_manifest(addons_dir, &pending.folder_name)
+    // Backups live under `.kalpa-backups/<folder>/`, and each folder records
+    // its own installed version, so group first rather than labelling a
+    // sibling's backup with the primary's "from" version.
+    for (backup_folder, files) in file_hashes::group_by_folder(&files_to_backup) {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &backup_folder)
             .map(|manifest| manifest.installed_version)
             .unwrap_or_default();
         edit_backups::backup_user_files(
             addons_dir,
-            &pending.folder_name,
-            &files_to_backup,
+            &backup_folder,
+            &files,
             &from_version,
             &pending.update_version,
         )?;
     }
 
-    let skip_files = kept_files
-        .iter()
-        .map(|path| format!("{}/{}", pending.folder_name, path))
-        .collect::<HashSet<_>>();
+    // Kept paths are already folder-qualified, the shape the extractor matches
+    // on. Prepending the primary folder is what let a kept sibling file be
+    // overwritten anyway.
+    let skip_files = kept_files.iter().cloned().collect::<HashSet<_>>();
 
-    let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip(&pending.zip_path, addons_dir)?
-    } else {
-        installer::extract_addon_zip_selective(&pending.zip_path, addons_dir, &skip_files)?
-    };
-
-    let zip_hashes = if pending.zip_hashes.is_empty() {
-        file_hashes::hash_zip_entries(&pending.zip_path, &pending.folder_name)?
+    let zip_hashes = if pending.zip_hashes.folders.is_empty() {
+        file_hashes::hash_zip_entries_by_folder(&pending.zip_path)?
     } else {
         pending.zip_hashes.clone()
     };
     let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
-    file_hashes::record_hashes_with_zip_baseline(
-        addons_dir,
+    let empty_overrides = BTreeMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes(
         &pending.zip_path,
-        &installed_folders,
-        &pending.folder_name,
-        &zip_hashes,
+        addons_dir,
+        &skip_files,
+        installer::ExtractHooks::NONE,
         pending.esoui_id,
         &pending.update_version,
-        hash_overrides.as_ref(),
+        hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
     let _guard = metadata_guard();
@@ -13058,7 +13581,15 @@ fn native_pending_conflict_diff_blocking(
         return Err("Conflict file was not found.".to_string());
     }
 
-    let user_path = addon_file_path(addons_dir, &pending.folder_name, relative_path)?;
+    // The conflict path names its own folder. Resolving it under the pending
+    // update's primary would read `AddOns/<primary>/LibFoo/init.lua` for a
+    // sibling conflict - a path that exists nowhere - so the diff showed empty
+    // local content and then failed to find the file in the ZIP.
+    let (conflict_folder, conflict_relative) = file_hashes::split_qualified(relative_path)
+        .filter(|(folder, _)| pending.zip_hashes.has_folder(folder))
+        .ok_or_else(|| format!("Conflict path does not belong to this update: {relative_path}"))?;
+
+    let user_path = addon_file_path(addons_dir, conflict_folder, conflict_relative)?;
     let user_bytes = fs::read(&user_path).unwrap_or_default();
     if bytes_look_binary(&user_bytes) {
         return Ok(NativeConflictDiffPreview {
@@ -13071,7 +13602,11 @@ fn native_pending_conflict_diff_blocking(
         .map_err(|error| format!("Failed to open pending update ZIP: {error}"))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| format!("Failed to read update ZIP: {error}"))?;
-    let zip_entry_name = format!("{}/{}", pending.folder_name, relative_path);
+    // A flat archive's entries carry no folder prefix, so the entry name cannot
+    // be rebuilt by concatenation.
+    let zip_entry_name = pending
+        .zip_hashes
+        .zip_entry_name(conflict_folder, conflict_relative);
     let mut entry = archive
         .by_name(&zip_entry_name)
         .map_err(|error| format!("File was not found in update ZIP: {error}"))?;
@@ -13224,27 +13759,19 @@ fn apply_native_single_addon_update(
     if !report.conflicts.is_empty() && conflict_policy == 2 {
         backup_native_conflicting_files(addons_dir, target, remote_version, &report.conflicts)?;
     }
-    let skip_files = kept_files
-        .iter()
-        .map(|path| format!("{}/{}", target.folder_name, path))
-        .collect::<HashSet<_>>();
-
-    let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip(zip.path(), addons_dir)?
-    } else {
-        installer::extract_addon_zip_selective(zip.path(), addons_dir, &skip_files)?
-    };
+    // Already folder-qualified; see the pending-conflict path.
+    let skip_files = kept_files.iter().cloned().collect::<HashSet<_>>();
 
     let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
-    file_hashes::record_hashes_with_zip_baseline(
-        addons_dir,
+    let empty_overrides = BTreeMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes(
         zip.path(),
-        &installed_folders,
-        &target.folder_name,
-        &zip_hashes,
+        addons_dir,
+        &skip_files,
+        installer::ExtractHooks::NONE,
         target.esoui_id,
         remote_version,
-        hash_overrides.as_ref(),
+        hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
     let _guard = metadata_guard();
@@ -13282,36 +13809,54 @@ fn native_kept_files_for_policy(
     Some(kept_files)
 }
 
+/// Back up conflicting files before a policy-driven overwrite.
+///
+/// Conflicts are folder-qualified and can span several folders, so they are
+/// grouped first. Passing them through under the primary folder would build
+/// paths like `MainAddon/LibFoo/init.lua`, which exist nowhere: the backup
+/// would silently find nothing and the edits would be overwritten unprotected.
 fn backup_native_conflicting_files(
     addons_dir: &Path,
-    target: &NativeAddonUpdateTarget,
+    _target: &NativeAddonUpdateTarget,
     remote_version: &str,
     conflicts: &[String],
 ) -> Result<(), String> {
-    let from_version = file_hashes::load_hash_manifest(addons_dir, &target.folder_name)
-        .map(|manifest| manifest.installed_version)
-        .unwrap_or_default();
-    edit_backups::backup_user_files(
-        addons_dir,
-        &target.folder_name,
-        conflicts,
-        &from_version,
-        remote_version,
-    )
+    for (folder, files) in file_hashes::group_by_folder(conflicts) {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &folder)
+            .map(|manifest| manifest.installed_version)
+            .unwrap_or_default();
+        edit_backups::backup_user_files(
+            addons_dir,
+            &folder,
+            &files,
+            &from_version,
+            remote_version,
+        )?;
+    }
+    Ok(())
 }
 
+/// Upstream hashes for kept-mine files, grouped by folder.
+///
+/// Mirrors the Tauri app's `build_hash_overrides`. Grouped because hash
+/// manifests are per folder, and kept files can now come from any folder the
+/// archive touches rather than only the primary.
 fn native_hash_overrides(
     kept_files: &[String],
-    zip_hashes: &HashMap<String, String>,
-) -> Option<HashMap<String, String>> {
-    let overrides = kept_files
-        .iter()
-        .filter_map(|path| {
-            zip_hashes
-                .get(path)
-                .map(|hash| (path.clone(), hash.clone()))
-        })
-        .collect::<HashMap<_, _>>();
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Option<BTreeMap<String, HashMap<String, String>>> {
+    let mut overrides: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    for key in kept_files {
+        let Some((folder, relative)) = file_hashes::split_qualified(key) else {
+            continue;
+        };
+        if let Some(hash) = zip_hashes.folders.get(folder).and_then(|m| m.get(relative)) {
+            overrides
+                .entry(folder.to_string())
+                .or_default()
+                .insert(relative.to_string(), hash.clone());
+        }
+    }
     (!overrides.is_empty()).then_some(overrides)
 }
 
@@ -13333,56 +13878,73 @@ fn remove_stale_native_metadata(
     }
 }
 
+/// Mirror of the Tauri app's `build_conflict_report`.
+///
+/// Covers every folder the archive writes. Classifying only the primary meant
+/// a modified file in a bundled sibling was overwritten with no prompt and no
+/// backup, even though it had a baseline and was shown as modified.
+///
+/// Emitted paths are folder-qualified, matching the wire contract and the
+/// selective-extraction skip keys.
 fn build_native_conflict_report(
     addons_dir: &Path,
-    folder_name: &str,
+    _folder_name: &str,
     zip_path: &Path,
-) -> Result<(NativeConflictReport, HashMap<String, String>), String> {
-    let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
-    let addon_path = addons_dir.join(folder_name);
-    let disk_hashes = if stored.is_some() && addon_path.is_dir() {
-        file_hashes::compute_addon_hashes(&addon_path)?
-    } else {
-        HashMap::new()
-    };
-    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
-    let stored_files = stored.as_ref().map(|manifest| &manifest.files);
+) -> Result<(NativeConflictReport, file_hashes::ZipHashSet), String> {
+    let zip_hashes = file_hashes::hash_zip_entries_by_folder(zip_path)?;
+    let report = classify_native_update_archive(addons_dir, &zip_hashes)?;
 
+    Ok((report, zip_hashes))
+}
+
+fn classify_native_update_archive(
+    addons_dir: &Path,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Result<NativeConflictReport, String> {
     let mut safe_file_count = 0;
     let mut auto_kept_files = Vec::new();
     let mut conflicts = Vec::new();
 
-    for (relative_path, zip_hash) in &zip_hashes {
-        let stored_hash = stored_files.and_then(|files| files.get(relative_path));
-        let disk_hash = disk_hashes.get(relative_path);
-        let user_modified = match (stored_hash, disk_hash) {
-            (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
-            (Some(_), None) => true,
-            (None, _) => false,
+    for (folder, folder_hashes) in &zip_hashes.folders {
+        let stored = file_hashes::load_hash_manifest(addons_dir, folder);
+        let addon_path = addons_dir.join(folder);
+        let disk_hashes = if stored.is_some() && addon_path.is_dir() {
+            file_hashes::compute_addon_hashes(&addon_path)?
+        } else {
+            HashMap::new()
         };
-        let upstream_changed = match stored_hash {
-            Some(stored) => stored != zip_hash,
-            None => true,
-        };
+        let stored_files = stored.as_ref().map(|manifest| &manifest.files);
 
-        match (user_modified, upstream_changed) {
-            (false, _) => safe_file_count += 1,
-            (true, false) => auto_kept_files.push(relative_path.clone()),
-            (true, true) => conflicts.push(relative_path.clone()),
+        for (relative_path, zip_hash) in folder_hashes {
+            let stored_hash = stored_files.and_then(|files| files.get(relative_path));
+            let disk_hash = disk_hashes.get(relative_path);
+            let user_modified = match (stored_hash, disk_hash) {
+                (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
+                (Some(_), None) => true,
+                (None, Some(disk)) => !file_hashes::signatures_match(disk, zip_hash),
+                (None, None) => false,
+            };
+            let upstream_changed = match stored_hash {
+                Some(stored) => stored != zip_hash,
+                None => true,
+            };
+
+            match (user_modified, upstream_changed) {
+                (false, _) => safe_file_count += 1,
+                (true, false) => auto_kept_files.push(file_hashes::qualify(folder, relative_path)),
+                (true, true) => conflicts.push(file_hashes::qualify(folder, relative_path)),
+            }
         }
     }
 
     auto_kept_files.sort();
     conflicts.sort();
 
-    Ok((
-        NativeConflictReport {
-            safe_file_count,
-            auto_kept_files,
-            conflicts,
-        },
-        zip_hashes,
-    ))
+    Ok(NativeConflictReport {
+        safe_file_count,
+        auto_kept_files,
+        conflicts,
+    })
 }
 
 fn native_is_rate_limited(error: &str) -> bool {
@@ -13495,6 +14057,23 @@ fn native_resolve_transitive_deps(
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
 ) -> NativeImportResult {
+    native_resolve_transitive_deps_with(
+        addons_dir,
+        installed_folders,
+        store,
+        native_try_install_dep,
+    )
+}
+
+fn native_resolve_transitive_deps_with<F>(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    mut install_dep: F,
+) -> NativeImportResult
+where
+    F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
+{
     let mut all_installed = native_build_installed_set(addons_dir);
     let mut result = NativeImportResult::default();
     let mut folders_to_scan = installed_folders.to_vec();
@@ -13524,7 +14103,7 @@ fn native_resolve_transitive_deps(
             if index > 0 {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            match native_try_install_dep(dep_name, addons_dir, store) {
+            match install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
                     for folder in &dep_folders {
                         if find_manifest(addons_dir, folder).is_some() {
@@ -13539,8 +14118,10 @@ fn native_resolve_transitive_deps(
                     }
                     result.installed.push(dep_name.clone());
                 }
-                Err("not_found") => result.skipped.push(dep_name.clone()),
-                Err(_) => result.failed.push(dep_name.clone()),
+                Err(reason) if reason == "not_found" => result.skipped.push(dep_name.clone()),
+                Err(reason) => result
+                    .failed
+                    .push(native_dependency_failure(dep_name, &reason)),
             }
         }
 
@@ -13554,53 +14135,125 @@ fn native_try_install_dep(
     dep_name: &str,
     addons_dir: &Path,
     store: &mut metadata::MetadataStore,
-) -> Result<Vec<String>, &'static str> {
+) -> Result<Vec<String>, String> {
     let dep_id = if let Some(meta) = store.addons.get(dep_name) {
         meta.esoui_id
     } else {
         match esoui::search_addon_by_name(dep_name) {
             Ok(Some(id)) => id,
-            Ok(None) => return Err("not_found"),
-            Err(_) => return Err("search_failed"),
+            Ok(None) => return Err("not_found".to_string()),
+            Err(_) => return Err("search_failed".to_string()),
         }
     };
-    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
-    let dep_zip =
-        esoui::download_addon(&dep_info.download_url, None).map_err(|_| "download_failed")?;
-    let dep_folders =
-        installer::extract_addon_zip(dep_zip.path(), addons_dir).map_err(|_| "extract_failed")?;
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|_| "hash_record_failed")?;
+    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed".to_string())?;
+    let dep_zip = esoui::download_addon(&dep_info.download_url, None)
+        .map_err(|_| "download_failed".to_string())?;
+    native_finish_dependency_install(
+        dep_name,
+        addons_dir,
+        store,
+        dep_id,
+        &dep_info,
+        dep_zip.path(),
+    )
+}
 
-    for folder in &dep_folders {
-        let version = read_local_version(addons_dir, folder);
-        metadata::record_install(store, folder, dep_id, &version, &dep_info.download_url);
-    }
+fn native_finish_dependency_install(
+    _dep_name: &str,
+    addons_dir: &Path,
+    store: &mut metadata::MetadataStore,
+    dep_id: u32,
+    dep_info: &esoui::EsouiAddonInfo,
+    zip_path: &Path,
+) -> Result<Vec<String>, String> {
+    let dep_folders = installer::install_addon_zip_with_hashes(
+        zip_path,
+        addons_dir,
+        dep_id,
+        &dep_info.version,
+        installer::ExtractHooks::NONE,
+    )?;
+
+    // Same rule as a direct install: a multi-folder dependency must not stamp
+    // its ID onto folders it merely ships, or a separately tracked library
+    // loses its identity and the dependency produces duplicate update rows.
+    record_native_installed_folders(
+        store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+    );
 
     Ok(dep_folders)
+}
+
+fn native_dependency_failure(dep_name: &str, reason: &str) -> String {
+    format!("{dep_name}: {reason}")
+}
+
+fn native_dependency_error_message(dep_name: &str, reason: &str) -> String {
+    match reason {
+        "not_found" => format!("{dep_name} was not found on ESOUI."),
+        "search_failed" => format!("Could not search ESOUI for {dep_name}."),
+        "fetch_failed" => format!("Could not read {dep_name} on ESOUI."),
+        "download_failed" => format!("Could not download {dep_name}."),
+        "hash_record_failed" => {
+            format!("Installed {dep_name}, but could not record its file hashes.")
+        }
+        other => format!("Could not install {dep_name}: {other}"),
+    }
+}
+
+fn native_dependency_install_status(
+    dep_name: &str,
+    folder_count: usize,
+    failed: &[String],
+) -> String {
+    if failed.is_empty() {
+        return format!(
+            "Installed {dep_name} ({} folder{} added).",
+            folder_count,
+            if folder_count == 1 { "" } else { "s" }
+        );
+    }
+
+    format!(
+        "Installed {dep_name} ({} folder{} added), but {} dependenc{} failed: {}",
+        folder_count,
+        if folder_count == 1 { "" } else { "s" },
+        failed.len(),
+        if failed.len() == 1 { "y" } else { "ies" },
+        failed.join("; ")
+    )
+}
+
+fn native_dependency_install_result(
+    folders: Vec<String>,
+    resolved: NativeImportResult,
+) -> NativeDependencyInstallResult {
+    NativeDependencyInstallResult {
+        folders,
+        failed: resolved.failed,
+    }
 }
 
 /// Install one missing dependency by name and record it, the same way the
 /// update paths do. This is what the detail pane's dependency "Install" button
 /// runs — the row must only change once the library is really on disk.
-fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Vec<String>, String> {
+fn install_dependency_blocking(
+    addons_dir: &Path,
+    dep_name: &str,
+) -> Result<NativeDependencyInstallResult, String> {
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
     let installed = native_try_install_dep(dep_name, addons_dir, &mut store);
-    let folders = installed.map_err(|reason| match reason {
-        "not_found" => format!("{dep_name} was not found on ESOUI."),
-        "search_failed" => format!("Could not search ESOUI for {dep_name}."),
-        "fetch_failed" => format!("Could not read {dep_name} on ESOUI."),
-        "download_failed" => format!("Could not download {dep_name}."),
-        "extract_failed" => format!("Could not extract {dep_name}."),
-        "hash_record_failed" => {
-            format!("Installed {dep_name}, but could not record its file hashes.")
-        }
-        other => format!("Could not install {dep_name} ({other})."),
-    })?;
-    let _ = native_resolve_transitive_deps(addons_dir, &folders, &mut store);
+    let folders = installed.map_err(|reason| native_dependency_error_message(dep_name, &reason))?;
+    let resolved = native_resolve_transitive_deps(addons_dir, &folders, &mut store);
     metadata::save_metadata(addons_dir, &store)?;
-    Ok(folders)
+    Ok(native_dependency_install_result(folders, resolved))
 }
 
 fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
@@ -13647,6 +14300,17 @@ fn import_addon_list_json(
     addons_dir: &Path,
     json_data: &str,
 ) -> Result<NativeImportResult, String> {
+    import_addon_list_json_with(addons_dir, json_data, import_addon_entry_blocking)
+}
+
+fn import_addon_list_json_with<F>(
+    addons_dir: &Path,
+    json_data: &str,
+    mut import_entry: F,
+) -> Result<NativeImportResult, String>
+where
+    F: FnMut(&Path, &ExportEntry) -> Result<(), String>,
+{
     let export = serde_json::from_str::<ExportData>(json_data)
         .map_err(|error| format!("Invalid addon list export: {error}"))?;
     let mut result = NativeImportResult::default();
@@ -13662,9 +14326,11 @@ fn import_addon_list_json(
             continue;
         }
 
-        match import_addon_entry_blocking(addons_dir, &entry) {
+        match import_entry(addons_dir, &entry) {
             Ok(()) => result.installed.push(entry.folder_name),
-            Err(_) => result.failed.push(entry.folder_name),
+            Err(error) => result
+                .failed
+                .push(format!("{}: {error}", entry.folder_name)),
         }
     }
 
@@ -13686,12 +14352,17 @@ fn import_addon_entry_blocking(addons_dir: &Path, entry: &ExportEntry) -> Result
 }
 
 fn import_result_summary(result: &NativeImportResult) -> String {
-    format!(
+    let summary = format!(
         "Import complete: {} installed, {} skipped, {} failed.",
         result.installed.len(),
         result.skipped.len(),
         result.failed.len()
-    )
+    );
+    if result.failed.is_empty() {
+        summary
+    } else {
+        format!("{summary} Failed: {}", result.failed.join("; "))
+    }
 }
 
 fn write_clipboard_text(text: String) -> Result<(), String> {
@@ -13839,6 +14510,7 @@ fn set_addon_disabled_on_disk(
     folder_name: &str,
     disabled: bool,
 ) -> Result<(), String> {
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     validate_addon_folder_name(folder_name)?;
     if disabled {
         let src = addons_root.join(folder_name);
@@ -13863,7 +14535,18 @@ fn set_addon_disabled_on_disk(
     }
 }
 
-fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), String> {
+struct RemoveFromDiskOutcome {
+    cleanup_warning: Option<String>,
+}
+
+fn remove_addon_from_disk(
+    addons_root: &Path,
+    folder_name: &str,
+) -> Result<RemoveFromDiskOutcome, String> {
+    // Retain the cross-process guard across the existence snapshot, both
+    // deletions, and metadata cleanup so a concurrent publisher cannot place a
+    // replacement into the gap and have this operation delete it.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     validate_addon_folder_name(folder_name)?;
 
     let enabled_exists = addons_root.join(folder_name).is_dir();
@@ -13871,24 +14554,40 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     let disabled_exists = addons_root.join(&disabled_name).is_dir();
 
     if enabled_exists {
-        installer::remove_addon(addons_root, folder_name)?;
+        installer::remove_addon_locked(addons_root, folder_name)?;
     }
     if disabled_exists {
-        installer::remove_addon(addons_root, &disabled_name)?;
+        installer::remove_addon_locked(addons_root, &disabled_name)?;
     }
     if !enabled_exists && !disabled_exists {
         return Err(format!("Addon folder not found: {folder_name}"));
     }
 
     // The folder is already deleted — removal has succeeded. Treat the kalpa.json
-    // metadata cleanup as best-effort so a transient lock (OneDrive/AV) or a CFA
-    // block doesn't report "Remove failed" for an addon that is actually gone.
+    // Cleanup failures are warnings so the UI does not retain a row for an
+    // addon folder that has already been removed.
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_root);
+    let removed_id = store.addons.get(folder_name).map(|meta| meta.esoui_id);
     metadata::remove_entry(&mut store, folder_name);
-    let _ = metadata::save_metadata(addons_root, &store);
-    let _ = save_prototype_tags(addons_root, folder_name, &[]);
-    Ok(())
+    if let Some(id) = removed_id {
+        metadata::forget_bundled_parent(&mut store, id);
+    }
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = metadata::save_metadata(addons_root, &store) {
+        cleanup_errors.push(error);
+    }
+    if let Some(id) = removed_id {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_root, id) {
+            cleanup_errors.push(error);
+        }
+    }
+    if let Err(error) = save_prototype_tags(addons_root, folder_name, &[]) {
+        cleanup_errors.push(error);
+    }
+    Ok(RemoveFromDiskOutcome {
+        cleanup_warning: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+    })
 }
 
 fn active_tag_ids(tags: &ModelRc<TagEntry>) -> Vec<String> {
@@ -13919,6 +14618,8 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    bundled_by: Vec::new(),
+                    esoui_marker_installed: false,
                 },
             );
         }
@@ -13983,7 +14684,7 @@ fn save_prototype_tags(
         map.insert(key, tags.to_vec());
     }
     let json = serde_json::to_string_pretty(&map).map_err(|error| error.to_string())?;
-    std::fs::write(&path, json).map_err(|error| error.to_string())
+    atomic_file::atomic_write(&path, json.as_bytes()).map_err(|error| error.to_string())
 }
 
 /// Persist tags to the CFA-safe app-data store (primary) and mirror them into the
@@ -14981,6 +15682,9 @@ fn restore_edit_backup_file(
     {
         return Err("Invalid backup timestamp.".to_string());
     }
+    // Serialize the live-file replacement with installer publication in the
+    // Tauri process as well as this native process.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
 
     let timestamp_dir = backup.backed_up_at.replace(':', "-");
     let source_root = addons_root
@@ -15103,12 +15807,13 @@ fn persist_addons_path(addons_path: &str) -> Result<(), String> {
 }
 
 fn persist_addons_path_to_settings_path(path: &Path, addons_path: &str) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_ADDONS_PATH.to_string(),
-        serde_json::Value::String(addons_path.to_string()),
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_ADDONS_PATH.to_string(),
+            serde_json::Value::String(addons_path.to_string()),
+        );
+        Ok(())
+    })
 }
 
 fn read_installed_pack_refs() -> Vec<NativeInstalledPackRef> {
@@ -15136,24 +15841,40 @@ fn read_installed_pack_refs_from_settings_path(
         .map_err(|error| format!("Failed to parse installed packs: {error}"))
 }
 
-fn persist_installed_pack_refs(refs: &[NativeInstalledPackRef]) -> Result<(), String> {
-    let Some(path) = native_settings_store_path() else {
-        return Err("settings store path was not available".to_string());
-    };
-    persist_installed_pack_refs_to_settings_path(&path, refs)
-}
-
-fn persist_installed_pack_refs_to_settings_path(
+fn update_installed_pack_refs_to_settings_path(
     path: &Path,
-    refs: &[NativeInstalledPackRef],
-) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_INSTALLED_PACKS.to_string(),
-        serde_json::to_value(normalize_installed_pack_refs(refs.to_vec()))
-            .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
-    );
-    write_settings_store_object_to_path(path, object)
+    fallback_paths: &[PathBuf],
+    mutate: impl FnOnce(&mut Vec<NativeInstalledPackRef>),
+) -> Result<Vec<NativeInstalledPackRef>, String> {
+    update_settings_store_object_to_path(path, |object| {
+        let mut refs = match object.get(STORE_KEY_INSTALLED_PACKS).cloned() {
+            Some(value) => serde_json::from_value::<Vec<NativeInstalledPackRef>>(value)
+                .map(normalize_installed_pack_refs)
+                .map_err(|error| format!("Failed to parse installed packs: {error}"))?,
+            None => {
+                let mut fallback = Vec::new();
+                for fallback_path in fallback_paths {
+                    match read_installed_pack_refs_from_settings_path(fallback_path)? {
+                        Some(refs) => {
+                            fallback = refs;
+                            break;
+                        }
+                        None => continue,
+                    }
+                }
+                fallback
+            }
+        };
+
+        mutate(&mut refs);
+        refs = normalize_installed_pack_refs(refs);
+        object.insert(
+            STORE_KEY_INSTALLED_PACKS.to_string(),
+            serde_json::to_value(&refs)
+                .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
+        );
+        Ok(refs)
+    })
 }
 
 fn normalize_installed_pack_refs(refs: Vec<NativeInstalledPackRef>) -> Vec<NativeInstalledPackRef> {
@@ -15189,21 +15910,24 @@ fn upsert_installed_pack_ref(entry: &PackHubEntry) -> Result<Vec<NativeInstalled
         installed_at: current_iso_utc(),
     };
 
-    let mut refs = read_installed_pack_refs();
-    refs.retain(|existing| existing.pack_id != reference.pack_id);
-    refs.insert(0, reference);
-    persist_installed_pack_refs(&refs)?;
-    Ok(refs)
+    let paths = native_settings_store_paths();
+    let Some((path, fallback_paths)) = paths.split_first() else {
+        return Err("settings store path was not available".to_string());
+    };
+    update_installed_pack_refs_to_settings_path(path, fallback_paths, |refs| {
+        refs.retain(|existing| existing.pack_id != reference.pack_id);
+        refs.insert(0, reference);
+    })
 }
 
 fn remove_installed_pack_ref(pack_id: &str) -> Result<Vec<NativeInstalledPackRef>, String> {
-    let mut refs = read_installed_pack_refs();
-    let before = refs.len();
-    refs.retain(|reference| reference.pack_id != pack_id);
-    if refs.len() != before {
-        persist_installed_pack_refs(&refs)?;
-    }
-    Ok(refs)
+    let paths = native_settings_store_paths();
+    let Some((path, fallback_paths)) = paths.split_first() else {
+        return Err("settings store path was not available".to_string());
+    };
+    update_installed_pack_refs_to_settings_path(path, fallback_paths, |refs| {
+        refs.retain(|reference| reference.pack_id != pack_id);
+    })
 }
 
 fn parse_addon_count_label(label: &str) -> usize {
@@ -16739,12 +17463,8 @@ fn restore_character_subtrees_merge(
 
 fn write_raw_backup_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
-    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, content).map_err(|error| format!("Failed to write temp file: {error}"))?;
-    fs::rename(&tmp_path, &file_path).map_err(|error| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {error}")
-    })
+    atomic_file::atomic_write(&file_path, content)
+        .map_err(|error| format!("Failed to write backup: {error}"))
 }
 
 fn prune_auto_snapshots(backups_dir: &Path, keep: usize) {
@@ -17993,6 +18713,8 @@ fn write_text_file(
     content: &str,
 ) -> Result<(), String> {
     let file_path = addon_file_path(addons_root, folder_name, relative_path)?;
+    // Serialize the file/manifest pair with publication by the Tauri process.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     // Temp file + rename instead of writing in place: a crash or a Controlled
     // Folder Access block mid-write would otherwise leave the live addon file
     // truncated, and update_hash_manifest_for_file would immediately record the
@@ -18001,21 +18723,10 @@ fn write_text_file(
     update_hash_manifest_for_file(addons_root, folder_name, relative_path, &file_path)
 }
 
-/// Replace `file_path` with `content` via a sibling temp file and a rename.
-/// `fs::rename` replaces the destination atomically on Windows as well
-/// (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
+/// Replace `file_path` through the same unique, synced publisher as Tauri.
 fn write_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
-    let file_name = file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Invalid file path.".to_string())?;
-    let temp_path = file_path.with_file_name(format!("{file_name}.kalpa-tmp"));
-    fs::write(&temp_path, content)
-        .map_err(|error| format!("Failed to write temp file: {error}"))?;
-    fs::rename(&temp_path, file_path).map_err(|error| {
-        let _ = fs::remove_file(&temp_path);
-        format!("Failed to finalize write: {error}")
-    })
+    atomic_file::atomic_write(file_path, content)
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 fn update_hash_manifest_for_file(
@@ -18260,6 +18971,35 @@ fn open_path(path: &Path) {
     }
 }
 
+/// Mint the reverse-handoff launch ID and publish its pending record.
+///
+/// Extracted so the ID's shape is testable. The child claims authority under
+/// THIS ID, so it is also what `native_authority_is_active` classifies the
+/// resulting owner by: an unprefixed ID makes the WebView read as a *native*
+/// owner, and a later native toggle then sees a "live native owner", exits the
+/// WebView, and leaves the user with no window at all.
+fn prepare_webview_handoff(state_dir: &Path) -> Result<String, String> {
+    let launch_id = native_boot::webview_launch_id();
+    native_boot::prepare(state_dir, &launch_id)?;
+    Ok(launch_id)
+}
+
+fn cleanup_failed_webview_ready_wait(
+    state_dir: &Path,
+    launch_id: &str,
+    original_error: String,
+    terminate_and_reap: impl FnOnce() -> Result<(), String>,
+) -> String {
+    let reap = terminate_and_reap();
+    native_boot::clear_owned(state_dir, launch_id);
+    if let Err(error) = reap {
+        eprintln!(
+            "[native-shell] failed to reap WebView after readiness polling error launch_id={launch_id}: {error}"
+        );
+    }
+    original_error
+}
+
 fn return_to_webview_shell(
     start_app_update: bool,
     start_log_uploader: bool,
@@ -18276,6 +19016,20 @@ fn return_to_webview_shell(
         ));
     }
 
+    let state_dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "native state directory was not provided".to_string())?;
+    let pending_path = native_boot::pending_path(&state_dir);
+    let _pending_guard = transaction_lock::acquire(
+        &pending_path,
+        transaction_lock::LockOptions {
+            timeout: native_boot::READY_TIMEOUT,
+            cancel: None,
+        },
+    )
+    .map_err(|error| format!("Could not serialize WebView handoff: {error}"))?;
+    let launch_id = prepare_webview_handoff(&state_dir)?;
+
     let mut command = std::process::Command::new(&exe);
     // Children inherit this process's environment, and THIS process may itself
     // carry KALPA_START_* from the launch that created it. Clear every re-entry
@@ -18286,10 +19040,13 @@ fn return_to_webview_shell(
         "KALPA_START_LOG_UPLOADER",
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
+        native_boot::LAUNCH_ID_ENV,
+        native_boot::WEBVIEW_LAUNCH_ID_ENV,
     ] {
         command.env_remove(stale);
     }
     command.env("KALPA_FORCE_WEBVIEW", "1");
+    command.env(native_boot::WEBVIEW_LAUNCH_ID_ENV, &launch_id);
     if start_app_update {
         command.env("KALPA_START_APP_UPDATE", "1");
     }
@@ -18303,10 +19060,136 @@ fn return_to_webview_shell(
         command.env("KALPA_START_PACK_HUB_ID", pack_id);
     }
 
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("failed to launch webview shell: {error}"))
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(format!("failed to launch webview shell: {error}"));
+        }
+    };
+    eprintln!("[native-shell] waiting for WebView ready launch_id={launch_id}");
+    let outcome = native_boot::wait_for_ready(
+        &state_dir,
+        &launch_id,
+        native_boot::READY_TIMEOUT,
+        || match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "[native-shell] WebView exited before ready launch_id={launch_id} status={status}"
+                );
+                Ok(native_boot::ChildState::Exited)
+            }
+            Ok(None) => Ok(native_boot::ChildState::Running),
+            Err(error) => Err(format!("failed to inspect WebView handoff: {error}")),
+        },
+    );
+    let first_outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(cleanup_failed_webview_ready_wait(
+                &state_dir,
+                &launch_id,
+                error,
+                || native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1)),
+            ));
+        }
+    };
+    if first_outcome == native_boot::WaitOutcome::Ready {
+        let released = native_authority()
+            .lock()
+            .map_err(|_| "native authority state is unavailable".to_string())?
+            .take();
+        if released.is_none() {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            return Err("native UI authority was unavailable for WebView handoff".to_string());
+        }
+        drop(released);
+        eprintln!(
+            "[native-shell] WebView ready launch_id={launch_id}; waiting for authority proof"
+        );
+        let acquired = native_boot::wait_for_acquired(
+            &state_dir,
+            &launch_id,
+            native_boot::READY_TIMEOUT,
+            || match child.try_wait() {
+                Ok(Some(_)) => Ok(native_boot::ChildState::Exited),
+                Ok(None) => Ok(native_boot::ChildState::Running),
+                Err(error) => Err(format!(
+                    "failed to inspect WebView authority handoff: {error}"
+                )),
+            },
+        );
+        if matches!(acquired, Ok(native_boot::WaitOutcome::Ready)) {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            eprintln!("[native-shell] WebView authority acquired launch_id={launch_id}");
+            return Ok(());
+        }
+
+        let reap = native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+        let reclaim_id = format!("native-reclaim-{}", native_boot::new_launch_id());
+        let reclaimed = native_boot::claim_after_ready_release(
+            &state_dir,
+            &reclaim_id,
+            native_boot::READY_TIMEOUT,
+        );
+        native_boot::clear_owned(&state_dir, &launch_id);
+        let failure = match acquired {
+            Ok(_) => "WebView failed to acquire UI authority after readiness.".to_string(),
+            Err(error) => {
+                format!("Failed while waiting for WebView UI authority after readiness: {error}")
+            }
+        };
+        let guard = match reclaimed {
+            Ok(guard) => guard,
+            Err(error) => {
+                // Same rule the forward-handoff child follows: a shell that
+                // cannot hold UI authority must not keep rendering. Staying up
+                // leaves the lock free, so the next launch spawns a second
+                // sidecar and both write. The shutdown timer is keyed on the
+                // guard's launch ID too, so an unauthoritative shell would not
+                // even hear a later release request.
+                eprintln!(
+                    "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
+                );
+                NATIVE_AUTHORITY_LOST.store(true, Ordering::SeqCst);
+                let _ = slint::quit_event_loop();
+                return Err(format!(
+                    "{failure} Native authority recovery failed: {error}"
+                ));
+            }
+        };
+        *native_authority()
+            .lock()
+            .map_err(|_| "native authority state is unavailable".to_string())? = Some(guard);
+        if let Err(error) = reap {
+            eprintln!(
+                "[native-shell] failed to reap unsuccessful WebView launch_id={launch_id}: {error}"
+            );
+        }
+        return Err(failure);
+    }
+    native_boot::clear_owned(&state_dir, &launch_id);
+    match first_outcome {
+        native_boot::WaitOutcome::Ready => {
+            unreachable!("ready handoff returned above")
+        }
+        native_boot::WaitOutcome::ChildExited => {
+            Err("WebView exited before reporting that its runtime was ready.".to_string())
+        }
+        native_boot::WaitOutcome::TimedOut => {
+            eprintln!(
+                "[native-shell] WebView ready timeout launch_id={launch_id}; keeping native UI"
+            );
+            if let Err(error) =
+                native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))
+            {
+                eprintln!(
+                    "[native-shell] failed to terminate/reap WebView launch_id={launch_id}: {error}"
+                );
+            }
+            Err("WebView timed out before its runtime was ready.".to_string())
+        }
+    }
 }
 
 fn open_url(url: &str) {
@@ -18826,24 +19709,18 @@ fn persist_active_theme_id(theme_id: &str) {
 }
 
 fn persist_active_theme_id_to_settings_path(path: &Path, theme_id: &str) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_ACTIVE_THEME.to_string(),
-        serde_json::Value::String(theme_id.to_string()),
-    );
-    write_settings_store_object_to_path(path, object)
+    update_settings_store_object_to_path(path, |object| {
+        object.insert(
+            STORE_KEY_ACTIVE_THEME.to_string(),
+            serde_json::Value::String(theme_id.to_string()),
+        );
+        Ok(())
+    })
 }
 
 fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return Err(format!(
-                "Failed to create native theme state directory: {error}"
-            ));
-        }
-    }
-
-    fs::write(path, theme_id).map_err(|error| format!("Failed to write active theme id: {error}"))
+    atomic_file::atomic_write(path, theme_id.as_bytes())
+        .map_err(|error| format!("Failed to write active theme id: {error}"))
 }
 
 fn read_custom_themes() -> Vec<CatalogTheme> {
@@ -18891,49 +19768,77 @@ fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String
         .map_err(|error| format!("Failed to parse custom themes: {error}"))
 }
 
-fn persist_custom_themes(custom_themes: &[CatalogTheme]) {
-    if let Some(path) = native_settings_store_path() {
-        if let Err(error) = persist_custom_themes_to_settings_path(&path, custom_themes) {
-            eprintln!("Failed to persist native custom themes: {error}");
-        }
-        return;
+fn update_custom_themes(
+    mutate: impl FnOnce(&mut Vec<CatalogTheme>),
+) -> Result<Vec<CatalogTheme>, String> {
+    let settings_paths = native_settings_store_paths();
+    if let Some((path, fallback_paths)) = settings_paths.split_first() {
+        return update_custom_themes_in_settings_path(path, fallback_paths, mutate);
     }
 
-    if let Some(path) = custom_theme_store_path() {
-        if let Err(error) = persist_custom_themes_to_path(&path, custom_themes) {
-            eprintln!("Failed to persist native custom themes: {error}");
-        }
-    }
+    let Some(path) = custom_theme_store_path() else {
+        return Err("custom theme store path was not available".to_string());
+    };
+    let _transaction = transaction_lock::acquire(&path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let mut themes = read_custom_themes_from_path(&path)?;
+    mutate(&mut themes);
+    themes = normalize_custom_themes(themes);
+    persist_custom_themes_to_path(&path, &themes)?;
+    Ok(themes)
 }
 
-fn persist_custom_themes_to_settings_path(
+fn update_custom_themes_in_settings_path(
     path: &Path,
-    custom_themes: &[CatalogTheme],
-) -> Result<(), String> {
-    let mut object = read_settings_store_object_from_path(path)?;
-    object.insert(
-        STORE_KEY_CUSTOM_THEMES.to_string(),
-        serde_json::to_value(normalize_custom_themes(custom_themes.to_vec()))
-            .map_err(|error| format!("Failed to serialize production custom themes: {error}"))?,
-    );
-    write_settings_store_object_to_path(path, object)
+    fallback_paths: &[PathBuf],
+    mutate: impl FnOnce(&mut Vec<CatalogTheme>),
+) -> Result<Vec<CatalogTheme>, String> {
+    update_settings_store_object_to_path(path, |object| {
+        let mut themes = match object.get(STORE_KEY_CUSTOM_THEMES).cloned() {
+            Some(value) => serde_json::from_value::<Vec<CatalogTheme>>(value)
+                .map(normalize_custom_themes)
+                .map_err(|error| format!("Failed to parse production custom themes: {error}"))?,
+            None => {
+                let mut fallback = None;
+                for fallback_path in fallback_paths {
+                    if let Some(themes) = read_custom_themes_from_settings_path(fallback_path)? {
+                        fallback = Some(themes);
+                        break;
+                    }
+                }
+                match fallback {
+                    Some(themes) => themes,
+                    None => custom_theme_store_path()
+                        .map(|fallback_path| read_custom_themes_from_path(&fallback_path))
+                        .transpose()?
+                        .unwrap_or_default(),
+                }
+            }
+        };
+
+        mutate(&mut themes);
+        themes = normalize_custom_themes(themes);
+        object.insert(
+            STORE_KEY_CUSTOM_THEMES.to_string(),
+            serde_json::to_value(&themes).map_err(|error| {
+                format!("Failed to serialize production custom themes: {error}")
+            })?,
+        );
+        Ok(themes)
+    })
 }
 
 fn persist_custom_themes_to_path(
     path: &Path,
     custom_themes: &[CatalogTheme],
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create custom theme directory: {error}"))?;
-    }
-
     let store = NativeCustomThemeStore {
         themes: custom_themes.to_vec(),
     };
     let json = serde_json::to_string_pretty(&store)
         .map_err(|error| format!("Failed to serialize custom themes: {error}"))?;
-    fs::write(path, json).map_err(|error| format!("Failed to write custom themes: {error}"))
+    atomic_file::atomic_write(path, json.as_bytes())
+        .map_err(|error| format!("Failed to write custom themes: {error}"))
 }
 
 fn normalize_custom_themes(themes: Vec<CatalogTheme>) -> Vec<CatalogTheme> {
@@ -18957,20 +19862,28 @@ fn read_settings_store_key_from_path(
 fn read_settings_store_object_from_path(
     path: &Path,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    match read_settings_store_value_from_path(path)? {
+        None => Ok(serde_json::Map::default()),
+        Some(serde_json::Value::Object(object)) => Ok(object),
+        Some(_) => Err("Failed to parse settings store: root must be a JSON object".to_string()),
+    }
+}
+
+fn read_settings_store_value_from_path(path: &Path) -> Result<Option<serde_json::Value>, String> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("Failed to read settings store: {error}")),
     };
 
     let contents = json_without_bom(&contents);
     if contents.trim().is_empty() {
-        return Ok(Default::default());
+        return Ok(None);
     }
 
     serde_json::from_str::<serde_json::Value>(contents)
         .map_err(|error| format!("Failed to parse settings store: {error}"))
-        .map(|value| value.as_object().cloned().unwrap_or_default())
+        .map(Some)
 }
 
 fn write_settings_store_object_to_path(
@@ -18980,6 +19893,18 @@ fn write_settings_store_object_to_path(
     let json = serde_json::to_string_pretty(&serde_json::Value::Object(object))
         .map_err(|error| format!("Failed to serialize settings store: {error}"))?;
     write_string_atomic(path, &json)
+}
+
+fn update_settings_store_object_to_path<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let mut object = read_settings_store_object_from_path(path)?;
+    let result = mutate(&mut object)?;
+    write_settings_store_object_to_path(path, object)?;
+    Ok(result)
 }
 
 fn read_native_settings() -> NativeSettings {
@@ -18994,21 +19919,7 @@ fn read_native_settings() -> NativeSettings {
 }
 
 fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(NativeSettings::default());
-        }
-        Err(error) => return Err(format!("Failed to read native settings: {error}")),
-    };
-
-    let contents = json_without_bom(&contents);
-    if contents.trim().is_empty() {
-        return Ok(NativeSettings::default());
-    }
-
-    let value = serde_json::from_str::<serde_json::Value>(contents)
-        .map_err(|error| format!("Failed to parse native settings: {error}"))?;
+    let value = serde_json::Value::Object(read_settings_store_object_from_path(path)?);
     Ok(native_settings_from_store_value(&value))
 }
 
@@ -19021,20 +19932,59 @@ fn persist_native_settings(settings: &NativeSettings) {
         return;
     };
 
-    if let Err(error) = persist_native_settings_to_path(&path, settings) {
+    // The settings callback supplies the whole UI snapshot even though one
+    // control changed. Compare it to this shell's last snapshot, then merge only
+    // those changed fields into the latest disk object under the OS lock. This
+    // prevents a stale, unchanged Slint field from erasing a newer Tauri value.
+    let mut baseline = native_settings_baseline()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let before = baseline
+        .clone()
+        .unwrap_or_else(|| read_native_settings_from_path(&path).unwrap_or_default());
+    if let Err(error) = persist_native_settings_delta_to_path(&path, &before, settings) {
         eprintln!("Failed to persist native settings: {error}");
+    } else {
+        *baseline = Some(normalize_native_settings(settings.clone()));
     }
 }
 
-fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
-    let mut settings = settings.clone();
+fn native_settings_baseline() -> &'static Mutex<Option<NativeSettings>> {
+    static BASELINE: OnceLock<Mutex<Option<NativeSettings>>> = OnceLock::new();
+    BASELINE.get_or_init(|| Mutex::new(None))
+}
+
+fn normalize_native_settings(mut settings: NativeSettings) -> NativeSettings {
     settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
     settings.uploader_region = settings.uploader_region.clamp(1, 2);
     settings.uploader_visibility = settings.uploader_visibility.clamp(0, 2);
-    let existing = fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+    settings
+}
+
+#[cfg(test)]
+fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let settings = normalize_native_settings(settings.clone());
+    let existing = read_settings_store_object_from_path(path)?;
     let store_value = native_settings_to_store_value(&settings, existing);
+    let json = serde_json::to_string_pretty(&store_value)
+        .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
+    write_string_atomic(path, &json)
+        .map_err(|error| format!("Failed to write native settings: {error}"))
+}
+
+fn persist_native_settings_delta_to_path(
+    path: &Path,
+    baseline: &NativeSettings,
+    settings: &NativeSettings,
+) -> Result<(), String> {
+    let _transaction = transaction_lock::acquire(path, transaction_lock::LockOptions::default())
+        .map_err(|error| error.to_string())?;
+    let baseline = normalize_native_settings(baseline.clone());
+    let settings = normalize_native_settings(settings.clone());
+    let existing = read_settings_store_object_from_path(path)?;
+    let store_value = native_settings_delta_to_store_value(&baseline, &settings, existing);
     let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
     write_string_atomic(path, &json)
@@ -19133,13 +20083,12 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
     }
 }
 
+#[cfg(test)]
 fn native_settings_to_store_value(
     settings: &NativeSettings,
-    existing: Option<serde_json::Value>,
+    existing: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let mut object = existing
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut object = existing;
 
     object.remove("warnEsoRunning");
     object.remove("officialUploader");
@@ -19183,38 +20132,74 @@ fn native_settings_to_store_value(
     serde_json::Value::Object(object)
 }
 
+fn native_settings_delta_to_store_value(
+    baseline: &NativeSettings,
+    settings: &NativeSettings,
+    existing: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut object = existing;
+
+    if baseline.auto_update != settings.auto_update {
+        object.insert(
+            "autoUpdate".to_string(),
+            serde_json::Value::Bool(settings.auto_update),
+        );
+    }
+    if baseline.warn_eso_running != settings.warn_eso_running {
+        object.remove("warnEsoRunning");
+        object.insert(
+            "suppressEsoRunningWarning".to_string(),
+            serde_json::Value::Bool(!settings.warn_eso_running),
+        );
+    }
+    if baseline.native_performance_mode != settings.native_performance_mode {
+        object.insert(
+            STORE_KEY_PERFORMANCE_MODE.to_string(),
+            native_performance_mode_to_store_value(settings.native_performance_mode),
+        );
+    }
+    if baseline.official_uploader != settings.official_uploader {
+        object.remove("officialUploader");
+        object.insert(
+            "manualUseOfficialUploader".to_string(),
+            serde_json::Value::Bool(settings.official_uploader),
+        );
+        object.insert(
+            "liveUseOfficialUploader".to_string(),
+            serde_json::Value::Bool(settings.official_uploader),
+        );
+    }
+    if baseline.auto_open_analysis != settings.auto_open_analysis {
+        object.insert(
+            "autoOpenAnalysis".to_string(),
+            serde_json::Value::Bool(settings.auto_open_analysis),
+        );
+    }
+    if baseline.conflict_policy != settings.conflict_policy {
+        object.insert(
+            "conflictPolicy".to_string(),
+            conflict_policy_to_store_value(settings.conflict_policy),
+        );
+    }
+    if baseline.uploader_region != settings.uploader_region {
+        object.insert(
+            "uploaderRegion".to_string(),
+            serde_json::Value::Number(settings.uploader_region.into()),
+        );
+    }
+    if baseline.uploader_visibility != settings.uploader_visibility {
+        object.insert(
+            "uploaderVisibility".to_string(),
+            serde_json::Value::Number(settings.uploader_visibility.into()),
+        );
+    }
+
+    serde_json::Value::Object(object)
+}
+
 fn write_string_atomic(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create settings directory: {error}"))?;
-    }
-
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("settings.json");
-    let staging = path.with_file_name(format!("{file_name}.tmp-{}-{unique}", std::process::id()));
-
-    let write_result = (|| -> Result<(), String> {
-        let mut file = fs::File::create(&staging)
-            .map_err(|error| format!("Failed to stage settings: {error}"))?;
-        file.write_all(contents.as_bytes())
-            .map_err(|error| format!("Failed to write staged settings: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("Failed to sync staged settings: {error}"))?;
-        drop(file);
-        fs::rename(&staging, path).map_err(|error| format!("Failed to publish settings: {error}"))
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&staging);
-    }
-
-    write_result
+    atomic_file::atomic_write(path, contents.as_bytes())
+        .map_err(|error| format!("Failed to publish settings: {error}"))
 }
 
 fn parse_theme_catalog() -> Option<ThemeCatalog> {
@@ -19541,6 +20526,7 @@ fn rgb_from_hex(hex: &str) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     use slint::Model;
+    use std::io::Write;
 
     #[test]
     fn addon_meta_omits_empty_separators() {
@@ -19549,6 +20535,21 @@ mod tests {
         assert_eq!(addon_meta("", "Author"), "Author");
         assert_eq!(addon_meta("", ""), "");
         assert_eq!(addon_meta(" 1.2.3 ", " Author "), "1.2.3  \u{00b7} Author");
+    }
+
+    #[test]
+    fn primary_folder_selection_disambiguates_duplicate_legacy_ids_by_title() {
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 3, "1.0", "u", 0);
+        metadata::record_install_ext(&mut store, "ZAddon", 3, "1.0", "u", 0);
+        let folders = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+
+        // Legacy metadata stamped the same ID on every extracted folder. The
+        // title, rather than sorted iteration order, identifies the owner.
+        assert_eq!(
+            determine_primary_folder(&store, &folders, 3, "ZAddon"),
+            "ZAddon"
+        );
     }
 
     #[test]
@@ -19740,7 +20741,7 @@ mod tests {
         fs::write(&path, r#"{"conflictPolicy":"ask"}"#).expect("seed settings store");
         let theme = sample_custom_theme("custom-one", "Custom One");
 
-        persist_custom_themes_to_settings_path(&path, std::slice::from_ref(&theme))
+        update_custom_themes_in_settings_path(&path, &[], |themes| themes.push(theme.clone()))
             .expect("persist custom themes");
         let themes = read_custom_themes_from_settings_path(&path)
             .expect("read production custom themes")
@@ -19826,6 +20827,50 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_native_settings_writers_preserve_both_keys() {
+        let root = test_temp_dir("settings-concurrent-writers");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            for _ in 0..10 {
+                persist_addons_path_to_settings_path(&left_path, "D:/ESO/live/AddOns")?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok::<(), String>(())
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            for _ in 0..10 {
+                persist_active_theme_id_to_settings_path(&right_path, "apocrypha-ink")?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok::<(), String>(())
+        });
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let object = read_settings_store_object_from_path(&path).unwrap();
+        assert_eq!(
+            object
+                .get(STORE_KEY_ADDONS_PATH)
+                .and_then(serde_json::Value::as_str),
+            Some("D:/ESO/live/AddOns")
+        );
+        assert_eq!(
+            object
+                .get(STORE_KEY_ACTIVE_THEME)
+                .and_then(serde_json::Value::as_str),
+            Some("apocrypha-ink")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn installed_pack_refs_round_trip_through_production_settings_key() {
         let root = test_temp_dir("installed-packs-production");
         let path = root.join("settings.json");
@@ -19850,8 +20895,10 @@ mod tests {
             },
         ];
 
-        persist_installed_pack_refs_to_settings_path(&path, &refs)
-            .expect("persist installed packs");
+        update_installed_pack_refs_to_settings_path(&path, &[], |installed| {
+            installed.extend(refs.clone());
+        })
+        .expect("persist installed packs");
         let restored = read_installed_pack_refs_from_settings_path(&path)
             .expect("read installed packs")
             .expect("installed packs key exists");
@@ -19873,6 +20920,91 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .is_some());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_installed_pack_mutations_preserve_both_updates() {
+        let root = test_temp_dir("installed-packs-concurrent-mutations");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+
+        let make_ref = |pack_id: &str| NativeInstalledPackRef {
+            pack_id: pack_id.to_string(),
+            title: format!("Pack {pack_id}"),
+            pack_type: "addon-pack".to_string(),
+            author_name: "Kalpa".to_string(),
+            addon_count: 1,
+            installed_at: "2026-08-29T00:00:00Z".to_string(),
+        };
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_ref = make_ref("left");
+        let right_ref = make_ref("right");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            update_installed_pack_refs_to_settings_path(&left_path, &[], |refs| {
+                refs.push(left_ref);
+            })
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            update_installed_pack_refs_to_settings_path(&right_path, &[], |refs| {
+                refs.push(right_ref);
+            })
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let restored = read_installed_pack_refs_from_settings_path(&path)
+            .unwrap()
+            .unwrap();
+        let ids = restored
+            .iter()
+            .map(|reference| reference.pack_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["left", "right"]));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_custom_theme_mutations_preserve_both_updates() {
+        let root = test_temp_dir("custom-themes-concurrent-mutations");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_theme = sample_custom_theme("left", "Left");
+        let right_theme = sample_custom_theme("right", "Right");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left = std::thread::spawn(move || {
+            left_start.wait();
+            update_custom_themes_in_settings_path(&left_path, &[], |themes| {
+                upsert_custom_theme(themes, left_theme);
+            })
+        });
+        let right = std::thread::spawn(move || {
+            start.wait();
+            update_custom_themes_in_settings_path(&right_path, &[], |themes| {
+                upsert_custom_theme(themes, right_theme);
+            })
+        });
+
+        left.join().unwrap().unwrap();
+        right.join().unwrap().unwrap();
+        let restored = read_custom_themes_from_settings_path(&path)
+            .unwrap()
+            .unwrap();
+        let ids = restored
+            .iter()
+            .map(|theme| theme.id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from(["left", "right"]));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -20582,6 +21714,152 @@ mod tests {
     }
 
     #[test]
+    fn native_settings_delta_preserves_newer_tauri_field() {
+        let root = test_temp_dir("native-settings-delta");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        fs::write(
+            &path,
+            serde_json::json!({
+                "autoUpdate": true,
+                "suppressEsoRunningWarning": false
+            })
+            .to_string(),
+        )
+        .expect("seed newer Tauri setting");
+        let mut desired = baseline.clone();
+        desired.warn_eso_running = false;
+
+        persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect("persist unrelated Slint setting");
+
+        let object = read_settings_store_object_from_path(&path).unwrap();
+        assert_eq!(
+            object
+                .get("autoUpdate")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "the stale Slint snapshot must not overwrite Tauri's newer field"
+        );
+        assert_eq!(
+            object
+                .get("suppressEsoRunningWarning")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_rejects_malformed_store_without_overwriting_it() {
+        let root = test_temp_dir("native-settings-malformed-store");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let malformed = br#"{"autoUpdate": true"#;
+        fs::write(&path, malformed).expect("seed malformed settings store");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect_err("malformed settings must stop the transaction");
+
+        assert!(error.contains("Failed to parse settings store"));
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_writers_reject_non_object_roots_without_overwriting_them() {
+        let root = test_temp_dir("settings-non-object-root");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        for invalid in [b"[]".as_slice(), b"null", b"42", br#""scalar""#] {
+            fs::write(&path, invalid).expect("seed non-object settings store");
+            let error = update_settings_store_object_to_path(&path, |object| {
+                object.insert("autoUpdate".to_string(), serde_json::Value::Bool(true));
+                Ok(())
+            })
+            .expect_err("semantic settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = match read_native_settings_from_path(&path) {
+                Ok(_) => panic!("native settings reads must reject a non-object root"),
+                Err(error) => error,
+            };
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+
+            let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+                .expect_err("native settings updates must reject a non-object root");
+            assert!(error.contains("root must be a JSON object"));
+            assert_eq!(fs::read(&path).unwrap(), invalid);
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_delta_rejects_read_failure_without_replacing_target() {
+        let root = test_temp_dir("native-settings-read-failure");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&path).expect("create directory at settings path");
+        let baseline = NativeSettings::default();
+        let mut desired = baseline.clone();
+        desired.auto_update = true;
+
+        let error = persist_native_settings_delta_to_path(&path, &baseline, &desired)
+            .expect_err("unreadable settings target must stop the transaction");
+
+        assert!(error.contains("Failed to read settings store"));
+        assert!(
+            path.is_dir(),
+            "the failed transaction must not replace the target"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_full_native_snapshots_merge_independent_changes() {
+        let root = test_temp_dir("native-settings-full-snapshot-race");
+        let path = root.join("settings.json");
+        fs::create_dir_all(root).expect("create temp settings directory");
+        fs::write(&path, "{}").expect("seed settings store");
+        let baseline = NativeSettings::default();
+        let mut left = baseline.clone();
+        left.auto_update = true;
+        let mut right = baseline.clone();
+        right.uploader_visibility = 0;
+        let left_path = path.clone();
+        let right_path = path.clone();
+        let left_baseline = baseline.clone();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_start = start.clone();
+        let left_writer = std::thread::spawn(move || {
+            left_start.wait();
+            persist_native_settings_delta_to_path(&left_path, &left_baseline, &left)
+        });
+        let right_writer = std::thread::spawn(move || {
+            start.wait();
+            persist_native_settings_delta_to_path(&right_path, &baseline, &right)
+        });
+
+        left_writer.join().unwrap().unwrap();
+        right_writer.join().unwrap().unwrap();
+
+        let saved = read_native_settings_from_path(&path).unwrap();
+        assert!(saved.auto_update);
+        assert_eq!(saved.uploader_visibility, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn native_settings_read_production_store_keys() {
         let root = test_temp_dir("native-settings-production");
         let path = root.join("settings.json");
@@ -21271,6 +22549,46 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The sidecar has its own copy of the primary/bundled dispatch, so it can
+    /// regress independently of the Tauri app even though the ownership rule
+    /// itself lives in the shared `metadata.rs`. If the two disagree,
+    /// installing through one and updating through the other would hand a
+    /// bundled library's identity back and forth.
+    #[test]
+    fn native_install_does_not_take_over_a_separately_tracked_library() {
+        let root = test_temp_dir("native-bundled-library");
+        for (folder, version) in [("AddonA", "3.0"), ("LibFoo", "1.2")] {
+            let dir = root.join(folder);
+            fs::create_dir_all(&dir).expect("create addon dir");
+            fs::write(
+                dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: {version}\n"),
+            )
+            .expect("write manifest");
+        }
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib", 0);
+
+        record_native_installed_folders(
+            &mut store,
+            root,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+        );
+
+        assert_eq!(store.addons.get("AddonA").unwrap().esoui_id, 3);
+        let lib = store.addons.get("LibFoo").expect("library still tracked");
+        assert_eq!(lib.esoui_id, 7, "the sidecar must not demote the library");
+        assert_eq!(lib.bundled_by, vec![3]);
+        assert_eq!(lib.installed_version, "1.2");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn native_remove_deletes_enabled_and_disabled_copies_and_metadata() {
         let root = test_temp_dir("native-remove-addon");
@@ -21294,6 +22612,70 @@ mod tests {
         assert!(!metadata::load_metadata(root)
             .addons
             .contains_key("DuplicateAddon"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_remove_clears_parent_metadata_and_hash_ownership() {
+        let root = test_temp_dir("native-remove-parent-ownership");
+        fs::create_dir_all(root.join("AddonA")).expect("create parent addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.2", "u", 0);
+        store
+            .addons
+            .get_mut("LibFoo")
+            .expect("library metadata")
+            .bundled_by = vec![3];
+        metadata::save_metadata(root, &store).expect("save metadata");
+        file_hashes::save_hash_manifest(
+            root,
+            &file_hashes::HashManifest {
+                addon_folder: "LibFoo".to_string(),
+                esoui_ids: vec![7, 3],
+                recorded_at: "2026-08-28T00-00-00Z".to_string(),
+                installed_version: "1.2".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("save hashes");
+
+        remove_addon_from_disk(root, "AddonA").expect("remove addon");
+
+        let store = metadata::load_metadata(root);
+        assert!(!store.addons.contains_key("AddonA"));
+        assert_eq!(store.addons["LibFoo"].bundled_by, Vec::<u32>::new());
+        assert_eq!(
+            file_hashes::load_hash_manifest(root, "LibFoo")
+                .expect("load hashes")
+                .esoui_ids,
+            vec![7]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_remove_reports_cleanup_warning_after_persisting_metadata() {
+        let root = test_temp_dir("native-remove-cleanup-warning");
+        fs::create_dir_all(root.join("AddonA")).expect("create addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(root, &store).expect("save metadata");
+        let hashes_dir = root.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).expect("create hashes directory");
+        fs::write(hashes_dir.join("Broken.json"), "not json").expect("write corrupt manifest");
+
+        let outcome = remove_addon_from_disk(root, "AddonA").expect("remove addon");
+
+        assert!(!root.join("AddonA").exists());
+        assert!(!metadata::load_metadata(root).addons.contains_key("AddonA"));
+        assert!(outcome
+            .cleanup_warning
+            .is_some_and(|warning| warning.contains("hash manifest")));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -22313,6 +23695,8 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            bundled_by: Vec::new(),
+            esoui_marker_installed: true,
         };
 
         hydrate_addon_from_metadata(&mut entry, &meta);
@@ -22325,6 +23709,55 @@ CombatMetrics_SavedVariables = {
         assert!(entry.favorite);
         assert!(tag_model_has_active(&entry.tags, "favorite"));
         assert!(tag_model_has_active(&entry.tags, "pvp-build"));
+    }
+
+    #[test]
+    fn native_pending_update_preserves_installed_publication_marker() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            bundled_by: Vec::new(),
+            esoui_marker_installed: true,
+        };
+
+        assert!(!reconcile_native_update_observation(
+            &mut meta, "v2", 200, true
+        ));
+        assert_eq!(meta.installed_version, "v1");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn native_update_check_rejects_a_stale_filelist_downgrade() {
+        assert!(!native_artifact_has_update("v2", "v1", 200, true, 100));
+        assert!(native_artifact_has_update("v1", "v2", 100, true, 200));
+        assert!(native_artifact_has_update("v2", "v1", 200, false, 100));
+    }
+
+    #[test]
+    fn native_matching_observation_can_establish_marker_provenance() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            bundled_by: Vec::new(),
+            esoui_marker_installed: false,
+        };
+
+        assert!(reconcile_native_update_observation(
+            &mut meta, " 1 ", 100, false
+        ));
+        assert_eq!(meta.installed_version, " 1 ");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
     }
 
     #[test]
@@ -22371,6 +23804,7 @@ CombatMetrics_SavedVariables = {
             "",
             0,
         );
+        stale.protected_edits_baseline = false;
         stale.last_updated = "Jan 1, 2025".into();
         let models = test_addon_models(vec![current, stale]);
         let updates = vec![
@@ -22389,15 +23823,34 @@ CombatMetrics_SavedVariables = {
         ];
 
         let available = apply_addon_update_check_results(&models, &updates);
+        let unprotected = unprotected_update_count(&models);
         let addons = models.all.borrow();
 
         assert_eq!(available, 1);
+        assert_eq!(unprotected, 1);
         assert_eq!(addons[0].badge.as_str(), "");
         assert_eq!(addons[0].state, 0);
         assert_eq!(addons[0].last_updated.as_str(), "Jul 1, 2026");
         assert_eq!(addons[1].state, 1);
         assert_eq!(addons[1].badge.as_str(), "Update");
         assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
+    }
+
+    #[test]
+    fn native_update_start_copy_discloses_missing_baseline_without_claiming_safety() {
+        let targets = vec![NativeAddonUpdateTarget {
+            folder_name: "MigratedAddon".to_string(),
+            esoui_id: 42,
+        }];
+
+        let disclosed = update_start_message(&targets, 1);
+        assert!(disclosed.contains("Protected Edits unavailable"));
+        assert!(disclosed.contains("no trusted file baseline"));
+        assert!(!disclosed.to_ascii_lowercase().contains("safe"));
+
+        let covered = update_start_message(&targets, 0);
+        assert_eq!(covered, "Applying 1 addon update...");
+        assert!(!covered.to_ascii_lowercase().contains("safe"));
     }
 
     #[test]
@@ -22422,7 +23875,9 @@ CombatMetrics_SavedVariables = {
         let (report, _) =
             build_native_conflict_report(root, folder, &zip_path).expect("build report");
 
-        assert_eq!(report.conflicts, vec!["main.lua".to_string()]);
+        // Folder-qualified now: an archive can write several folders, so a
+        // bare path would be ambiguous between them.
+        assert_eq!(report.conflicts, vec![format!("{folder}/main.lua")]);
         assert!(report.auto_kept_files.is_empty());
 
         let _ = fs::remove_dir_all(root);
@@ -22451,7 +23906,7 @@ CombatMetrics_SavedVariables = {
             build_native_conflict_report(root, folder, &zip_path).expect("build report");
 
         assert!(report.conflicts.is_empty());
-        assert_eq!(report.auto_kept_files, vec!["main.lua".to_string()]);
+        assert_eq!(report.auto_kept_files, vec![format!("{folder}/main.lua")]);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -22507,6 +23962,132 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn native_pending_conflict_apply_ignores_stale_keep_mine_after_revert() {
+        let root = test_temp_dir("native-pending-conflict-stale-keep");
+        let folder = "StaleKeepAddon";
+        seed_conflicted_addon(root, folder);
+
+        let zip_path = root.join("update.zip");
+        write_test_addon_zip_with_lua(&zip_path, folder, "2.0", "d('new upstream')\n");
+        let pending = pending_conflict_for_test(root, folder, &zip_path, 1);
+
+        // The cached keep-mine decision is stale: while the dialog was open,
+        // the user restored the file to its recorded baseline.
+        fs::write(root.join(folder).join("main.lua"), "d('old upstream')\n")
+            .expect("restore baseline");
+
+        apply_native_pending_conflict_files_blocking(root, &pending)
+            .expect("apply pending conflict");
+
+        assert_eq!(
+            fs::read_to_string(root.join(folder).join("main.lua")).expect("read updated file"),
+            "d('new upstream')\n",
+            "a stale keep-mine decision must not skip the upstream update"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_pending_apply_rejects_a_sibling_conflict_that_appeared_after_scan() {
+        let root = test_temp_dir("native-pending-new-sibling-conflict");
+        for folder in ["MainAddon", "LibFoo"] {
+            let addon_dir = root.join(folder);
+            fs::create_dir_all(&addon_dir).expect("create addon dir");
+            fs::write(
+                addon_dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: 1.0\n"),
+            )
+            .expect("write manifest");
+            fs::write(addon_dir.join("init.lua"), "-- baseline").expect("write baseline");
+        }
+        file_hashes::record_hashes_for_folders(
+            root,
+            &["MainAddon".to_string(), "LibFoo".to_string()],
+            42,
+            "1.0",
+        )
+        .expect("record baselines");
+        fs::write(root.join("MainAddon/init.lua"), "-- main edit").expect("write main edit");
+
+        let zip_path = root.join("update.zip");
+        write_multi_folder_zip(&zip_path);
+        let (report, zip_hashes) =
+            build_native_conflict_report(root, "MainAddon", &zip_path).expect("build report");
+        assert_eq!(report.conflicts, vec!["MainAddon/init.lua".to_string()]);
+        let pending = NativePendingConflict {
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 42,
+            update_version: "2.0".to_string(),
+            title: "MainAddon".to_string(),
+            download_url: "https://example.invalid/update.zip".to_string(),
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::from([("MainAddon/init.lua".to_string(), 2)]),
+            zip_path,
+            zip_hashes,
+        };
+
+        fs::write(root.join("LibFoo/init.lua"), "-- fresh lib edit")
+            .expect("write fresh sibling edit");
+        let error = apply_native_pending_conflict_files_blocking(root, &pending)
+            .expect_err("a newly-conflicting sibling must stop the apply");
+
+        assert!(
+            error.contains("LibFoo/init.lua"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("MainAddon/init.lua")).expect("read main"),
+            "-- main edit"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("LibFoo/init.lua")).expect("read lib"),
+            "-- fresh lib edit"
+        );
+        assert_eq!(pending.conflicts, vec!["MainAddon/init.lua".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_conflict_report_flags_user_added_file_newly_shipped_by_sibling() {
+        let root = test_temp_dir("native-user-added-sibling-conflict");
+        for folder in ["MainAddon", "LibFoo"] {
+            let addon_dir = root.join(folder);
+            fs::create_dir_all(&addon_dir).expect("create addon dir");
+            fs::write(
+                addon_dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: 1.0\n"),
+            )
+            .expect("write manifest");
+            fs::write(addon_dir.join("init.lua"), "-- baseline").expect("write baseline");
+        }
+        file_hashes::record_hashes_for_folders(
+            root,
+            &["MainAddon".to_string(), "LibFoo".to_string()],
+            42,
+            "1.0",
+        )
+        .expect("record baselines");
+        fs::write(root.join("LibFoo/user.lua"), "-- user file").expect("write user file");
+
+        let zip_path = root.join("update.zip");
+        write_multi_folder_zip_with_extra_lib_file(&zip_path, Some("-- upstream file"));
+        let (report, _) =
+            build_native_conflict_report(root, "MainAddon", &zip_path).expect("build report");
+
+        assert!(
+            report.conflicts.contains(&"LibFoo/user.lua".to_string()),
+            "user-added sibling file must remain folder-qualified: {:?}",
+            report.conflicts
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn native_pending_conflict_apply_takes_update_and_backs_up_user_file() {
         let root = test_temp_dir("native-pending-conflict-take");
         let folder = "TakeConflictAddon";
@@ -22544,6 +24125,117 @@ CombatMetrics_SavedVariables = {
         fs::write(addon_dir.join("main.lua"), "d('user edit')\n").expect("write user edit");
     }
 
+    /// The sidecar diff must resolve a conflict under ITS OWN folder. Reading
+    /// it under the pending update's primary produced
+    /// `AddOns/<primary>/LibFoo/init.lua` - a path that exists nowhere - so the
+    /// user saw empty local content and then "file not found in update ZIP".
+    #[test]
+    fn native_diff_resolves_a_sibling_conflict_under_its_own_folder() {
+        let root = test_temp_dir("native-sibling-diff");
+        for (folder, body) in [("MainAddon", "-- main"), ("LibFoo", "-- lib baseline")] {
+            let dir = root.join(folder);
+            fs::create_dir_all(&dir).expect("create addon dir");
+            fs::write(
+                dir.join(format!("{folder}.txt")),
+                format!(
+                    "## Title: {folder}
+## Version: 1.0
+"
+                ),
+            )
+            .expect("write manifest");
+            fs::write(dir.join("init.lua"), body).expect("write lua");
+        }
+        file_hashes::record_hashes_for_folders(
+            root,
+            &["MainAddon".to_string(), "LibFoo".to_string()],
+            42,
+            "1.0",
+        )
+        .expect("record baselines");
+        // The user edits the LIBRARY, not the primary.
+        fs::write(root.join("LibFoo").join("init.lua"), "-- my lib edit").expect("edit lib");
+
+        let zip_path = root.join("update.zip");
+        write_multi_folder_zip(&zip_path);
+
+        let (report, zip_hashes) =
+            build_native_conflict_report(root, "MainAddon", &zip_path).expect("build report");
+        assert_eq!(report.conflicts, vec!["LibFoo/init.lua".to_string()]);
+
+        let pending = NativePendingConflict {
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 42,
+            update_version: "2.0".to_string(),
+            title: "MainAddon".to_string(),
+            download_url: String::new(),
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::new(),
+            zip_path: zip_path.clone(),
+            zip_hashes,
+        };
+
+        let preview = native_pending_conflict_diff_blocking(root, &pending, "LibFoo/init.lua")
+            .expect("diff resolves under the sibling folder");
+        assert!(!preview.binary);
+        assert!(
+            preview.user_preview.contains("my lib edit"),
+            "local side must read the sibling file, got: {:?}",
+            preview.user_preview
+        );
+        assert!(
+            preview.upstream_preview.contains("upstream lib"),
+            "upstream side must read the sibling ZIP entry, got: {:?}",
+            preview.upstream_preview
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_multi_folder_zip(zip_path: &Path) {
+        write_multi_folder_zip_with_extra_lib_file(zip_path, None);
+    }
+
+    fn write_multi_folder_zip_with_extra_lib_file(zip_path: &Path, extra_lib_body: Option<&str>) {
+        use std::io::Write;
+        let file = fs::File::create(zip_path).expect("create zip");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (folder, body) in [
+            ("MainAddon", "-- main v2"),
+            ("LibFoo", "-- upstream lib v2"),
+        ] {
+            archive
+                .start_file(format!("{folder}/{folder}.txt"), options)
+                .expect("start manifest");
+            archive
+                .write_all(
+                    format!(
+                        "## Title: {folder}
+## Version: 2.0
+"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write manifest");
+            archive
+                .start_file(format!("{folder}/init.lua"), options)
+                .expect("start lua");
+            archive.write_all(body.as_bytes()).expect("write lua");
+        }
+        if let Some(body) = extra_lib_body {
+            archive
+                .start_file("LibFoo/user.lua", options)
+                .expect("start extra lib file");
+            archive
+                .write_all(body.as_bytes())
+                .expect("write extra lib file");
+        }
+        archive.finish().expect("finish zip");
+    }
+
     fn pending_conflict_for_test(
         root: &Path,
         folder: &str,
@@ -22552,7 +24244,8 @@ CombatMetrics_SavedVariables = {
     ) -> NativePendingConflict {
         let (report, zip_hashes) =
             build_native_conflict_report(root, folder, zip_path).expect("build report");
-        assert_eq!(report.conflicts, vec!["main.lua".to_string()]);
+        let qualified = format!("{folder}/main.lua");
+        assert_eq!(report.conflicts, vec![qualified.clone()]);
 
         NativePendingConflict {
             folder_name: folder.to_string(),
@@ -22563,7 +24256,7 @@ CombatMetrics_SavedVariables = {
             safe_file_count: report.safe_file_count,
             auto_kept_files: report.auto_kept_files,
             conflicts: report.conflicts,
-            decisions: HashMap::from([("main.lua".to_string(), decision)]),
+            decisions: HashMap::from([(qualified, decision)]),
             zip_path: zip_path.to_path_buf(),
             zip_hashes,
         }
@@ -22638,6 +24331,129 @@ CombatMetrics_SavedVariables = {
             .expect("start lua file");
         archive.write_all(lua.as_bytes()).expect("write lua file");
         archive.finish().expect("finish test zip");
+    }
+
+    fn write_reserved_state_zip(path: &Path) {
+        let file = fs::File::create(path).expect("create reserved-state zip");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                ".KALPA-STAGING. /Victim.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start reserved entry");
+        archive
+            .write_all(b"-- must never be extracted")
+            .expect("write reserved entry");
+        archive.finish().expect("finish reserved-state zip");
+    }
+
+    #[test]
+    fn native_direct_dependency_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_state_zip(&zip_path);
+        let info = esoui::EsouiAddonInfo {
+            id: 42,
+            title: "LibReserved".to_string(),
+            version: "1".to_string(),
+            download_url: "https://example.invalid/reserved.zip".to_string(),
+            updated: String::new(),
+            last_update: 0,
+            checksum: String::new(),
+        };
+        let mut store = metadata::MetadataStore::default();
+
+        let refusal = native_finish_dependency_install(
+            "LibReserved",
+            &addons_dir,
+            &mut store,
+            info.id,
+            &info,
+            &zip_path,
+        )
+        .unwrap_err();
+        let surfaced = native_dependency_error_message("LibReserved", &refusal);
+
+        assert!(surfaced.contains("reserved state folder"));
+        assert!(surfaced.contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn native_transitive_dependency_result_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("AddonA");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(
+            addon_dir.join("AddonA.txt"),
+            "## Title: AddonA\n## DependsOn: LibReserved\n",
+        )
+        .unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_state_zip(&zip_path);
+        let mut store = metadata::MetadataStore::default();
+
+        let result = native_resolve_transitive_deps_with(
+            &addons_dir,
+            &["AddonA".to_string()],
+            &mut store,
+            |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+        );
+
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0].starts_with("LibReserved: "));
+        assert!(result.failed[0].contains("reserved state folder"));
+        assert!(result.failed[0].contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn native_dependency_install_keeps_primary_visible_after_transitive_failure() {
+        let result = native_dependency_install_result(
+            vec!["LibPrimary".to_string()],
+            NativeImportResult {
+                installed: Vec::new(),
+                failed: vec!["LibTransitive: download_failed".to_string()],
+                skipped: Vec::new(),
+            },
+        );
+
+        assert_eq!(result.folders, vec!["LibPrimary"]);
+        assert_eq!(result.failed, vec!["LibTransitive: download_failed"]);
+        assert_eq!(
+            native_dependency_install_status("LibPrimary", result.folders.len(), &result.failed),
+            "Installed LibPrimary (1 folder added), but 1 dependency failed: LibTransitive: download_failed"
+        );
+    }
+
+    #[test]
+    fn addon_list_import_summary_includes_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_state_zip(&zip_path);
+        let json = serde_json::json!({
+            "version": 1,
+            "addons": [{
+                "esouiId": 42,
+                "folderName": "LibReserved",
+                "version": "1"
+            }]
+        })
+        .to_string();
+
+        let result = import_addon_list_json_with(&addons_dir, &json, |destination, _| {
+            installer::extract_addon_zip(&zip_path, destination).map(|_| ())
+        })
+        .unwrap();
+        let summary = import_result_summary(&result);
+
+        assert!(result.failed[0].starts_with("LibReserved: "));
+        assert!(summary.contains("reserved state folder"));
+        assert!(summary.contains(".KALPA-STAGING. "));
     }
 
     fn sample_native_hub_pack(addons: serde_json::Value) -> NativeHubPack {
@@ -23523,6 +25339,8 @@ CombatMetrics_SavedVariables = {
                 created: "08/05/14".to_string(),
                 screenshots: Vec::new(),
                 download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
+                change_log: String::new(),
+                archived_versions: Vec::new(),
             },
         );
 
@@ -23556,6 +25374,8 @@ CombatMetrics_SavedVariables = {
             created: "08/05/14".to_string(),
             screenshots: Vec::new(),
             download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
+            change_log: String::new(),
+            archived_versions: Vec::new(),
         };
 
         let installed =
@@ -23733,15 +25553,17 @@ CombatMetrics_SavedVariables = {
             ),
         ]);
 
-        let removed = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
+        let outcome = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
 
         assert_eq!(
-            removed,
+            outcome.removed,
             vec![
                 "CombatMetrics".to_string(),
                 "CombatMetricsHelper".to_string()
             ]
         );
+        assert!(outcome.cleanup_warnings.is_empty());
+        assert!(outcome.failures.is_empty());
         assert!(!addons_root.join("CombatMetrics").exists());
         assert!(!addons_root.join("CombatMetricsHelper").exists());
         assert!(addons_root.join("OtherAddon").exists());
@@ -23759,6 +25581,103 @@ CombatMetrics_SavedVariables = {
             std::env::remove_var("KALPA_ADDONS_PATH");
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_addons_by_esoui_id_preserves_failed_folders_in_the_model() {
+        let models = test_addon_models(vec![
+            addon_entry(
+                "CombatMetrics",
+                "CombatMetrics",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Addon",
+                "3/3/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "CombatMetrics Helper",
+                "CombatMetricsHelper",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Library",
+                "3/3/2026",
+                "",
+                false,
+                true,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "Other Addon",
+                "OtherAddon",
+                "3520",
+                "Author",
+                "1.0.0",
+                "101048",
+                "Addon",
+                "4/1/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+        ]);
+
+        let outcome = remove_addons_by_esoui_id_with(&models, "1360", |folder_name| {
+            if folder_name == "CombatMetricsHelper" {
+                Err("folder is locked".to_string())
+            } else {
+                Ok(None)
+            }
+        })
+        .expect("remove matching addon folders");
+
+        assert_eq!(outcome.removed, vec!["CombatMetrics".to_string()]);
+        assert!(outcome.cleanup_warnings.is_empty());
+        assert_eq!(
+            outcome.failures,
+            vec![(
+                "CombatMetricsHelper".to_string(),
+                "folder is locked".to_string()
+            )]
+        );
+        assert_eq!(
+            models
+                .all
+                .borrow()
+                .iter()
+                .map(|addon| addon.folder_name.to_string())
+                .collect::<Vec<_>>(),
+            vec!["CombatMetricsHelper".to_string(), "OtherAddon".to_string()]
+        );
     }
 
     #[test]
@@ -23913,5 +25832,62 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title.as_str(), "Dolgubon's Lazy Writ Crafter");
         assert_eq!(entries[0].rank, 1);
+    }
+
+    /// The reverse handoff hands its launch ID to the WebView child, which
+    /// claims UI authority under it. `native-shell.active` is therefore
+    /// classified by that ID, so minting it without the WebView prefix makes
+    /// the WebView read as a *native* owner. A later "turn native mode on"
+    /// then finds a "live native owner", exits the WebView, and leaves the
+    /// user with no window. Guard the mint, not just the classifier.
+    #[test]
+    fn reverse_handoff_mints_a_webview_shaped_launch_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path();
+
+        let launch_id = prepare_webview_handoff(state_dir).expect("prepare handoff");
+
+        assert!(
+            native_boot::is_webview_launch_id(&launch_id),
+            "reverse-handoff launch ID must be WebView-shaped, got {launch_id}"
+        );
+        assert!(native_boot::has_pending(state_dir));
+
+        // Claim under exactly the ID the child would use, then assert the
+        // owner classifies as WebView and never as a live native owner.
+        let _guard = match native_boot::try_claim_authority(state_dir, &launch_id).unwrap() {
+            native_boot::AuthorityClaim::Held(guard) => guard,
+            native_boot::AuthorityClaim::AlreadyHeld => panic!("authority was unexpectedly held"),
+        };
+        assert!(native_boot::webview_authority_is_active(state_dir));
+        assert!(!native_boot::native_authority_is_active(state_dir));
+        assert!(!native_boot::live_native_authority_exists(state_dir));
+    }
+
+    #[test]
+    fn reverse_handoff_polling_error_reaps_and_clears_owned_markers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path();
+        let launch_id = prepare_webview_handoff(state_dir).expect("prepare handoff");
+        assert!(native_boot::signal_ready(state_dir, &launch_id).unwrap());
+        assert!(native_boot::has_pending(state_dir));
+        assert!(native_boot::ready_matches(state_dir, &launch_id));
+
+        let mut reaped = false;
+        let error = cleanup_failed_webview_ready_wait(
+            state_dir,
+            &launch_id,
+            "poll failed".to_string(),
+            || {
+                reaped = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(error, "poll failed");
+        assert!(reaped, "the spawned WebView must be terminated and reaped");
+        assert!(!native_boot::has_pending(state_dir));
+        assert!(!native_boot::ready_matches(state_dir, &launch_id));
+        assert!(!native_boot::acquired_matches(state_dir, &launch_id));
     }
 }

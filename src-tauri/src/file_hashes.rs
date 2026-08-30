@@ -2,7 +2,7 @@ use crate::metadata;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
@@ -36,6 +36,11 @@ pub struct HashManifest {
     pub recorded_at: String,
     pub installed_version: String,
     pub files: HashMap<String, String>,
+    /// Baseline signatures for files written directly under the AddOns root.
+    /// These are owned by the primary addon manifest because a foldered archive
+    /// can carry ancillary files beside its addon folders.
+    #[serde(default)]
+    pub root_files: HashMap<String, String>,
     #[serde(default)]
     pub modified_files: Vec<String>,
 }
@@ -289,6 +294,7 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
 /// `hash_zip_entries` still hashes but `extract_addon_zip*` does not write — is
 /// therefore never recorded, matching `compute_addon_hashes` and avoiding a
 /// spurious "file deleted" flag on the next modification scan.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn compute_baseline_with_zip(
     addon_path: &Path,
     zip_hashes: &HashMap<String, String>,
@@ -312,25 +318,102 @@ pub fn compute_baseline_with_zip(
 
 /// Hash files inside a ZIP that belong to a specific addon folder, without extracting.
 /// Keys are forward-slash-normalized relative paths (excluding the top-level folder prefix).
-pub fn hash_zip_entries(
-    zip_path: &Path,
-    folder_name: &str,
-) -> Result<HashMap<String, String>, String> {
+/// Every top-level folder an archive writes, each with its own bare-keyed hash
+/// map.
+///
+/// Conflict detection used to hash exactly one folder - the archive primary -
+/// so a modified file inside a bundled sibling folder had a baseline, was even
+/// shown as modified in the file browser, and was then overwritten on update
+/// with no prompt and no backup.
+///
+/// Keys inside each map stay *bare* (`relative/path.lua`), matching the
+/// per-folder `.kalpa-hashes/<Folder>.json` files on disk. Only strings that
+/// cross a folder boundary get qualified; see [`qualify`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ZipHashSet {
+    /// Folder name -> bare relative path -> hash or size signature.
+    pub folders: BTreeMap<String, HashMap<String, String>>,
+    /// Files written directly under AddOns by a foldered archive.
+    pub root_files: HashMap<String, String>,
+    /// Set when the archive is flat and its entries are re-rooted under a
+    /// synthesised folder that does not appear in the entry names.
+    pub flat_wrap: Option<String>,
+}
+
+impl ZipHashSet {
+    /// The archive entry name for a folder-qualified pair.
+    ///
+    /// This is the single place the flat-archive divergence is encoded: a flat
+    /// archive's folder exists only after extraction re-roots it, so its entry
+    /// names carry no folder prefix while every other archive's do. Looking up
+    /// `Folder/rel` in a flat archive finds nothing, which previously made diff
+    /// generation fail on exactly the archives conflict detection had just
+    /// started handling.
+    pub fn zip_entry_name(&self, folder: &str, relative: &str) -> String {
+        if self.flat_wrap.as_deref() == Some(folder) {
+            relative.to_string()
+        } else {
+            format!("{folder}/{relative}")
+        }
+    }
+
+    /// Whether this archive writes into `folder`.
+    pub fn has_folder(&self, folder: &str) -> bool {
+        self.folders.contains_key(folder)
+    }
+}
+
+/// Join a folder and a folder-relative path into a boundary-crossing key.
+pub fn qualify(folder: &str, relative: &str) -> String {
+    format!("{folder}/{relative}")
+}
+
+/// Split a boundary-crossing key back into its folder and folder-relative path.
+///
+/// Returns `None` when either half would be empty, so a bare path or a leading
+/// slash is rejected rather than silently treated as folder `""`.
+pub fn split_qualified(key: &str) -> Option<(&str, &str)> {
+    let (folder, relative) = key.split_once('/')?;
+    if folder.is_empty() || relative.is_empty() {
+        return None;
+    }
+    Some((folder, relative))
+}
+
+/// Group folder-qualified keys by folder, preserving order within each folder.
+///
+/// Keys that are not qualified are dropped: every caller has already validated
+/// its input, so an unqualified key here means a bug, not user data.
+pub fn group_by_folder(keys: &[String]) -> BTreeMap<String, Vec<String>> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for key in keys {
+        if let Some((folder, relative)) = split_qualified(key) {
+            grouped
+                .entry(folder.to_string())
+                .or_default()
+                .push(relative.to_string());
+        }
+    }
+    grouped
+}
+
+/// Hash every top-level folder the archive writes, in one pass.
+pub fn hash_zip_entries_by_folder(zip_path: &Path) -> Result<ZipHashSet, String> {
     let file =
         fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP for hashing: {e}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
-    // A FLAT archive has no `<folder>/` prefix to strip — the folder only comes
-    // into existence when `extract_addon_zip` re-roots the entries under it. The
-    // strip therefore matched nothing and this returned an EMPTY map, so conflict
-    // detection reported zero conflicts for every flat-archive update and the
-    // user's edits were overwritten with no prompt and no backup.
-    let is_flat =
-        crate::installer::flat_archive_wrap_name(&archive).as_deref() == Some(folder_name);
-
-    let prefix = format!("{folder_name}/");
-    let mut hashes = HashMap::new();
+    // A FLAT archive has no `<folder>/` prefix at all - the folder only comes
+    // into existence when `extract_addon_zip` re-roots the entries under it.
+    // Treat the whole archive as that one folder, keyed by the unprefixed entry
+    // names, so extraction and conflict detection agree on the keys.
+    let flat_wrap = crate::installer::flat_archive_wrap_name(&archive);
+    let mut set = ZipHashSet {
+        folders: BTreeMap::new(),
+        root_files: HashMap::new(),
+        flat_wrap: flat_wrap.clone(),
+    };
 
     for i in 0..archive.len() {
         let mut entry = archive
@@ -344,8 +427,8 @@ pub fn hash_zip_entries(
         // Skip symlink entries, exactly as `extract_addon_zip*` does. Otherwise a
         // symlink entry would be hashed here but never written to disk, so a
         // symlink whose path collides with a real on-disk file would record the
-        // symlink's payload hash as that file's baseline — a false mismatch on the
-        // next scan.
+        // symlink's payload hash as that file's baseline - a false mismatch on
+        // the next scan.
         if let Some(mode) = entry.unix_mode() {
             if mode & 0o170000 == 0o120000 {
                 continue;
@@ -357,16 +440,30 @@ pub fn hash_zip_entries(
             None => continue,
         };
 
-        let relative = if is_flat {
-            name.clone()
-        } else {
-            match name.strip_prefix(&prefix) {
-                Some(r) if !r.is_empty() => r.to_string(),
+        let (folder, relative) = match flat_wrap {
+            Some(ref wrap) => (wrap.clone(), name.clone()),
+            None => match name.split_once('/') {
+                Some((folder, relative)) if !folder.is_empty() && !relative.is_empty() => {
+                    (folder.to_string(), relative.to_string())
+                }
+                // Foldered archives really do extract these entries at the
+                // AddOns root. Keep them in a separate map so classification,
+                // baselines, and extraction all agree on that destination.
+                None if !name.is_empty() => {
+                    let value = if hashes_file_contents(&name) {
+                        stream_sha256(&mut entry)
+                            .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?
+                    } else {
+                        size_signature(entry.size())
+                    };
+                    set.root_files.insert(name, value);
+                    continue;
+                }
                 _ => continue,
-            }
+            },
         };
 
-        // Binary assets get a size signature without decompressing the entry —
+        // Binary assets get a size signature without decompressing the entry -
         // `entry.size()` is the uncompressed size, identical to the file's size
         // on disk after extraction, so it matches the disk-side signature in
         // [`file_signature`]. Editable files are still content-hashed.
@@ -376,12 +473,28 @@ pub fn hash_zip_entries(
         } else {
             size_signature(entry.size())
         };
-        hashes.insert(relative, value);
+        set.folders
+            .entry(folder)
+            .or_default()
+            .insert(relative, value);
     }
 
-    Ok(hashes)
+    Ok(set)
 }
 
+/// The hashes for a single folder of an archive.
+///
+/// Retained so the many single-folder call sites keep working; new code that
+/// needs more than one folder should use [`hash_zip_entries_by_folder`].
+pub fn hash_zip_entries(
+    zip_path: &Path,
+    folder_name: &str,
+) -> Result<HashMap<String, String>, String> {
+    Ok(hash_zip_entries_by_folder(zip_path)?
+        .folders
+        .remove(folder_name)
+        .unwrap_or_default())
+}
 pub fn save_hash_manifest(addons_dir: &Path, manifest: &HashManifest) -> Result<(), String> {
     let dir = hashes_dir(addons_dir);
     if !dir.exists() {
@@ -398,11 +511,83 @@ pub fn load_hash_manifest(addons_dir: &Path, folder_name: &str) -> Option<HashMa
         return None;
     }
     let mut manifest: HashManifest = metadata::load_json_with_backup(&path);
+    // The backup-aware loader returns Default when every candidate is corrupt.
+    // An empty/mismatched identity therefore means there is no trusted baseline.
+    if manifest.addon_folder != folder_name {
+        return None;
+    }
     // Migrate manifests written before esoui_ids was introduced.
     if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
         manifest.esoui_ids = vec![manifest.esoui_id];
     }
     Some(manifest)
+}
+
+/// Remove an addon's provenance from every folder hash manifest it contributed
+/// to. All manifests are parsed before any are rewritten so a corrupt store
+/// cannot leave only part of the ownership index updated.
+pub fn forget_esoui_owner(addons_dir: &Path, esoui_id: u32) -> Result<(), String> {
+    if esoui_id == 0 {
+        return Ok(());
+    }
+    let dir = hashes_dir(addons_dir);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut paths = Vec::new();
+    for entry in
+        fs::read_dir(&dir).map_err(|e| format!("Failed to read .kalpa-hashes directory: {e}"))?
+    {
+        let path = entry
+            .map_err(|e| format!("Failed to inspect .kalpa-hashes entry: {e}"))?
+            .path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut changed = Vec::new();
+    for path in paths {
+        let mut manifest = read_manifest_for_rewrite(&path)?;
+        if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
+            manifest.esoui_ids.push(manifest.esoui_id);
+        }
+        let old_len = manifest.esoui_ids.len();
+        manifest.esoui_ids.retain(|id| *id != esoui_id);
+        if manifest.esoui_ids.len() != old_len {
+            manifest.esoui_id = 0;
+            changed.push(manifest);
+        }
+    }
+    for manifest in changed {
+        save_hash_manifest(addons_dir, &manifest)?;
+    }
+    Ok(())
+}
+
+fn read_manifest_for_rewrite(path: &Path) -> Result<HashManifest, String> {
+    let candidates = [
+        path.to_path_buf(),
+        path.with_extension("json.tmp"),
+        path.with_extension("json.bak"),
+    ];
+    let mut last_error = None;
+    for candidate in candidates {
+        match fs::read_to_string(&candidate) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(manifest) => return Ok(manifest),
+                Err(error) => last_error = Some(format!("{}: {error}", candidate.display())),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => last_error = Some(format!("{}: {error}", candidate.display())),
+        }
+    }
+    Err(format!(
+        "Failed to load hash manifest for ownership cleanup: {}",
+        last_error.unwrap_or_else(|| path.display().to_string())
+    ))
 }
 
 /// Read ONLY the count of `modified_files` recorded in a folder's hash manifest,
@@ -421,11 +606,12 @@ pub fn load_modified_file_count(addons_dir: &Path, folder_name: &str) -> Option<
     }
     #[derive(Default, Deserialize)]
     struct SlimManifest {
+        addon_folder: String,
         #[serde(default)]
         modified_files: Vec<String>,
     }
     let slim: SlimManifest = metadata::load_json_with_backup(&path);
-    Some(slim.modified_files.len() as u32)
+    (slim.addon_folder == folder_name).then_some(slim.modified_files.len() as u32)
 }
 
 /// Compare current files on disk against stored hashes.
@@ -477,6 +663,7 @@ pub fn detect_modifications(addons_dir: &Path, folder_name: &str) -> Result<Vec<
 /// remaining folders are still attempted first. A missing/stale manifest is
 /// silent-data-loss territory (the next update would see no baseline and treat
 /// user edits as absent), so callers should surface this rather than ignore it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn record_hashes_for_folders(
     addons_dir: &Path,
     installed_folders: &[String],
@@ -497,6 +684,7 @@ pub fn record_hashes_for_folders(
 ///
 /// Every folder is attempted; the first per-folder failure is reported via the
 /// returned `Err` (later folders still get their manifests written).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn record_hashes_for_folders_with_overrides(
     addons_dir: &Path,
     installed_folders: &[String],
@@ -521,64 +709,86 @@ pub fn record_hashes_for_folders_with_overrides(
     })
 }
 
-/// Record hash baselines after a conflict-aware install/update, reusing an
-/// already-computed ZIP hash map instead of re-hashing each folder from disk.
-///
-/// `primary_zip_hashes` is the ZIP hash map for `primary_folder_name` that the
-/// caller already produced (e.g. during conflict detection). For the primary
-/// folder it is reused directly; for any *secondary* folders a multi-folder ZIP
-/// extracted (bundled libraries), this function hashes that folder's ZIP entries
-/// itself. Each folder's baseline is built with [`compute_baseline_with_zip`],
-/// which only reads from disk the files the ZIP did not provide.
-///
-/// `hash_overrides` (kept "keep_mine" files → upstream hash) are applied ONLY to
-/// the primary folder: selective extraction skips are always primary-folder
-/// paths, so secondary folders are fully extracted and never have kept files.
+/// Build hash manifests from a staged addon tree without publishing them.
+/// The installer serializes these into its transaction and promotes them only
+/// after every addon folder has been swapped successfully.
+pub(crate) fn build_hash_manifests_for_folders(
+    staged_addons_dir: &Path,
+    live_addons_dir: &Path,
+    installed_folders: &[String],
+    esoui_id: u32,
+    version: &str,
+    hash_overrides: Option<&BTreeMap<String, HashMap<String, String>>>,
+) -> Result<Vec<HashManifest>, String> {
+    let timestamp = manifest_timestamp();
+    let mut manifests = Vec::with_capacity(installed_folders.len());
+    for folder in installed_folders {
+        let files = compute_addon_hashes(&staged_addons_dir.join(folder))?;
+        manifests.push(build_folder_manifest(
+            live_addons_dir,
+            folder,
+            files,
+            esoui_id,
+            version,
+            &timestamp,
+            hash_overrides.and_then(|all| all.get(folder)),
+        ));
+    }
+    Ok(manifests)
+}
+
+/// Record hash baselines after a conflict-aware install/update, reusing the
+/// already-computed archive hashes instead of re-hashing each folder from disk.
 ///
 /// Every folder in `installed_folders` is guaranteed an attempt at a manifest:
-/// if reusing the ZIP map fails for any folder it falls back to a full disk hash
-/// pass, and only a folder that fails *both* contributes an `Err`. Returns `Err`
-/// (after attempting all folders) if any folder could not be recorded, so the
-/// caller can fail the update instead of leaving metadata pointing at a folder
-/// with no hash baseline.
+/// if reusing the archive map fails for any folder it falls back to a full disk
+/// hash pass, and only a folder that fails *both* contributes an `Err`. Returns
+/// `Err` (after attempting all folders) if any folder could not be recorded, so
+/// the caller can fail the update instead of leaving metadata pointing at a
+/// folder with no hash baseline.
+///
+/// `zip_hashes` covers the whole archive, so a bundled sibling no longer has to
+/// re-open and re-hash the ZIP just to get its own map. `hash_overrides` is
+/// keyed by folder for the same reason: kept-mine files can now come from any
+/// folder the archive touches, not just the primary.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn record_hashes_with_zip_baseline(
     addons_dir: &Path,
     zip_path: &Path,
     installed_folders: &[String],
-    primary_folder_name: &str,
-    primary_zip_hashes: &HashMap<String, String>,
+    zip_hashes: &ZipHashSet,
     esoui_id: u32,
     version: &str,
-    hash_overrides: Option<&HashMap<String, String>>,
+    hash_overrides: Option<&BTreeMap<String, HashMap<String, String>>>,
 ) -> Result<(), String> {
     let timestamp = manifest_timestamp();
 
     record_each_folder(installed_folders, |folder| {
         let addon_path = addons_dir.join(folder);
-        let is_primary = folder == primary_folder_name;
 
-        // Build the folder's baseline from the ZIP map where possible, always
-        // falling back to a full disk hash so a ZIP-side failure (e.g. an entry
-        // exceeding the streaming hash cap) still produces a correct manifest.
-        let files = if is_primary {
-            compute_baseline_with_zip(&addon_path, primary_zip_hashes)
-                .or_else(|_| compute_addon_hashes(&addon_path))?
-        } else {
-            match hash_zip_entries(zip_path, folder) {
-                Ok(zip_hashes) => compute_baseline_with_zip(&addon_path, &zip_hashes),
-                Err(e) => {
-                    eprintln!(
-                        "Warning: failed to hash ZIP for {folder}, falling back to disk: {e}"
-                    );
-                    compute_addon_hashes(&addon_path)
+        // Build the folder's baseline from the archive map where possible,
+        // always falling back to a full disk hash so a ZIP-side failure (e.g.
+        // an entry exceeding the streaming hash cap) still produces a correct
+        // manifest.
+        let files = match zip_hashes.folders.get(folder) {
+            Some(folder_hashes) => compute_baseline_with_zip(&addon_path, folder_hashes)
+                .or_else(|_| compute_addon_hashes(&addon_path))?,
+            None => {
+                // The archive set was built elsewhere and does not cover this
+                // folder. Re-derive just this one rather than trusting a gap.
+                match hash_zip_entries(zip_path, folder) {
+                    Ok(folder_hashes) => compute_baseline_with_zip(&addon_path, &folder_hashes),
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: failed to hash ZIP for {folder}, falling back to disk: {e}"
+                        );
+                        compute_addon_hashes(&addon_path)
+                    }
                 }
+                .or_else(|_| compute_addon_hashes(&addon_path))?
             }
-            .or_else(|_| compute_addon_hashes(&addon_path))?
         };
-
-        // Overrides only ever describe primary-folder kept files.
-        let folder_overrides = if is_primary { hash_overrides } else { None };
 
         write_folder_manifest(
             addons_dir,
@@ -587,7 +797,7 @@ pub fn record_hashes_with_zip_baseline(
             esoui_id,
             version,
             &timestamp,
-            folder_overrides,
+            hash_overrides.and_then(|all| all.get(folder)),
         )
     })
 }
@@ -595,6 +805,7 @@ pub fn record_hashes_with_zip_baseline(
 /// Run `record` for every folder, attempting all of them and returning the first
 /// error encountered (logging each). Centralizes the "attempt all, report any
 /// failure" policy both record paths share.
+#[cfg_attr(not(test), allow(dead_code))]
 fn record_each_folder<F>(installed_folders: &[String], mut record: F) -> Result<(), String>
 where
     F: FnMut(&str) -> Result<(), String>,
@@ -628,7 +839,30 @@ fn manifest_timestamp() -> String {
 /// folder's manifest. Shared by the disk-only and ZIP-baseline record paths so
 /// they produce byte-identical manifests for the same `files` map. Returns the
 /// `save_hash_manifest` error so callers can treat a failed write as fatal.
+#[cfg_attr(not(test), allow(dead_code))]
 fn write_folder_manifest(
+    addons_dir: &Path,
+    folder: &str,
+    files: HashMap<String, String>,
+    esoui_id: u32,
+    version: &str,
+    timestamp: &str,
+    hash_overrides: Option<&HashMap<String, String>>,
+) -> Result<(), String> {
+    let manifest = build_folder_manifest(
+        addons_dir,
+        folder,
+        files,
+        esoui_id,
+        version,
+        timestamp,
+        hash_overrides,
+    );
+
+    save_hash_manifest(addons_dir, &manifest)
+}
+
+fn build_folder_manifest(
     addons_dir: &Path,
     folder: &str,
     mut files: HashMap<String, String>,
@@ -636,7 +870,7 @@ fn write_folder_manifest(
     version: &str,
     timestamp: &str,
     hash_overrides: Option<&HashMap<String, String>>,
-) -> Result<(), String> {
+) -> HashManifest {
     // For kept files, record the upstream ZIP hash as the baseline so the user's
     // change stays detectable on the next update. This is inserted
     // UNCONDITIONALLY: a kept file the user *deleted* (auto-kept because upstream
@@ -659,22 +893,86 @@ fn write_folder_manifest(
         None => Vec::new(),
     };
 
-    let manifest = HashManifest {
+    // `esoui_ids` is the set of addons that ship files into this folder, so a
+    // rewrite must union rather than replace. Replacing it dropped every other
+    // owner on each install, which left this store disagreeing with the
+    // metadata store about who a bundled library belongs to.
+    let mut esoui_ids = load_hash_manifest(addons_dir, folder)
+        .map(|existing| existing.esoui_ids)
+        .unwrap_or_default();
+    if esoui_id != 0 && !esoui_ids.contains(&esoui_id) {
+        esoui_ids.push(esoui_id);
+    }
+    esoui_ids.sort_unstable();
+    esoui_ids.dedup();
+    if esoui_ids.is_empty() {
+        esoui_ids.push(esoui_id);
+    }
+
+    HashManifest {
         addon_folder: folder.to_string(),
-        esoui_ids: vec![esoui_id],
+        esoui_ids,
         recorded_at: timestamp.to_string(),
         installed_version: version.to_string(),
         files,
         modified_files,
         ..Default::default()
-    };
-
-    save_hash_manifest(addons_dir, &manifest)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `esoui_ids` is the set of addons that ship files into a folder, so
+    /// recording a second owner must union rather than replace. Replacing it
+    /// dropped the library's own ID every time a bundling addon updated, which
+    /// left this store disagreeing with the metadata store about who owns the
+    /// folder.
+    #[test]
+    fn recording_hashes_unions_the_owning_addon_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        create_addon_dir(addons_dir, "LibFoo", &[("LibFoo.lua", "-- lua")]);
+        let folders = vec!["LibFoo".to_string()];
+
+        // The library records itself.
+        record_hashes_for_folders(addons_dir, &folders, 7, "1.5").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![7]
+        );
+
+        // An addon that bundles it records too; both owners must survive.
+        record_hashes_for_folders(addons_dir, &folders, 3, "3.0").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![3, 7],
+            "the library's own ID must not be dropped by a bundling install"
+        );
+
+        // Re-recording an existing owner is not a new owner.
+        record_hashes_for_folders(addons_dir, &folders, 3, "3.1").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![3, 7]
+        );
+
+        create_addon_dir(addons_dir, "OtherLib", &[("OtherLib.lua", "-- lua")]);
+        record_hashes_for_folders(addons_dir, &["OtherLib".to_string()], 3, "3.1").unwrap();
+        forget_esoui_owner(addons_dir, 3).unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![7]
+        );
+        assert!(
+            load_hash_manifest(addons_dir, "OtherLib")
+                .unwrap()
+                .esoui_ids
+                .is_empty(),
+            "the removed parent must be cleared from every manifest"
+        );
+    }
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -798,6 +1096,17 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_manifest_is_not_a_trusted_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hashes = tmp.path().join(".kalpa-hashes");
+        fs::create_dir_all(&hashes).unwrap();
+        fs::write(hashes.join("Broken.json"), "{not valid json").unwrap();
+
+        assert!(load_hash_manifest(tmp.path(), "Broken").is_none());
+        assert!(load_modified_file_count(tmp.path(), "Broken").is_none());
+    }
+
+    #[test]
     fn detect_modifications_finds_changed_file() {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
@@ -909,6 +1218,9 @@ mod tests {
     }
 
     #[test]
+    /// The single-folder view is still exactly that - it is the *pipeline* that
+    /// had to stop calling it only for the primary. Companion to
+    /// `hash_zip_by_folder_returns_every_folder`.
     fn hash_zip_ignores_other_folders() {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("multi.zip");
@@ -925,6 +1237,99 @@ mod tests {
         let hashes = hash_zip_entries(&zip_path, "AddonA").unwrap();
         assert_eq!(hashes.len(), 1);
         assert!(hashes.contains_key("init.lua"));
+    }
+
+    #[test]
+    fn hash_zip_by_folder_returns_every_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("multi.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        // Each folder carries its own manifest, which is what makes this a
+        // foldered archive rather than a flat one needing a synthesised wrap.
+        archive.start_file("AddonA/AddonA.txt", options).unwrap();
+        archive.write_all(b"## Title: AddonA").unwrap();
+        archive.start_file("AddonA/init.lua", options).unwrap();
+        archive.write_all(b"aaa").unwrap();
+        archive.start_file("AddonB/AddonB.txt", options).unwrap();
+        archive.write_all(b"## Title: AddonB").unwrap();
+        archive.start_file("AddonB/init.lua", options).unwrap();
+        archive.write_all(b"bbb").unwrap();
+        // A loose file at the archive root is written directly under AddOns;
+        // it belongs to the primary addon manifest, not a phantom folder.
+        archive.start_file("readme.txt", options).unwrap();
+        archive.write_all(b"hi").unwrap();
+        archive.finish().unwrap();
+
+        let set = hash_zip_entries_by_folder(&zip_path).unwrap();
+        assert_eq!(
+            set.folders.keys().cloned().collect::<Vec<_>>(),
+            vec!["AddonA".to_string(), "AddonB".to_string()]
+        );
+        assert!(set.folders["AddonA"].contains_key("init.lua"));
+        assert!(set.folders["AddonB"].contains_key("init.lua"));
+        // Different bytes, so the two same-named files must hash differently.
+        assert_ne!(
+            set.folders["AddonA"]["init.lua"],
+            set.folders["AddonB"]["init.lua"]
+        );
+        assert!(set.root_files.contains_key("readme.txt"));
+        assert!(set.flat_wrap.is_none());
+        assert_eq!(set.zip_entry_name("AddonA", "init.lua"), "AddonA/init.lua");
+    }
+
+    /// A flat archive is the one case where the archive entry name and the
+    /// folder-qualified key diverge: the folder only exists after extraction
+    /// re-roots the entries, so the entry names carry no prefix.
+    #[test]
+    fn hash_zip_by_folder_keys_a_flat_archive_under_its_wrap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("flat.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("UL_LootLog.txt", options).unwrap();
+        archive.write_all(b"## Title: UL_LootLog").unwrap();
+        archive.start_file("UL_LootLog.lua", options).unwrap();
+        archive.write_all(b"-- lua").unwrap();
+        archive.finish().unwrap();
+
+        let set = hash_zip_entries_by_folder(&zip_path).unwrap();
+        assert_eq!(set.flat_wrap.as_deref(), Some("UL_LootLog"));
+        assert_eq!(
+            set.folders.keys().cloned().collect::<Vec<_>>(),
+            vec!["UL_LootLog".to_string()]
+        );
+        assert!(set.folders["UL_LootLog"].contains_key("UL_LootLog.lua"));
+        // The key is qualified, but the archive entry is not.
+        assert_eq!(
+            set.zip_entry_name("UL_LootLog", "UL_LootLog.lua"),
+            "UL_LootLog.lua"
+        );
+    }
+
+    #[test]
+    fn qualified_keys_split_and_group_predictably() {
+        assert_eq!(qualify("LibFoo", "init.lua"), "LibFoo/init.lua");
+        assert_eq!(
+            split_qualified("LibFoo/sub/init.lua"),
+            Some(("LibFoo", "sub/init.lua"))
+        );
+        // A bare path names no folder, and a leading slash would mean folder "".
+        assert_eq!(split_qualified("init.lua"), None);
+        assert_eq!(split_qualified("/init.lua"), None);
+        assert_eq!(split_qualified("LibFoo/"), None);
+
+        let grouped = group_by_folder(&[
+            "AddonA/init.lua".to_string(),
+            "LibFoo/init.lua".to_string(),
+            "AddonA/data.lua".to_string(),
+            "not-qualified.lua".to_string(),
+        ]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped["AddonA"], vec!["init.lua", "data.lua"]);
+        assert_eq!(grouped["LibFoo"], vec!["init.lua"]);
     }
 
     #[test]
@@ -1068,13 +1473,12 @@ mod tests {
             "MyAddon",
             &[("init.lua", "v2"), ("data.lua", "d")],
         );
-        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &zip_hashes,
             7,
             "2.0",
@@ -1109,16 +1513,20 @@ mod tests {
             "MyAddon",
             &[("init.lua", "UPSTREAM"), ("other.lua", "o")],
         );
-        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
-        let mut overrides = HashMap::new();
-        overrides.insert("init.lua".to_string(), zip_hashes["init.lua"].clone());
+        let mut folder_overrides = HashMap::new();
+        folder_overrides.insert(
+            "init.lua".to_string(),
+            zip_hashes.folders["MyAddon"]["init.lua"].clone(),
+        );
+        let mut overrides = BTreeMap::new();
+        overrides.insert("MyAddon".to_string(), folder_overrides);
 
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &zip_hashes,
             7,
             "2.0",
@@ -1127,7 +1535,7 @@ mod tests {
         .unwrap();
 
         let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        assert_eq!(m.files, oracle_baseline(&addon, Some(&overrides)));
+        assert_eq!(m.files, oracle_baseline(&addon, overrides.get("MyAddon")));
         // init.lua baseline = upstream hash, NOT the user's on-disk hash.
         assert_eq!(m.files["init.lua"], sha256_hex("UPSTREAM"));
         assert_ne!(m.files["init.lua"], sha256_hex("USER EDIT"));
@@ -1147,13 +1555,12 @@ mod tests {
         );
         // ZIP only ships init.lua.
         let zip = create_test_zip(tmp.path(), "u.zip", "MyAddon", &[("init.lua", "new")]);
-        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &zip_hashes,
             7,
             "2.0",
@@ -1191,13 +1598,12 @@ mod tests {
                 ("libs/inner/deep.lua", "c"),
             ],
         );
-        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &zip_hashes,
             7,
             "2.0",
@@ -1236,13 +1642,12 @@ mod tests {
         archive.write_all(b"ff").unwrap();
         archive.finish().unwrap();
 
-        let primary_zip_hashes = hash_zip_entries(&zip_path, "AddonX").unwrap();
+        let primary_zip_hashes = hash_zip_entries_by_folder(&zip_path).unwrap();
 
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip_path,
             &["AddonX".to_string(), "LibFoo".to_string()],
-            "AddonX",
             &primary_zip_hashes,
             42,
             "1.0",
@@ -1281,12 +1686,11 @@ mod tests {
             "MyAddon",
             &[("init.lua", "z"), ("m/n.lua", "q")],
         );
-        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
         record_hashes_with_zip_baseline(
             &new_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &zip_hashes,
             5,
             "3.0",
@@ -1309,8 +1713,11 @@ mod tests {
         let primary = create_addon_dir(&addons_dir, "AddonX", &[("x.lua", "xx")]);
         let secondary = create_addon_dir(&addons_dir, "LibFoo", &[("foo.lua", "ff")]);
 
-        let mut primary_zip_hashes = HashMap::new();
-        primary_zip_hashes.insert("x.lua".to_string(), sha256_hex("xx"));
+        let mut primary_zip_hashes = ZipHashSet::default();
+        primary_zip_hashes.folders.insert(
+            "AddonX".to_string(),
+            HashMap::from([("x.lua".to_string(), sha256_hex("xx"))]),
+        );
 
         // Nonexistent zip path: secondary hash_zip_entries fails → disk fallback.
         let bad_zip = tmp.path().join("does-not-exist.zip");
@@ -1319,7 +1726,6 @@ mod tests {
             &addons_dir,
             &bad_zip,
             &["AddonX".to_string(), "LibFoo".to_string()],
-            "AddonX",
             &primary_zip_hashes,
             42,
             "1.0",
@@ -1346,12 +1752,11 @@ mod tests {
 
         // Empty primary map: compute_baseline_with_zip still succeeds by hashing
         // every file from disk, so the manifest matches the full-disk oracle.
-        let empty: HashMap<String, String> = HashMap::new();
+        let empty = ZipHashSet::default();
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &empty,
             7,
             "2.0",
@@ -1376,13 +1781,12 @@ mod tests {
         let good = create_addon_dir(&addons_dir, "GoodAddon", &[("a.lua", "aa")]);
         // "GhostAddon" is intentionally never created on disk.
         let zip = create_test_zip(tmp.path(), "u.zip", "GoodAddon", &[("a.lua", "aa")]);
-        let good_zip_hashes = hash_zip_entries(&zip, "GoodAddon").unwrap();
+        let good_zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
         let result = record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["GoodAddon".to_string(), "GhostAddon".to_string()],
-            "GoodAddon",
             &good_zip_hashes,
             7,
             "2.0",
@@ -1439,20 +1843,21 @@ mod tests {
             "MyAddon",
             &[("init.lua", "code"), ("settings.lua", "UPSTREAM")],
         );
-        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
         // The kept deletion's override carries the upstream hash.
-        let mut overrides = HashMap::new();
-        overrides.insert(
+        let mut folder_overrides = HashMap::new();
+        folder_overrides.insert(
             "settings.lua".to_string(),
-            zip_hashes["settings.lua"].clone(),
+            zip_hashes.folders["MyAddon"]["settings.lua"].clone(),
         );
+        let mut overrides = BTreeMap::new();
+        overrides.insert("MyAddon".to_string(), folder_overrides);
 
         record_hashes_with_zip_baseline(
             &addons_dir,
             &zip,
             &["MyAddon".to_string()],
-            "MyAddon",
             &zip_hashes,
             7,
             "2.0",

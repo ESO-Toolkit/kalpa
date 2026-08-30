@@ -52,6 +52,10 @@ pub struct AddonManifest {
     pub disabled: bool,
     #[serde(default)]
     pub modified_file_count: u32,
+    /// Whether Kalpa has a trusted pre-update file baseline for this folder.
+    /// False for migrated/manual installs that Protected Edits cannot evaluate.
+    #[serde(default)]
+    pub has_protected_edits_baseline: bool,
 }
 
 /// Strip zero-width / BOM characters that occasionally get glued onto manifest
@@ -213,6 +217,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
         installed_at: String::new(),
         disabled: false,
         modified_file_count: 0,
+        has_protected_edits_baseline: false,
     })
 }
 
