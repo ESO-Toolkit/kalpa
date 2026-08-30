@@ -1,12 +1,12 @@
 {
   "name": "eso-packs-worker",
-  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "npm run check && wrangler deploy",
-    "check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "check": "npm run check:version-policy && tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "check:version-policy": "node scripts/check-version-policy.mjs",
     "test": "vitest run"
   },
   "devDependencies": {
@@ -15,5 +15,6 @@
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.110.0"
-  }
+  },
+  "version": "0.0.0"
 }
