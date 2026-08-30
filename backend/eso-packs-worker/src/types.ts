@@ -94,6 +94,8 @@ export interface Env {
   ALLOW_SEED?: string;
   /** Shared D1 binding to roster-hub-db — same database roster-hub-api uses */
   ROSTER_HUB_DB?: D1Database;
+  /** Exact values: off, dry-run (default/fail-closed), or apply. */
+  D1_RECONCILIATION_MODE?: string;
   /** Built-in atomic rate limit bindings (GA Sep 2025) */
   READ_LIMITER: RateLimit;
   WRITE_LIMITER: RateLimit;

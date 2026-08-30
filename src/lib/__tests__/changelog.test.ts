@@ -532,8 +532,20 @@ describe("matchInstalledEntry — prefix versions", () => {
     expect(matchInstalledEntry(entries, "1.7")).toBe(2);
   });
 
+  it("does not use containment for an unlisted simple prefix", () => {
+    const newerEntries: ChangelogEntry[] = [
+      { header: "version 1.7.8:", body: "newest" },
+      { header: "version 1.7.7:", body: "older" },
+    ];
+    expect(matchInstalledEntry(newerEntries, "1.7")).toBe(-1);
+  });
+
   it("still matches the exact version", () => {
     expect(matchInstalledEntry(entries, "1.7.8")).toBe(0);
+  });
+
+  it("returns no match when a one-token version is only a prefix", () => {
+    expect(matchInstalledEntry(entries.slice(0, 2), "1.7")).toBe(-1);
   });
 
   it("falls back to containment for multi-token versions", () => {
