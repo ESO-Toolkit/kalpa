@@ -25,7 +25,6 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
 | H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
-| H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
 | H6 | pr-open | `fix/audit-h6-quick-xml-advisory` | [#387](https://github.com/ESO-Toolkit/kalpa/pull/387) (draft, stacked on W1) | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
 
@@ -443,6 +442,17 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Handoff: pushed the branch and opened stacked draft PR [#380](https://github.com/ESO-Toolkit/kalpa/pull/380). No merge was performed.
 - Blockers: none.
 - Exact next action: review and merge the stacked P0-A1 draft after W1, then begin P0-A2 from D-P0-1 with a fresh Fable consultation before choosing the lock dependency/API.
+
+### 2026-08-26 — Codex (H4)
+
+- Active branch: `fix/audit-h4-claude-structure-tree`; originally stacked on `fix/audit-w1-worker-consistency`, later retargeted to `main` after W1 merged.
+- Scope: H4 only. Inventory tracked paths and update the `claude.md` project tree for the existing `animate-ui`, frontend test, E2E, and Worker test directories.
+- Test-first note: a failing runtime regression test is mechanically inapplicable to a documentation-only inventory correction. Before editing, `rg --files` established that the directories exist while the `claude.md` project tree contained none of the `animate-ui`, `__tests__`, `e2e`, or Worker `test` paths.
+- Sol review: `REVISE`. The bug-class sweep verified the same omissions in the public `README.md` structure tree. Applied the same tracked-path correction there; no runtime or wire-contract changes.
+- Completed: updated both maintained project trees from tracked paths, passed documentation gates, addressed the verified README sweep finding, and opened draft PR [#382](https://github.com/ESO-Toolkit/kalpa/pull/382).
+- Sol follow-up: `APPROVE`; no findings or missing tests, wire contract OK, and bug-class sweep clean.
+- Blockers: none.
+- Exact next action: review PR #382 after its current-`main` validation passes.
 
 ### 2026-08-26 — Codex
 

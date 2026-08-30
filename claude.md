@@ -53,12 +53,21 @@ Use the existing architecture; extend it instead of inventing new patterns:
 
 ```text
 src/                        # React frontend
+  __mocks__/                # Shared frontend test mocks
+  __tests__/                # Frontend setup and source-hygiene tests
   components/               # Feature components (addon list, packs, settings)
+  components/__tests__/     # Feature-component tests
+  components/animate-ui/    # Motion primitives grouped by animate/base/buttons/effects/texts
   components/ui/            # shadcn-ui primitives
   components/uploader/      # ESO Logs uploader workspace
+  components/uploader/__tests__/ # Uploader component and reducer tests
   hooks/                    # Shared React hooks
+  hooks/__tests__/          # Shared hook tests
   lib/                      # Utilities, Tauri bindings, store, theme presets
+  lib/__tests__/            # Frontend utility and contract tests
   types.ts                  # Shared TypeScript interfaces
+
+e2e/                       # Windows WebView2 read-only and sandbox Playwright specs
 
 src-tauri/src/              # Rust backend
   commands.rs               # Tauri command handlers (except the uploader's)
@@ -90,6 +99,7 @@ backend/eso-packs-worker/   # Pack Hub Cloudflare Worker
   src/redact.ts             # Anonymous-pack author redaction
   src/seed.ts               # Seed data for a fresh namespace
   src/cors.ts               # CORS config
+  test/                     # Worker unit, route, Durable Object, and scheduled tests
   wrangler.toml             # Worker config — name MUST be "kalpa-pack-hub"
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar, shipped on Windows
