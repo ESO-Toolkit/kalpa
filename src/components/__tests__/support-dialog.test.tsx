@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -113,5 +113,50 @@ describe("SupportDialog consent binding", () => {
     expect(screen.getByRole("checkbox", { name: consentLabel })).not.toBeChecked();
     expect(screen.getByRole("status")).toHaveAttribute("id", "support-stage");
     expect(screen.getByRole("status")).toHaveTextContent(reportChangedMessage);
+  });
+
+  it("announces browser handoff and report changes from a deferred opener race", async () => {
+    const user = userEvent.setup();
+    const consentLabel = "I agree to share the exact report shown below with ESO Toolkit support";
+    const continuingMessage =
+      "Continuing in your browser. No ticket exists until ESO Toolkit confirms it there.";
+    const reportChangedMessage =
+      "The report changed since you agreed. Review it and tick the box again.";
+    let resolveOpen!: (opened: boolean) => void;
+    mocks.openFeedbackUrl.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveOpen = resolve;
+        })
+    );
+    const initialProps = supportDialogProps();
+
+    const { rerender } = render(<SupportDialog {...initialProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/- Kalpa version: 0\.1\.0-test/)).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("checkbox", { name: consentLabel }));
+    await user.click(screen.getByRole("button", { name: /Create private ticket/i }));
+
+    rerender(
+      <SupportDialog
+        {...supportDialogProps({
+          lastError: "Changed diagnostic message",
+          onClose: initialProps.onClose,
+        })}
+      />
+    );
+
+    await act(async () => {
+      resolveOpen(true);
+    });
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveAttribute("id", "support-stage");
+    expect(status).toHaveTextContent(continuingMessage);
+    expect(status).toHaveTextContent(reportChangedMessage);
+    expect(screen.getByRole("checkbox", { name: consentLabel })).not.toBeChecked();
   });
 });

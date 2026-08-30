@@ -330,11 +330,13 @@ export function SupportDialog({
               role="status"
               className="text-[11px] leading-relaxed text-muted-foreground"
             >
-              {reportChangedSinceConsent
-                ? "The report changed since you agreed. Review it and tick the box again."
-                : handoffOpened
-                  ? "Continuing in your browser. No ticket exists until ESO Toolkit confirms it there."
-                  : "Your report is prepared. No ticket has been created yet."}
+              {handoffOpened && reportChangedSinceConsent
+                ? "Continuing in your browser. No ticket exists until ESO Toolkit confirms it there. The report changed since you agreed. Review it and tick the box again."
+                : reportChangedSinceConsent
+                  ? "The report changed since you agreed. Review it and tick the box again."
+                  : handoffOpened
+                    ? "Continuing in your browser. No ticket exists until ESO Toolkit confirms it there."
+                    : "Your report is prepared. No ticket has been created yet."}
             </p>
             {!handoffUrl && (
               <GlassPanel
