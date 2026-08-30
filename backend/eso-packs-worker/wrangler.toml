@@ -12,6 +12,10 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 # For local dev, create a .dev.vars file (git-ignored):
 #   ADMIN_API_KEY=dev-secret-key
 
+[vars]
+# Remains log-only until a maintainer approves deletion-capable apply mode.
+D1_RECONCILIATION_MODE = "dry-run"
+
 # Daily backup of pack index (midnight UTC)
 [triggers]
 crons = ["0 0 * * *"]
