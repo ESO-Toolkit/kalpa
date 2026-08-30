@@ -78,7 +78,9 @@ describe("setSetting", () => {
       expect.objectContaining({ autoSave: false })
     );
     // Persistence is the atomic command, never the plugin's save().
-    expect(mockInvoke).toHaveBeenCalledWith("flush_settings");
+    expect(mockInvoke).toHaveBeenCalledWith("flush_settings", {
+      entries: { theme: "dark" },
+    });
   });
 
   it("handles set errors without throwing and reports failure", async () => {
@@ -123,7 +125,9 @@ describe("setSettings", () => {
     expect(backing.get("a")).toBe(1);
     expect(backing.get("b")).toBe("two");
     expect(mockInvoke).toHaveBeenCalledTimes(1);
-    expect(mockInvoke).toHaveBeenCalledWith("flush_settings");
+    expect(mockInvoke).toHaveBeenCalledWith("flush_settings", {
+      entries: { a: 1, b: "two" },
+    });
   });
 
   it("rolls the cache back to its pre-batch snapshot when the flush fails", async () => {
@@ -165,6 +169,19 @@ describe("setSettings", () => {
     // Rollback was skipped (its snapshot would be stale): the newly-added key was
     // NOT deleted, unlike a normal flush failure.
     expect(backing.has("fresh")).toBe(true);
+  });
+
+  it("preserves the cache and reports success after a committed reload failure", async () => {
+    const backing = backStore({ existing: "old" });
+    mockInvoke.mockRejectedValue(
+      "settings-store-committed: cache reload failed: transient read error"
+    );
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ existing: "new", fresh: 1 })).resolves.toBe(true);
+
+    expect(backing.get("existing")).toBe("new");
+    expect(backing.get("fresh")).toBe(1);
   });
 
   it("does not clobber a concurrent write when rolling back", async () => {
