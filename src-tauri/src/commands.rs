@@ -1228,15 +1228,22 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    // Modified-file counts live in one JSON manifest per addon under
-    // .kalpa-hashes; each read is independent disk I/O, so collect them in
-    // parallel (mirroring the manifest parsing above) instead of paying one
-    // sequential read per addon inside the enrichment loop.
-    let modified_counts: HashMap<String, u32> = addons
+    // Protected Edits coverage and modified-file counts live in one JSON
+    // manifest per addon under .kalpa-hashes. Each read is independent disk I/O,
+    // so collect both in parallel instead of paying one sequential read per
+    // addon inside the enrichment loop.
+    let protected_edits_state: HashMap<String, (u32, bool)> = addons
         .par_iter()
-        .filter_map(|addon| {
-            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
-                .map(|count| (addon.folder_name.clone(), count))
+        .map(|addon| {
+            let modified_file_count =
+                file_hashes::load_modified_file_count(addons_dir, &addon.folder_name);
+            (
+                addon.folder_name.clone(),
+                (
+                    modified_file_count.unwrap_or(0),
+                    modified_file_count.is_some(),
+                ),
+            )
         })
         .collect();
 
@@ -1286,8 +1293,9 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(count) = modified_counts.get(&addon.folder_name) {
+        if let Some((count, has_baseline)) = protected_edits_state.get(&addon.folder_name) {
             addon.modified_file_count = *count;
+            addon.has_protected_edits_baseline = *has_baseline;
         }
     }
 
@@ -1818,11 +1826,6 @@ fn check_for_updates_metadata(
         // resolves to the same addon id we track locally; the filelist cache is
         // keyed by top-level folder name, so a stale or duplicate mapping should
         // not let unrelated external state rewrite this entry.
-        // Prefer direct disk evidence when the manifest already matches the
-        // current API version; this also handles manual/external installs.
-        // Never adopt an arbitrary manifest version: addon authors sometimes
-        // use a manifest version that differs from ESOUI's filelist version,
-        // which would recreate a perpetual false update after Kalpa installs it.
         let api_ids_match = api_entry.esoui_id == meta.esoui_id;
         let remote_ver = normalized_version(&api_entry.version);
         let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
@@ -1835,12 +1838,7 @@ fn check_for_updates_metadata(
                     meta.esoui_id,
                 )
                 .is_some_and(|version| normalized_version(version) == remote_ver);
-                let disk_version = read_local_version(addons_dir, folder_name);
-                let disk_matches_api = !disk_version.trim().is_empty()
-                    && !remote_ver.is_empty()
-                    && normalized_version(&disk_version) == remote_ver;
-
-                (minion_matches_api || disk_matches_api).then(|| api_entry.version.clone())
+                minion_matches_api.then(|| api_entry.version.clone())
             })
             .flatten();
 
@@ -2594,6 +2592,7 @@ pub struct ConflictReport {
     pub safe_files: Vec<String>,
     pub auto_kept_files: Vec<String>,
     pub conflicts: Vec<FileConflict>,
+    pub has_hash_baseline: bool,
 }
 
 fn generate_session_id(folder_name: &str) -> String {
@@ -2613,6 +2612,7 @@ struct ClassifiedFiles {
     safe_files: Vec<String>,
     auto_kept_files: Vec<String>,
     conflicts: Vec<FileConflict>,
+    has_hash_baseline: bool,
 }
 
 /// Classify the files `zip_hashes` would write over the installed folder.
@@ -2693,6 +2693,7 @@ fn classify_update_files(
         safe_files,
         auto_kept_files,
         conflicts,
+        has_hash_baseline: stored.is_some(),
     })
 }
 
@@ -2716,6 +2717,7 @@ fn build_conflict_report(
         safe_files: classified.safe_files,
         auto_kept_files: classified.auto_kept_files,
         conflicts: classified.conflicts,
+        has_hash_baseline: classified.has_hash_baseline,
     };
 
     Ok((report, zip_hashes))
@@ -4078,22 +4080,7 @@ pub async fn write_addon_file(
         // Atomic temp-file + rename: the file being saved is one the user hand
         // edited, so a crash or a Controlled Folder Access block mid-write must
         // not be able to truncate it.
-        let tmp_name = format!(
-            "{}.kalpa-edit-tmp",
-            file_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-        );
-        let tmp_path = file_path
-            .parent()
-            .map(|p| p.join(&tmp_name))
-            .unwrap_or_else(|| PathBuf::from(&tmp_name));
-        fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
-        fs::rename(&tmp_path, &file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to write file: {e}")
-        })?;
+        write_addon_file_atomically(&file_path, content.as_bytes())?;
 
         // Re-hash only the file we just wrote — compute_addon_hashes would walk
         // the entire addon folder (0.7-1.5 s per Ctrl+S on large addons) just to
@@ -4120,6 +4107,11 @@ pub async fn write_addon_file(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn write_addon_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
+    crate::atomic_file::atomic_write(file_path, content)
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 #[tauri::command]
@@ -6039,7 +6031,7 @@ fn save_profiles_with_mirror(
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(store) {
-            let _ = fs::write(mirror, json);
+            let _ = crate::atomic_file::atomic_write(mirror, json.as_bytes());
         }
     }
     Ok(())
@@ -8900,12 +8892,8 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     // Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING), so removing the
     // previous export first would only open a window where a crash leaves the
     // user with no .esopack at all.
-    let tmp_path = file_path.with_extension("esopack.tmp");
-    fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {e}"))?;
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })
+    crate::atomic_file::atomic_write(&file_path, json.as_bytes())
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 #[tauri::command]
@@ -9224,14 +9212,8 @@ pub async fn import_sv_settings(
             // Unix AND on Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
             // so the live file is never removed first — a failure here leaves
             // the previous settings in place instead of no file at all.
-            let tmp = sv_dir.join(format!("{folder}.lua.tmp"));
-            if let Err(e) = fs::write(&tmp, &substituted) {
+            if let Err(e) = write_imported_sv(&dest, substituted.as_bytes()) {
                 errors.push(format!("{folder}: failed to write: {e}"));
-                continue;
-            }
-            if let Err(e) = fs::rename(&tmp, &dest) {
-                let _ = fs::remove_file(&tmp);
-                errors.push(format!("{folder}: failed to finalize write: {e}"));
                 continue;
             }
 
@@ -9246,6 +9228,10 @@ pub async fn import_sv_settings(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn write_imported_sv(destination: &Path, content: &[u8]) -> Result<(), String> {
+    crate::atomic_file::atomic_write(destination, content).map_err(|error| error.to_string())
 }
 
 /// Walk the SavedVariables `.lua` files, parse each that parses successfully,
@@ -10562,10 +10548,7 @@ fn revert_performance_mode_to_webview(settings_path: &Path) {
     let Ok(serialized) = serde_json::to_string_pretty(&value) else {
         return;
     };
-    let temp = settings_path.with_extension("json.native-revert.tmp");
-    if fs::write(&temp, serialized).is_ok() {
-        let _ = fs::rename(&temp, settings_path);
-    }
+    let _ = crate::atomic_file::atomic_write(settings_path, serialized.as_bytes());
 }
 
 /// One-shot query for the WebView frontend: did the last launch auto-revert
@@ -11549,6 +11532,47 @@ mod tests {
     }
 
     #[test]
+    fn update_check_does_not_infer_external_update_from_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: 2.0\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
     fn update_check_does_not_downgrade_an_outdated_version_from_stale_minion_data() {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
@@ -11738,6 +11762,37 @@ mod tests {
             report.safe_files,
             vec!["same.lua".to_string(), "stock.lua".to_string()]
         );
+        assert!(report.has_hash_baseline);
+    }
+
+    #[test]
+    fn conflict_report_discloses_when_protected_edits_has_no_baseline() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MigratedAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- possibly edited").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "MigratedAddon/main.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"-- upstream replacement").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MigratedAddon", &zip_path, "2.0", "session")
+                .unwrap();
+
+        assert!(!report.has_hash_baseline);
+        assert!(report.conflicts.is_empty());
     }
 
     #[test]
@@ -12851,6 +12906,82 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_pack_exports_never_share_a_staging_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = std::sync::Arc::new(temp.path().join("pack.esopack"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let destination = destination.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let pack = EsoPackFile {
+                        format: "esopack".to_string(),
+                        version: 1,
+                        pack: EsoPackData {
+                            title: format!("Writer {writer}"),
+                            description: String::new(),
+                            pack_type: "addon-pack".to_string(),
+                            tags: vec![],
+                            addons: vec![],
+                        },
+                        shared_at: String::new(),
+                        shared_by: String::new(),
+                        settings: HashMap::new(),
+                    };
+                    start.wait();
+                    export_pack_file(pack, destination.to_string_lossy().to_string()).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let contents = fs::read_to_string(destination.as_ref()).unwrap();
+        serde_json::from_str::<EsoPackFile>(&contents).unwrap();
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(crate::atomic_file::STAGING_INFIX)
+        }));
+    }
+
+    #[test]
+    fn concurrent_import_and_editor_writes_leave_complete_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let imported = std::sync::Arc::new(temp.path().join("Addon.lua"));
+        let edited = std::sync::Arc::new(temp.path().join("init.lua"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let imported = imported.clone();
+                let edited = edited.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let lua = format!("Addon = {{ writer = {writer} }}\n");
+                    start.wait();
+                    write_imported_sv(imported.as_ref(), lua.as_bytes()).unwrap();
+                    write_addon_file_atomically(edited.as_ref(), lua.as_bytes()).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        for path in [imported.as_ref(), edited.as_ref()] {
+            let contents = fs::read_to_string(path).unwrap();
+            assert!(contents.starts_with("Addon = { writer = "));
+            assert!(contents.ends_with(" }\n"));
+        }
+        assert!(!temp.path().join("Addon.lua.tmp").exists());
+        assert!(!temp.path().join("init.lua.kalpa-edit-tmp").exists());
+    }
+
+    #[test]
     fn restore_buffer_gate_refuses_only_above_the_ceiling() {
         assert!(ensure_restore_buffer_fits(MAX_RESTORE_BUFFER_BYTES).is_ok());
         let err = ensure_restore_buffer_fits(MAX_RESTORE_BUFFER_BYTES + 1)
@@ -12923,6 +13054,14 @@ mod tests {
         // …and every unrelated setting is preserved verbatim.
         assert_eq!(value["theme"], "nordic");
         assert_eq!(value["autoUpdate"], true);
+        assert!(!settings.with_extension("json.native-revert.tmp").exists());
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(crate::atomic_file::STAGING_INFIX)
+        }));
     }
 
     #[test]

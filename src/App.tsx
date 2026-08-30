@@ -59,6 +59,10 @@ import {
 } from "@/lib/removal-queue";
 import { isModKey, isWindows } from "@/lib/platform";
 import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
+import {
+  countUpdatesWithoutProtectedEditsBaseline,
+  shouldPublishProtectedEditsCoverage,
+} from "@/lib/protected-edits";
 import type {
   AddonManifest,
   AuthUser,
@@ -222,6 +226,7 @@ function App() {
   const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
+  const addonsRef = useRef<AddonManifest[]>([]);
   const viewModeRef = useRef<ViewMode>("installed");
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
@@ -429,6 +434,7 @@ function App() {
       // succeeds — the list shows an addon that no longer exists.
       const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path);
 
+      addonsRef.current = visible;
       setAddons(visible);
       if (selectedAddonRef.current) {
         setSelectedAddon(reconcileSelectedAddon(selectedAddonRef.current, visible));
@@ -439,6 +445,7 @@ function App() {
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
+      addonsRef.current = [];
       setAddons([]);
       setSelectedFolders(new Set());
     } finally {
@@ -669,8 +676,16 @@ function App() {
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
         void refreshUploaderIntroDetection();
         // Scan (disk) and update check (metadata + network) touch different
-        // state and locks, so run them concurrently instead of in series.
-        await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, autoUpdate, false)]);
+        // state and locks, so run them concurrently unless auto-update needs
+        // scan-derived Protected Edits coverage first.
+        if (autoUpdate) {
+          // Auto-update needs the scan's Protected Edits coverage before it may
+          // disclose risk and begin mutation.
+          await scanAddons(savedPath);
+          await checkForUpdates(savedPath, true, false);
+        } else {
+          await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, false, false)]);
+        }
         void runAutoLink(savedPath);
         // Populate knownInstances so the Settings instance switcher works for
         // returning users. Fire-and-forget — does not block startup.
@@ -713,8 +728,13 @@ function App() {
           // Best-effort persist: this is auto-detection, so if the write fails it
           // self-heals — the same instance is re-detected and re-selected next launch.
           void setSetting("addonsPath", path);
-          // Scan and update check are independent — run concurrently.
-          await Promise.all([scanAddons(path), checkForUpdates(path, autoUpdate, false)]);
+          if (autoUpdate) {
+            await scanAddons(path);
+            await checkForUpdates(path, true, false);
+          } else {
+            // No mutation follows, so the disk scan and network check may overlap.
+            await Promise.all([scanAddons(path), checkForUpdates(path, false, false)]);
+          }
           void runAutoLink(path);
         } catch (initError) {
           setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
@@ -1090,41 +1110,14 @@ function App() {
     [presentDependencyBatch]
   );
 
-  const handleSingleUpdate = useCallback(
-    async (folderName: string) => {
-      const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
-      if (!ur) return;
-      if (!(await ensureEsoNotBlocking())) return;
-      try {
-        const result = await invokeOrThrow<InstallResult>("update_addon", {
-          addonsPath,
-          esouiId: ur.esouiId,
-          // Preserve the version observed by the check in the existing wire
-          // contract. The backend re-fetches filedetails, checksum-binds the
-          // artifact, and persists that fetched version if publication advanced.
-          apiVersion: ur.remoteVersion,
-          dependencyPolicy: await getDependencyPolicy(),
-        });
-        toast.success(`Updated ${folderName}`);
-        srAnnounce(`Updated ${folderName}`);
-        handleAddonUpdated(ur.esouiId);
-        // Empty unless the policy is "ask"; the picker owns the rest. Pass the
-        // same folder this update wrote to, not the live one — the user may
-        // have switched instances while it ran.
-        void resolvePendingDeps(result.pendingDeps, addonsPath);
-      } catch (e) {
-        toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
-      }
-    },
-    [
-      addonsPath,
-      updateResults,
-      srAnnounce,
-      handleAddonUpdated,
-      ensureEsoNotBlocking,
-      resolvePendingDeps,
-    ]
-  );
+  const handleSingleUpdate = useCallback((folderName: string) => {
+    const addon = addonsRef.current.find((candidate) => candidate.folderName === folderName);
+    if (!addon) return;
+    // Route the shortcut through AddonDetail's fresh conflict preflight. The
+    // legacy command snapshots disk only after extraction and cannot safely
+    // infer a migrated addon's pre-existing edits.
+    setSelectedAddon(addon);
+  }, []);
 
   // The optimistic-removal queue. Its group-timer and per-entry AddOns-folder
   // rules live in `lib/removal-queue.ts` so they can be tested without the app.
@@ -1374,15 +1367,19 @@ function App() {
   // banner's "Choose" checklist reads like the addon list rather than raw
   // folder names.
   const bannerUpdates = useMemo<BannerUpdate[]>(() => {
-    const titleByFolder = new Map(addons.map((a) => [a.folderName, a.title] as const));
+    const addonByFolder = new Map(addons.map((addon) => [addon.folderName, addon] as const));
     return updatesAvailable
-      .map((u) => ({
-        folderName: u.folderName,
-        title: titleByFolder.get(u.folderName) ?? u.folderName,
-        currentVersion: u.currentVersion,
-        remoteVersion: u.remoteVersion,
-        esouiId: u.esouiId,
-      }))
+      .map((u) => {
+        const addon = addonByFolder.get(u.folderName);
+        return {
+          folderName: u.folderName,
+          title: addon?.title ?? u.folderName,
+          currentVersion: u.currentVersion,
+          remoteVersion: u.remoteVersion,
+          esouiId: u.esouiId,
+          hasProtectedEditsBaseline: addon?.hasProtectedEditsBaseline === true,
+        };
+      })
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [updatesAvailable, addons]);
 
@@ -1403,6 +1400,41 @@ function App() {
       // guard takes over below.
       const latch = batchLatchRef.current;
       if (!latch.tryEnterPreflight()) return;
+
+      // Refresh coverage at action time: a hash manifest may have been removed
+      // or corrupted since the update banner's last installed-addon scan.
+      const coverage = await invokeResult<AddonManifest[]>("scan_installed_addons", {
+        addonsPath: path,
+      });
+      if (
+        !shouldPublishProtectedEditsCoverage(
+          switchGen,
+          pathSwitchGenRef.current,
+          sameAddonsFolder(path, addonsPathRef.current)
+        )
+      ) {
+        latch.abortPreflight();
+        toast.info("AddOns folder changed — the update was not started.");
+        return;
+      }
+      const currentAddons = coverage.ok
+        ? hidePendingRemovals(coverage.data, pendingRemovalsRef.current, path)
+        : [];
+      if (coverage.ok) {
+        addonsRef.current = currentAddons;
+        setAddons(currentAddons);
+      }
+
+      const unavailableCount = countUpdatesWithoutProtectedEditsBaseline(updates, currentAddons);
+      if (unavailableCount > 0) {
+        toast.warning(
+          `Protected Edits unavailable for ${unavailableCount} addon${unavailableCount === 1 ? "" : "s"}.`,
+          {
+            description:
+              "No trusted file baseline exists, so Kalpa cannot detect which files you changed. Updating may overwrite those edits.",
+          }
+        );
+      }
 
       if (!(await ensureEsoNotBlocking())) {
         latch.abortPreflight();

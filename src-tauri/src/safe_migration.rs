@@ -277,13 +277,12 @@ fn create_zip_snapshot(
 
     let id = snapshot_id(label);
     let archive_path = root.join(format!("{id}.zip"));
-    let tmp_path = root.join(format!("{id}.zip.tmp"));
-
-    let file = fs::File::create(&tmp_path)
+    let file = crate::atomic_file::AtomicFile::create(&archive_path)
         .map_err(|e| format!("Failed to create snapshot archive: {e}"))?;
 
-    // Use a closure so we can clean up tmp_path on any failure
-    let build_zip = || -> Result<(Vec<String>, u32, u64, Vec<String>), String> {
+    // AtomicFile owns its unique staging path and cleans it if ZIP creation is
+    // abandoned, without touching another process's in-flight snapshot.
+    let build_zip = || -> Result<_, String> {
         let mut zip = zip::ZipWriter::new(file);
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -333,41 +332,24 @@ fn create_zip_snapshot(
             }
         }
 
-        // Take the archive file back from the writer and fsync it. These snapshots
-        // guard destructive operations that start immediately afterwards, so the
-        // rename must not be able to land ahead of the archive's data blocks — a
-        // power loss would otherwise leave a zero-length "safety net" whose
-        // recorded SHA-256 was computed from page cache.
+        // Take the owned staging file back from the ZIP writer. commit_with below
+        // flushes and fsyncs it before hashing and publishing.
         let out = zip
             .finish()
             .map_err(|e| format!("Failed to finalize snapshot archive: {e}"))?;
-        out.sync_all()
-            .map_err(|e| format!("Failed to flush snapshot archive to disk: {e}"))?;
 
-        Ok((source_paths, file_count, total_size, skipped))
+        Ok((source_paths, file_count, total_size, skipped, out))
     };
 
-    let (source_paths, file_count, total_size, skipped) = match build_zip() {
-        Ok(result) => result,
-        Err(e) => {
-            // Clean up the .tmp file on failure
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-    };
-
-    // Compute SHA-256 of the archive
-    let sha256 = match sha256_file(&tmp_path) {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-    };
-
-    // Atomic rename
-    fs::rename(&tmp_path, &archive_path)
+    let (source_paths, file_count, total_size, skipped, staged) = build_zip()?;
+    let mut sha256 = None;
+    staged
+        .commit_with(|staging| {
+            sha256 = Some(sha256_file(staging).map_err(std::io::Error::other)?);
+            Ok(())
+        })
         .map_err(|e| format!("Failed to finalize snapshot: {e}"))?;
+    let sha256 = sha256.expect("snapshot hash callback runs before publication");
 
     // Record in snapshot store
     let skipped_count = skipped.len() as u32;
@@ -401,8 +383,8 @@ fn create_zip_snapshot(
 /// Files that cannot be opened are skipped and their archive-relative paths are
 /// pushed onto `skipped`; the caller records them so a snapshot whose contents
 /// are incomplete never presents itself as a complete rollback point.
-fn add_dir_to_zip(
-    zip: &mut zip::ZipWriter<fs::File>,
+fn add_dir_to_zip<W: Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
     dir: &Path,
     prefix: &str,
     options: &SimpleFileOptions,
@@ -885,23 +867,12 @@ fn extract_archive_entries(archive_path: &Path, parent: &Path) -> Result<u32, St
             if let Some(parent_dir) = dest.parent() {
                 let _ = fs::create_dir_all(parent_dir);
             }
-            // Atomic write: write to .tmp then rename
-            let mut tmp_name = dest.file_name().unwrap_or_default().to_os_string();
-            tmp_name.push(".restore-tmp");
-            let tmp_dest = dest.with_file_name(tmp_name);
-            let mut out = fs::File::create(&tmp_dest)
+            let mut out = crate::atomic_file::AtomicFile::create(&dest)
                 .map_err(|e| format!("Failed to create restore file: {e}"))?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("Failed to write restore file: {e}"))?;
-            // `std::fs::rename` replaces the destination atomically on Windows
-            // (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`) — same guarantee used
-            // by saved_variables/io.rs::write_raw_bytes — so no separate remove is
-            // needed. Removing first would leave a gap where `dest` doesn't exist at
-            // all if the rename that follows then failed.
-            fs::rename(&tmp_dest, &dest).map_err(|e| {
-                let _ = fs::remove_file(&tmp_dest);
-                format!("Failed to finalize restored file: {e}")
-            })?;
+            out.commit()
+                .map_err(|e| format!("Failed to finalize restored file: {e}"))?;
             restored += 1;
         }
     }

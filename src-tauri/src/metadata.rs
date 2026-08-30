@@ -58,8 +58,9 @@ fn metadata_path(addons_path: &Path) -> std::path::PathBuf {
 /// Load a JSON file with automatic recovery from crash artifacts.
 ///
 /// Recovery order when the primary file is missing or corrupted:
-/// 1. `.json.tmp` — a completed write that was never renamed into place
-///    (crash between the temp write and the rename in `save_json_with_backup`).
+/// 1. Legacy `.json.tmp` — a completed write made by an older Kalpa version
+///    that was never renamed into place. New writes use unique staging names
+///    and never treat those uncommitted leftovers as recovery candidates.
 /// 2. `.json.bak` — the copy of the previous primary taken during the last save.
 ///
 /// Returns `T::default()` if all sources are missing or corrupted.
@@ -75,26 +76,23 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
         );
     }
 
-    // Primary missing or corrupted — try .tmp (newest data, written but not renamed).
+    // Primary missing or corrupted — preserve compatibility with the fixed
+    // staging artifact written by older Kalpa versions. New unique staging
+    // leftovers are deliberately ignored because they were never committed.
     let tmp = path.with_extension("json.tmp");
     if let Ok(content) = fs::read_to_string(&tmp) {
         if let Ok(data) = serde_json::from_str::<T>(&content) {
             eprintln!("Recovered data from incomplete write {}.", tmp.display());
-            // Promote the .tmp so subsequent loads hit the primary path.
-            // On Windows fs::rename can't overwrite, so remove the corrupt primary first.
-            // Best-effort: if promotion fails the data is still returned correctly;
-            // the next load will recover from .tmp again.
-            if let Err(e) = fs::remove_file(path) {
-                eprintln!(
-                    "Warning: could not remove corrupt primary {}: {e}",
-                    path.display()
-                );
-            }
-            if let Err(e) = fs::rename(&tmp, path) {
+            // Publish through the shared writer so replacing a corrupt primary
+            // never opens a remove-before-rename gap. Remove only this known
+            // legacy artifact after the complete primary has been published.
+            if let Err(e) = crate::atomic_file::atomic_write(path, content.as_bytes()) {
                 eprintln!(
                     "Warning: could not promote {} to primary: {e}",
                     tmp.display()
                 );
+            } else if let Err(e) = fs::remove_file(&tmp) {
+                eprintln!("Warning: could not remove legacy {}: {e}", tmp.display());
             }
             return data;
         }
@@ -115,8 +113,9 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 /// Save data as JSON with atomic write and automatic backup.
 ///
-/// Writes and fsyncs `.json.tmp`, copies the current primary to `.json.bak`, then
-/// renames the temp over the primary. The ordering matters: copying to `.bak`
+/// Writes and fsyncs a uniquely owned sibling staging file, copies the current
+/// primary to `.json.bak`, then atomically publishes the replacement. The
+/// ordering matters: copying to `.bak`
 /// first would overwrite the last good backup with a possibly-corrupt primary
 /// before the replacement was safe on disk — destroying the very copy the `.bak`
 /// recovery in [`load_json_with_backup`] exists to provide.
@@ -124,33 +123,29 @@ pub fn save_json_with_backup<T: Serialize>(path: &Path, data: &T) -> Result<(), 
     let json =
         serde_json::to_string_pretty(data).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    // Flush the replacement to stable storage before anything else is touched.
-    // Without sync_all a power loss can journal the rename (and the .bak copy)
-    // while both files' data blocks are still in page cache, leaving primary,
-    // .tmp and .bak all zero-length — the whole recovery ladder defeated and the
-    // store silently reset to T::default() on the next load.
-    let tmp = path.with_extension("json.tmp");
-    let write_tmp = || -> std::io::Result<()> {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()
-    };
-    if let Err(e) = write_tmp() {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("Failed to write temp file: {e}"));
-    }
+    let mut replacement = crate::atomic_file::AtomicFile::create(path)
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    replacement
+        .write_all(json.as_bytes())
+        .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
-    // Only now is the previous primary expendable (ignore if it doesn't exist).
+    // commit_with flushes and syncs the replacement before this callback. Only
+    // then is the previous primary copied. The backup itself uses the same
+    // crash-safe publisher, so a failed refresh preserves the old backup.
     let bak = path.with_extension("json.bak");
-    let _ = fs::copy(path, &bak);
-
-    // fs::rename replaces the destination atomically on both Unix and Windows
-    // (MoveFileExW with MOVEFILE_REPLACE_EXISTING). Removing the primary first
-    // would only add a window in which no primary exists at all.
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Failed to finalize write: {e}")
-    })
+    replacement
+        .commit_with(|_| {
+            if path.is_file() {
+                // Backup refresh has historically been best-effort. Preserve
+                // that behavior while using atomic publication so a failed
+                // refresh cannot truncate the previously valid backup.
+                if let Ok(previous) = fs::read(path) {
+                    let _ = crate::atomic_file::atomic_write(&bak, &previous);
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("Failed to finalize write: {e}"))
 }
 
 pub fn format_timestamp(secs: u64) -> String {
@@ -454,11 +449,18 @@ mod tests {
         save_json_with_backup(&path, &good).unwrap();
         assert!(bak.exists());
 
-        // Occupying the temp path with a directory makes the write fail.
-        fs::create_dir(tmp.path().join("test.json.tmp")).unwrap();
-        let mut other = MetadataStore::default();
-        record_install(&mut other, "Other", 2, "2.0", "url");
-        assert!(save_json_with_backup(&path, &other).is_err());
+        struct SerializationFailure;
+        impl serde::Serialize for SerializationFailure {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(<S::Error as serde::ser::Error>::custom(
+                    "injected serialization failure",
+                ))
+            }
+        }
+        assert!(save_json_with_backup(&path, &SerializationFailure).is_err());
 
         let backup: MetadataStore =
             serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
@@ -489,6 +491,39 @@ mod tests {
         let backup: MetadataStore =
             serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
         assert!(backup.addons.is_empty());
+    }
+
+    #[test]
+    fn concurrent_saves_never_share_a_staging_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(tmp.path().join("test.json"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let path = path.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for iteration in 0..100 {
+                        let value = serde_json::json!({
+                            "writer": writer,
+                            "iteration": iteration,
+                        });
+                        save_json_with_backup(path.as_ref(), &value)?;
+                    }
+                    Ok::<(), String>(())
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(path.as_ref()).unwrap()).unwrap();
+        assert!(value.get("writer").is_some());
+        assert!(value.get("iteration").is_some());
     }
 
     #[test]
@@ -644,6 +679,31 @@ mod tests {
         assert!(path.exists());
         let reloaded: MetadataStore = load_json_with_backup(&path);
         assert_eq!(reloaded.addons["LatestData"].esoui_id, 77);
+    }
+
+    #[test]
+    fn load_never_promotes_an_uncommitted_unique_staging_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let staging = tmp.path().join("test.json.tmp-999-1-deadbeef");
+        let bak = tmp.path().join("test.json.bak");
+        fs::write(&path, "corrupted").unwrap();
+
+        let mut uncommitted = MetadataStore::default();
+        record_install(&mut uncommitted, "Uncommitted", 1, "1.0", "url");
+        fs::write(&staging, serde_json::to_vec(&uncommitted).unwrap()).unwrap();
+
+        let mut backup = MetadataStore::default();
+        record_install(&mut backup, "Backup", 2, "2.0", "url");
+        fs::write(&bak, serde_json::to_vec(&backup).unwrap()).unwrap();
+
+        let loaded: MetadataStore = load_json_with_backup(&path);
+        assert!(loaded.addons.contains_key("Backup"));
+        assert!(!loaded.addons.contains_key("Uncommitted"));
+        assert!(
+            staging.exists(),
+            "load must not claim another writer's staging"
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod atomic_file;
 mod auth;
 /// Heap high-water-mark allocator for the uploader perf benchmark. The
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
