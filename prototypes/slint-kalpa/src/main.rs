@@ -23530,8 +23530,6 @@ CombatMetrics_SavedVariables = {
                 archived_versions: Vec::new(),
                 change_log: String::new(),
                 download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
-                change_log: String::new(),
-                archived_versions: Vec::new(),
             },
         );
 
@@ -23567,8 +23565,6 @@ CombatMetrics_SavedVariables = {
             archived_versions: Vec::new(),
             change_log: String::new(),
             download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
-            change_log: String::new(),
-            archived_versions: Vec::new(),
         };
 
         let installed =
