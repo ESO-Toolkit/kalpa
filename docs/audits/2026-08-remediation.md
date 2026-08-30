@@ -23,7 +23,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F5 | pr-open | `fix/audit-f5-controlled-state-veto` | [#370](https://github.com/ESO-Toolkit/kalpa/pull/370) (draft, stacked on W1) | - | not required | APPROVE | Focused 10/10; frontend check; 493 tests | Controlled values remain authoritative when a parent vetoes a change; uncontrolled behavior is preserved. |
 | F6 | pr-open | `fix/audit-f6-optimistic-sequencing` | [#377](https://github.com/ESO-Toolkit/kalpa/pull/377) (draft, stacked) | - | D-F6-1; Luna PASS | REVISE follow-up; no findings, requested tests addressed | Frontend check; 500 tests | Sequenced optimistic settings/library state and latest-only SavedVariables file/character refreshes implemented. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
-| H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
+| H2 | pr-open | `fix/audit-h2-theme-provenance` | [#383](https://github.com/ESO-Toolkit/kalpa/pull/383) | - | not required | REVISE x2; all verified findings addressed | Root check; frontend check; 490 tests | Evidence supports treating the directory as local visual-review output; ignore narrowly without modifying it. |
 | H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
 | H6 | pr-open | `fix/audit-h6-quick-xml-advisory` | [#387](https://github.com/ESO-Toolkit/kalpa/pull/387) (draft, stacked on W1) | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
@@ -532,4 +532,3 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - W1: owner sign-off is required before the later manual `kv` → `do` authority flip and must accept backup restore as the post-flip rollback path.
 - P0-A2: D-P0-1 establishes the lock invariants; a fresh Fable consultation must choose the concrete cross-platform dependency/API and user-visible timeout behavior before implementation.
 - R4/R5: ownership/conflict behavior that changes install outcomes requires explicit design review before implementation.
-- H2: `kalpa-elder-scrolls-themes/` is currently untracked; provenance must be inspected before tracking or ignoring it.
