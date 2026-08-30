@@ -89,6 +89,24 @@ function decodeHandoff(url: string): SupportTicketPayload {
   return JSON.parse(new TextDecoder().decode(bytes)) as SupportTicketPayload;
 }
 
+/**
+ * True when the string contains no unpaired surrogate. `String#isWellFormed`
+ * would say the same thing, but it is ES2024 and this project targets ES2022.
+ */
+function isWellFormed(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 describe("buildSupportReport", () => {
   it.each(supportContractFixture.cases.map((entry) => [entry.name, entry] as const))(
     "renders the shared client/server contract fixture exactly: %s",
@@ -242,6 +260,52 @@ describe("buildSupportReport", () => {
     expect(report).not.toContain("Games");
     expect(report).not.toContain("/opt/");
     expect(report).not.toContain("\u0007");
+  });
+
+  it("redacts removable-media mounts and drive-less Windows paths", () => {
+    // udisks mounts a secondary Steam library under /media or
+    // /run/media/<username>, which Kalpa explicitly supports. Those carry the
+    // account name exactly as /home does, and so does a Windows path that has
+    // lost its drive letter.
+    const report = buildSupportReport(
+      input({
+        description: "/run/media/bob/SteamLibrary/ESO failed; /media/bob/ext broke",
+        lastError: "Users\\Brayden\\Documents\\Elder Scrolls Online\\live\\Backups is wrong",
+      })
+    );
+
+    expect(report).not.toContain("bob");
+    expect(report).not.toContain("Brayden");
+    expect(report.match(/\[local path\]/g)).toHaveLength(3);
+  });
+
+  it("leaves ordinary prose that merely starts with a path keyword alone", () => {
+    const report = buildSupportReport(input({ description: "Users of this addon report a crash" }));
+    expect(report).toContain("Users of this addon report a crash");
+  });
+
+  it("never truncates through a surrogate pair", () => {
+    // A cut by UTF-16 unit can leave a lone high surrogate. The string is then
+    // not well-formed: JSON.stringify emits a bare \\ud83d, Discord rejects the
+    // message, and because the private channel already exists every retry fails
+    // identically -- the user could never be given the ticket that exists.
+    const report = buildSupportReport(
+      input({
+        addons: [
+          addon({
+            // Addon names clamp at 80, so `truncate` cuts at 77. Placing the
+            // emoji at units 76-77 puts the cut inside the pair.
+            title: `${"A".repeat(76)}\u{1F600}${"B".repeat(20)}`,
+            folderName: "SurrogateAddon",
+            missingDependencies: ["LibAddonMenu-2.0"],
+          }),
+        ],
+        updateResults: [update({ folderName: "SurrogateAddon" })],
+      })
+    );
+
+    expect(isWellFormed(report)).toBe(true);
+    expect(JSON.parse(JSON.stringify(report))).toBe(report);
   });
 
   it("preserves useful description paragraphs and explains category-specific collection", () => {

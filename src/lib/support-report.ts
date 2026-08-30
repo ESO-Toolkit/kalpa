@@ -226,10 +226,26 @@ export function neutralizeDiscordMentions(value: string): string {
     .replace(/<(?=(@[!&]?\d+|#\d+|t:\d+(?::[tTdDfFR])?|\/[^:>]{1,32}:\d+)>)/g, "<\u200b");
 }
 
+/**
+ * Cut to a UTF-16 length without splitting a surrogate pair.
+ *
+ * A plain `slice` cuts by code unit, so an astral character (an emoji in an
+ * addon name is enough) straddling the boundary leaves a lone high surrogate.
+ * That string is not well-formed: `JSON.stringify` emits a bare `\ud83d`,
+ * which Discord rejects. The report would then be un-postable while the
+ * private channel already existed, and every retry would fail identically.
+ */
+function sliceCodeUnits(value: string, units: number): string {
+  if (units <= 0) return "";
+  const lastUnit = value.charCodeAt(units - 1);
+  const splitsPair = lastUnit >= 0xd800 && lastUnit <= 0xdbff;
+  return value.slice(0, splitsPair ? units - 1 : units);
+}
+
 function truncate(value: string, maxLength: number): string {
   if (value.length <= maxLength) return value;
-  if (maxLength <= 3) return value.slice(0, maxLength);
-  return `${value.slice(0, maxLength - 3)}...`;
+  if (maxLength <= 3) return sliceCodeUnits(value, maxLength);
+  return `${sliceCodeUnits(value, maxLength - 3)}...`;
 }
 
 function stripNonPrintingControlCharacters(value: string): string {
@@ -237,7 +253,12 @@ function stripNonPrintingControlCharacters(value: string): string {
     const codePoint = character.codePointAt(0) ?? 0;
     const isAllowedWhitespace = codePoint === 9 || codePoint === 10 || codePoint === 13;
     const isControlCharacter = codePoint < 32 || (codePoint >= 127 && codePoint <= 159);
-    return isControlCharacter && !isAllowedWhitespace ? "" : character;
+    // Array.from iterates code points, so a well-formed pair arrives as one
+    // character whose code point is astral. A code point still inside the
+    // surrogate range is therefore unpaired, and would make the string
+    // un-serializable as JSON.
+    const isLoneSurrogate = codePoint >= 0xd800 && codePoint <= 0xdfff;
+    return (isControlCharacter && !isAllowedWhitespace) || isLoneSurrogate ? "" : character;
   }).join("");
 }
 
@@ -255,7 +276,7 @@ function redactSensitiveText(value: string, addonsPath: string): string {
   return stripNonPrintingControlCharacters(
     redacted
       .replace(
-        /(?:[A-Za-z]:[\\/]+|[\\/]+(?:Users|home|mnt|opt|var|tmp|etc|srv|Volumes)[\\/]+)[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/gi,
+        /(?:[A-Za-z]:[\\/]+|[\\/]+(?:Users|home|media|mnt|opt|run|srv|tmp|var|etc|Volumes)[\\/]+|\bUsers[\\/]+)[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/gi,
         "[local path]"
       )
       .replace(/\\\\[^\r\n,;]+?(?=\s+(?:and|at|from|with|then)\b|[,;\r\n]|$)/g, "[local path]")
