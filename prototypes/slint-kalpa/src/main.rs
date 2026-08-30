@@ -2,6 +2,9 @@
 
 slint::include_modules!();
 
+#[path = "../../../src-tauri/src/atomic_file.rs"]
+mod atomic_file;
+
 #[path = "native_char_backup.rs"]
 mod char_backup;
 
@@ -429,7 +432,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -2336,6 +2339,9 @@ fn real_addon_draft(addon_dir: &Path) -> Result<RealAddonDraft, String> {
         entry.badge3 = "Disabled".into();
         entry.badge3_kind = 5;
     }
+    entry.protected_edits_baseline = addon_dir.parent().is_some_and(|addons_root| {
+        file_hashes::load_hash_manifest(addons_root, &folder_name).is_some()
+    });
 
     Ok(RealAddonDraft {
         entry,
@@ -2784,6 +2790,39 @@ fn apply_addon_update_check_results(
     }
 
     available
+}
+
+fn unprotected_update_count(models: &AddonModels) -> usize {
+    models
+        .all
+        .borrow()
+        .iter()
+        .filter(|addon| addon_has_update(addon) && !addon.protected_edits_baseline)
+        .count()
+}
+
+fn unprotected_target_count(addons_root: &Path, targets: &[NativeAddonUpdateTarget]) -> usize {
+    targets
+        .iter()
+        .filter(|target| {
+            file_hashes::load_hash_manifest(addons_root, &target.folder_name).is_none()
+        })
+        .count()
+}
+
+fn update_start_message(targets: &[NativeAddonUpdateTarget], unprotected: usize) -> String {
+    if unprotected > 0 {
+        format!(
+            "Protected Edits unavailable for {unprotected} addon{}: no trusted file baseline exists, so Kalpa cannot detect changed files. Updating may overwrite edits.",
+            if unprotected == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Applying {} addon update{}...",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )
+    }
 }
 
 fn native_update_targets(models: &AddonModels) -> Vec<NativeAddonUpdateTarget> {
@@ -3948,6 +3987,7 @@ fn addon_entry(
         selected: false,
         is_library,
         disabled,
+        protected_edits_baseline: true,
         state,
         badge: badge.into(),
         badge_kind,
@@ -6915,22 +6955,10 @@ fn apply_imported_pack_settings_blocking(
             }
         }
 
-        let temp = sv_dir.join(format!("{folder}.lua.tmp"));
-        if let Err(error) = fs::write(&temp, &substituted) {
+        if let Err(error) = atomic_file::atomic_write(&destination, substituted.as_bytes()) {
             result
                 .errors
                 .push(format!("{folder}: failed to write: {error}"));
-            continue;
-        }
-        // Rename straight over the destination: fs::rename replaces it
-        // atomically on Windows too (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
-        // so deleting it first would only open a window where the live
-        // SavedVariables file is missing.
-        if let Err(error) = fs::rename(&temp, &destination) {
-            let _ = fs::remove_file(&temp);
-            result
-                .errors
-                .push(format!("{folder}: failed to finalize write: {error}"));
             continue;
         }
 
@@ -10388,6 +10416,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         let available = apply_addon_update_check_results(&update_finished_models, &update_rows);
         ui.set_checking_updates(false);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&update_finished_models) as i32);
         apply_addon_view(&ui, &update_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10403,6 +10432,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_checking_updates(false);
         ui.set_pending_conflict_count(conflict_count);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&apply_finished_models) as i32);
         apply_addon_view(&ui, &apply_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10720,11 +10750,9 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 let eso_running = addon_write_eso_running_warning_active(&ui);
                 ui.set_checking_updates(true);
-                let message = format!(
-                    "Applying {} safe addon update{}...",
-                    targets.len(),
-                    if targets.len() == 1 { "" } else { "s" }
-                );
+                let unprotected = unprotected_target_count(&addons_root, &targets);
+                ui.set_unprotected_update_count(unprotected as i32);
+                let message = update_start_message(&targets, unprotected);
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -11097,13 +11125,24 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_checking_updates(true);
+        let targets = vec![target];
+        let unprotected = unprotected_target_count(&addons_root, &targets);
+        ui.set_unprotected_update_count(unprotected as i32);
         ui.set_status_error_message(
-            addon_write_status_message(format!("Updating {}...", addon.title), eso_running).into(),
+            addon_write_status_message(
+                if unprotected > 0 {
+                    update_start_message(&targets, unprotected)
+                } else {
+                    format!("Updating {}...", addon.title)
+                },
+                eso_running,
+            )
+            .into(),
         );
         start_native_addon_update_apply(
             ui.as_weak(),
             addons_root,
-            vec![target],
+            targets,
             ui.get_settings_conflict_policy().clamp(0, 2),
             eso_running,
         );
@@ -12708,6 +12747,63 @@ fn normalized_addon_version(version: &str) -> &str {
         .unwrap_or(version.trim())
 }
 
+fn native_artifact_has_update(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    let local_version = normalized_addon_version(local_version);
+    let remote_version = normalized_addon_version(remote_version);
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+fn reconcile_native_update_observation(
+    entry: &mut metadata::AddonMetadata,
+    remote_version: &str,
+    remote_marker: u64,
+    has_update: bool,
+) -> bool {
+    let local_version = normalized_addon_version(&entry.installed_version);
+    let remote_version_normalized = normalized_addon_version(remote_version);
+
+    // A filelist observation is not proof that its artifact was installed.
+    // Only attach its version and publication marker when it matches the
+    // non-empty version already on disk.
+    if has_update
+        || local_version.is_empty()
+        || remote_version_normalized.is_empty()
+        || local_version != remote_version_normalized
+    {
+        return false;
+    }
+
+    let mut changed = false;
+    if entry.installed_version != remote_version {
+        entry.installed_version = remote_version.to_string();
+        changed = true;
+    }
+    if remote_marker > entry.esoui_last_update {
+        entry.esoui_last_update = remote_marker;
+        entry.esoui_marker_installed = true;
+        changed = true;
+    } else if remote_marker > 0
+        && remote_marker == entry.esoui_last_update
+        && !entry.esoui_marker_installed
+    {
+        entry.esoui_marker_installed = true;
+        changed = true;
+    }
+    changed
+}
+
 fn check_native_addon_updates_blocking(
     addons_dir: &Path,
 ) -> Result<Vec<NativeAddonUpdateCheck>, String> {
@@ -12734,21 +12830,21 @@ fn check_native_addon_updates_blocking(
             continue;
         };
 
-        let local_version = normalized_addon_version(&meta.installed_version);
-        let remote_version = normalized_addon_version(&api_entry.version);
-        let has_update = !remote_version.is_empty()
-            && !local_version.is_empty()
-            && remote_version != local_version;
+        let has_update = native_artifact_has_update(
+            &meta.installed_version,
+            &api_entry.version,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(&folder_name) {
-            if !has_update && entry.installed_version != api_entry.version {
-                entry.installed_version = api_entry.version.clone();
-                metadata_changed = true;
-            }
-            if entry.esoui_last_update != api_entry.last_update {
-                entry.esoui_last_update = api_entry.last_update;
-                metadata_changed = true;
-            }
+            metadata_changed |= reconcile_native_update_observation(
+                entry,
+                &api_entry.version,
+                api_entry.last_update,
+                has_update,
+            );
         }
 
         results.push(NativeAddonUpdateCheck {
@@ -13919,6 +14015,7 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    esoui_marker_installed: false,
                 },
             );
         }
@@ -13983,7 +14080,7 @@ fn save_prototype_tags(
         map.insert(key, tags.to_vec());
     }
     let json = serde_json::to_string_pretty(&map).map_err(|error| error.to_string())?;
-    std::fs::write(&path, json).map_err(|error| error.to_string())
+    atomic_file::atomic_write(&path, json.as_bytes()).map_err(|error| error.to_string())
 }
 
 /// Persist tags to the CFA-safe app-data store (primary) and mirror them into the
@@ -16739,12 +16836,8 @@ fn restore_character_subtrees_merge(
 
 fn write_raw_backup_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
-    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, content).map_err(|error| format!("Failed to write temp file: {error}"))?;
-    fs::rename(&tmp_path, &file_path).map_err(|error| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {error}")
-    })
+    atomic_file::atomic_write(&file_path, content)
+        .map_err(|error| format!("Failed to write backup: {error}"))
 }
 
 fn prune_auto_snapshots(backups_dir: &Path, keep: usize) {
@@ -18001,21 +18094,10 @@ fn write_text_file(
     update_hash_manifest_for_file(addons_root, folder_name, relative_path, &file_path)
 }
 
-/// Replace `file_path` with `content` via a sibling temp file and a rename.
-/// `fs::rename` replaces the destination atomically on Windows as well
-/// (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
+/// Replace `file_path` through the same unique, synced publisher as Tauri.
 fn write_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
-    let file_name = file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Invalid file path.".to_string())?;
-    let temp_path = file_path.with_file_name(format!("{file_name}.kalpa-tmp"));
-    fs::write(&temp_path, content)
-        .map_err(|error| format!("Failed to write temp file: {error}"))?;
-    fs::rename(&temp_path, file_path).map_err(|error| {
-        let _ = fs::remove_file(&temp_path);
-        format!("Failed to finalize write: {error}")
-    })
+    atomic_file::atomic_write(file_path, content)
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 fn update_hash_manifest_for_file(
@@ -18835,15 +18917,8 @@ fn persist_active_theme_id_to_settings_path(path: &Path, theme_id: &str) -> Resu
 }
 
 fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return Err(format!(
-                "Failed to create native theme state directory: {error}"
-            ));
-        }
-    }
-
-    fs::write(path, theme_id).map_err(|error| format!("Failed to write active theme id: {error}"))
+    atomic_file::atomic_write(path, theme_id.as_bytes())
+        .map_err(|error| format!("Failed to write active theme id: {error}"))
 }
 
 fn read_custom_themes() -> Vec<CatalogTheme> {
@@ -18923,17 +18998,13 @@ fn persist_custom_themes_to_path(
     path: &Path,
     custom_themes: &[CatalogTheme],
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create custom theme directory: {error}"))?;
-    }
-
     let store = NativeCustomThemeStore {
         themes: custom_themes.to_vec(),
     };
     let json = serde_json::to_string_pretty(&store)
         .map_err(|error| format!("Failed to serialize custom themes: {error}"))?;
-    fs::write(path, json).map_err(|error| format!("Failed to write custom themes: {error}"))
+    atomic_file::atomic_write(path, json.as_bytes())
+        .map_err(|error| format!("Failed to write custom themes: {error}"))
 }
 
 fn normalize_custom_themes(themes: Vec<CatalogTheme>) -> Vec<CatalogTheme> {
@@ -19184,37 +19255,8 @@ fn native_settings_to_store_value(
 }
 
 fn write_string_atomic(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create settings directory: {error}"))?;
-    }
-
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("settings.json");
-    let staging = path.with_file_name(format!("{file_name}.tmp-{}-{unique}", std::process::id()));
-
-    let write_result = (|| -> Result<(), String> {
-        let mut file = fs::File::create(&staging)
-            .map_err(|error| format!("Failed to stage settings: {error}"))?;
-        file.write_all(contents.as_bytes())
-            .map_err(|error| format!("Failed to write staged settings: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("Failed to sync staged settings: {error}"))?;
-        drop(file);
-        fs::rename(&staging, path).map_err(|error| format!("Failed to publish settings: {error}"))
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&staging);
-    }
-
-    write_result
+    atomic_file::atomic_write(path, contents.as_bytes())
+        .map_err(|error| format!("Failed to publish settings: {error}"))
 }
 
 fn parse_theme_catalog() -> Option<ThemeCatalog> {
@@ -19541,6 +19583,7 @@ fn rgb_from_hex(hex: &str) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     use slint::Model;
+    use std::io::Write;
 
     #[test]
     fn addon_meta_omits_empty_separators() {
@@ -22313,6 +22356,7 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            esoui_marker_installed: true,
         };
 
         hydrate_addon_from_metadata(&mut entry, &meta);
@@ -22325,6 +22369,53 @@ CombatMetrics_SavedVariables = {
         assert!(entry.favorite);
         assert!(tag_model_has_active(&entry.tags, "favorite"));
         assert!(tag_model_has_active(&entry.tags, "pvp-build"));
+    }
+
+    #[test]
+    fn native_pending_update_preserves_installed_publication_marker() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: true,
+        };
+
+        assert!(!reconcile_native_update_observation(
+            &mut meta, "v2", 200, true
+        ));
+        assert_eq!(meta.installed_version, "v1");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn native_update_check_rejects_a_stale_filelist_downgrade() {
+        assert!(!native_artifact_has_update("v2", "v1", 200, true, 100));
+        assert!(native_artifact_has_update("v1", "v2", 100, true, 200));
+        assert!(native_artifact_has_update("v2", "v1", 200, false, 100));
+    }
+
+    #[test]
+    fn native_matching_observation_can_establish_marker_provenance() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: false,
+        };
+
+        assert!(reconcile_native_update_observation(
+            &mut meta, " 1 ", 100, false
+        ));
+        assert_eq!(meta.installed_version, " 1 ");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
     }
 
     #[test]
@@ -22371,6 +22462,7 @@ CombatMetrics_SavedVariables = {
             "",
             0,
         );
+        stale.protected_edits_baseline = false;
         stale.last_updated = "Jan 1, 2025".into();
         let models = test_addon_models(vec![current, stale]);
         let updates = vec![
@@ -22389,15 +22481,34 @@ CombatMetrics_SavedVariables = {
         ];
 
         let available = apply_addon_update_check_results(&models, &updates);
+        let unprotected = unprotected_update_count(&models);
         let addons = models.all.borrow();
 
         assert_eq!(available, 1);
+        assert_eq!(unprotected, 1);
         assert_eq!(addons[0].badge.as_str(), "");
         assert_eq!(addons[0].state, 0);
         assert_eq!(addons[0].last_updated.as_str(), "Jul 1, 2026");
         assert_eq!(addons[1].state, 1);
         assert_eq!(addons[1].badge.as_str(), "Update");
         assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
+    }
+
+    #[test]
+    fn native_update_start_copy_discloses_missing_baseline_without_claiming_safety() {
+        let targets = vec![NativeAddonUpdateTarget {
+            folder_name: "MigratedAddon".to_string(),
+            esoui_id: 42,
+        }];
+
+        let disclosed = update_start_message(&targets, 1);
+        assert!(disclosed.contains("Protected Edits unavailable"));
+        assert!(disclosed.contains("no trusted file baseline"));
+        assert!(!disclosed.to_ascii_lowercase().contains("safe"));
+
+        let covered = update_start_message(&targets, 0);
+        assert_eq!(covered, "Applying 1 addon update...");
+        assert!(!covered.to_ascii_lowercase().contains("safe"));
     }
 
     #[test]
@@ -23522,9 +23633,9 @@ CombatMetrics_SavedVariables = {
                 updated: "03/03/26".to_string(),
                 created: "08/05/14".to_string(),
                 screenshots: Vec::new(),
-                download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
-                change_log: String::new(),
                 archived_versions: Vec::new(),
+                change_log: String::new(),
+                download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
             },
         );
 
@@ -23557,9 +23668,9 @@ CombatMetrics_SavedVariables = {
             updated: "03/03/26".to_string(),
             created: "08/05/14".to_string(),
             screenshots: Vec::new(),
-            download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
-            change_log: String::new(),
             archived_versions: Vec::new(),
+            change_log: String::new(),
+            download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
         };
 
         let installed =

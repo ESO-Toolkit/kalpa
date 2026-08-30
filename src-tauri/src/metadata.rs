@@ -18,11 +18,23 @@ pub struct AddonMetadata {
     /// ESOUI last-updated timestamp in epoch milliseconds (from the API).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub esoui_last_update: u64,
+    /// Whether `esoui_last_update` is known to belong to the artifact installed
+    /// locally. Metadata written before this flag existed only recorded an API
+    /// observation, so it must not suppress a version mismatch until a matching
+    /// observation or real install establishes the marker's provenance.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub esoui_marker_installed: bool,
 }
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+const CURRENT_METADATA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataStore {
@@ -33,7 +45,7 @@ pub struct MetadataStore {
 impl Default for MetadataStore {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: CURRENT_METADATA_VERSION,
             addons: HashMap::new(),
         }
     }
@@ -46,8 +58,9 @@ fn metadata_path(addons_path: &Path) -> std::path::PathBuf {
 /// Load a JSON file with automatic recovery from crash artifacts.
 ///
 /// Recovery order when the primary file is missing or corrupted:
-/// 1. `.json.tmp` — a completed write that was never renamed into place
-///    (crash between the temp write and the rename in `save_json_with_backup`).
+/// 1. Legacy `.json.tmp` — a completed write made by an older Kalpa version
+///    that was never renamed into place. New writes use unique staging names
+///    and never treat those uncommitted leftovers as recovery candidates.
 /// 2. `.json.bak` — the copy of the previous primary taken during the last save.
 ///
 /// Returns `T::default()` if all sources are missing or corrupted.
@@ -63,26 +76,23 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
         );
     }
 
-    // Primary missing or corrupted — try .tmp (newest data, written but not renamed).
+    // Primary missing or corrupted — preserve compatibility with the fixed
+    // staging artifact written by older Kalpa versions. New unique staging
+    // leftovers are deliberately ignored because they were never committed.
     let tmp = path.with_extension("json.tmp");
     if let Ok(content) = fs::read_to_string(&tmp) {
         if let Ok(data) = serde_json::from_str::<T>(&content) {
             eprintln!("Recovered data from incomplete write {}.", tmp.display());
-            // Promote the .tmp so subsequent loads hit the primary path.
-            // On Windows fs::rename can't overwrite, so remove the corrupt primary first.
-            // Best-effort: if promotion fails the data is still returned correctly;
-            // the next load will recover from .tmp again.
-            if let Err(e) = fs::remove_file(path) {
-                eprintln!(
-                    "Warning: could not remove corrupt primary {}: {e}",
-                    path.display()
-                );
-            }
-            if let Err(e) = fs::rename(&tmp, path) {
+            // Publish through the shared writer so replacing a corrupt primary
+            // never opens a remove-before-rename gap. Remove only this known
+            // legacy artifact after the complete primary has been published.
+            if let Err(e) = crate::atomic_file::atomic_write(path, content.as_bytes()) {
                 eprintln!(
                     "Warning: could not promote {} to primary: {e}",
                     tmp.display()
                 );
+            } else if let Err(e) = fs::remove_file(&tmp) {
+                eprintln!("Warning: could not remove legacy {}: {e}", tmp.display());
             }
             return data;
         }
@@ -103,8 +113,9 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 /// Save data as JSON with atomic write and automatic backup.
 ///
-/// Writes and fsyncs `.json.tmp`, copies the current primary to `.json.bak`, then
-/// renames the temp over the primary. The ordering matters: copying to `.bak`
+/// Writes and fsyncs a uniquely owned sibling staging file, copies the current
+/// primary to `.json.bak`, then atomically publishes the replacement. The
+/// ordering matters: copying to `.bak`
 /// first would overwrite the last good backup with a possibly-corrupt primary
 /// before the replacement was safe on disk — destroying the very copy the `.bak`
 /// recovery in [`load_json_with_backup`] exists to provide.
@@ -112,33 +123,29 @@ pub fn save_json_with_backup<T: Serialize>(path: &Path, data: &T) -> Result<(), 
     let json =
         serde_json::to_string_pretty(data).map_err(|e| format!("Failed to serialize: {e}"))?;
 
-    // Flush the replacement to stable storage before anything else is touched.
-    // Without sync_all a power loss can journal the rename (and the .bak copy)
-    // while both files' data blocks are still in page cache, leaving primary,
-    // .tmp and .bak all zero-length — the whole recovery ladder defeated and the
-    // store silently reset to T::default() on the next load.
-    let tmp = path.with_extension("json.tmp");
-    let write_tmp = || -> std::io::Result<()> {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()
-    };
-    if let Err(e) = write_tmp() {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("Failed to write temp file: {e}"));
-    }
+    let mut replacement = crate::atomic_file::AtomicFile::create(path)
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    replacement
+        .write_all(json.as_bytes())
+        .map_err(|e| format!("Failed to write temp file: {e}"))?;
 
-    // Only now is the previous primary expendable (ignore if it doesn't exist).
+    // commit_with flushes and syncs the replacement before this callback. Only
+    // then is the previous primary copied. The backup itself uses the same
+    // crash-safe publisher, so a failed refresh preserves the old backup.
     let bak = path.with_extension("json.bak");
-    let _ = fs::copy(path, &bak);
-
-    // fs::rename replaces the destination atomically on both Unix and Windows
-    // (MoveFileExW with MOVEFILE_REPLACE_EXISTING). Removing the primary first
-    // would only add a window in which no primary exists at all.
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("Failed to finalize write: {e}")
-    })
+    replacement
+        .commit_with(|_| {
+            if path.is_file() {
+                // Backup refresh has historically been best-effort. Preserve
+                // that behavior while using atomic publication so a failed
+                // refresh cannot truncate the previously valid backup.
+                if let Ok(previous) = fs::read(path) {
+                    let _ = crate::atomic_file::atomic_write(&bak, &previous);
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("Failed to finalize write: {e}"))
 }
 
 pub fn format_timestamp(secs: u64) -> String {
@@ -202,7 +209,28 @@ pub fn format_timestamp(secs: u64) -> String {
 }
 
 pub fn load_metadata(addons_path: &Path) -> MetadataStore {
-    load_json_with_backup(&metadata_path(addons_path))
+    let path = metadata_path(addons_path);
+    let mut store: MetadataStore = load_json_with_backup(&path);
+
+    // Version 1 stored every filelist marker as if it belonged to the local
+    // artifact, even when the user deferred the corresponding update. Keep the
+    // value for diagnostics/relearning, but do not let it veto a version
+    // mismatch until a post-migration install or matching observation confirms
+    // its provenance.
+    if store.version < CURRENT_METADATA_VERSION {
+        for addon in store.addons.values_mut() {
+            addon.esoui_marker_installed = false;
+        }
+        store.version = CURRENT_METADATA_VERSION;
+        if let Err(e) = save_json_with_backup(&path, &store) {
+            eprintln!(
+                "Warning: failed to persist metadata migration for {}: {e}",
+                path.display()
+            );
+        }
+    }
+
+    store
 }
 
 pub fn save_metadata(addons_path: &Path, store: &MetadataStore) -> Result<(), String> {
@@ -230,11 +258,22 @@ pub fn record_install_ext(
     let existing = store.addons.get(folder_name);
     // Preserve existing tags when re-recording an install (e.g. update)
     let existing_tags = existing.map(|m| m.tags.clone()).unwrap_or_default();
-    // Keep existing last_update if new one is 0
-    let last_update = if esoui_last_update == 0 {
-        existing.map(|m| m.esoui_last_update).unwrap_or(0)
+    // The filelist is eventually consistent with filedetails. When this
+    // install has a marker, preserve the greatest marker already proven to
+    // belong to an installed artifact so a lagging response cannot make that
+    // artifact look older than it is. Observation-only markers from migrated
+    // metadata do not belong to the artifact being installed and must be
+    // replaced by the download's marker. A zero marker means this install has
+    // no proven ESOUI publication identity (manual imports and dependency
+    // installs use this path), so an older artifact's marker must not be
+    // inherited.
+    let last_update = if esoui_last_update > 0 {
+        existing
+            .filter(|m| m.esoui_marker_installed)
+            .map(|m| m.esoui_last_update.max(esoui_last_update))
+            .unwrap_or(esoui_last_update)
     } else {
-        esoui_last_update
+        0
     };
     // `installed_at` records the last time Kalpa actually downloaded/installed
     // this addon locally (a real install or update). It is intentionally
@@ -257,6 +296,7 @@ pub fn record_install_ext(
             installed_at,
             tags: existing_tags,
             esoui_last_update: last_update,
+            esoui_marker_installed: esoui_last_update > 0,
         },
     );
 }
@@ -272,13 +312,24 @@ pub fn reconcile_addon(
     esoui_last_update: u64,
     download_url: &str,
 ) {
+    reconcile_addon_identity(meta, esoui_id, download_url);
+
+    // Reconciliation can observe an older filelist entry than the marker
+    // captured when the artifact was downloaded. Never regress the marker.
+    meta.esoui_last_update = meta.esoui_last_update.max(esoui_last_update);
+    meta.esoui_marker_installed = true;
+}
+
+/// Reconcile API identity fields without attaching a publication marker.
+/// Auto-link uses this when the observed API version differs from the local
+/// artifact: linking an addon must not make a pending update look installed.
+pub fn reconcile_addon_identity(meta: &mut AddonMetadata, esoui_id: u32, download_url: &str) {
     if esoui_id > 0 {
         meta.esoui_id = esoui_id;
     }
     if meta.download_url.is_empty() && !download_url.is_empty() {
         meta.download_url = download_url.to_string();
     }
-    meta.esoui_last_update = esoui_last_update;
 }
 
 pub fn remove_entry(store: &mut MetadataStore, folder_name: &str) {
@@ -300,7 +351,7 @@ mod tests {
         save_json_with_backup(&path, &store).unwrap();
 
         let loaded: MetadataStore = load_json_with_backup(&path);
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, CURRENT_METADATA_VERSION);
         assert_eq!(loaded.addons.len(), 1);
         assert_eq!(loaded.addons["TestAddon"].esoui_id, 123);
         assert_eq!(loaded.addons["TestAddon"].installed_version, "1.0.0");
@@ -309,8 +360,44 @@ mod tests {
     #[test]
     fn load_returns_default_for_missing_file() {
         let loaded: MetadataStore = load_json_with_backup(Path::new("/nonexistent/path.json"));
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, CURRENT_METADATA_VERSION);
         assert!(loaded.addons.is_empty());
+    }
+
+    #[test]
+    fn load_metadata_migrates_observation_only_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = metadata_path(tmp.path());
+
+        // Version 1 metadata could not distinguish a filelist observation
+        // from a marker belonging to the artifact installed on disk.
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "addons": {
+                    "Addon": {
+                        "esouiId": 7,
+                        "installedVersion": "v1",
+                        "downloadUrl": "https://example.invalid/addon.zip",
+                        "installedAt": "",
+                        "esouiLastUpdate": 42
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_metadata(tmp.path());
+        assert_eq!(loaded.version, CURRENT_METADATA_VERSION);
+        assert_eq!(loaded.addons["Addon"].esoui_last_update, 42);
+        assert!(!loaded.addons["Addon"].esoui_marker_installed);
+
+        // Migration is persisted so a later process does not re-enter the
+        // ambiguous legacy state.
+        let persisted: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(persisted.version, CURRENT_METADATA_VERSION);
+        assert!(!persisted.addons["Addon"].esoui_marker_installed);
     }
 
     #[test]
@@ -362,11 +449,18 @@ mod tests {
         save_json_with_backup(&path, &good).unwrap();
         assert!(bak.exists());
 
-        // Occupying the temp path with a directory makes the write fail.
-        fs::create_dir(tmp.path().join("test.json.tmp")).unwrap();
-        let mut other = MetadataStore::default();
-        record_install(&mut other, "Other", 2, "2.0", "url");
-        assert!(save_json_with_backup(&path, &other).is_err());
+        struct SerializationFailure;
+        impl serde::Serialize for SerializationFailure {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(<S::Error as serde::ser::Error>::custom(
+                    "injected serialization failure",
+                ))
+            }
+        }
+        assert!(save_json_with_backup(&path, &SerializationFailure).is_err());
 
         let backup: MetadataStore =
             serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
@@ -397,6 +491,39 @@ mod tests {
         let backup: MetadataStore =
             serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
         assert!(backup.addons.is_empty());
+    }
+
+    #[test]
+    fn concurrent_saves_never_share_a_staging_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(tmp.path().join("test.json"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let path = path.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    for iteration in 0..100 {
+                        let value = serde_json::json!({
+                            "writer": writer,
+                            "iteration": iteration,
+                        });
+                        save_json_with_backup(path.as_ref(), &value)?;
+                    }
+                    Ok::<(), String>(())
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(path.as_ref()).unwrap()).unwrap();
+        assert!(value.get("writer").is_some());
+        assert!(value.get("iteration").is_some());
     }
 
     #[test]
@@ -437,6 +564,47 @@ mod tests {
         assert_eq!(meta.esoui_last_update, 999);
         // download_url was non-empty, so it is preserved (not clobbered).
         assert_eq!(meta.download_url, "url");
+    }
+
+    #[test]
+    fn publication_marker_never_regresses() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 200);
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 100);
+        assert_eq!(store.addons["Addon"].esoui_last_update, 200);
+
+        reconcile_addon(store.addons.get_mut("Addon").unwrap(), 1, 50, "url");
+        assert_eq!(store.addons["Addon"].esoui_last_update, 200);
+    }
+
+    #[test]
+    fn install_replaces_an_observation_only_marker() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "Addon", 1, "1.0", "url", 300);
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 200);
+
+        let meta = &store.addons["Addon"];
+        assert_eq!(meta.esoui_last_update, 200);
+        assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn install_without_marker_clears_an_older_artifacts_provenance() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url", 200);
+
+        record_install(&mut store, "Addon", 1, "1.0", "manual-url");
+
+        let meta = &store.addons["Addon"];
+        assert_eq!(meta.installed_version, "1.0");
+        assert_eq!(meta.esoui_last_update, 0);
+        assert!(!meta.esoui_marker_installed);
     }
 
     #[test]
@@ -511,6 +679,31 @@ mod tests {
         assert!(path.exists());
         let reloaded: MetadataStore = load_json_with_backup(&path);
         assert_eq!(reloaded.addons["LatestData"].esoui_id, 77);
+    }
+
+    #[test]
+    fn load_never_promotes_an_uncommitted_unique_staging_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let staging = tmp.path().join("test.json.tmp-999-1-deadbeef");
+        let bak = tmp.path().join("test.json.bak");
+        fs::write(&path, "corrupted").unwrap();
+
+        let mut uncommitted = MetadataStore::default();
+        record_install(&mut uncommitted, "Uncommitted", 1, "1.0", "url");
+        fs::write(&staging, serde_json::to_vec(&uncommitted).unwrap()).unwrap();
+
+        let mut backup = MetadataStore::default();
+        record_install(&mut backup, "Backup", 2, "2.0", "url");
+        fs::write(&bak, serde_json::to_vec(&backup).unwrap()).unwrap();
+
+        let loaded: MetadataStore = load_json_with_backup(&path);
+        assert!(loaded.addons.contains_key("Backup"));
+        assert!(!loaded.addons.contains_key("Uncommitted"));
+        assert!(
+            staging.exists(),
+            "load must not claim another writer's staging"
+        );
     }
 
     #[test]
