@@ -9,6 +9,7 @@ mod edit_backups;
 mod esoui;
 mod file_hashes;
 pub mod game_instances;
+mod install_txn;
 mod installer;
 mod manifest;
 mod manifest_cache;

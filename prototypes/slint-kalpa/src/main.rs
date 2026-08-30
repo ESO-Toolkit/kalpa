@@ -22,6 +22,8 @@ mod edit_backups;
 #[path = "../../../src-tauri/src/file_hashes.rs"]
 mod file_hashes;
 
+#[path = "../../../src-tauri/src/install_txn.rs"]
+mod install_txn;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/installer.rs"]
 mod installer;
@@ -2373,6 +2375,7 @@ struct RealAddonDraft {
 }
 
 fn real_addon_entries(addons_root: &Path) -> Result<Vec<AddonEntry>, String> {
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     let store = metadata::load_metadata(addons_root);
     let mut addon_dirs = fs::read_dir(addons_root)
         .map_err(|error| format!("Failed to read AddOns folder: {error}"))?
@@ -9839,7 +9842,10 @@ fn wire_safety_actions(ui: &KalpaWindow) {
         ui.set_status_error_message("Restoring snapshot...".into());
         spawn_maintenance_job(
             ui.as_weak(),
-            move || safe_migration::restore_snapshot(&addons_root, &snapshot_id),
+            move || {
+                let _transaction = install_txn::lock_and_recover(&addons_root)?;
+                safe_migration::restore_snapshot(&addons_root, &snapshot_id)
+            },
             |ui, result| match result {
                 Ok(count) => {
                     // Rescan through the shared refresh callback: the addon models
@@ -12899,8 +12905,13 @@ fn install_downloaded_addon_blocking(
     version: &str,
     download_url: &str,
 ) -> Result<Vec<String>, String> {
-    let installed_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
-    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
+    let installed_folders = installer::install_addon_zip_with_hashes(
+        zip_path,
+        addons_dir,
+        esoui_id,
+        version,
+        installer::ExtractHooks::NONE,
+    )?;
 
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_dir);
@@ -13326,27 +13337,22 @@ fn apply_native_pending_conflict_files_blocking(
         .map(|path| format!("{}/{}", pending.folder_name, path))
         .collect::<HashSet<_>>();
 
-    let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip(&pending.zip_path, addons_dir)?
-    } else {
-        installer::extract_addon_zip_selective(&pending.zip_path, addons_dir, &skip_files)?
-    };
-
     let zip_hashes = if pending.zip_hashes.is_empty() {
         file_hashes::hash_zip_entries(&pending.zip_path, &pending.folder_name)?
     } else {
         pending.zip_hashes.clone()
     };
     let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
-    file_hashes::record_hashes_with_zip_baseline(
-        addons_dir,
+    let empty_overrides = HashMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes(
         &pending.zip_path,
-        &installed_folders,
-        &pending.folder_name,
-        &zip_hashes,
+        addons_dir,
+        &skip_files,
+        installer::ExtractHooks::NONE,
         pending.esoui_id,
         &pending.update_version,
-        hash_overrides.as_ref(),
+        &pending.folder_name,
+        hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
     let _guard = metadata_guard();
@@ -13548,22 +13554,17 @@ fn apply_native_single_addon_update(
         .map(|path| format!("{}/{}", target.folder_name, path))
         .collect::<HashSet<_>>();
 
-    let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip(zip.path(), addons_dir)?
-    } else {
-        installer::extract_addon_zip_selective(zip.path(), addons_dir, &skip_files)?
-    };
-
     let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
-    file_hashes::record_hashes_with_zip_baseline(
-        addons_dir,
+    let empty_overrides = HashMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes(
         zip.path(),
-        &installed_folders,
-        &target.folder_name,
-        &zip_hashes,
+        addons_dir,
+        &skip_files,
+        installer::ExtractHooks::NONE,
         target.esoui_id,
         remote_version,
-        hash_overrides.as_ref(),
+        &target.folder_name,
+        hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
 
     let _guard = metadata_guard();
@@ -13886,10 +13887,14 @@ fn native_try_install_dep(
     let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
     let dep_zip =
         esoui::download_addon(&dep_info.download_url, None).map_err(|_| "download_failed")?;
-    let dep_folders =
-        installer::extract_addon_zip(dep_zip.path(), addons_dir).map_err(|_| "extract_failed")?;
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|_| "hash_record_failed")?;
+    let dep_folders = installer::install_addon_zip_with_hashes(
+        dep_zip.path(),
+        addons_dir,
+        dep_id,
+        &dep_info.version,
+        installer::ExtractHooks::NONE,
+    )
+    .map_err(|_| "extract_failed")?;
 
     for folder in &dep_folders {
         let version = read_local_version(addons_dir, folder);
@@ -14158,6 +14163,7 @@ fn set_addon_disabled_on_disk(
     folder_name: &str,
     disabled: bool,
 ) -> Result<(), String> {
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     validate_addon_folder_name(folder_name)?;
     if disabled {
         let src = addons_root.join(folder_name);
@@ -14183,6 +14189,10 @@ fn set_addon_disabled_on_disk(
 }
 
 fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), String> {
+    // Retain the cross-process guard across the existence snapshot, both
+    // deletions, and metadata cleanup so a concurrent publisher cannot place a
+    // replacement into the gap and have this operation delete it.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     validate_addon_folder_name(folder_name)?;
 
     let enabled_exists = addons_root.join(folder_name).is_dir();
@@ -14190,10 +14200,10 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     let disabled_exists = addons_root.join(&disabled_name).is_dir();
 
     if enabled_exists {
-        installer::remove_addon(addons_root, folder_name)?;
+        installer::remove_addon_locked(addons_root, folder_name)?;
     }
     if disabled_exists {
-        installer::remove_addon(addons_root, &disabled_name)?;
+        installer::remove_addon_locked(addons_root, &disabled_name)?;
     }
     if !enabled_exists && !disabled_exists {
         return Err(format!("Addon folder not found: {folder_name}"));
@@ -15301,6 +15311,9 @@ fn restore_edit_backup_file(
     {
         return Err("Invalid backup timestamp.".to_string());
     }
+    // Serialize the live-file replacement with installer publication in the
+    // Tauri process as well as this native process.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
 
     let timestamp_dir = backup.backed_up_at.replace(':', "-");
     let source_root = addons_root
@@ -18329,6 +18342,8 @@ fn write_text_file(
     content: &str,
 ) -> Result<(), String> {
     let file_path = addon_file_path(addons_root, folder_name, relative_path)?;
+    // Serialize the file/manifest pair with publication by the Tauri process.
+    let _transaction = install_txn::lock_and_recover(addons_root)?;
     // Temp file + rename instead of writing in place: a crash or a Controlled
     // Folder Access block mid-write would otherwise leave the live addon file
     // truncated, and update_hash_manifest_for_file would immediately record the
