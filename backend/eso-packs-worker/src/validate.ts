@@ -30,12 +30,37 @@ export async function readJsonBody(request: Request): Promise<JsonBodyResult> {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { ok: false, reason: "too-large" };
   }
-  const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) {
-    return { ok: false, reason: "too-large" };
+  const reader = request.body?.getReader();
+  if (!reader) return { ok: false, reason: "invalid-json" };
+  const chunks: Uint8Array[] = [];
+  let byteCount = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteCount += value.byteLength;
+      if (byteCount > MAX_BODY_BYTES) {
+        try {
+          await reader.cancel("Request body is too large");
+        } catch {
+          // The size verdict is already known; an aborted stream cannot change it.
+        }
+        return { ok: false, reason: "too-large" };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, reason: "invalid-json" };
+  }
+
+  const bytes = new Uint8Array(byteCount);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   try {
-    return { ok: true, body: JSON.parse(text) };
+    return { ok: true, body: JSON.parse(new TextDecoder().decode(bytes)) };
   } catch {
     return { ok: false, reason: "invalid-json" };
   }
