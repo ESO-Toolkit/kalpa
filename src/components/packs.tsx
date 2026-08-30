@@ -129,6 +129,7 @@ export function Packs({
     AddonSettings
   > | null>(null);
   const [applyingSettings, setApplyingSettings] = useState(false);
+  const importOperationSeqRef = useRef(0);
 
   // Export state
   const [exportIncludeSettings, setExportIncludeSettings] = useState(false);
@@ -151,6 +152,32 @@ export function Packs({
   const [myPacksPage, setMyPacksPage] = useState(1);
   const [myPacksHasMore, setMyPacksHasMore] = useState(false);
   const [duplicatingPackId, setDuplicatingPackId] = useState<string | null>(null);
+  const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
+
+  const loadMyPacksSeqRef = useRef(0);
+  const authIdentity = authUser?.userId ?? null;
+  const authIdentityRef = useRef(authIdentity);
+  const authUserRef = useRef(authUser);
+  /* eslint-disable react-hooks/refs */
+  // Keep the request guards current as soon as props render, before a stale
+  // promise continuation can run ahead of the transition effect below.
+  authIdentityRef.current = authIdentity;
+  authUserRef.current = authUser;
+  /* eslint-enable react-hooks/refs */
+
+  useEffect(() => {
+    // Auth can change outside the local logout handler (for example after a
+    // child request receives a 401). Clear all private state for both logout
+    // and account switches, while the sequence bump here rejects old loads.
+    loadMyPacksSeqRef.current++;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMyPacks([]);
+    setMyPacksPage(1);
+    setMyPacksHasMore(false);
+    setMyPacksLoading(false);
+    setMyPacksLoadingMore(false);
+    setVotingPacks(new Set());
+  }, [authIdentity]);
 
   // Delete state
   const [deletingPack, setDeletingPack] = useState(false);
@@ -277,11 +304,6 @@ export function Packs({
   }, []);
 
   // ── My Packs loader ──────────────────────────────────────────────
-  const loadMyPacksSeqRef = useRef(0);
-  const authUserRef = useRef(authUser);
-  // eslint-disable-next-line react-hooks/refs
-  authUserRef.current = authUser;
-
   const loadMyPacks = useCallback(
     async (page: number = 1) => {
       const currentUser = authUserRef.current;
@@ -302,7 +324,8 @@ export function Packs({
           author: currentUser.userId,
           status: "all",
         });
-        if (seq !== loadMyPacksSeqRef.current) return;
+        if (seq !== loadMyPacksSeqRef.current || authIdentityRef.current !== currentUser.userId)
+          return;
         if (page === 1) {
           setMyPacks(result.packs);
         } else {
@@ -312,10 +335,11 @@ export function Packs({
         const PAGE_SIZE = 10;
         setMyPacksHasMore(result.packs.length >= PAGE_SIZE);
       } catch (e) {
-        if (seq !== loadMyPacksSeqRef.current) return;
+        if (seq !== loadMyPacksSeqRef.current || authIdentityRef.current !== currentUser.userId)
+          return;
         toast.error(`Failed to load your packs: ${getTauriErrorMessage(e)}`);
       } finally {
-        if (seq === loadMyPacksSeqRef.current) {
+        if (seq === loadMyPacksSeqRef.current && authIdentityRef.current === currentUser.userId) {
           setMyPacksLoading(false);
           setMyPacksLoadingMore(false);
         }
@@ -538,32 +562,40 @@ export function Packs({
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return;
 
+    const operationId = ++importOperationSeqRef.current;
     setResolvingCode(true);
     setImportError(null);
     setImportedPack(null);
     setImportedFileSettings(null);
     try {
       const pack = await invokeOrThrow<SharedPack>("resolve_share_code", { code: trimmed });
+      if (operationId !== importOperationSeqRef.current) return;
       setImportedPack(pack);
     } catch (e) {
+      if (operationId !== importOperationSeqRef.current) return;
       setImportError(getTauriErrorMessage(e));
     } finally {
-      setResolvingCode(false);
+      if (operationId === importOperationSeqRef.current) {
+        setResolvingCode(false);
+      }
     }
   }, []);
 
   const handleImportFile = async () => {
+    const operationId = ++importOperationSeqRef.current;
+    setResolvingCode(false);
     const path = await openFileDialog({
       filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
       multiple: false,
     });
-    if (!path) return;
+    if (!path || operationId !== importOperationSeqRef.current) return;
 
     setImportError(null);
     setImportedPack(null);
     setImportedFileSettings(null);
     try {
       const result = await invokeOrThrow<EsoPackFile>("import_pack_file", { path });
+      if (operationId !== importOperationSeqRef.current) return;
       setImportedPack({
         title: result.pack.title,
         description: result.pack.description,
@@ -574,13 +606,20 @@ export function Packs({
         sharedAt: result.sharedAt,
         expiresAt: "",
       });
-      if (result.settings && Object.keys(result.settings).length > 0) {
-        setImportedFileSettings(result.settings);
-      }
+      setImportedFileSettings(
+        result.settings && Object.keys(result.settings).length > 0 ? result.settings : null
+      );
     } catch (e) {
+      if (operationId !== importOperationSeqRef.current) return;
       setImportError(getTauriErrorMessage(e));
     }
   };
+
+  const handleImportModeChange = useCallback(() => {
+    ++importOperationSeqRef.current;
+    setResolvingCode(false);
+    setImportError(null);
+  }, []);
 
   // Auto-resolve share code from deep link
   useEffect(() => {
@@ -848,13 +887,15 @@ export function Packs({
   };
 
   // ── Voting ──────────────────────────────────────────────────────────
-  const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
-
   const handleLogout = useCallback(async () => {
     if (loggingOut) return;
     setLoggingOut(true);
     try {
       await invokeOrThrow("auth_logout");
+      // A private list request may still resolve after the authenticated session
+      // is gone. Invalidate every page load before clearing signed-in state so
+      // neither its result nor its cleanup can publish into the signed-out view.
+      loadMyPacksSeqRef.current++;
       onAuthChange(null);
       setMyPacks([]);
       setMyPacksPage(1);
@@ -1116,12 +1157,15 @@ export function Packs({
                           importedPackAddonsToInstall={importedPackAddonsToInstall}
                           onResolveCode={handleResolveShareCode}
                           onImportFile={handleImportFile}
+                          onImportModeChange={handleImportModeChange}
                           onInstall={handleInstallImportedPack}
                           hasSettings={
                             !!importedFileSettings && Object.keys(importedFileSettings).length > 0
                           }
                           applyingSettings={applyingSettings}
                           onClear={() => {
+                            ++importOperationSeqRef.current;
+                            setResolvingCode(false);
                             setImportedPack(null);
                             setImportedFileSettings(null);
                             setImportError(null);

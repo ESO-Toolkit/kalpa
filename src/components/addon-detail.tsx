@@ -1022,7 +1022,7 @@ function AddonDetailBase({
                 <EsouiTab
                   esouiId={addon.esouiId}
                   isOffline={isOffline}
-                  installedVersion={addon.version}
+                  installedVersion={updateResult?.currentVersion ?? addon.version}
                 />
               </Suspense>
             )}
