@@ -3892,22 +3892,7 @@ pub async fn write_addon_file(
         // Atomic temp-file + rename: the file being saved is one the user hand
         // edited, so a crash or a Controlled Folder Access block mid-write must
         // not be able to truncate it.
-        let tmp_name = format!(
-            "{}.kalpa-edit-tmp",
-            file_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-        );
-        let tmp_path = file_path
-            .parent()
-            .map(|p| p.join(&tmp_name))
-            .unwrap_or_else(|| PathBuf::from(&tmp_name));
-        fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
-        fs::rename(&tmp_path, &file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to write file: {e}")
-        })?;
+        write_addon_file_atomically(&file_path, content.as_bytes())?;
 
         // Re-hash only the file we just wrote — compute_addon_hashes would walk
         // the entire addon folder (0.7-1.5 s per Ctrl+S on large addons) just to
@@ -3934,6 +3919,11 @@ pub async fn write_addon_file(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn write_addon_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
+    crate::atomic_file::atomic_write(file_path, content)
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 #[tauri::command]
@@ -5840,7 +5830,7 @@ fn save_profiles_with_mirror(
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(store) {
-            let _ = fs::write(mirror, json);
+            let _ = crate::atomic_file::atomic_write(mirror, json.as_bytes());
         }
     }
     Ok(())
@@ -8701,12 +8691,8 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     // Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING), so removing the
     // previous export first would only open a window where a crash leaves the
     // user with no .esopack at all.
-    let tmp_path = file_path.with_extension("esopack.tmp");
-    fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {e}"))?;
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })
+    crate::atomic_file::atomic_write(&file_path, json.as_bytes())
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 #[tauri::command]
@@ -9025,14 +9011,8 @@ pub async fn import_sv_settings(
             // Unix AND on Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
             // so the live file is never removed first — a failure here leaves
             // the previous settings in place instead of no file at all.
-            let tmp = sv_dir.join(format!("{folder}.lua.tmp"));
-            if let Err(e) = fs::write(&tmp, &substituted) {
+            if let Err(e) = write_imported_sv(&dest, substituted.as_bytes()) {
                 errors.push(format!("{folder}: failed to write: {e}"));
-                continue;
-            }
-            if let Err(e) = fs::rename(&tmp, &dest) {
-                let _ = fs::remove_file(&tmp);
-                errors.push(format!("{folder}: failed to finalize write: {e}"));
                 continue;
             }
 
@@ -9047,6 +9027,10 @@ pub async fn import_sv_settings(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn write_imported_sv(destination: &Path, content: &[u8]) -> Result<(), String> {
+    crate::atomic_file::atomic_write(destination, content).map_err(|error| error.to_string())
 }
 
 /// Walk the SavedVariables `.lua` files, parse each that parses successfully,
@@ -10363,10 +10347,7 @@ fn revert_performance_mode_to_webview(settings_path: &Path) {
     let Ok(serialized) = serde_json::to_string_pretty(&value) else {
         return;
     };
-    let temp = settings_path.with_extension("json.native-revert.tmp");
-    if fs::write(&temp, serialized).is_ok() {
-        let _ = fs::rename(&temp, settings_path);
-    }
+    let _ = crate::atomic_file::atomic_write(settings_path, serialized.as_bytes());
 }
 
 /// One-shot query for the WebView frontend: did the last launch auto-revert
@@ -12501,6 +12482,82 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_pack_exports_never_share_a_staging_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = std::sync::Arc::new(temp.path().join("pack.esopack"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let destination = destination.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let pack = EsoPackFile {
+                        format: "esopack".to_string(),
+                        version: 1,
+                        pack: EsoPackData {
+                            title: format!("Writer {writer}"),
+                            description: String::new(),
+                            pack_type: "addon-pack".to_string(),
+                            tags: vec![],
+                            addons: vec![],
+                        },
+                        shared_at: String::new(),
+                        shared_by: String::new(),
+                        settings: HashMap::new(),
+                    };
+                    start.wait();
+                    export_pack_file(pack, destination.to_string_lossy().to_string()).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let contents = fs::read_to_string(destination.as_ref()).unwrap();
+        serde_json::from_str::<EsoPackFile>(&contents).unwrap();
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(crate::atomic_file::STAGING_INFIX)
+        }));
+    }
+
+    #[test]
+    fn concurrent_import_and_editor_writes_leave_complete_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let imported = std::sync::Arc::new(temp.path().join("Addon.lua"));
+        let edited = std::sync::Arc::new(temp.path().join("init.lua"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let imported = imported.clone();
+                let edited = edited.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let lua = format!("Addon = {{ writer = {writer} }}\n");
+                    start.wait();
+                    write_imported_sv(imported.as_ref(), lua.as_bytes()).unwrap();
+                    write_addon_file_atomically(edited.as_ref(), lua.as_bytes()).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        for path in [imported.as_ref(), edited.as_ref()] {
+            let contents = fs::read_to_string(path).unwrap();
+            assert!(contents.starts_with("Addon = { writer = "));
+            assert!(contents.ends_with(" }\n"));
+        }
+        assert!(!temp.path().join("Addon.lua.tmp").exists());
+        assert!(!temp.path().join("init.lua.kalpa-edit-tmp").exists());
+    }
+
+    #[test]
     fn restore_buffer_gate_refuses_only_above_the_ceiling() {
         assert!(ensure_restore_buffer_fits(MAX_RESTORE_BUFFER_BYTES).is_ok());
         let err = ensure_restore_buffer_fits(MAX_RESTORE_BUFFER_BYTES + 1)
@@ -12573,6 +12630,14 @@ mod tests {
         // …and every unrelated setting is preserved verbatim.
         assert_eq!(value["theme"], "nordic");
         assert_eq!(value["autoUpdate"], true);
+        assert!(!settings.with_extension("json.native-revert.tmp").exists());
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(crate::atomic_file::STAGING_INFIX)
+        }));
     }
 
     #[test]

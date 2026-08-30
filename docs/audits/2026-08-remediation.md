@@ -7,7 +7,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
 | W2 | pr-open | `fix/audit-w2-d1-reconciliation` | [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) (draft) | - | D-W2-1, D-W2-2 | Fresh REVISE; follow-up APPROVE | Worker check; 208 tests; Wrangler dry-run | Technically ready and stacked on W1. Draft/merge hold remains: deletion-capable code and later `apply` each require separate maintainer approval. |
 | W3 | pr-open | `fix/audit-w3-worker-hardening` | [#379](https://github.com/ESO-Toolkit/kalpa/pull/379) (draft) | - | D-W3-1 reaccepted after reconsultation | Fresh REVISE; follow-up APPROVE | Worker check; 233 tests; Wrangler dry-run | Technically ready and stacked on refreshed W2/D-W2-2; remains draft with no real deployment. |
-| P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
+| P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
@@ -30,6 +30,16 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
 ## Decisions
+
+### D-P0-1 — One shared atomic publisher, separate transaction locks and launch protocol
+
+- Chosen for P0-A1: a dependency-free `atomic_file.rs` shared by the Tauri and Slint crates. Each operation creates a same-directory staging file with `create_new(true)` and a PID, monotonic counter, and random nonce; writes are flushed and `sync_all` completes before a bounded atomic replacement attempt. The operation owns exactly one staging path and cleanup never scans for or removes another writer's file.
+- The helper supports byte/string writes and streamed `Read + Write + Seek` use through `AtomicFile`, so large snapshot ZIPs do not need to be buffered. A process-local final-publish mutex mitigates simultaneous Windows replacements but is explicitly not a read-modify-write lock.
+- Durability contract: after success, readers see a complete old or new file. Unix additionally attempts a parent-directory sync after rename; Windows has no portable directory-sync guarantee, so the file contents are durable before publication but rename metadata persistence across sudden power loss is not claimed.
+- Compatibility: metadata keeps the primary → legacy `.json.tmp` → `.json.bak` recovery order. New unique staging files are uncommitted implementation details and are never promoted or globally cleaned. Existing primary/backup formats and JSON/wire shapes remain unchanged.
+- P0-A2 design: put a separate shared OS-backed transaction lock around the full read → mutate → write sequence, with canonical identities and ordering, bounded waits, crash release, and two-process/owner-kill tests. Never infer lock ownership from a PID or delete a lock file as stale. Existing useful in-process mutexes remain.
+- P0-A3 design: replace fixed-delay correctness with a parent-issued launch ID bound to the pending boot record and a positive child-ready signal. The parent keeps WebView authority until the matching child reports ready; timeout, early exit, stale markers, duplicate/deep-link launches, retry, and shutdown must fail back observably. A3 reduces concurrent writers; A2 remains defense in depth.
+- Rejected: buffering all output into one bytes-only helper, because snapshot archives can be large; and sharing only a staging-name utility while retaining bespoke publication logic, because that violates the one-implementation acceptance criterion and permits durability/cleanup drift.
 
 ### D-W1-1 — Durable Object storage is mutation authority
 
@@ -205,6 +215,19 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review after Fable: REVISE. Verified that unowned rows in the shared D1 `packs` table could permanently block W1's authority flip, malformed authority fields beyond status could reach D1, and restore's inline upsert retained stale `author_id`. Added an explicit `unowned_d1_ids` operator adjudication limited to D1 witnesses, reused full request validation plus persisted-field invariants for authority, and made restore conflict updates replace `author_id`. Focused endpoint/unit regressions pass; Worker check, 208 tests, and Wrangler dry-run pass. The single permitted Sol follow-up is pending.
 - Sol follow-up after the three corrections: APPROVE. Findings: none. Missing tests: none. Wire contract: OK. Bug-class propagation sweep: CLEAN. W2 is technically ready on its W1 base, but PR #378 remains draft and unmerged pending explicit maintainer approval for deletion-capable code; exact `apply` remains a separate approval after a dry-run soak and plan inspection.
 
+### 2026-08-26 — Codex (P0-A1)
+
+- Active branch: `fix/audit-p0-a1-atomic-writer`, stacked on `fix/audit-w1-worker-consistency`.
+- Design: completed the required full P0 consultation with `claude --model fable` before implementation. Fable selected D-P0-1: one shared streaming atomic publisher for A1, a distinct OS transaction-lock layer for A2, and a launch-ID/positive-ready protocol for A3.
+- Failing-before evidence: the concurrent metadata-save regression against the fixed `test.json.tmp` stage failed on Windows with finalization OS error 2. Clean-target testing then exposed simultaneous Windows replacement `PermissionDenied`, addressed with a process-local final-publish mutex and bounded transient retry without remove-then-rename.
+- Implementation: added the shared `atomic_file.rs` to both Rust crates and migrated metadata, settings, safe migration ZIP/restore streams, SavedVariables, edit backups, profile mirror, Pack Hub import/export, addon editor, native settings fallback, and the Slint duplicate writer paths. Legacy `.json.tmp` recovery remains read-only compatibility behavior; new unique stages are never promoted or swept. P0-A2 and P0-A3 were not implemented.
+- Tests: added uniqueness, owner-only cleanup, failed-publish cleanup, concurrent complete/parseable JSON, primary/backup recovery, concurrent pack export, import/editor completeness, and native fallback staging regressions. Root checks pass (`npm run check`; 37 files/490 tests). Main Rust strict clippy, format, and tests pass (814 passed, 17 ignored); Slint strict clippy, format, and tests pass (760 passed, 15 ignored). Native Slint and Tauri debug builds pass with Cargo outputs on `B:\codex-build\kalpa-p0a1-target`. The destructive sandbox passes 3/3.
+- Sol review: initial `REVISE` identified four remaining fixed replacement writers in `commands.rs` (Pack Hub SavedVariables import, addon editor, native settings fallback, and pack export). All four, plus the profile mirror found in the same sweep, were migrated and covered by regressions. Required follow-up verdict: `APPROVE`; no findings, no missing tests, wire contract OK, bug-class sweep clean.
+- Safety: an ENOSPC event invalidated earlier partial evidence; source diffs were inspected for truncation, `safe_migration.rs` was restored from HEAD, disk capacity was recovered, and every required gate was rerun from scratch. Existing Roaming/Local app state was moved aside and restored around the destructive sandbox. Fresh sandbox outputs are preserved at `C:\Users\brayd\AppData\Roaming\com.kalpa.desktop.codex-p0a1-sandbox-output-20260826` and `C:\Users\brayd\AppData\Local\com.kalpa.desktop.codex-p0a1-sandbox-output-20260826`.
+- Handoff: pushed the branch and opened stacked draft PR [#380](https://github.com/ESO-Toolkit/kalpa/pull/380). No merge was performed.
+- Blockers: none.
+- Exact next action: review and merge the stacked P0-A1 draft after W1, then begin P0-A2 from D-P0-1 with a fresh Fable consultation before choosing the lock dependency/API.
+
 ### 2026-08-26 — Codex
 
 - Active branch: `fix/audit-w1-worker-consistency`
@@ -264,6 +287,6 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - W2: maintainer approval is required before merging any reconciliation path that can delete rows from shared D1.
 - W1: decide whether moving vote-record authority from KV/in-memory memo into DO storage belongs in W1 or W3. The current W1 code prevents resurrection but retains the pre-existing eviction/double-toggle limitation for later hardening.
 - W1: owner sign-off is required before the later manual `kv` → `do` authority flip and must accept backup restore as the post-flip rollback path.
-- P0-A2: lock dependency and user-visible timeout behavior require a Fable recommendation and may require maintainer input.
+- P0-A2: D-P0-1 establishes the lock invariants; a fresh Fable consultation must choose the concrete cross-platform dependency/API and user-visible timeout behavior before implementation.
 - R4/R5: ownership/conflict behavior that changes install outcomes requires explicit design review before implementation.
 - H2: `kalpa-elder-scrolls-themes/` is currently untracked; provenance must be inspected before tracking or ignoring it.

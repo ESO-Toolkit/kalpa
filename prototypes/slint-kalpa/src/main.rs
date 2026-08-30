@@ -2,6 +2,9 @@
 
 slint::include_modules!();
 
+#[path = "../../../src-tauri/src/atomic_file.rs"]
+mod atomic_file;
+
 #[path = "native_char_backup.rs"]
 mod char_backup;
 
@@ -429,7 +432,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -6915,22 +6918,10 @@ fn apply_imported_pack_settings_blocking(
             }
         }
 
-        let temp = sv_dir.join(format!("{folder}.lua.tmp"));
-        if let Err(error) = fs::write(&temp, &substituted) {
+        if let Err(error) = atomic_file::atomic_write(&destination, substituted.as_bytes()) {
             result
                 .errors
                 .push(format!("{folder}: failed to write: {error}"));
-            continue;
-        }
-        // Rename straight over the destination: fs::rename replaces it
-        // atomically on Windows too (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
-        // so deleting it first would only open a window where the live
-        // SavedVariables file is missing.
-        if let Err(error) = fs::rename(&temp, &destination) {
-            let _ = fs::remove_file(&temp);
-            result
-                .errors
-                .push(format!("{folder}: failed to finalize write: {error}"));
             continue;
         }
 
@@ -13983,7 +13974,7 @@ fn save_prototype_tags(
         map.insert(key, tags.to_vec());
     }
     let json = serde_json::to_string_pretty(&map).map_err(|error| error.to_string())?;
-    std::fs::write(&path, json).map_err(|error| error.to_string())
+    atomic_file::atomic_write(&path, json.as_bytes()).map_err(|error| error.to_string())
 }
 
 /// Persist tags to the CFA-safe app-data store (primary) and mirror them into the
@@ -16739,12 +16730,8 @@ fn restore_character_subtrees_merge(
 
 fn write_raw_backup_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
-    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, content).map_err(|error| format!("Failed to write temp file: {error}"))?;
-    fs::rename(&tmp_path, &file_path).map_err(|error| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {error}")
-    })
+    atomic_file::atomic_write(&file_path, content)
+        .map_err(|error| format!("Failed to write backup: {error}"))
 }
 
 fn prune_auto_snapshots(backups_dir: &Path, keep: usize) {
@@ -18001,21 +17988,10 @@ fn write_text_file(
     update_hash_manifest_for_file(addons_root, folder_name, relative_path, &file_path)
 }
 
-/// Replace `file_path` with `content` via a sibling temp file and a rename.
-/// `fs::rename` replaces the destination atomically on Windows as well
-/// (MoveFileExW with MOVEFILE_REPLACE_EXISTING).
+/// Replace `file_path` through the same unique, synced publisher as Tauri.
 fn write_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
-    let file_name = file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "Invalid file path.".to_string())?;
-    let temp_path = file_path.with_file_name(format!("{file_name}.kalpa-tmp"));
-    fs::write(&temp_path, content)
-        .map_err(|error| format!("Failed to write temp file: {error}"))?;
-    fs::rename(&temp_path, file_path).map_err(|error| {
-        let _ = fs::remove_file(&temp_path);
-        format!("Failed to finalize write: {error}")
-    })
+    atomic_file::atomic_write(file_path, content)
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 fn update_hash_manifest_for_file(
@@ -18835,15 +18811,8 @@ fn persist_active_theme_id_to_settings_path(path: &Path, theme_id: &str) -> Resu
 }
 
 fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return Err(format!(
-                "Failed to create native theme state directory: {error}"
-            ));
-        }
-    }
-
-    fs::write(path, theme_id).map_err(|error| format!("Failed to write active theme id: {error}"))
+    atomic_file::atomic_write(path, theme_id.as_bytes())
+        .map_err(|error| format!("Failed to write active theme id: {error}"))
 }
 
 fn read_custom_themes() -> Vec<CatalogTheme> {
@@ -18923,17 +18892,13 @@ fn persist_custom_themes_to_path(
     path: &Path,
     custom_themes: &[CatalogTheme],
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create custom theme directory: {error}"))?;
-    }
-
     let store = NativeCustomThemeStore {
         themes: custom_themes.to_vec(),
     };
     let json = serde_json::to_string_pretty(&store)
         .map_err(|error| format!("Failed to serialize custom themes: {error}"))?;
-    fs::write(path, json).map_err(|error| format!("Failed to write custom themes: {error}"))
+    atomic_file::atomic_write(path, json.as_bytes())
+        .map_err(|error| format!("Failed to write custom themes: {error}"))
 }
 
 fn normalize_custom_themes(themes: Vec<CatalogTheme>) -> Vec<CatalogTheme> {
@@ -19184,37 +19149,8 @@ fn native_settings_to_store_value(
 }
 
 fn write_string_atomic(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create settings directory: {error}"))?;
-    }
-
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("settings.json");
-    let staging = path.with_file_name(format!("{file_name}.tmp-{}-{unique}", std::process::id()));
-
-    let write_result = (|| -> Result<(), String> {
-        let mut file = fs::File::create(&staging)
-            .map_err(|error| format!("Failed to stage settings: {error}"))?;
-        file.write_all(contents.as_bytes())
-            .map_err(|error| format!("Failed to write staged settings: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("Failed to sync staged settings: {error}"))?;
-        drop(file);
-        fs::rename(&staging, path).map_err(|error| format!("Failed to publish settings: {error}"))
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&staging);
-    }
-
-    write_result
+    atomic_file::atomic_write(path, contents.as_bytes())
+        .map_err(|error| format!("Failed to publish settings: {error}"))
 }
 
 fn parse_theme_catalog() -> Option<ThemeCatalog> {
@@ -19541,6 +19477,7 @@ fn rgb_from_hex(hex: &str) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     use slint::Model;
+    use std::io::Write;
 
     #[test]
     fn addon_meta_omits_empty_separators() {
@@ -23522,6 +23459,8 @@ CombatMetrics_SavedVariables = {
                 updated: "03/03/26".to_string(),
                 created: "08/05/14".to_string(),
                 screenshots: Vec::new(),
+                archived_versions: Vec::new(),
+                change_log: String::new(),
                 download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
             },
         );
@@ -23555,6 +23494,8 @@ CombatMetrics_SavedVariables = {
             updated: "03/03/26".to_string(),
             created: "08/05/14".to_string(),
             screenshots: Vec::new(),
+            archived_versions: Vec::new(),
+            change_log: String::new(),
             download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
         };
 
