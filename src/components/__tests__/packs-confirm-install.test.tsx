@@ -161,4 +161,54 @@ describe("Packs install confirmation", () => {
     await waitFor(() => expect(screen.queryByText("Install 1 new addon?")).not.toBeInTheDocument());
     expect(await screen.findByRole("button", { name: "Install 1 New Addon" })).toBeInTheDocument();
   });
+
+  it("disarms immediately while the new pack loads and stays disarmed if the load fails", async () => {
+    let rejectBeta!: (reason: Error) => void;
+    mocks.invoke.mockImplementation((command: string, args?: { id?: string }) => {
+      if (command === "list_packs") {
+        return Promise.resolve({ packs: [], page: 1, sort: "votes" });
+      }
+      if (command === "get_pack") {
+        if (args?.id === "pack-b") {
+          return new Promise((_resolve, reject) => {
+            rejectBeta = reject;
+          });
+        }
+        return Promise.resolve(pack("pack-a", "Alpha Pack", 1001));
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    const user = userEvent.setup();
+    const baseProps = {
+      addonsPath: "C:/ESO/AddOns",
+      authUser: null,
+      installedAddons: [],
+      onAuthChange: vi.fn(),
+      onClose: vi.fn(),
+      onRefresh: vi.fn(),
+    };
+
+    const { rerender } = render(<Packs {...baseProps} initialPackId="pack-a" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("selected-pack")).toHaveTextContent("Alpha Pack")
+    );
+    await user.click(await screen.findByRole("button", { name: "Install 1 New Addon" }));
+    expect(screen.getByText("Install 1 new addon?")).toBeInTheDocument();
+
+    rerender(<Packs {...baseProps} initialPackId="pack-b" />);
+
+    // The confirmation must vanish before the new pack resolves — the old
+    // pack's armed confirm bar must not be clickable during the load window.
+    await waitFor(() => expect(screen.queryByText("Install 1 new addon?")).not.toBeInTheDocument());
+    expect(screen.getByTestId("selected-pack")).toHaveTextContent("Alpha Pack");
+
+    rejectBeta(new Error("network down"));
+
+    // And it must stay disarmed after the load fails, even though the old
+    // pack is still the one on screen.
+    await waitFor(() => expect(screen.queryByText("Install 1 new addon?")).not.toBeInTheDocument());
+    expect(screen.getByTestId("selected-pack")).toHaveTextContent("Alpha Pack");
+  });
 });

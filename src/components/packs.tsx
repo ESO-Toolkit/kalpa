@@ -289,12 +289,15 @@ export function Packs({
   const selectPackSeqRef = useRef(0);
   const handleSelectPack = useCallback(async (id: string) => {
     const seq = ++selectPackSeqRef.current;
+    // Disarm before the await, not after: an armed "Install N addons?" bar must
+    // not stay clickable while the newly selected pack is still loading, nor
+    // survive a load failure.
+    setConfirmInstall(false);
     setLoadingDetail(true);
     try {
       const pack = await invokeOrThrow<Pack>("get_pack", { id });
       if (seq !== selectPackSeqRef.current) return;
       setSelectedPack(pack);
-      setConfirmInstall(false);
     } catch (e) {
       if (seq !== selectPackSeqRef.current) return;
       toast.error(`Failed to load pack: ${getTauriErrorMessage(e)}`);
