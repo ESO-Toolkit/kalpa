@@ -14,7 +14,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
 | R7 | pr-open | `fix/audit-r7-build-evidence-bound` | [#372](https://github.com/ESO-Toolkit/kalpa/pull/372) (draft) | - | - | APPROVE | Focused 1; evidence 16; frontend 490; Rust 808 | D-R7-1: one-shot evidence uses the encoder's exact `scanned_len` byte bound; stacked on W1. |
-| R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
+| R8 | pr-open | `fix/audit-r8-protected-edits-disclosure` | [#381](https://github.com/ESO-Toolkit/kalpa/pull/381) (draft) | - | D-R8-1 | REVISE; all in-scope findings addressed | Frontend check; 497 tests; Rust 809/17 ignored; Slint 757/15 ignored; clippy/fmt; native release build; Luna PASS | Non-blocking disclosure for absent/invalid baselines across React and shipped Slint; stacked on W1. |
 | R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
 | F2 | pr-open | `fix/audit-f2-log-directory-sequencing` | [#373](https://github.com/ESO-Toolkit/kalpa/pull/373) (draft) | - | D-F2-1 | REVISE x2; all verified findings addressed | Frontend check; 496 tests | Stacked on W1; no wire or persisted-data changes. |
@@ -59,13 +59,22 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Rejected: all dated backups as live witnesses. Their intentional 90-day retention includes deleted packs and would make parity impossible; only a post-deploy `backup:latest` represents the current corpus.
 - Rollback: shadow-mode mutations deliberately do not rewrite the full KV index, so rolling back to old code can omit post-deploy creates from listings even though their detail and D1 rows survive. Any rollback after this deployment therefore requires a verified backup/DO export restore; changing the flag alone is not a reconciliation strategy.
 
-### D-W1-3 — Journal lifecycle transitions and serve detail from DO authority
+ ### D-W1-3 — Journal lifecycle transitions and serve detail from DO authority
 
 - Chosen after the twice-reject Fable reconsultation: commit canonical lifecycle state together with a deterministic operation journal and per-pack pending marker, then resume idempotent KV vote/detail, D1, and full-index effects on retry and by Durable Object alarm.
 - Delete commits the tombstone before destructive cleanup, so partial vote cleanup cannot coexist with a live pack. Same-owner retry resumes pending cleanup; slug reuse is refused until the old lifecycle finishes.
 - Create retry by the same actor resumes the stored canonical create instead of returning duplicate. Success is acknowledged only after the KV detail step; an incomplete mirror returns a retryable failure while public detail reads use the DO and remain consistent with canonical lifecycle state.
 - Unowned shadow records reconcile against newer KV detail by `updated_at`; an ownership latch prevents stale KV from overwriting DO mutations. Version disagreement is exposed as `stale_shadow` and blocks the authority flip.
-- Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+ - Rejected: external-effects-first compensation, because the compensating store can fail and a crash can leave an unowned orphan; pending markers without operation identity or alarms, because retries cannot be safely attributed and cleanup may remain stuck indefinitely.
+
+ ### D-R8-1 — Disclose missing coverage without blocking updates
+
+- Chosen: treat an absent, corrupt, or folder-mismatched `.kalpa-hashes` manifest as no trusted Protected Edits baseline and disclose that Kalpa cannot detect changed files before mutation. Updates remain enabled because no explicit blocking policy was chosen.
+- React manual, selected, batch, context-menu, and launch-auto-update flows share explicit coverage state. Batch coverage is refreshed at action time and published only while its captured instance generation and AddOns path remain current. The context shortcut opens the detail review flow, whose conflict report supplies the freshest single-addon baseline status.
+- Shipped Slint single and batch flows re-read manifests at action time, display the same specific risk, and never label unprotected updates “safe.”
+- Rejected: silently creating a trusted baseline from a migrated addon's existing files. Those files may already contain user edits, so seeding requires separate design review.
+- Rejected: blocking migrated addons from updating. That changes product policy beyond the audit's minimum acceptable fix.
+ - Compatibility: wire fields are additive and serde-defaulted; persisted metadata and hash-manifest formats are unchanged.
 ### D-F6-1 — Persisted optimistic state tracks confirmed storage
 
 - Chosen: centralize optimistic setting and installed-pack reference mutations in a hook that assigns monotonically increasing operation IDs, composes functional updates against the latest visible value, and records every successful serialized store write as the rollback target. Only the newest failed operation may change UI or surface an error; rollback restores confirmed storage rather than inverting the submitted value or reinstating a captured array.
@@ -269,6 +278,18 @@ Verified findings:
 5. Account deletion leaves other users' vote records attached to removed pack IDs, so a reused ID can inherit votes.
 
 Wire contract verdict: OK. Bug-class sweep found the restore and account-deletion sites above.
+
+### 2026-08-26 — R8 Protected Edits disclosure
+
+- Active branch: `fix/audit-r8-protected-edits-disclosure`, stacked on `fix/audit-w1-worker-consistency`.
+- Decision: D-R8-1 selects honest, specific, non-blocking disclosure and explicitly excludes baseline seeding from migrated files.
+- Implementation: added defaulted baseline-presence fields to installed-addon and conflict-report contracts; rejected corrupt/mismatched manifests; added persistent React and Slint warning hierarchy; ordered automatic updates after coverage scans; refreshed React batch and native single/batch coverage at action time; routed the context shortcut through fresh detail preflight; removed native “safe” claims.
+- Sol initial: `REVISE`. Verified the context-menu legacy bypass, launch auto-update race, ignored fresh single-update report, and corrupt-manifest validity. All four were addressed.
+- Sol follow-up: `REVISE`. Verified remaining first-run ordering, cached action-time coverage, and dishonest native copy. All in-scope disclosure findings were addressed. The requested broader disk-only baseline redesign and dormant native auto-update preference wiring were excluded from R8 rather than silently expanding scope.
+- Luna initial: `FAIL`. Verified that Review Update was pointer-only and that a late coverage scan could publish the old instance after a path switch. Added Context Menu / Shift+F10 access, focused menu active-descendant behavior, focus restoration, and generation/path-guarded reverse-resolution handling.
+- Luna follow-up: `PASS`; `TOKEN_VIOLATIONS`, `ACCESSIBILITY`, `STATE_FEEDBACK`, and `RESPONSIVE_BEHAVIOR` all reported none.
+- Evidence: `npm run check`; 40 frontend files / 497 tests; main Rust 809 passed / 17 ignored; Slint 757 passed / 15 ignored; main and Slint clippy with warnings denied; both fmt checks; native Slint release sidecar build; `git diff --check`.
+- Handoff: pushed the branch and opened draft stacked PR [#381](https://github.com/ESO-Toolkit/kalpa/pull/381). No merge was performed.
 
 ### 2026-08-26 — Codex F6
 
