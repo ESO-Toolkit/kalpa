@@ -1,6 +1,7 @@
 import type { Env, PackType, SharePackData, ShareRecord, ShareCodeResponse, ValidationError } from "./types";
 import { corsHeaders } from "./cors";
 import { readJsonBody, sanitizeAddons } from "./validate";
+import { rememberBounded } from "./bounded-map";
 
 // Unambiguous alphabet: no 0/O, 1/I/L
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -83,10 +84,12 @@ export interface EsoLogsUser {
 const TOKEN_CACHE_TTL_MS = 30_000;
 const TOKEN_CACHE_LIMIT = 500;
 const tokenCache = new Map<string, { user: EsoLogsUser; at: number }>();
+let tokenCacheGeneration = 0;
 
 /** Forget every memoized token identity. Tests resolve one token to several
  *  different identities, so they reset between cases. */
 export function resetTokenCache(): void {
+  tokenCacheGeneration += 1;
   tokenCache.clear();
 }
 
@@ -100,6 +103,9 @@ export async function validateBearerToken(request: Request): Promise<EsoLogsUser
   if (!authHeader?.startsWith("Bearer ")) return null;
 
   const token = authHeader.slice(7);
+  // Capture before the first await. A reset while hashing or fetching must
+  // invalidate this lookup just as surely as one that happens during fetch.
+  const generation = tokenCacheGeneration;
   const fingerprint = await tokenFingerprint(token);
   const cached = tokenCache.get(fingerprint);
   if (cached && Date.now() - cached.at < TOKEN_CACHE_TTL_MS) {
@@ -125,9 +131,8 @@ export async function validateBearerToken(request: Request): Promise<EsoLogsUser
       data?: { userData?: { currentUser?: EsoLogsUser } };
     };
     const user = body.data?.userData?.currentUser ?? null;
-    if (user) {
-      if (tokenCache.size >= TOKEN_CACHE_LIMIT) tokenCache.clear();
-      tokenCache.set(fingerprint, { user, at: Date.now() });
+    if (user && generation === tokenCacheGeneration) {
+      rememberBounded(tokenCache, fingerprint, { user, at: Date.now() }, TOKEN_CACHE_LIMIT);
     }
     return user;
   } catch {
