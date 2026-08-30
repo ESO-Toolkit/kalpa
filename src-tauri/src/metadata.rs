@@ -18,6 +18,17 @@ pub struct AddonMetadata {
     /// ESOUI last-updated timestamp in epoch milliseconds (from the API).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub esoui_last_update: u64,
+    /// ESOUI IDs of other addons whose archives also ship files into this
+    /// folder.
+    ///
+    /// A folder can be written by more than one addon: many ESOUI addons
+    /// vendor their libraries. Recording that as provenance means a library
+    /// that is *also* tracked in its own right keeps its own identity instead
+    /// of being demoted, while Kalpa still knows the folder is not solely its
+    /// own. Empty for the ordinary single-owner case, so old metadata files
+    /// round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundled_by: Vec<u32>,
     /// Whether `esoui_last_update` is known to belong to the artifact installed
     /// locally. Metadata written before this flag existed only recorded an API
     /// observation, so it must not suppress a version mismatch until a matching
@@ -350,6 +361,7 @@ fn empty_metadata() -> AddonMetadata {
         installed_at: String::new(),
         tags: Vec::new(),
         esoui_last_update: 0,
+        bundled_by: Vec::new(),
         esoui_marker_installed: false,
     }
 }
@@ -376,6 +388,9 @@ fn apply_changed_fields(
     }
     if before.esoui_last_update != after.esoui_last_update {
         current.esoui_last_update = after.esoui_last_update;
+    }
+    if before.bundled_by != after.bundled_by {
+        current.bundled_by = after.bundled_by.clone();
     }
     if before.esoui_marker_installed != after.esoui_marker_installed {
         current.esoui_marker_installed = after.esoui_marker_installed;
@@ -432,6 +447,16 @@ pub fn record_install_ext(
             .unwrap_or_default()
             .as_secs(),
     );
+    // A real-ID entry can still be separately tracked while an archive also
+    // ships its files. In that case `bundled_by` is live provenance, not stale
+    // state, so keep it when refreshing or re-recording that sibling. A zero
+    // ID cannot assert ownership and likewise preserves existing provenance.
+    // The only conversion that clears provenance is a genuinely bundled (ID 0)
+    // entry becoming a standalone primary install.
+    let bundled_by = existing
+        .filter(|m| esoui_id == 0 || m.esoui_id != 0)
+        .map(|m| m.bundled_by.clone())
+        .unwrap_or_default();
     store.addons.insert(
         folder_name.to_string(),
         AddonMetadata {
@@ -441,9 +466,99 @@ pub fn record_install_ext(
             installed_at,
             tags: existing_tags,
             esoui_last_update: last_update,
+            bundled_by,
             esoui_marker_installed: esoui_last_update > 0,
         },
     );
+}
+
+/// Record a folder that an archive wrote into but that the archive does not
+/// own outright.
+///
+/// This is the counterpart to [`record_install_ext`], which records the archive
+/// **primary** folder. Assigning every non-primary folder `esoui_id = 0` (the
+/// previous behaviour) silently demoted a library that the user also tracks in
+/// its own right: update checks skip `esoui_id == 0`, so the library stopped
+/// receiving updates entirely, and the demotion was effectively permanent.
+///
+/// Two cases, decided by what is already recorded for the folder:
+///
+/// * **Separately tracked** - a different, nonzero ID is already recorded. The
+///   folder keeps its identity, URL and ESOUI timestamp, and gains `parent_id`
+///   as provenance. `installed_version` is still refreshed from the manifest on
+///   disk, because the files really were overwritten and metadata must describe
+///   what is actually installed rather than preserving a stale version.
+/// * **Genuinely bundled** - nothing recorded, ID 0, or the same ID. The folder
+///   belongs to `parent_id`, so it takes the parent URL and stays out of update
+///   checks in its own right.
+pub fn record_bundled_folder(
+    store: &mut MetadataStore,
+    folder_name: &str,
+    parent_id: u32,
+    parent_url: &str,
+    local_version: &str,
+) {
+    let existing = store.addons.get(folder_name);
+    let separately_tracked = existing
+        .map(|m| m.esoui_id != 0 && m.esoui_id != parent_id)
+        .unwrap_or(false);
+
+    let tags = existing.map(|m| m.tags.clone()).unwrap_or_default();
+    let mut bundled_by = existing.map(|m| m.bundled_by.clone()).unwrap_or_default();
+    if parent_id != 0 && !bundled_by.contains(&parent_id) {
+        bundled_by.push(parent_id);
+    }
+    bundled_by.sort_unstable();
+    bundled_by.dedup();
+
+    let (esoui_id, download_url, esoui_last_update, esoui_marker_installed) = if separately_tracked
+    {
+        let owner = existing.expect("separately_tracked implies an existing entry");
+        (
+            owner.esoui_id,
+            owner.download_url.clone(),
+            owner.esoui_last_update,
+            owner.esoui_marker_installed,
+        )
+    } else {
+        (0, parent_url.to_string(), 0, false)
+    };
+
+    let installed_at = format_timestamp(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    );
+
+    store.addons.insert(
+        folder_name.to_string(),
+        AddonMetadata {
+            esoui_id,
+            installed_version: local_version.to_string(),
+            download_url,
+            installed_at,
+            tags,
+            esoui_last_update,
+            bundled_by,
+            esoui_marker_installed,
+        },
+    );
+}
+
+/// Drop `parent_id` from every folder that records it as provenance.
+///
+/// Used when the parent addon is removed. A separately tracked sibling keeps
+/// its own identity and its files; only the record that this parent also wrote
+/// there goes away. Genuinely bundled folders are left on disk exactly as
+/// before - other addons may declare a dependency on them.
+pub fn forget_bundled_parent(store: &mut MetadataStore, parent_id: u32) {
+    if parent_id == 0 {
+        return;
+    }
+    for meta in store.addons.values_mut() {
+        meta.bundled_by.retain(|id| *id != parent_id);
+    }
 }
 
 /// Reconcile API-derived fields on an existing metadata entry during `auto_link`
@@ -469,10 +584,11 @@ pub fn reconcile_addon(
 /// Auto-link uses this when the observed API version differs from the local
 /// artifact: linking an addon must not make a pending update look installed.
 pub fn reconcile_addon_identity(meta: &mut AddonMetadata, esoui_id: u32, download_url: &str) {
+    let was_bundled = meta.esoui_id == 0 && !meta.bundled_by.is_empty();
     if esoui_id > 0 {
         meta.esoui_id = esoui_id;
     }
-    if meta.download_url.is_empty() && !download_url.is_empty() {
+    if (was_bundled || meta.download_url.is_empty()) && !download_url.is_empty() {
         meta.download_url = download_url.to_string();
     }
 }
@@ -484,6 +600,150 @@ pub fn remove_entry(store: &mut MetadataStore, folder_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of R4: a library the user tracks in its own right keeps
+    /// its identity when some other addon's archive also ships it.
+    #[test]
+    fn a_separately_tracked_library_keeps_its_identity_when_bundled() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 900);
+        store
+            .addons
+            .get_mut("LibFoo")
+            .unwrap()
+            .tags
+            .push("favorite".to_string());
+
+        // Addon 3 bundles an older LibFoo and overwrites the folder.
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/addon-a", "1.2");
+
+        let lib = store.addons.get("LibFoo").expect("LibFoo still tracked");
+        assert_eq!(
+            lib.esoui_id, 7,
+            "must not be demoted to an untracked folder"
+        );
+        assert_eq!(lib.download_url, "https://esoui/lib-foo");
+        assert_eq!(lib.esoui_last_update, 900);
+        assert_eq!(lib.tags, vec!["favorite".to_string()]);
+        assert_eq!(lib.bundled_by, vec![3]);
+        // The files really were overwritten, so the recorded version describes
+        // what is on disk now - not the newer version that used to be there.
+        assert_eq!(lib.installed_version, "1.2");
+    }
+
+    /// Re-bundling by the owner itself is not a second owner, and a folder
+    /// nobody else tracks stays genuinely bundled.
+    #[test]
+    fn a_genuinely_bundled_folder_belongs_to_its_parent() {
+        let mut store = MetadataStore::default();
+
+        // Never seen before.
+        record_bundled_folder(&mut store, "LibBar", 3, "https://esoui/addon-a", "1.0");
+        let bar = store.addons.get("LibBar").unwrap();
+        assert_eq!(bar.esoui_id, 0);
+        assert_eq!(bar.download_url, "https://esoui/addon-a");
+        assert_eq!(bar.bundled_by, vec![3]);
+
+        // A second addon ships it too: provenance accumulates, sorted.
+        record_bundled_folder(&mut store, "LibBar", 9, "https://esoui/addon-b", "1.0");
+        assert_eq!(store.addons.get("LibBar").unwrap().bundled_by, vec![3, 9]);
+
+        // Bundled by the addon that already owns the folder is not a new owner.
+        record_install_ext(&mut store, "LibBaz", 4, "2.0", "https://esoui/baz", 0);
+        record_bundled_folder(&mut store, "LibBaz", 4, "https://esoui/baz", "2.0");
+        let baz = store.addons.get("LibBaz").unwrap();
+        assert_eq!(
+            baz.esoui_id, 0,
+            "same-owner re-record is an ordinary bundle"
+        );
+        assert_eq!(baz.bundled_by, vec![4]);
+    }
+
+    /// A folder recorded under a real ID is owned, not bundled, so stale
+    /// provenance from an earlier life as someone else's sibling is cleared.
+    #[test]
+    fn recording_a_primary_install_clears_stale_provenance() {
+        let mut store = MetadataStore::default();
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/addon-a", "1.0");
+        assert_eq!(store.addons.get("LibFoo").unwrap().bundled_by, vec![3]);
+
+        // An ID-0/manual record cannot disprove that archive ownership.
+        record_install_ext(&mut store, "LibFoo", 0, "1.0", "https://esoui/addon-a", 0);
+        assert_eq!(store.addons.get("LibFoo").unwrap().bundled_by, vec![3]);
+
+        // A real standalone identity is the deliberate conversion point.
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 0);
+        assert!(store.addons.get("LibFoo").unwrap().bundled_by.is_empty());
+    }
+
+    /// This is the standalone ID 7 -> parent ID 3 -> standalone ID 7
+    /// regression: refreshing the library must retain the parent's provenance.
+    #[test]
+    fn recording_a_separately_tracked_primary_preserves_parent_provenance() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 0);
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/addon-a", "1.2");
+
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 0);
+
+        let lib = store.addons.get("LibFoo").unwrap();
+        assert_eq!(lib.esoui_id, 7);
+        assert_eq!(lib.bundled_by, vec![3]);
+    }
+
+    /// Updating a separately tracked sibling must not erase the archives that
+    /// still own the copy on disk when there are multiple parent archives.
+    #[test]
+    fn recording_a_separately_tracked_primary_preserves_multiple_parents() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 0);
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/addon-a", "1.2");
+        record_bundled_folder(&mut store, "LibFoo", 9, "https://esoui/addon-b", "1.3");
+
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 0);
+
+        let lib = store.addons.get("LibFoo").unwrap();
+        assert_eq!(lib.esoui_id, 7);
+        assert_eq!(lib.bundled_by, vec![3, 9]);
+    }
+
+    /// Removing the parent drops only the provenance record.
+    #[test]
+    fn forgetting_a_parent_leaves_the_sibling_intact() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 0);
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/addon-a", "1.2");
+        record_bundled_folder(&mut store, "LibOnly", 3, "https://esoui/addon-a", "1.0");
+
+        forget_bundled_parent(&mut store, 3);
+
+        let lib = store.addons.get("LibFoo").unwrap();
+        assert!(lib.bundled_by.is_empty());
+        assert_eq!(lib.esoui_id, 7, "identity survives the parent going away");
+        assert_eq!(lib.installed_version, "1.2");
+        // A genuinely bundled folder stays recorded: other addons may depend
+        // on it, so it is not ours to delete.
+        let only = store.addons.get("LibOnly").expect("still recorded");
+        assert!(only.bundled_by.is_empty());
+        assert_eq!(only.esoui_id, 0);
+    }
+
+    /// Metadata written before `bundled_by` existed must load, and an entry
+    /// without provenance must not start writing an empty array into the file.
+    #[test]
+    fn metadata_without_provenance_round_trips_unchanged() {
+        let legacy = r#"{"version":1,"addons":{"LibFoo":{"esouiId":7,"installedVersion":"1.5","downloadUrl":"u","installedAt":"t"}}}"#;
+        let store: MetadataStore = serde_json::from_str(legacy).expect("legacy file loads");
+        let lib = store.addons.get("LibFoo").expect("entry present");
+        assert_eq!(lib.esoui_id, 7);
+        assert!(lib.bundled_by.is_empty());
+
+        let written = serde_json::to_string(&store).expect("serializes");
+        assert!(
+            !written.contains("bundledBy"),
+            "an empty provenance set must stay absent from the file, got: {written}"
+        );
+    }
 
     #[test]
     fn save_and_load_roundtrip() {
@@ -709,6 +969,23 @@ mod tests {
         assert_eq!(meta.esoui_last_update, 999);
         // download_url was non-empty, so it is preserved (not clobbered).
         assert_eq!(meta.download_url, "url");
+    }
+
+    #[test]
+    fn reconcile_addon_replaces_legacy_parent_url_when_healing_id_zero() {
+        let mut store = MetadataStore::default();
+        record_bundled_folder(&mut store, "LibFoo", 3, "https://esoui/parent", "1.0");
+
+        reconcile_addon(
+            store.addons.get_mut("LibFoo").unwrap(),
+            7,
+            999,
+            "https://esoui/lib-foo",
+        );
+
+        let meta = &store.addons["LibFoo"];
+        assert_eq!(meta.esoui_id, 7);
+        assert_eq!(meta.download_url, "https://esoui/lib-foo");
     }
 
     #[test]

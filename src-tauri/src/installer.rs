@@ -223,6 +223,7 @@ fn extract_with_rollback(
         Some(baseline) => {
             let manifests = crate::file_hashes::build_hash_manifests_for_folders(
                 &stage_dir,
+                addons_dir,
                 &installed,
                 baseline.esoui_id,
                 baseline.version,
@@ -667,6 +668,10 @@ fn extract_addon_zip_inner(
         return Err("ZIP archive contained no addon folders.".to_string());
     }
 
+    // Sorted, not `HashSet` order. Callers pick an archive's "primary" folder
+    // and fall back to the first entry when nothing else distinguishes them, so
+    // an unordered list meant the same archive could nominate a different
+    // primary on a second run.
     let mut folders: Vec<String> = created_folders.into_iter().collect();
     folders.sort();
     Ok(folders)

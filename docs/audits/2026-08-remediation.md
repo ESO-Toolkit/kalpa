@@ -10,7 +10,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | P0-A1 | pr-open | `fix/audit-p0-a1-atomic-writer` | [#380](https://github.com/ESO-Toolkit/kalpa/pull/380) (draft) | - | D-P0-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 814 passed/17 ignored; Slint 760 passed/15 ignored; native build; Tauri build; sandbox 3/3 | Shared crash-safe atomic writer; stacked on W1. |
 | P0-A2 | pr-open | `fix/audit-p0-a2-cross-process-locking` | [#388](https://github.com/ESO-Toolkit/kalpa/pull/388) (draft) | - | D-P0-A2 | REVISE; verified finding fixed; follow-up APPROVE | Root 490; Rust 828 passed/18 ignored; Slint 777 passed/16 ignored; native build; Tauri build; sandbox 3/3 | Shared bounded cross-process RMW locking; stacked on P0-A1. |
 | P0-A3 | pr-open | `fix/audit-p0-a3-sidecar-handshake` | [#389](https://github.com/ESO-Toolkit/kalpa/pull/389) (ready) | - | D-P0-1; D-P0-A3-FINAL; D-P0-A3-CLASSIFY; D-P0-A3-ACTIVATION; D-P0-A3-FATAL; Fable `SHIP: YES` | REVISE; all three findings fixed (2 and 3 after reversing an earlier refutation) | Root 490; Rust 859 passed/18 ignored; Slint 805 passed/16 ignored; strict clippy + fmt clean both crates; native sidecar build; **sandbox e2e 3/3**; 5/5 real-binary Windows handshake scenarios | All gates green, no outstanding work. Pushed (force-with-lease, maintainer-authorised, after the other session's rebase). Stacked on P0-A2 — merge in dependency order. |
-| R4 | design-done | - | - | - | D-R4-1 | - | - | Fable design complete (`consultations/r4-fable.md`). Implementation not started. **Must land before R5.** |
+| R4 | review-approved | `fix/audit-r4-sibling-ownership` | [#392](https://github.com/ESO-Toolkit/kalpa/pull/392) (draft) | - | D-R4-1 | APPROVE | Rust 820 passed/17 ignored; Slint 766 passed/15 ignored; clippy `-D warnings` both crates; fmt --check both; `npm run check`; native build | Implements D-R4-1. Removal now preserves successful disk deletion while reporting post-delete cleanup warnings, and Slint retains only folders that actually failed removal. **R5 sequences after this.** |
 | R5 | design-done | - | - | - | D-R5-1 | - | - | Fable design complete (`consultations/r5-fable.md`). Implementation not started. Sequence **after R4**. |
 | R6 | pr-open | `fix/audit-r6-crash-safe-installer` | [#399](https://github.com/ESO-Toolkit/kalpa/pull/399) (draft) | - | D-R6-1 | REVISE; all verified findings addressed; follow-up APPROVE | Root 490; Rust 840 passed/18 ignored; strict clippy both crates; native build; transaction 10; cross-instance copy 3; focused editor/restore tests | Crash-safe merged staging, folder swaps, hash promotion, and deterministic recovery; stacked on P0-A2. Slint test link and destructive sandbox have environment blockers recorded below. |
 | R7 | pr-open | `fix/audit-r7-build-evidence-bound` | [#372](https://github.com/ESO-Toolkit/kalpa/pull/372) (draft) | - | - | APPROVE | Focused 1; evidence 16; frontend 490; Rust 808 | D-R7-1: one-shot evidence uses the encoder's exact `scanned_len` byte bound; stacked on W1. |
@@ -225,6 +225,31 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Supersedes `installer.rs:951` `cancel_midway_preserves_pre_existing_addon_files`, which currently asserts the in-place semantics ("no file is removed, only some are overwritten") as a requirement.
 
 ## Session Log
+
+### 2026-08-28 — R4 removal-state review follow-up
+
+- A failed metadata/hash cleanup no longer converts an already successful on-disk removal into a failed removal. Cleanup is attempted comprehensively, metadata is persisted before hash cleanup, and warnings are returned through the Tauri wire contract and surfaced by the frontend.
+- Slint multi-folder removal now updates each successfully removed folder immediately, retains failed folders, and reports the exact failures instead of presenting an all-or-nothing result.
+- Added deterministic injected-operation regressions for partial removal and cleanup failures.
+- Gates: Rust 820 passed/17 ignored; Slint 766 passed/15 ignored; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean on both crates; `npm run check` and `git diff --check` pass.
+- Mandatory local Sol review (`gpt-5.5`, `xhigh`, read-only) returned exact `VERDICT: APPROVE`.
+
+### 2026-08-27 — R4 implemented
+
+- Implements D-R4-1. The ownership rule itself lives in `metadata::record_bundled_folder`, which the Slint crate shares verbatim by `#[path]`, so only the primary/bundled dispatch is duplicated between the two binaries.
+- `AddonMetadata` gains `bundled_by: Vec<u32>`, `#[serde(default, skip_serializing_if = "Vec::is_empty")]`. `metadata_without_provenance_round_trips_unchanged` pins both directions: a pre-change file loads, and an empty set is not written back into the JSON.
+- A separately tracked sibling keeps its ID, URL, ESOUI timestamp and tags, and gains the installing addon as provenance. `installed_version` is still refreshed from the manifest on disk, because the archive really did overwrite the files.
+- `record_install_ext` clears `bundled_by` when recording under a real ID: a folder recorded as owned is not simultaneously bundled.
+- Determinism: `extract_addon_zip` now returns its folder list **sorted** (it was `HashSet` order), and `determine_primary_folder` prefers a folder already recorded under this ID, then an exact case-insensitive title match, then the longest contained name, then the first entry. Previously an update whose title stopped matching could hand ownership to a bundled library.
+- The `auto_link` guard that made demotion permanent now keys on provenance. Entries written since `bundled_by` exists say outright who shipped them; legacy entries keep the old ID-0-plus-shared-URL shape but are healed when the on-disk manifest version equals the ESOUI version, which means the bundled copy is the standalone release and can be relinked with no mismatch risk. Anything else is left for the user rather than guessed.
+- Dependency installs route through the same rule. They previously stamped the dependency ID onto **every** extracted folder, which both overwrote separately tracked identities and made a two-folder dependency emit two identical update rows.
+- `write_folder_manifest` now unions `esoui_ids` instead of replacing it, so the hash store and the metadata store cannot disagree about who owns a folder.
+- Removing an addon drops only its provenance from other folders (`forget_bundled_parent`). Folders stay on disk because other addons may declare a dependency on them.
+- Review follow-up prevents the primary-folder fallback from claiming a separately tracked sibling when an unowned extracted folder is available, and pins the selection in both binaries.
+- Healing legacy ID-0 metadata now replaces a bundled parent's download URL with the standalone addon's URL instead of retaining the parent's identity.
+- Removing an owning addon now also removes that ID from every hash sidecar manifest while preserving any remaining owners.
+- **Failing-first verified after the fact, by re-running against the old behaviour.** With the sibling branch reverted to `record_install_ext(store, folder, 0, ..)`, `bundling_a_separately_tracked_library_does_not_take_it_over` and `removing_a_bundling_addon_leaves_the_library_tracked` both fail with `left: 0, right: 7` — exactly the demotion the finding describes. The inventory found **zero** existing coverage on any function R4 touches.
+- Gates: Rust 817 passed/17 ignored; Slint 763 passed/15 ignored; `cargo clippy --all-targets -- -D warnings` clean on both crates; `cargo fmt --check` clean on both; `npm run build:native-slint` succeeds.
 
 ### 2026-08-28 — Codex (H5 evidence refresh)
 

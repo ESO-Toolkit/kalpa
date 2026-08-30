@@ -11018,13 +11018,17 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
 
             let mut removed = 0usize;
             let mut failed = Vec::new();
+            let mut cleanup_warnings = Vec::new();
             let eso_running = addon_write_eso_running_warning_active(&ui);
             for folder_name in selected_folders {
                 if let Some(addons_root) = disk_root_for_addon(&folder_name) {
                     match remove_addon_from_disk(&addons_root, &folder_name) {
-                        Ok(()) => {
+                        Ok(outcome) => {
                             remove_master_addon(&models, &folder_name);
                             removed += 1;
+                            if let Some(warning) = outcome.cleanup_warning {
+                                cleanup_warnings.push(format!("{folder_name}: {warning}"));
+                            }
                         }
                         Err(error) => failed.push(format!("{folder_name}: {error}")),
                     }
@@ -11035,7 +11039,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             }
 
             apply_addon_view(&ui, &models);
-            let message = if failed.is_empty() {
+            let mut message = if failed.is_empty() {
                 format!("Removed {removed} selected addons.")
             } else {
                 format!(
@@ -11044,6 +11048,12 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                     failed.join("; ")
                 )
             };
+            if !cleanup_warnings.is_empty() {
+                message.push_str(&format!(
+                    " Cleanup warnings: {}",
+                    cleanup_warnings.join("; ")
+                ));
+            }
             ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
         }
     });
@@ -11136,9 +11146,10 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let folder_name = addon.folder_name.to_string();
         let eso_running = addon_write_eso_running_warning_active(&ui);
+        let mut cleanup_warning = None;
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
-                Ok(()) => {}
+                Ok(outcome) => cleanup_warning = outcome.cleanup_warning,
                 Err(error) => {
                     ui.set_status_error_message(error.into());
                     return;
@@ -11148,9 +11159,11 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&models, &folder_name);
         apply_addon_view(&ui, &models);
-        ui.set_status_error_message(
-            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
-        );
+        let mut message = format!("Removed {folder_name}.");
+        if let Some(warning) = cleanup_warning {
+            message.push_str(&format!(" Cleanup warning: {warning}"));
+        }
+        ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
     });
 }
 
@@ -11315,9 +11328,10 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         let folder_name = addon.folder_name.to_string();
         let eso_running = addon_write_eso_running_warning_active(&ui);
+        let mut cleanup_warning = None;
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
-                Ok(()) => {}
+                Ok(outcome) => cleanup_warning = outcome.cleanup_warning,
                 Err(error) => {
                     ui.set_status_error_message(error.into());
                     return;
@@ -11327,9 +11341,11 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&remove_models, &folder_name);
         apply_addon_view(&ui, &remove_models);
-        ui.set_status_error_message(
-            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
-        );
+        let mut message = format!("Removed {folder_name}.");
+        if let Some(warning) = cleanup_warning {
+            message.push_str(&format!(" Cleanup warning: {warning}"));
+        }
+        ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
     });
 
     let update_addon_ui = ui.as_weak();
@@ -11459,11 +11475,15 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
         match remove_addon_from_disk(&addons_root, &dep_name) {
-            Ok(()) => {
+            Ok(outcome) => {
                 remove_master_addon(&models, &dep_name);
                 apply_addon_view(&ui, &models);
+                let mut message = format!("Removed {dep_name}.");
+                if let Some(warning) = outcome.cleanup_warning {
+                    message.push_str(&format!(" Cleanup warning: {warning}"));
+                }
                 ui.set_status_error_message(
-                    addon_write_status_message(format!("Removed {dep_name}."), eso_running).into(),
+                    addon_write_status_message(message, eso_running).into(),
                 );
             }
             Err(error) => {
@@ -12772,18 +12792,42 @@ fn wire_discover(
         let eso_running = addon_write_eso_running_warning_active(&ui);
 
         match remove_addons_by_esoui_id(&remove_models, &esoui_id) {
-            Ok(removed) => {
-                if let Ok(mut ids) = remove_ids.lock() {
-                    ids.remove(&esoui_id);
+            Ok(outcome) => {
+                let still_installed = remove_models
+                    .all
+                    .borrow()
+                    .iter()
+                    .any(|addon| addon.esoui_id.as_str() == esoui_id);
+                if !still_installed {
+                    if let Ok(mut ids) = remove_ids.lock() {
+                        ids.remove(&esoui_id);
+                    }
+                    mark_discover_uninstalled_model(&model, &esoui_id);
                 }
-                mark_discover_uninstalled_model(&model, &esoui_id);
                 apply_addon_view(&ui, &remove_models);
-                let message = format!(
+                let mut message = format!(
                     "Removed {} addon folder{} for ESOUI {}.",
-                    removed.len(),
-                    if removed.len() == 1 { "" } else { "s" },
+                    outcome.removed.len(),
+                    if outcome.removed.len() == 1 { "" } else { "s" },
                     esoui_id
                 );
+                if !outcome.cleanup_warnings.is_empty() {
+                    message.push_str(&format!(
+                        " Cleanup warnings: {}",
+                        outcome.cleanup_warnings.join("; ")
+                    ));
+                }
+                if !outcome.failures.is_empty() {
+                    message.push_str(&format!(
+                        " Failed to remove: {}",
+                        outcome
+                            .failures
+                            .iter()
+                            .map(|(folder, error)| format!("{folder}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ));
+                }
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -12844,7 +12888,31 @@ fn mark_discover_uninstalled_model(discover_model: &ModelRc<DiscoverEntry>, esou
     }
 }
 
-fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec<String>, String> {
+struct RemoveByEsouiOutcome {
+    removed: Vec<String>,
+    cleanup_warnings: Vec<String>,
+    failures: Vec<(String, String)>,
+}
+
+fn remove_addons_by_esoui_id(
+    models: &AddonModels,
+    esoui_id: &str,
+) -> Result<RemoveByEsouiOutcome, String> {
+    remove_addons_by_esoui_id_with(models, esoui_id, |folder_name| {
+        let Some(addons_root) = disk_root_for_addon(folder_name) else {
+            // Demo/mock rows have no configured disk folder but still need to
+            // leave the model when the user removes them.
+            return Ok(None);
+        };
+        remove_addon_from_disk(&addons_root, folder_name).map(|outcome| outcome.cleanup_warning)
+    })
+}
+
+fn remove_addons_by_esoui_id_with(
+    models: &AddonModels,
+    esoui_id: &str,
+    mut remove_from_disk: impl FnMut(&str) -> Result<Option<String>, String>,
+) -> Result<RemoveByEsouiOutcome, String> {
     let targets = models
         .all
         .borrow()
@@ -12857,17 +12925,29 @@ fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec
         return Err(format!("No installed addon found for ESOUI {esoui_id}."));
     }
 
+    let mut removed = Vec::new();
+    let mut cleanup_warnings = Vec::new();
+    let mut failures = Vec::new();
     for folder_name in &targets {
-        if let Some(addons_root) = disk_root_for_addon(folder_name) {
-            remove_addon_from_disk(&addons_root, folder_name)?;
+        match remove_from_disk(folder_name) {
+            Ok(warning) => {
+                if let Some(warning) = warning {
+                    cleanup_warnings.push(format!("{folder_name}: {warning}"));
+                }
+                remove_master_addon(models, folder_name);
+                removed.push(folder_name.clone());
+            }
+            Err(error) => {
+                failures.push((folder_name.clone(), error));
+            }
         }
     }
 
-    for folder_name in &targets {
-        remove_master_addon(models, folder_name);
-    }
-
-    Ok(targets)
+    Ok(RemoveByEsouiOutcome {
+        removed,
+        cleanup_warnings,
+        failures,
+    })
 }
 
 fn discover_installed_snapshot(installed_ids: &Arc<Mutex<BTreeSet<String>>>) -> BTreeSet<String> {
@@ -12938,6 +13018,13 @@ fn install_downloaded_addon_blocking(
     Ok(installed_folders)
 }
 
+/// Mirror of the Tauri app's `record_installed_folders`.
+///
+/// The ownership rule itself lives in `metadata.rs`, which this crate shares
+/// verbatim, so only the primary/bundled dispatch is duplicated here. A folder
+/// the archive does not own goes through `record_bundled_folder`, which keeps a
+/// separately tracked library on its own ESOUI entry instead of demoting it to
+/// ID 0 and dropping it out of update checks.
 fn record_native_installed_folders(
     store: &mut metadata::MetadataStore,
     addons_dir: &Path,
@@ -12947,30 +13034,101 @@ fn record_native_installed_folders(
     esoui_title: &str,
     download_url: &str,
 ) {
-    let primary = determine_primary_folder(installed_folders, esoui_title);
+    let primary = determine_primary_folder(store, installed_folders, esoui_id, esoui_title);
     for folder in installed_folders {
-        let is_primary = *folder == primary;
-        let version = if is_primary && !esoui_version.is_empty() {
-            esoui_version.to_string()
+        let local_version = read_local_version(addons_dir, folder);
+        if *folder == primary {
+            let version = if esoui_version.is_empty() {
+                local_version
+            } else {
+                esoui_version.to_string()
+            };
+            metadata::record_install_ext(store, folder, esoui_id, &version, download_url, 0);
         } else {
-            read_local_version(addons_dir, folder)
-        };
-        metadata::record_install_ext(
-            store,
-            folder,
-            if is_primary { esoui_id } else { 0 },
-            &version,
-            download_url,
-            0,
-        );
+            metadata::record_bundled_folder(store, folder, esoui_id, download_url, &local_version);
+        }
     }
 }
 
-fn determine_primary_folder(installed_folders: &[String], esoui_title: &str) -> String {
+/// Mirror of the Tauri app's `determine_primary_folder`; see that function for
+/// why each step exists. Kept in sync deliberately: the two crates must agree
+/// on which folder an archive owns, or installing through one and updating
+/// through the other would hand ownership back and forth.
+fn determine_primary_folder(
+    store: &metadata::MetadataStore,
+    installed_folders: &[String],
+    esoui_id: u32,
+    esoui_title: &str,
+) -> String {
+    let same_id: Vec<&String> = if esoui_id == 0 {
+        Vec::new()
+    } else {
+        installed_folders
+            .iter()
+            .filter(|folder| {
+                store
+                    .addons
+                    .get(folder.as_str())
+                    .is_some_and(|meta| meta.esoui_id == esoui_id)
+            })
+            .collect()
+    };
+
+    // A single recorded owner is authoritative. Legacy installs, however,
+    // stamped the same ID onto every folder in a multi-folder archive, so the
+    // first match is not necessarily the archive's primary folder. Let the
+    // title disambiguate those duplicates below.
+    if same_id.len() == 1 {
+        return same_id[0].clone();
+    }
+
+    if same_id.len() > 1 {
+        let title = esoui_title.trim();
+        if let Some(exact) = same_id
+            .iter()
+            .find(|folder| folder.eq_ignore_ascii_case(title))
+        {
+            return (*exact).clone();
+        }
+
+        let mut contained: Vec<&String> = same_id
+            .iter()
+            .copied()
+            .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+            .collect();
+        contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        if let Some(best) = contained.first() {
+            return (*best).clone();
+        }
+    }
+
+    let eligible = |folder: &String| {
+        store
+            .addons
+            .get(folder.as_str())
+            .is_none_or(|meta| meta.esoui_id == 0)
+    };
+    let title = esoui_title.trim();
+    if let Some(exact) = installed_folders
+        .iter()
+        .find(|folder| eligible(folder) && folder.eq_ignore_ascii_case(title))
+    {
+        return exact.clone();
+    }
+
+    let mut contained: Vec<&String> = installed_folders
+        .iter()
+        .filter(|folder| eligible(folder) && !folder.is_empty() && title.contains(folder.as_str()))
+        .collect();
+    contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    if let Some(best) = contained.first() {
+        return (*best).clone();
+    }
+
     installed_folders
         .iter()
-        .find(|folder| esoui_title.contains(folder.as_str()))
-        .or(installed_folders.first())
+        .find(|folder| eligible(folder))
+        .or_else(|| installed_folders.first())
         .cloned()
         .unwrap_or_default()
 }
@@ -13941,10 +14099,18 @@ fn native_finish_dependency_install(
         installer::ExtractHooks::NONE,
     )?;
 
-    for folder in &dep_folders {
-        let version = read_local_version(addons_dir, folder);
-        metadata::record_install(store, folder, dep_id, &version, &dep_info.download_url);
-    }
+    // Same rule as a direct install: a multi-folder dependency must not stamp
+    // its ID onto folders it merely ships, or a separately tracked library
+    // loses its identity and the dependency produces duplicate update rows.
+    record_native_installed_folders(
+        store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+    );
 
     Ok(dep_folders)
 }
@@ -14294,7 +14460,14 @@ fn set_addon_disabled_on_disk(
     }
 }
 
-fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), String> {
+struct RemoveFromDiskOutcome {
+    cleanup_warning: Option<String>,
+}
+
+fn remove_addon_from_disk(
+    addons_root: &Path,
+    folder_name: &str,
+) -> Result<RemoveFromDiskOutcome, String> {
     // Retain the cross-process guard across the existence snapshot, both
     // deletions, and metadata cleanup so a concurrent publisher cannot place a
     // replacement into the gap and have this operation delete it.
@@ -14316,14 +14489,30 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     }
 
     // The folder is already deleted — removal has succeeded. Treat the kalpa.json
-    // metadata cleanup as best-effort so a transient lock (OneDrive/AV) or a CFA
-    // block doesn't report "Remove failed" for an addon that is actually gone.
+    // Cleanup failures are warnings so the UI does not retain a row for an
+    // addon folder that has already been removed.
     let _guard = metadata_guard();
     let mut store = metadata::load_metadata(addons_root);
+    let removed_id = store.addons.get(folder_name).map(|meta| meta.esoui_id);
     metadata::remove_entry(&mut store, folder_name);
-    let _ = metadata::save_metadata(addons_root, &store);
-    let _ = save_prototype_tags(addons_root, folder_name, &[]);
-    Ok(())
+    if let Some(id) = removed_id {
+        metadata::forget_bundled_parent(&mut store, id);
+    }
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = metadata::save_metadata(addons_root, &store) {
+        cleanup_errors.push(error);
+    }
+    if let Some(id) = removed_id {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_root, id) {
+            cleanup_errors.push(error);
+        }
+    }
+    if let Err(error) = save_prototype_tags(addons_root, folder_name, &[]) {
+        cleanup_errors.push(error);
+    }
+    Ok(RemoveFromDiskOutcome {
+        cleanup_warning: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+    })
 }
 
 fn active_tag_ids(tags: &ModelRc<TagEntry>) -> Vec<String> {
@@ -14354,6 +14543,7 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    bundled_by: Vec::new(),
                     esoui_marker_installed: false,
                 },
             );
@@ -20273,6 +20463,21 @@ mod tests {
     }
 
     #[test]
+    fn primary_folder_selection_disambiguates_duplicate_legacy_ids_by_title() {
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 3, "1.0", "u", 0);
+        metadata::record_install_ext(&mut store, "ZAddon", 3, "1.0", "u", 0);
+        let folders = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+
+        // Legacy metadata stamped the same ID on every extracted folder. The
+        // title, rather than sorted iteration order, identifies the owner.
+        assert_eq!(
+            determine_primary_folder(&store, &folders, 3, "ZAddon"),
+            "ZAddon"
+        );
+    }
+
+    #[test]
     fn embedded_theme_catalog_contains_default_and_exported_themes() {
         let catalog = serde_json::from_str::<ThemeCatalog>(BUILTIN_THEME_CATALOG)
             .expect("embedded native theme catalog parses");
@@ -22269,6 +22474,46 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// The sidecar has its own copy of the primary/bundled dispatch, so it can
+    /// regress independently of the Tauri app even though the ownership rule
+    /// itself lives in the shared `metadata.rs`. If the two disagree,
+    /// installing through one and updating through the other would hand a
+    /// bundled library's identity back and forth.
+    #[test]
+    fn native_install_does_not_take_over_a_separately_tracked_library() {
+        let root = test_temp_dir("native-bundled-library");
+        for (folder, version) in [("AddonA", "3.0"), ("LibFoo", "1.2")] {
+            let dir = root.join(folder);
+            fs::create_dir_all(&dir).expect("create addon dir");
+            fs::write(
+                dir.join(format!("{folder}.txt")),
+                format!("## Title: {folder}\n## Version: {version}\n"),
+            )
+            .expect("write manifest");
+        }
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib", 0);
+
+        record_native_installed_folders(
+            &mut store,
+            root,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+        );
+
+        assert_eq!(store.addons.get("AddonA").unwrap().esoui_id, 3);
+        let lib = store.addons.get("LibFoo").expect("library still tracked");
+        assert_eq!(lib.esoui_id, 7, "the sidecar must not demote the library");
+        assert_eq!(lib.bundled_by, vec![3]);
+        assert_eq!(lib.installed_version, "1.2");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn native_remove_deletes_enabled_and_disabled_copies_and_metadata() {
         let root = test_temp_dir("native-remove-addon");
@@ -22292,6 +22537,70 @@ mod tests {
         assert!(!metadata::load_metadata(root)
             .addons
             .contains_key("DuplicateAddon"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_remove_clears_parent_metadata_and_hash_ownership() {
+        let root = test_temp_dir("native-remove-parent-ownership");
+        fs::create_dir_all(root.join("AddonA")).expect("create parent addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.2", "u", 0);
+        store
+            .addons
+            .get_mut("LibFoo")
+            .expect("library metadata")
+            .bundled_by = vec![3];
+        metadata::save_metadata(root, &store).expect("save metadata");
+        file_hashes::save_hash_manifest(
+            root,
+            &file_hashes::HashManifest {
+                addon_folder: "LibFoo".to_string(),
+                esoui_ids: vec![7, 3],
+                recorded_at: "2026-08-28T00-00-00Z".to_string(),
+                installed_version: "1.2".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("save hashes");
+
+        remove_addon_from_disk(root, "AddonA").expect("remove addon");
+
+        let store = metadata::load_metadata(root);
+        assert!(!store.addons.contains_key("AddonA"));
+        assert_eq!(store.addons["LibFoo"].bundled_by, Vec::<u32>::new());
+        assert_eq!(
+            file_hashes::load_hash_manifest(root, "LibFoo")
+                .expect("load hashes")
+                .esoui_ids,
+            vec![7]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_remove_reports_cleanup_warning_after_persisting_metadata() {
+        let root = test_temp_dir("native-remove-cleanup-warning");
+        fs::create_dir_all(root.join("AddonA")).expect("create addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(root, &store).expect("save metadata");
+        let hashes_dir = root.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).expect("create hashes directory");
+        fs::write(hashes_dir.join("Broken.json"), "not json").expect("write corrupt manifest");
+
+        let outcome = remove_addon_from_disk(root, "AddonA").expect("remove addon");
+
+        assert!(!root.join("AddonA").exists());
+        assert!(!metadata::load_metadata(root).addons.contains_key("AddonA"));
+        assert!(outcome
+            .cleanup_warning
+            .is_some_and(|warning| warning.contains("hash manifest")));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -23311,6 +23620,7 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            bundled_by: Vec::new(),
             esoui_marker_installed: true,
         };
 
@@ -23335,6 +23645,7 @@ CombatMetrics_SavedVariables = {
             installed_at: String::new(),
             tags: Vec::new(),
             esoui_last_update: 100,
+            bundled_by: Vec::new(),
             esoui_marker_installed: true,
         };
 
@@ -23362,6 +23673,7 @@ CombatMetrics_SavedVariables = {
             installed_at: String::new(),
             tags: Vec::new(),
             esoui_last_update: 100,
+            bundled_by: Vec::new(),
             esoui_marker_installed: false,
         };
 
@@ -24926,15 +25238,17 @@ CombatMetrics_SavedVariables = {
             ),
         ]);
 
-        let removed = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
+        let outcome = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
 
         assert_eq!(
-            removed,
+            outcome.removed,
             vec![
                 "CombatMetrics".to_string(),
                 "CombatMetricsHelper".to_string()
             ]
         );
+        assert!(outcome.cleanup_warnings.is_empty());
+        assert!(outcome.failures.is_empty());
         assert!(!addons_root.join("CombatMetrics").exists());
         assert!(!addons_root.join("CombatMetricsHelper").exists());
         assert!(addons_root.join("OtherAddon").exists());
@@ -24952,6 +25266,103 @@ CombatMetrics_SavedVariables = {
             std::env::remove_var("KALPA_ADDONS_PATH");
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_addons_by_esoui_id_preserves_failed_folders_in_the_model() {
+        let models = test_addon_models(vec![
+            addon_entry(
+                "CombatMetrics",
+                "CombatMetrics",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Addon",
+                "3/3/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "CombatMetrics Helper",
+                "CombatMetricsHelper",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Library",
+                "3/3/2026",
+                "",
+                false,
+                true,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "Other Addon",
+                "OtherAddon",
+                "3520",
+                "Author",
+                "1.0.0",
+                "101048",
+                "Addon",
+                "4/1/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+        ]);
+
+        let outcome = remove_addons_by_esoui_id_with(&models, "1360", |folder_name| {
+            if folder_name == "CombatMetricsHelper" {
+                Err("folder is locked".to_string())
+            } else {
+                Ok(None)
+            }
+        })
+        .expect("remove matching addon folders");
+
+        assert_eq!(outcome.removed, vec!["CombatMetrics".to_string()]);
+        assert!(outcome.cleanup_warnings.is_empty());
+        assert_eq!(
+            outcome.failures,
+            vec![(
+                "CombatMetricsHelper".to_string(),
+                "folder is locked".to_string()
+            )]
+        );
+        assert_eq!(
+            models
+                .all
+                .borrow()
+                .iter()
+                .map(|addon| addon.folder_name.to_string())
+                .collect::<Vec<_>>(),
+            vec!["CombatMetricsHelper".to_string(), "OtherAddon".to_string()]
+        );
     }
 
     #[test]

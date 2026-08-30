@@ -74,6 +74,7 @@ import type {
   GameInstance,
   InstallResult,
   PendingDependency,
+  RemoveAddonResult,
   StreamingBatchResult,
   UpdateCheckResult,
   WriteAccessStatus,
@@ -560,6 +561,12 @@ function App() {
           `Auto-linked ${result.data.linked.length} addon${result.data.linked.length > 1 ? "s" : ""} to ESOUI`
         );
         await scanAddons(path);
+      }
+
+      if (result.data.notFound.length > 0) {
+        toast.warning(
+          `Could not auto-link ${result.data.notFound.length} addon${result.data.notFound.length > 1 ? "s" : ""}; review them manually.`
+        );
       }
     },
     [scanAddons]
@@ -1151,11 +1158,16 @@ function App() {
     await Promise.all(
       entries.map(async (entry) => {
         try {
-          const result = await invokeResult("remove_addon", {
+          const result = await invokeResult<RemoveAddonResult>("remove_addon", {
             addonsPath: entry.addonsPath,
             folderName: entry.addon.folderName,
           });
-          if (result.ok) return;
+          if (result.ok) {
+            if (result.data.cleanupWarning) {
+              toast.warning(`Removed with cleanup warning: ${result.data.cleanupWarning}`);
+            }
+            return;
+          }
           toast.error(`Remove failed: ${result.error}`);
           // Only restore into the view the addon belongs to — after an instance
           // switch the row would reappear in a folder that never had it.
@@ -1203,7 +1215,15 @@ function App() {
         // returns, and a scan landing in that gap would restore a row nothing
         // hides again once the delete succeeds.
         pendingRemovalsRef.current.beginCommit(folderName, queuedPath);
-        void invokeOrThrow("remove_addon", { addonsPath: queuedPath, folderName })
+        void invokeOrThrow<RemoveAddonResult>("remove_addon", {
+          addonsPath: queuedPath,
+          folderName,
+        })
+          .then((result) => {
+            if (result.cleanupWarning) {
+              toast.warning(`Removed with cleanup warning: ${result.cleanupWarning}`);
+            }
+          })
           .catch((e) => {
             toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
             if (entry && sameAddonsFolder(queuedPath, addonsPathRef.current)) {
@@ -1806,6 +1826,14 @@ function App() {
         folderNames: entries.map((entry) => entry.addon.folderName),
       })
         .then((result) => {
+          const cleanupWarnings = Object.entries(result.cleanupWarnings);
+          if (cleanupWarnings.length > 0) {
+            toast.warning(
+              `Removed ${cleanupWarnings.length} addon(s) with cleanup warnings: ${cleanupWarnings
+                .map(([name, warning]) => `${name}: ${warning}`)
+                .join("; ")}`
+            );
+          }
           if (result.failed.length > 0) {
             // Restore only the addons that failed to remove
             const failedSet = new Set(result.failed);

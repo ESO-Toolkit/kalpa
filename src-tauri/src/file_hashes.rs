@@ -411,6 +411,73 @@ pub fn load_hash_manifest(addons_dir: &Path, folder_name: &str) -> Option<HashMa
     Some(manifest)
 }
 
+/// Remove an addon's provenance from every folder hash manifest it contributed
+/// to. All manifests are parsed before any are rewritten so a corrupt store
+/// cannot leave only part of the ownership index updated.
+pub fn forget_esoui_owner(addons_dir: &Path, esoui_id: u32) -> Result<(), String> {
+    if esoui_id == 0 {
+        return Ok(());
+    }
+    let dir = hashes_dir(addons_dir);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut paths = Vec::new();
+    for entry in
+        fs::read_dir(&dir).map_err(|e| format!("Failed to read .kalpa-hashes directory: {e}"))?
+    {
+        let path = entry
+            .map_err(|e| format!("Failed to inspect .kalpa-hashes entry: {e}"))?
+            .path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    let mut changed = Vec::new();
+    for path in paths {
+        let mut manifest = read_manifest_for_rewrite(&path)?;
+        if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
+            manifest.esoui_ids.push(manifest.esoui_id);
+        }
+        let old_len = manifest.esoui_ids.len();
+        manifest.esoui_ids.retain(|id| *id != esoui_id);
+        if manifest.esoui_ids.len() != old_len {
+            manifest.esoui_id = 0;
+            changed.push(manifest);
+        }
+    }
+    for manifest in changed {
+        save_hash_manifest(addons_dir, &manifest)?;
+    }
+    Ok(())
+}
+
+fn read_manifest_for_rewrite(path: &Path) -> Result<HashManifest, String> {
+    let candidates = [
+        path.to_path_buf(),
+        path.with_extension("json.tmp"),
+        path.with_extension("json.bak"),
+    ];
+    let mut last_error = None;
+    for candidate in candidates {
+        match fs::read_to_string(&candidate) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(manifest) => return Ok(manifest),
+                Err(error) => last_error = Some(format!("{}: {error}", candidate.display())),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => last_error = Some(format!("{}: {error}", candidate.display())),
+        }
+    }
+    Err(format!(
+        "Failed to load hash manifest for ownership cleanup: {}",
+        last_error.unwrap_or_else(|| path.display().to_string())
+    ))
+}
+
 /// Read ONLY the count of `modified_files` recorded in a folder's hash manifest,
 /// without deserializing the (potentially many-thousand-entry) `files` map.
 ///
@@ -535,6 +602,7 @@ pub fn record_hashes_for_folders_with_overrides(
 /// after every addon folder has been swapped successfully.
 pub(crate) fn build_hash_manifests_for_folders(
     staged_addons_dir: &Path,
+    live_addons_dir: &Path,
     installed_folders: &[String],
     esoui_id: u32,
     version: &str,
@@ -545,6 +613,7 @@ pub(crate) fn build_hash_manifests_for_folders(
     for folder in installed_folders {
         let files = compute_addon_hashes(&staged_addons_dir.join(folder))?;
         manifests.push(build_folder_manifest(
+            live_addons_dir,
             folder,
             files,
             esoui_id,
@@ -675,13 +744,21 @@ fn write_folder_manifest(
     timestamp: &str,
     hash_overrides: Option<&HashMap<String, String>>,
 ) -> Result<(), String> {
-    let manifest =
-        build_folder_manifest(folder, files, esoui_id, version, timestamp, hash_overrides);
+    let manifest = build_folder_manifest(
+        addons_dir,
+        folder,
+        files,
+        esoui_id,
+        version,
+        timestamp,
+        hash_overrides,
+    );
 
     save_hash_manifest(addons_dir, &manifest)
 }
 
 fn build_folder_manifest(
+    addons_dir: &Path,
     folder: &str,
     mut files: HashMap<String, String>,
     esoui_id: u32,
@@ -711,9 +788,25 @@ fn build_folder_manifest(
         None => Vec::new(),
     };
 
+    // `esoui_ids` is the set of addons that ship files into this folder, so a
+    // rewrite must union rather than replace. Replacing it dropped every other
+    // owner on each install, which left this store disagreeing with the
+    // metadata store about who a bundled library belongs to.
+    let mut esoui_ids = load_hash_manifest(addons_dir, folder)
+        .map(|existing| existing.esoui_ids)
+        .unwrap_or_default();
+    if esoui_id != 0 && !esoui_ids.contains(&esoui_id) {
+        esoui_ids.push(esoui_id);
+    }
+    esoui_ids.sort_unstable();
+    esoui_ids.dedup();
+    if esoui_ids.is_empty() {
+        esoui_ids.push(esoui_id);
+    }
+
     HashManifest {
         addon_folder: folder.to_string(),
-        esoui_ids: vec![esoui_id],
+        esoui_ids,
         recorded_at: timestamp.to_string(),
         installed_version: version.to_string(),
         files,
@@ -725,6 +818,56 @@ fn build_folder_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `esoui_ids` is the set of addons that ship files into a folder, so
+    /// recording a second owner must union rather than replace. Replacing it
+    /// dropped the library's own ID every time a bundling addon updated, which
+    /// left this store disagreeing with the metadata store about who owns the
+    /// folder.
+    #[test]
+    fn recording_hashes_unions_the_owning_addon_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        create_addon_dir(addons_dir, "LibFoo", &[("LibFoo.lua", "-- lua")]);
+        let folders = vec!["LibFoo".to_string()];
+
+        // The library records itself.
+        record_hashes_for_folders(addons_dir, &folders, 7, "1.5").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![7]
+        );
+
+        // An addon that bundles it records too; both owners must survive.
+        record_hashes_for_folders(addons_dir, &folders, 3, "3.0").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![3, 7],
+            "the library's own ID must not be dropped by a bundling install"
+        );
+
+        // Re-recording an existing owner is not a new owner.
+        record_hashes_for_folders(addons_dir, &folders, 3, "3.1").unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![3, 7]
+        );
+
+        create_addon_dir(addons_dir, "OtherLib", &[("OtherLib.lua", "-- lua")]);
+        record_hashes_for_folders(addons_dir, &["OtherLib".to_string()], 3, "3.1").unwrap();
+        forget_esoui_owner(addons_dir, 3).unwrap();
+        assert_eq!(
+            load_hash_manifest(addons_dir, "LibFoo").unwrap().esoui_ids,
+            vec![7]
+        );
+        assert!(
+            load_hash_manifest(addons_dir, "OtherLib")
+                .unwrap()
+                .esoui_ids
+                .is_empty(),
+            "the removed parent must be cleared from every manifest"
+        );
+    }
     use std::io::Write;
     use std::path::PathBuf;
 
