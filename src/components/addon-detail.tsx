@@ -20,6 +20,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/compo
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting } from "@/lib/store";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
@@ -214,6 +215,7 @@ function AddonDetailBase({
       operationId: beginOperation(),
       dependencyPolicy,
     });
+    reportDependencyFailures(result.failedDeps);
     // Empty unless the policy is "ask". The picker is app-level and owns the
     // install + refresh from here, so this update's busy state can clear. Hand it
     // the same `addonsPath` this update ran against (closure-captured, so it stays
@@ -424,6 +426,7 @@ function AddonDetailBase({
       } else {
         toast.success(`Installed ${depName}`);
       }
+      reportDependencyFailures(result.failedDeps);
       setJustInstalledDeps((prev) => new Set(prev).add(depName));
       onRefresh(); // refresh addon list, keeping this addon selected
     } catch (e) {

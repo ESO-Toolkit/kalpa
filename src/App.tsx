@@ -34,6 +34,7 @@ import {
   isDependencySkipped,
   setDependencyPolicy,
 } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { DependencyPromptProvider, type ResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import {
   getTauriErrorMessage,
@@ -1561,6 +1562,8 @@ function App() {
         srAnnounce("Batch update failed");
         return;
       }
+
+      reportDependencyFailures(batch.data.failedDeps);
 
       const { completed, failed, errors: batchErrors, conflicts: remainingConflicts } = batch.data;
 

@@ -1132,6 +1132,134 @@ mod tests {
         assert_eq!(folders, vec!["AddonA".to_string(), "AddonB".to_string()]);
     }
 
+    /// Kalpa keeps its own state in `.kalpa-hashes/`, `.kalpa-backups/` and
+    /// `.kalpa-staging/` directly under the AddOns root, alongside addon
+    /// folders. `enclosed_name` only proves an entry cannot escape the
+    /// extraction root - it happily permits a first component that collides
+    /// with one of those, so an archive could overwrite hash baselines or edit
+    /// backups. Corrupting a baseline is not cosmetic: it decides what
+    /// Protected Edits treats as a user edit.
+    #[test]
+    fn an_archive_cannot_write_into_kalpa_state_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        // A real baseline the archive must not be able to reach.
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        let baseline = hashes_dir.join("Victim.json");
+        fs::write(&baseline, b"real-baseline").unwrap();
+
+        let zip_path = tmp.path().join("hostile.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file(".kalpa-hashes/Victim.json", options)
+            .unwrap();
+        archive.write_all(b"forged").unwrap();
+        archive
+            .start_file(".kalpa-backups/Victim/stamp/init.lua", options)
+            .unwrap();
+        archive.write_all(b"-- forged").unwrap();
+        archive.start_file("RealAddon/init.lua", options).unwrap();
+        archive.write_all(b"-- lua").unwrap();
+        archive.finish().unwrap();
+
+        let result = extract_addon_zip(&zip_path, &addons_dir);
+
+        // The pre-existing baseline must survive untouched.
+        assert_eq!(
+            fs::read(&baseline).unwrap(),
+            b"real-baseline",
+            "an archive entry overwrote a Kalpa hash baseline"
+        );
+        assert!(
+            !addons_dir
+                .join(".kalpa-backups/Victim/stamp/init.lua")
+                .exists(),
+            "an archive entry wrote into the edit-backup store"
+        );
+        // Reserved names are refused outright rather than silently skipped, so
+        // a partial install is never reported as success.
+        assert!(
+            result.is_err(),
+            "a reserved top-level folder must fail the install"
+        );
+        assert!(!addons_dir.join("RealAddon").exists());
+    }
+
+    /// Windows resolves `.kalpa-hashes.` and `.KALPA-HASHES` to the same
+    /// directory as `.kalpa-hashes`, so the reserved check must normalise
+    /// before comparing. The negative cases pin that it stays surgical: only
+    /// the `.kalpa-` prefix is reserved, not every dotfile and not every name
+    /// containing "kalpa".
+    #[test]
+    fn reserved_state_folder_detection_resists_windows_name_variants() {
+        for reserved in [
+            ".kalpa-hashes",
+            ".kalpa-backups",
+            ".kalpa-staging",
+            ".KALPA-Hashes",
+            ".kalpa-hashes.",
+            ".kalpa-hashes   ",
+            "  .kalpa-hashes",
+        ] {
+            assert!(
+                is_reserved_state_folder(reserved),
+                "{reserved:?} must be treated as a Kalpa state folder"
+            );
+        }
+        for allowed in [
+            "KalpaHelper",
+            "kalpa",
+            ".kalpa",
+            ".hidden",
+            "LibAddonMenu-2.0",
+            "MyAddon",
+        ] {
+            assert!(
+                !is_reserved_state_folder(allowed),
+                "{allowed:?} is a legitimate addon folder and must still install"
+            );
+        }
+    }
+
+    /// A flat archive has no top-level folder; the wrap name is synthesised
+    /// from its root manifest stem. That path reaches the same destination, so
+    /// a root `.kalpa-hashes.txt` must be refused just like a foldered entry.
+    #[test]
+    fn a_flat_archive_cannot_synthesise_a_reserved_wrap_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = tmp.path().join("flat-hostile.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file(".kalpa-hashes.txt", options).unwrap();
+        archive.write_all(b"## Title: forged").unwrap();
+        archive.start_file("payload.lua", options).unwrap();
+        archive.write_all(b"-- forged").unwrap();
+        archive.finish().unwrap();
+
+        let result = extract_addon_zip(&zip_path, &addons_dir);
+
+        assert!(
+            result.is_err(),
+            "a flat archive wrapping into a reserved name must be refused"
+        );
+        // Pin that it is refused *for this reason*, not incidentally.
+        let message = result.unwrap_err();
+        assert!(
+            message.contains(".kalpa-hashes"),
+            "error must name the reserved folder, got: {message}"
+        );
+        assert!(!addons_dir.join(".kalpa-hashes").exists());
+    }
+
     // ── Cancellation, progress, and selective extraction ─────────────────
 
     fn create_multi_file_zip(dir: &Path, name: &str, folder: &str, count: usize) -> PathBuf {
