@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::uploader::types::{
@@ -190,9 +190,10 @@ struct PlayerUnitFacts {
 
 pub(crate) fn extract_from_file(
     path: impl AsRef<Path>,
+    scanned_len: u64,
     report_code: Option<String>,
 ) -> Result<KalpaBuildEvidence, String> {
-    extract_from_file_from(path, 0, report_code)
+    extract_from_file_range(path, 0, Some(scanned_len), report_code)
 }
 
 pub(crate) fn extract_from_file_from(
@@ -200,12 +201,28 @@ pub(crate) fn extract_from_file_from(
     start_offset: u64,
     report_code: Option<String>,
 ) -> Result<KalpaBuildEvidence, String> {
+    extract_from_file_range(path, start_offset, None, report_code)
+}
+
+fn extract_from_file_range(
+    path: impl AsRef<Path>,
+    start_offset: u64,
+    end_offset: Option<u64>,
+    report_code: Option<String>,
+) -> Result<KalpaBuildEvidence, String> {
     let mut file =
         File::open(path.as_ref()).map_err(|e| format!("Read build evidence failed: {e}"))?;
     file.seek(SeekFrom::Start(start_offset))
         .map_err(|e| format!("Read build evidence failed: {e}"))?;
 
-    let reader = BufReader::new(file);
+    let read_len = end_offset
+        .map(|end| {
+            end.checked_sub(start_offset)
+                .ok_or_else(|| "Read build evidence failed: invalid byte range".to_string())
+        })
+        .transpose()?
+        .unwrap_or(u64::MAX);
+    let reader = BufReader::new(file.take(read_len));
     let mut accumulator = BuildEvidenceAccumulator::default();
     for line in reader.lines() {
         let line = line.map_err(|e| format!("Read build evidence failed: {e}"))?;
@@ -870,6 +887,30 @@ mod tests {
                 .as_ref()
                 .map(|food| food.ability_id),
             Some(89958)
+        );
+    }
+
+    #[test]
+    fn bounded_extract_preserves_utf8_and_excludes_bytes_appended_after_scan() {
+        let scanned = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             1,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Scanned Pläyer\",\"@scanned\",111,50,1700,0,PLAYER_ALLY,T\n\
+             2,PLAYER_INFO,1,[263870],[1],[],[],[]\n";
+        let appended = "3,UNIT_ADDED,2,PLAYER,T,2,0,F,6,5,\"Appended Player\",\"@appended\",222,50,2100,0,PLAYER_ALLY,T\n\
+             4,PLAYER_INFO,2,[263585],[1],[],[],[]\n";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Encounter.log");
+        std::fs::write(&path, scanned).expect("write scanned prefix");
+        let scanned_len = std::fs::metadata(&path).expect("metadata").len();
+        std::fs::write(&path, format!("{scanned}{appended}")).expect("append fixture");
+
+        let evidence = extract_from_file(&path, scanned_len, None).unwrap();
+
+        assert_eq!(scanned_len, scanned.len() as u64);
+        assert!(scanned_len > scanned.chars().count() as u64);
+        assert_eq!(evidence.players.len(), 1);
+        assert_eq!(
+            evidence.players[0].character_name.as_deref(),
+            Some("Scanned Pläyer")
         );
     }
 

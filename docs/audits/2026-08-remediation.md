@@ -5,26 +5,26 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | ID | Status | Branch | PR | Merged SHA | Fable decision | Sol verdict | Tests | Notes |
 |---|---|---|---|---|---|---|---|---|
 | W1 | pr-open | `fix/audit-w1-worker-consistency` | [#369](https://github.com/ESO-Toolkit/kalpa/pull/369) (draft) | - | D-W1-1, D-W1-2, D-W1-3 | REVISE; follow-up REVISE; all verified findings addressed | Worker check; 184 tests; Wrangler dry-run; name guard | Fable twice-reject redesign implemented; awaiting refreshed CI/maintainer sign-off. |
-| W2 | todo | - | - | - | pending | - | - | Requires maintainer approval before merge if reconciliation can delete D1 rows. |
-| W3 | todo | - | - | - | - | - | - | Worker low-severity hardening. |
+| W2 | pr-open | `fix/audit-w2-d1-reconciliation` | [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) (draft) | - | D-W2-1, D-W2-2 | Fresh REVISE; follow-up APPROVE | Worker check; 208 tests; Wrangler dry-run | Technically ready and stacked on W1. Draft/merge hold remains: deletion-capable code and later `apply` each require separate maintainer approval. |
+| W3 | pr-open | `fix/audit-w3-worker-hardening` | [#379](https://github.com/ESO-Toolkit/kalpa/pull/379) (draft) | - | D-W3-1 reaccepted after reconsultation | Fresh REVISE; follow-up APPROVE | Worker check; 233 tests; Wrangler dry-run | Technically ready and stacked on refreshed W2/D-W2-2; remains draft with no real deployment. |
 | P0-A1 | todo | - | - | - | pending | - | - | Shared crash-safe atomic writer. |
 | P0-A2 | todo | - | - | - | pending | - | - | Cross-process read-modify-write locking. |
 | P0-A3 | todo | - | - | - | pending | - | - | Native sidecar ready handshake. |
 | R4 | todo | - | - | - | pending | - | - | Preserve separately tracked sibling ownership. |
 | R5 | todo | - | - | - | pending | - | - | Folder-qualified conflict protection. |
 | R6 | todo | - | - | - | pending | - | - | Crash-safe installer transaction. |
-| R7 | todo | - | - | - | - | - | - | Bound native build evidence to uploaded bytes. |
+| R7 | pr-open | `fix/audit-r7-build-evidence-bound` | [#372](https://github.com/ESO-Toolkit/kalpa/pull/372) (draft) | - | - | APPROVE | Focused 1; evidence 16; frontend 490; Rust 808 | D-R7-1: one-shot evidence uses the encoder's exact `scanned_len` byte bound; stacked on W1. |
 | R8 | todo | - | - | - | - | - | - | Manifest-less Protected Edits disclosure. |
 | R9 | todo | - | - | - | - | - | - | Record the downloaded artifact version. |
 | F1 | todo | - | - | - | - | - | - | Import-source sequencing. |
 | F2 | pr-open | `fix/audit-f2-log-directory-sequencing` | [#373](https://github.com/ESO-Toolkit/kalpa/pull/373) (draft) | - | D-F2-1 | REVISE x2; all verified findings addressed | Frontend check; 496 tests | Stacked on W1; no wire or persisted-data changes. |
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
-| F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
-| F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
+| F4 | pr-open | `fix/audit-f4-logout-invalidation` | [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) (draft, stacked on F1) | - | D-F4-1 | APPROVE | Focused 1 test; pack sequencing 4 tests; frontend check; 494 tests | Successful logout invalidates every private-list page request before clearing signed-in state; no wire/persisted-data change. |
+| F5 | pr-open | `fix/audit-f5-controlled-state-veto` | [#370](https://github.com/ESO-Toolkit/kalpa/pull/370) (draft, stacked on W1) | - | not required | APPROVE | Focused 10/10; frontend check; 493 tests | Controlled values remain authoritative when a parent vetoes a change; uncontrolled behavior is preserved. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
-| H3 | todo | - | - | - | - | - | - | Triage Worker package-version synchronization. |
+| H3 | pr-open | `fix/audit-h3-worker-version-policy` | [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) (draft) | - | D-H3-1 | APPROVE | Worker policy/check; 218 tests; root check/490 tests/version gate; Wrangler dry-run | Stacked on W3; independent Worker uses sentinel `0.0.0`; no real deployment. |
 | H4 | todo | - | - | - | - | - | - | Update `claude.md` structure tree. |
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
@@ -63,8 +63,66 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Directory changes immediately invalidate older list/detection work and clear incompatible list, error, and selection state. Deferred imports capture and re-check their directory before refreshing or selecting.
 - Rejected: checking only the directory. A same-directory refresh can still resolve out of order. Rejected: checking only an operation ID local to `loadLogs`; detection and import completion can independently reclaim stale directory or selection state.
 - Compatibility: frontend-only state sequencing; no IPC, wire-format, persisted-data, or backend behavior changes.
+### D-F1-1 — One sequence owns every import source
+
+- Chosen: share-code resolution and `.esopack` import capture IDs from one component-scoped monotonic sequence; only the current ID may publish pack data, file settings, errors, or share loading cleanup. Opening the file picker, changing import methods, and Clear invalidate prior work.
+- Rejected: independent per-source IDs, because a request from one source could still overwrite the other source. Rejected: guarding only successful results, because stale failures and cleanup could still replace the active operation's error/loading state.
+- Compatibility: no wire-format, persisted-data, dependency, or visible UI changes. Rollback is a normal code revert with no data action.
+
+### D-F4-1 — Successful logout invalidates the private-list lifecycle
+
+- Chosen: after `auth_logout` succeeds, advance the existing `loadMyPacksSeqRef` before publishing signed-out state and clearing My Packs data/loading flags. The loader's existing success, error, and cleanup guards then reject every pre-logout page request.
+- Rejected: clearing state without advancing the sequence, because a late authenticated result remains current and can repopulate it. Rejected: invalidating before `auth_logout` succeeds, because a failed logout leaves the user authenticated and should preserve the current private view.
+- Compatibility: no wire-format, persisted-data, dependency, backend, or visible UI change. Rollback is a normal code revert with no data action.
+
+### D-W2-1 — Bounded, ownership-gated D1 reconciliation
+
+- Chosen: after the independent daily backup attempt, compare one validated DO authority snapshot against explicit columns from only `packs` and `pack_tags`. Build the entire deterministic repair plan before mutation; exact `dry-run` is the checked-in default, exact `apply` is the only mutation-capable mode, and missing/invalid values fail to dry-run.
+- Durable DO tombstones plus current authoritative IDs are the ownership proof for deletion. An extra D1 row without that proof is reported as `unowned_extra` and never deleted. A valid empty authority can delete at most five tombstone-proven rows; larger empty divergence and all other count/ratio limit violations reject the whole plan.
+- Inline D1 failures persist `d1-mirror:last_error`; reconciliation persists `d1-recon:last` or stage-specific `d1-recon:last_error` with planned/applied counts. Authority failure occurs before any D1 statement, and D1 read failure occurs before any mutation.
+- Rejected: a KV repair queue, because KV cannot atomically append concurrent failures and the queue cannot discover historical or falsely successful stale writes. Rejected: a paginated cursor sweep, because no stable authority generation exists to prove completeness before zombie deletion.
+- No D1 schema, Worker/Rust wire shape, or unrelated shared table changes. Rollback is a code revert; checked-in dry-run performs no reconciliation mutations. Enabling `apply` and merging deletion-capable code both require explicit maintainer approval.
+
+### D-W2-2 — Authority-gated, bounded, single-flight scheduling
+
+- Chosen after the twice-`REVISE` Fable reconsultation: retain and report deletion candidates while W1 remains in `kv` shadow authority; permit deletion planning only after the explicit parity-gated `do` authority flip.
+- Bound shared D1 reads with ceiling-plus-one probes (`packs` 2,001; `pack_tags` 20,001) and reject the plan when either configured ceiling is exceeded.
+- Serialize scheduled reconciliation with a token-owned, expiring lease in the existing PackIndexDO. Overlapping runs record `skipped-overlap`, and a stale token cannot release a newer lease.
+- Preserve per-pack lifecycle gates for writes/deletes, deterministic planning, dry-run default, existing-table-only SQL, and the separate merge/apply approval sequence from D-W2-1.
+
+### D-W3-1 — Bounded Worker edge state and disclosure
+
+- Chosen: stream and byte-count every JSON request body; bound vote and auth identity memos with oldest-entry eviction; and keep auth-cache generation checks so stale in-flight lookups cannot repopulate reset state.
+- Chosen: remove the manual Cache API list entry. Its invalidation could not coordinate across Worker isolates, and it is ineffective on the current `workers.dev` route. The unchanged list response uses a bounded 30-second `Cache-Control` TTL only.
+- Chosen: serialize each install claim and counter update in one Durable Object storage transaction. Claims use an admin-keyed HMAC identity, a fixed 5,000-slot oldest-eviction ring, an alarm-backed one-hour retention limit, lifecycle cleanup, and retry mirroring. Live legacy `install-rate:<pack>:<ip>` keys remain honored through their existing TTL, avoiding rollout double counts.
+- Chosen: public `/health` exposes only `status`, KV reachability, and timestamp. Corpus size and backup freshness remain operator data; the deploy workflow consumes only `status` and `kv`. This intentionally removes undocumented health fields but does not change Pack Hub/Rust response shapes or any D1 schema.
+- Fable reaccepted D-W3-1 after two verified Sol revisions. It clarified that rejected/aborted streams fail as invalid JSON, decoding happens only after bounded byte assembly, and viewer-bearing responses explicitly emit `max-age=0` and vary on `Authorization` and `Origin`.
+- The 5,000-slot claim ring is deliberately bounded idempotence: an identity may recount inside one hour only after 5,000 newer distinct claims evict it. Rotating `ADMIN_API_KEY` can likewise admit one extra count per identity until old claims expire; both are acceptable for a display counter and are not exact billing semantics.
+
+### D-H3-1 — Worker package version is an independent sentinel
+
+- Chosen: keep the private Pack Hub Worker at the non-release sentinel `0.0.0` in `package.json` and both npm lockfile fields. Its deployment workflow is triggered by Worker-path pushes to `main`; neither Wrangler, the runtime, health checks, nor the desktop wire client consumes this metadata. Desktop tags and `check:versions` separately own the six app version fields.
+- Enforced: `npm run check:version-policy` rejects any value other than `0.0.0` in the three npm-owned Worker fields. It runs inside Worker `npm run check`, so both pull-request CI and the pre-deploy workflow execute it.
+- Rejected: synchronizing the Worker to each desktop tag. That would imply shared release ownership which the independent deployment pipeline does not provide, and would manufacture version changes unrelated to Worker deployments.
+- Compatibility: no Worker runtime, response shape, D1 schema, Wrangler configuration, desktop release field, or deployment trigger changed. Rollback is a normal code revert; it does not alter deployed state or persisted data.
 
 ## Session Log
+
+### 2026-08-26 — Codex (F4)
+
+- Active branch: `fix/audit-f4-logout-invalidation`; draft stacked PR [#374](https://github.com/ESO-Toolkit/kalpa/pull/374) targets `fix/audit-f1-import-sequencing`.
+- Completed: reproduced a deferred authenticated My Packs request repopulating state after successful logout; implemented D-F4-1 by invalidating the shared private-list sequence before clearing signed-out state. The focused regression passes 1/1, related pack sequencing tests pass 4/4, `npm run check` passes, and `npm test` passes 39 files/494 tests.
+- Review: required local read-only Sol review returned `APPROVE` with no findings, no missing tests, wire contract OK, and a clean authenticated-private-load bug-class sweep. No follow-up review was required.
+- Blockers: no F4 implementation blockers. The PR remains draft and stacked until its F1 base is available in the integration history.
+- Exact next action: monitor PR CI, then mark #374 ready after base-branch sequencing is confirmed; do not merge from this worktree.
+
+### 2026-08-26 — Codex (F1)
+
+- Active branch: `fix/audit-f1-import-sequencing`; draft stacked PR [#371](https://github.com/ESO-Toolkit/kalpa/pull/371) targets `fix/audit-w1-worker-consistency`.
+- Completed: reproduced both cross-source races with deferred promises resolving in reverse order; implemented D-F1-1; added method-switch invalidation after the verified Sol finding; focused sequencing tests pass 3/3, `npm run check` passes, and `npm test` passes 40 files/593 tests.
+- Review: initial Sol `REVISE` found the method-toggle invalidation gap; follow-up Sol `APPROVE` reported no findings, no missing tests, wire contract OK, and a clean bug-class sweep.
+- Blockers: no F1 implementation blockers. The PR remains draft and stacked until its W1 base is available in the integration history.
+- Exact next action: run PR CI, then mark #371 ready after the base-branch sequencing is confirmed; do not merge from this worktree.
 
 ### 2026-08-27 — W1 twice-reject escalation
 
@@ -74,6 +132,64 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### 2026-08-26 — Codex (R7)
+
+- Active branch: `fix/audit-r7-build-evidence-bound`, stacked on `fix/audit-w1-worker-consistency`.
+- Failing-before evidence: after preflight captured the vetted prefix length, appending a second player caused unbounded build-evidence extraction to return two players instead of the uploaded prefix's one.
+- Implemented D-R7-1: one-shot native evidence now reads through `scanned_len` only, using a byte-limited reader; the separate live-stream evidence path remains unchanged because it has no one-shot preflight bound.
+- Verification: append-after-scan/UTF-8 regression passes; build-evidence suite 16/16; root check passes; frontend tests 490/490; Rust clippy-fix, formatting, strict clippy, 808 tests (17 ignored), and fmt-check pass. Slint gates were not applicable because no shared or Slint module changed.
+- Sol: `APPROVE`; no findings or missing tests, wire contract OK, bug-class sweep clean.
+- Handoff: pushed commit `5dd53bd5` and opened draft stacked PR [#372](https://github.com/ESO-Toolkit/kalpa/pull/372). No merge or deployment was performed.
+### 2026-08-26 — Codex (F5)
+
+- Active branch: `fix/audit-f5-controlled-state-veto`, rebased onto `main` after W1 landed.
+- Completed: reproduced the controlled-state divergence with failing-first hook and dialog tests; implemented the minimum fix so controlled mode renders only the supplied value and uncontrolled mode alone mutates internal state; added controlled-veto and uncontrolled dialog regressions.
+- Evidence: before the fix, the hook rendered `requested-value` instead of the vetoing parent's `parent-value`, and the dialog context changed from `open` to `closed`. After the fix, the focused suite passes 10/10, `npm run check` passes, and `npm test` passes 593/593.
+- Review: Sol `APPROVE` with no findings or missing tests, wire contract `OK`, and a clean bug-class sweep across dialog, checkbox, tooltip, and popover.
+- Handoff: pushed the branch and opened draft PR [#370](https://github.com/ESO-Toolkit/kalpa/pull/370). No persisted-data, wire-format, dependency, or visual changes.
+- Blockers: none known; CI and maintainer review remain.
+- Exact next action: confirm the rebased diff contains only F5 and wait for green CI before marking it ready.
+
+### 2026-08-27 — Codex W3 revalidation
+
+- Merged updated W2 commit `4b2c18d0` forward with a normal merge. The authority-route conflict was resolved additively: W3's bounded streaming reader now protects W2's exact `authority` and `unowned_d1_ids` validation; D-W2-2 and W3 tracker history were both preserved.
+- Marked W3 blocked after its two verified Sol `REVISE` rounds and reconsulted Fable with both reviews, the final diff/tests, D-W2-2 dependency, and separate H3 package-version boundary. Fable accepted Candidate A and reaccepted D-W3-1.
+- Failing-before revalidation reproduced an escaped rejected body stream and missing explicit viewer cache metadata. Fixed by catching stream aborts as invalid JSON, decoding only the fully assembled bounded byte buffer, emitting explicit `public, max-age=0` for viewer-bearing list/detail responses, and varying all CORS responses on `Origin, Authorization`.
+- Focused body/list/CORS tests pass 146/146; full Worker tests pass 230/230; Worker check, Wrangler dry-run, name guard, and `git diff --check` pass. Repository search found no in-repo consumer of removed health detail fields; the deploy workflow reads only `status` and `kv`. No real deployment, merge, authority flip, schema change, or H3 version decision occurred.
+- Fresh Sol review: `REVISE`. It verified that list and detail routes chose their anonymous public TTL from failed `viewerId` resolution rather than the presence of an authentication attempt, so a transient ESO Logs failure could cache a redacted/no-vote fallback for a bearer token after recovery. Fixed by permitting anonymous TTLs only when the request has no `Authorization` header. Added both regressions plus the requested oversized W2 adjudication/no-authority-mutation case; full Worker tests now pass 233/233 and all Worker gates remain green.
+- Sol follow-up after those corrections: `APPROVE`. Findings: none. Missing tests: none. Wire contract: OK. Bug-class propagation sweep: CLEAN. W3 is technically ready on its refreshed W2 base but remains draft; no deployment or merge was performed.
+### 2026-08-26 — Codex H3
+
+- Active branch: `fix/audit-h3-worker-version-policy`, stacked on W3.
+- Evidence and decision: the Worker is private and independently auto-deployed on Worker-path changes; desktop releases are tag-triggered, and the root release/version gate intentionally owns only six desktop fields. Repository history synchronized the Worker through beta.1 but left it unchanged for seventeen later desktop releases. No runtime, release artifact, Wrangler configuration, or health check consumes the Worker package version. Chose D-H3-1 rather than forced desktop parity.
+- Failing-before evidence: after adding the exact policy gate, `npm run check:version-policy` reported stale `0.1.0-beta.1` values in Worker `package.json`, the lockfile top level, and `packages[""]`.
+- Implemented: used `npm version 0.0.0 --no-git-tag-version` to update all npm-owned fields and added the policy check to Worker `npm run check`, which is already invoked by both PR CI and `deploy-worker.yml` before deployment.
+- Sol review: APPROVE, with no findings or missing tests; wire contract OK and the propagated package/version, lock, CI, deploy, release, changelog, and runtime sweep was clean. No follow-up was required.
+- Tests: Worker check, production dependency audit, 218/218 tests, and Wrangler dry-run pass; root check, 490/490 tests, and all six desktop version fields pass. Worker name remains `kalpa-pack-hub`; no runtime code, schema, real deployment, release, or merge occurred.
+- Handoff: pushed the branch and opened draft stacked PR [#386](https://github.com/ESO-Toolkit/kalpa/pull/386) targeting `fix/audit-w3-worker-hardening`.
+
+### 2026-08-26 — Codex W3
+
+- Active branch: `fix/audit-w3-worker-hardening`, stacked on W2.
+- Failing-before evidence: focused regressions failed for UTF-8 byte limits/stream cancellation, bounded memo eviction, stale auth repopulation, atomic install claiming, health disclosure, and oversized admin restore input before the implementation existed.
+- Implemented: incremental byte-bounded JSON reads across every Worker body route; bounded oldest eviction for vote/auth memos; auth-cache sequencing; transactional and time-bounded install idempotency; removal of isolate-unsafe manual list caching; awaited Worker background writes; and minimal public health output.
+- Initial Sol review: REVISE. Verified cross-isolate cache invalidation, aliased list wire results, missed seed/adopt invalidation, non-atomic install state, durable IP-derived retention, and legacy limiter rollout gaps. Addressed by removing manual list storage, using one DO transaction plus retry healing, keyed HMAC identities with alarm/deletion cleanup, exact 5,001st-slot coverage, and honoring legacy limiter keys until expiry.
+- Sol follow-up: REVISE. It reported public caching of personalized lists and non-atomic alarm scheduling from the snapshot it had read; both had already been corrected during the review by disabling authenticated list caching and moving alarm creation into the claim transaction. Its remaining verified legacy-limiter lifecycle finding was addressed by consulting canonical DO state, honoring a legacy key only when KV and DO lifecycles match, and adding tombstone/recreated-slug regressions. The review limit is exhausted, so no third review was requested.
+- Tests: focused 107/107 and full 218/218 pass, including personalized-list cache headers, transactional alarm persistence, multi-page claim expiry, and both legacy lifecycle cases; Worker check and Wrangler dry-run pass. Directly faulting a DO output-gate KV write makes Miniflare mark the object broken, so the alarm-before-mirror ordering is objectively covered by the single storage transaction plus persisted-alarm assertion rather than an artificial caught-failure test. Worker name remains `kalpa-pack-hub`; no schema change, real deployment, merge, or authority flip was performed.
+- Handoff: pushed the branch and opened draft stacked PR [#379](https://github.com/ESO-Toolkit/kalpa/pull/379) targeting `fix/audit-w2-d1-reconciliation`. No merge or deployment was performed.
+
+### 2026-08-26 — Codex W2
+
+- Active branch: `fix/audit-w2-d1-reconciliation`, stacked on W1.
+- Failing-before evidence: the focused regression suite failed to import the intentionally absent `src/d1-reconcile.ts` module.
+- Implemented: durable inline mirror breadcrumbs; canonical DO reconciliation state with tombstones; explicit-only mode handling; authority/D1 read fail-closed behavior; ownership-gated deterministic planning; mutation and ratio caps; idempotent upsert/tag/delete apply order; per-delete authority recheck; independent scheduled invocation; dry-run production default.
+- Sol review: REVISE. Verified that unknown authority statuses could be interpreted as deletion and tag-only zombies were omitted. Fixed with full authority-shape/status validation and tag-ID planning. Added all requested boundary-plus-one cap tests. A further executor sweep moved the final liveness check plus D1 deletion into the DO lifecycle gate so slug reuse cannot cross a check-then-delete window.
+- Sol follow-up: REVISE. Verified that planned upserts/tag replacements could cross delete-and-recreate outside the DO gate, and draft tag-only orphans were skipped. Addressed by routing reconciliation writes through a created-at lifecycle check inside the DO, moving ordinary create/update/vote D1 writes under the same serialized lifecycle, and planning draft tag-only deletion. Added exact-cap acceptance cases and stale-lifecycle regressions. The prompt permits one follow-up, so no third review was requested.
+- Tests: focused missing-pack restore, owned/unowned pack and tag-only zombies, valid empty authority, malformed/failed authority, D1 read failure, mode, both sides of every safety cap, partial failure breadcrumb, draft removal, stale slug lifecycle, inline breadcrumb, and SQL-table whitelist coverage. Worker check, 197 tests, and Wrangler dry-run pass after reconstructing and rerunning from scratch following an ENOSPC interruption; Worker name remains `kalpa-pack-hub` and no real deploy ran.
+- Handoff: pushed the branch and opened draft stacked PR [#378](https://github.com/ESO-Toolkit/kalpa/pull/378) targeting `fix/audit-w1-worker-consistency`. Deletion-capable reconciliation must not merge without explicit maintainer approval. Exact next action is maintainer review of the dry-run plan and ownership/limit evidence; enabling exact `apply` remains a separate later approval after soak.
+- Compliance revalidation: W2 was marked blocked because two verified Sol `REVISE` rounds require architectural reassessment. Fable accepted corrected D-W2-1 and required D-W2-2: suppress all deletes until W1 reports DO authority, cap both shared D1 reads at ceiling plus one, and single-flight scheduled runs with a token-owned expiring DO lease. Three focused regressions failed before implementation and now pass; pack/tag ceiling and real-DO lease/authority tests were added. Worker check, 203 tests, and Wrangler dry-run pass; fresh Sol review is pending. The PR remains draft and both deletion-capable merge and later `apply` require explicit maintainer approval.
+- Fresh Sol review after Fable: REVISE. Verified that unowned rows in the shared D1 `packs` table could permanently block W1's authority flip, malformed authority fields beyond status could reach D1, and restore's inline upsert retained stale `author_id`. Added an explicit `unowned_d1_ids` operator adjudication limited to D1 witnesses, reused full request validation plus persisted-field invariants for authority, and made restore conflict updates replace `author_id`. Focused endpoint/unit regressions pass; Worker check, 208 tests, and Wrangler dry-run pass. The single permitted Sol follow-up is pending.
+- Sol follow-up after the three corrections: APPROVE. Findings: none. Missing tests: none. Wire contract: OK. Bug-class propagation sweep: CLEAN. W2 is technically ready on its W1 base, but PR #378 remains draft and unmerged pending explicit maintainer approval for deletion-capable code; exact `apply` remains a separate approval after a dry-run soak and plan inspection.
 
 ### 2026-08-26 — Codex
 
