@@ -139,7 +139,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 - **ZIP extraction** rejects absolute paths, drive prefixes, and `..` components, skips symlink entries, and caps total extraction at 500 MB. That is what stops path traversal and zip bombs.
 - **Content-Security-Policy** — strict, with `frame-ancestors 'none'` to block clickjacking and embedding.
 - **Pack Hub worker** rate-limits requests and serializes pack-index mutations through a Durable Object.
-- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies, `cargo audit` over the Rust lockfile. Advisories with no upstream fix are assessed one at a time and recorded in [`ci.yml`](.github/workflows/ci.yml). Today that's two quick-xml DoS advisories that none of Kalpa's code paths can reach.
+- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies and `cargo audit` over the main Rust lockfile. The Slint sidecar also rejects any resolved `quick-xml` version below the patched 0.41.0 release. Advisories without an upstream fix are assessed individually and recorded beside their CI gate.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
 
 When you export account-wide settings in a `.esopack` v2, Kalpa strips personal data before writing the file: account handles, character names and IDs, chat logs, mail, friends and roster lists, trade history. Placeholders are mapped back to your own identity on import. [What's scrubbed in `.esopack` v2](docs/settings-export.md) has the full list, including what is deliberately kept.

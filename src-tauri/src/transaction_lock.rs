@@ -131,11 +131,9 @@ impl LockKey {
         lock_name.push(name);
         lock_name.push(LOCK_SUFFIX);
         let lock_path = parent.join(lock_name);
-        let mut order_key = lock_path.to_string_lossy().into_owned();
+        let order_key = lock_path.to_string_lossy().into_owned();
         #[cfg(windows)]
-        {
-            order_key = order_key.to_lowercase();
-        }
+        let order_key = order_key.to_lowercase();
         Ok(Self {
             target,
             lock_path,
@@ -169,13 +167,13 @@ fn canonicalize_with_missing_tail(path: &Path) -> io::Result<PathBuf> {
     let mut existing = path;
     let mut tail: Vec<OsString> = Vec::new();
     while !existing.exists() {
-        let Some(name) = existing.file_name() else {
+        let Some(component) = existing.components().next_back() else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("no existing ancestor for {}", path.display()),
             ));
         };
-        tail.push(name.to_owned());
+        tail.push(component.as_os_str().to_owned());
         existing = existing.parent().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,

@@ -70,6 +70,11 @@ pub struct EsouiAddonInfo {
     pub version: String,
     pub download_url: String,
     pub updated: String,
+    /// Publication marker from the same filedetails response as the checksum
+    /// and download URL. It lets update metadata distinguish a stale filelist
+    /// entry from a genuinely newer artifact.
+    #[serde(skip_serializing)]
+    pub(crate) last_update: u64,
     /// MD5 the filedetails API reports for `download_url`. Pass it to
     /// [`download_addon`] as `expected_md5` so the existing verification runs —
     /// without it, a corrupt-but-structurally-valid ZIP installs silently.
@@ -217,6 +222,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         version: detail.version,
         download_url: detail.download_uri,
         updated: String::new(), // Not needed by callers — metadata uses last_update epoch
+        last_update: detail.last_update,
         checksum: detail.checksum,
     })
 }
@@ -1412,6 +1418,29 @@ pub fn refresh_filelist_cache() -> Result<(), String> {
     ensure_filelist_cache(true)
 }
 
+/// Drop a filelist observation after an update successfully installs an
+/// artifact described by a newer filedetails response. The next update check
+/// must fetch again instead of comparing the installed artifact against the
+/// stale pre-download filelist and offering a phantom update.
+pub fn invalidate_filelist_cache() {
+    // Serialize with the complete fetch-and-publish operation. Clearing only
+    // the cache mutex allows a refresh that started before an install to
+    // publish its stale, pre-install observation after this invalidation.
+    let _refresh_guard = FILELIST_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+/// Invalidate only when at least one update was actually applied. Batch paths
+/// can finish with zero successes and must preserve a still-valid observation.
+pub fn invalidate_filelist_cache_if_applied(applied: bool) {
+    if applied {
+        invalidate_filelist_cache();
+    }
+}
+
 /// Fetch the full ESOUI filelist and build a lookup map keyed by addon folder path.
 ///
 /// Single HTTP request returns ~4000 addons with all their folder paths,
@@ -1771,5 +1800,59 @@ mod tests {
     fn download_addon_rejects_http_esoui() {
         let result = download_addon("http://cdn.esoui.com/addon.zip", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn applied_update_invalidates_stale_filelist_observation() {
+        {
+            let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(FilelistCache {
+                entries: Vec::new(),
+                lookup: Arc::new(HashMap::new()),
+                fetched_at: Instant::now(),
+            });
+        }
+
+        assert!(cache_exists());
+        invalidate_filelist_cache();
+        assert!(!cache_exists());
+    }
+
+    #[test]
+    fn invalidation_waits_for_an_in_flight_refresh_to_finish() {
+        let refresh_guard = FILELIST_REFRESH_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+        let invalidator = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            invalidate_filelist_cache();
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        drop(refresh_guard);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        invalidator.join().unwrap();
+    }
+
+    #[test]
+    fn zero_applied_updates_preserve_filelist_observation() {
+        {
+            let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(FilelistCache {
+                entries: Vec::new(),
+                lookup: Arc::new(HashMap::new()),
+                fetched_at: Instant::now(),
+            });
+        }
+
+        invalidate_filelist_cache_if_applied(false);
+        assert!(cache_exists());
+        invalidate_filelist_cache();
     }
 }

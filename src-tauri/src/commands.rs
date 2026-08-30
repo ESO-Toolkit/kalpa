@@ -1095,6 +1095,7 @@ pub async fn scan_installed_addons(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+
         scan_installed_addons_blocking(&addons_dir, &cache_dir)
     })
     .await
@@ -1234,15 +1235,22 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    // Modified-file counts live in one JSON manifest per addon under
-    // .kalpa-hashes; each read is independent disk I/O, so collect them in
-    // parallel (mirroring the manifest parsing above) instead of paying one
-    // sequential read per addon inside the enrichment loop.
-    let modified_counts: HashMap<String, u32> = addons
+    // Protected Edits coverage and modified-file counts live in one JSON
+    // manifest per addon under .kalpa-hashes. Each read is independent disk I/O,
+    // so collect both in parallel instead of paying one sequential read per
+    // addon inside the enrichment loop.
+    let protected_edits_state: HashMap<String, (u32, bool)> = addons
         .par_iter()
-        .filter_map(|addon| {
-            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
-                .map(|count| (addon.folder_name.clone(), count))
+        .map(|addon| {
+            let modified_file_count =
+                file_hashes::load_modified_file_count(addons_dir, &addon.folder_name);
+            (
+                addon.folder_name.clone(),
+                (
+                    modified_file_count.unwrap_or(0),
+                    modified_file_count.is_some(),
+                ),
+            )
         })
         .collect();
 
@@ -1292,8 +1300,9 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(count) = modified_counts.get(&addon.folder_name) {
+        if let Some((count, has_baseline)) = protected_edits_state.get(&addon.folder_name) {
             addon.modified_file_count = *count;
+            addon.has_protected_edits_baseline = *has_baseline;
         }
     }
 
@@ -1333,6 +1342,7 @@ pub async fn set_addon_tags(
                         installed_at: String::new(),
                         tags,
                         esoui_last_update: 0,
+                        esoui_marker_installed: false,
                     },
                 );
             }
@@ -1831,11 +1841,6 @@ fn check_for_updates_metadata(
         // resolves to the same addon id we track locally; the filelist cache is
         // keyed by top-level folder name, so a stale or duplicate mapping should
         // not let unrelated external state rewrite this entry.
-        // Prefer direct disk evidence when the manifest already matches the
-        // current API version; this also handles manual/external installs.
-        // Never adopt an arbitrary manifest version: addon authors sometimes
-        // use a manifest version that differs from ESOUI's filelist version,
-        // which would recreate a perpetual false update after Kalpa installs it.
         let api_ids_match = api_entry.esoui_id == meta.esoui_id;
         let remote_ver = normalized_version(&api_entry.version);
         let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
@@ -1848,12 +1853,7 @@ fn check_for_updates_metadata(
                     meta.esoui_id,
                 )
                 .is_some_and(|version| normalized_version(version) == remote_ver);
-                let disk_version = read_local_version(addons_dir, folder_name);
-                let disk_matches_api = !disk_version.trim().is_empty()
-                    && !remote_ver.is_empty()
-                    && normalized_version(&disk_version) == remote_ver;
-
-                (minion_matches_api || disk_matches_api).then(|| api_entry.version.clone())
+                minion_matches_api.then(|| api_entry.version.clone())
             })
             .flatten();
 
@@ -1870,7 +1870,13 @@ fn check_for_updates_metadata(
         // Normalize versions: strip leading "v"/"V" and trim whitespace
         let local_ver = normalized_version(&meta.installed_version);
 
-        let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
+        let has_update = artifact_is_newer_with_marker_state(
+            local_ver,
+            remote_ver,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(folder_name) {
             // Sync the raw string only when both sides are real versions that
@@ -1883,13 +1889,34 @@ fn check_for_updates_metadata(
                 && api_ids_match
                 && !remote_ver.is_empty()
                 && !local_ver.is_empty()
+                && remote_ver == local_ver
                 && meta.installed_version != api_entry.version
             {
                 entry.installed_version = api_entry.version.clone();
                 metadata_changed = true;
             }
-            if entry.esoui_last_update != api_entry.last_update {
+            // A matching version observation establishes that a legacy marker
+            // belongs to the artifact on disk. Until then, markers loaded from
+            // pre-v2 metadata remain observation-only and cannot suppress a
+            // version mismatch.
+            if !local_ver.is_empty()
+                && !remote_ver.is_empty()
+                && local_ver == remote_ver
+                && api_entry.last_update > 0
+                && api_entry.last_update == entry.esoui_last_update
+                && !entry.esoui_marker_installed
+            {
+                entry.esoui_marker_installed = true;
+                metadata_changed = true;
+            }
+            // A marker is the publication identity of the installed artifact.
+            // Learn it from a matching filelist observation, but leave it
+            // untouched while an update is pending: recording the remote
+            // marker before download would make an ignored update appear
+            // installed on the next check.
+            if !has_update && api_entry.last_update > entry.esoui_last_update {
                 entry.esoui_last_update = api_entry.last_update;
+                entry.esoui_marker_installed = true;
                 metadata_changed = true;
             }
         }
@@ -2165,11 +2192,30 @@ fn update_addon_blocking(
     hooks: installer::ExtractHooks,
     dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
-    // Store the API version (from filelist.json) when available, since
-    // check_for_updates compares against the API version. Using the
-    // HTML-scraped version here caused perpetual "update available" when
-    // the two sources returned slightly different version strings.
-    let version = api_version.unwrap_or(&info.version);
+    // Store the version from the checksum-bound filedetails descriptor that
+    // supplied this artifact. The earlier filelist value is only an observation
+    // and may be stale if ESOUI publishes between check and download.
+    let artifact_version =
+        downloaded_artifact_version(api_version.unwrap_or_default(), &info.version);
+
+    // Keep a known local version if both remote sources are empty. In
+    // particular, never let an empty filedetails version erase the installed
+    // artifact marker or hash-manifest version.
+    let mut store = metadata::load_metadata(addons_dir);
+    let fallback_version = store
+        .addons
+        .values()
+        .find(|m| m.esoui_id == esoui_id)
+        .map(|m| m.installed_version.clone())
+        .unwrap_or_default();
+    let version = if artifact_version.is_empty() {
+        fallback_version.as_str()
+    } else {
+        artifact_version
+    };
+
+    // Publish the addon folders and their matching hash baselines as one
+    // recoverable transaction. Metadata is updated only after that succeeds.
     let installed_folders = installer::install_addon_zip_with_hashes(
         tmp_file.path(),
         addons_dir,
@@ -2180,7 +2226,6 @@ fn update_addon_blocking(
 
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
-    let mut store = metadata::load_metadata(addons_dir);
     let old_folders: Vec<String> = store
         .addons
         .iter()
@@ -2200,12 +2245,12 @@ fn update_addon_blocking(
         version,
         &info.title,
         &info.download_url,
-        0, // preserved from existing metadata
+        info.last_update,
     );
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -2224,6 +2269,86 @@ pub struct BatchUpdateEntry {
     pub esoui_id: u32,
     pub folder_name: String,
     pub api_version: String,
+}
+
+/// Choose the version persisted for an update after the backend has fetched the
+/// artifact descriptor. The fetched version and its checksum/download URL form
+/// one provenance tuple; the frontend value is only the earlier observation
+/// that caused the update request.
+fn downloaded_artifact_version<'a>(observed_version: &'a str, fetched_version: &'a str) -> &'a str {
+    let fetched_version = fetched_version.trim();
+    if !fetched_version.is_empty() {
+        fetched_version
+    } else {
+        observed_version.trim()
+    }
+}
+
+/// Compare the version strings used for local/API identity checks. ESOUI may
+/// include a leading `v` or surrounding whitespace, but an empty value is not
+/// evidence that the installed artifact matches the API entry.
+fn versions_match(local_version: &str, remote_version: &str) -> bool {
+    let local = local_version.trim();
+    let remote = remote_version.trim();
+    let local = local
+        .strip_prefix('v')
+        .or_else(|| local.strip_prefix('V'))
+        .unwrap_or(local);
+    let remote = remote
+        .strip_prefix('v')
+        .or_else(|| remote.strip_prefix('V'))
+        .unwrap_or(remote);
+    !local.is_empty() && !remote.is_empty() && local == remote
+}
+
+/// Compare a local artifact with a filelist observation. A filelist marker at
+/// or before the marker recorded with the installed artifact is not allowed to
+/// trigger an update: ESOUI can briefly serve an older filelist after the
+/// filedetails endpoint has published a new artifact.
+#[cfg(test)]
+fn artifact_is_newer(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    remote_marker: u64,
+) -> bool {
+    artifact_is_newer_with_marker_state(
+        local_version,
+        remote_version,
+        installed_marker,
+        true,
+        remote_marker,
+    )
+}
+
+fn artifact_is_newer_with_marker_state(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+/// Persist metadata for an applied update, then discard the pre-download
+/// filelist observation. If filedetails advanced between check and download,
+/// the next check must fetch a current filelist rather than compare the newly
+/// installed version against the stale version that initiated this request.
+fn save_applied_update_metadata(
+    addons_dir: &Path,
+    store: &metadata::MetadataStore,
+    applied: bool,
+) -> Result<(), String> {
+    metadata::save_metadata(addons_dir, store)?;
+    esoui::invalidate_filelist_cache_if_applied(applied);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2321,11 +2446,13 @@ fn batch_download_addons(
                             total,
                         },
                     );
+                    let artifact_version =
+                        downloaded_artifact_version(&entry.api_version, &info.version).to_string();
                     BatchDownloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
-                        api_version: entry.api_version.clone(),
+                        api_version: artifact_version,
                         index: i,
                     }
                 });
@@ -2368,68 +2495,80 @@ fn batch_extract_and_record(
                 failed.push(folder_name);
                 // Already emitted "failed" during download phase
             }
-            Ok(dl) => match installer::install_addon_zip_with_hashes(
-                dl.tmp.path(),
-                addons_dir,
-                dl.esoui_id,
-                &dl.api_version,
-                installer::ExtractHooks::NONE,
-            ) {
-                Err(e) => {
-                    let _ = app.emit(
-                        "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: folder_name.clone(),
-                            phase: "failed".to_string(),
-                            index: dl.index,
-                            total,
-                        },
-                    );
-                    errors.insert(folder_name.clone(), e);
-                    failed.push(folder_name);
-                }
-                Ok(installed_folders) => {
-                    let version = &dl.api_version;
+            Ok(dl) => {
+                let fallback_version = store
+                    .addons
+                    .values()
+                    .find(|m| m.esoui_id == dl.esoui_id)
+                    .map(|m| m.installed_version.clone())
+                    .unwrap_or_default();
+                let version = if dl.api_version.trim().is_empty() {
+                    fallback_version
+                } else {
+                    dl.api_version.trim().to_string()
+                };
 
-                    // Clean up old metadata entries for this esoui_id
-                    // that aren't in the newly extracted folders (handles renames)
-                    let old_folders: Vec<String> = store
-                        .addons
-                        .iter()
-                        .filter(|(_, m)| m.esoui_id == dl.esoui_id)
-                        .map(|(name, _)| name.clone())
-                        .collect();
-                    for old in &old_folders {
-                        if !installed_folders.contains(old) {
-                            metadata::remove_entry(&mut store, old);
-                        }
+                match installer::install_addon_zip_with_hashes(
+                    dl.tmp.path(),
+                    addons_dir,
+                    dl.esoui_id,
+                    &version,
+                    installer::ExtractHooks::NONE,
+                ) {
+                    Err(e) => {
+                        let _ = app.emit(
+                            "batch-update-progress",
+                            BatchUpdateProgress {
+                                folder_name: folder_name.clone(),
+                                phase: "failed".to_string(),
+                                index: dl.index,
+                                total,
+                            },
+                        );
+                        errors.insert(folder_name.clone(), e);
+                        failed.push(folder_name);
                     }
-                    record_installed_folders(
-                        &mut store,
-                        addons_dir,
-                        &installed_folders,
-                        dl.esoui_id,
-                        version,
-                        &dl.info.title,
-                        &dl.info.download_url,
-                        0,
-                    );
-                    let _ = app.emit(
-                        "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: folder_name.clone(),
-                            phase: "completed".to_string(),
-                            index: dl.index,
-                            total,
-                        },
-                    );
-                    completed.push(folder_name);
+                    Ok(installed_folders) => {
+                        // Clean up old metadata entries for this esoui_id
+                        // that aren't in the newly extracted folders (handles renames)
+                        let old_folders: Vec<String> = store
+                            .addons
+                            .iter()
+                            .filter(|(_, m)| m.esoui_id == dl.esoui_id)
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        for old in &old_folders {
+                            if !installed_folders.contains(old) {
+                                metadata::remove_entry(&mut store, old);
+                            }
+                        }
+                        record_installed_folders(
+                            &mut store,
+                            addons_dir,
+                            &installed_folders,
+                            dl.esoui_id,
+                            &version,
+                            &dl.info.title,
+                            &dl.info.download_url,
+                            dl.info.last_update,
+                        );
+                        let _ = app.emit(
+                            "batch-update-progress",
+                            BatchUpdateProgress {
+                                folder_name: folder_name.clone(),
+                                phase: "completed".to_string(),
+                                index: dl.index,
+                                total,
+                            },
+                        );
+                        completed.push(folder_name);
+                    }
                 }
-            },
+            }
         }
     }
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, !completed.is_empty())?;
 
     Ok(BatchUpdateResult {
         completed,
@@ -2457,6 +2596,7 @@ pub struct ConflictReport {
     pub safe_files: Vec<String>,
     pub auto_kept_files: Vec<String>,
     pub conflicts: Vec<FileConflict>,
+    pub has_hash_baseline: bool,
 }
 
 fn generate_session_id(folder_name: &str) -> String {
@@ -2476,6 +2616,7 @@ struct ClassifiedFiles {
     safe_files: Vec<String>,
     auto_kept_files: Vec<String>,
     conflicts: Vec<FileConflict>,
+    has_hash_baseline: bool,
 }
 
 /// Classify the files `zip_hashes` would write over the installed folder.
@@ -2556,6 +2697,7 @@ fn classify_update_files(
         safe_files,
         auto_kept_files,
         conflicts,
+        has_hash_baseline: stored.is_some(),
     })
 }
 
@@ -2579,6 +2721,7 @@ fn build_conflict_report(
         safe_files: classified.safe_files,
         auto_kept_files: classified.auto_kept_files,
         conflicts: classified.conflicts,
+        has_hash_baseline: classified.has_hash_baseline,
     };
 
     Ok((report, zip_hashes))
@@ -2616,17 +2759,24 @@ pub async fn scan_update_conflicts(
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
 
+        let stored_version = metadata::load_metadata(&addons_dir)
+            .addons
+            .values()
+            .find(|m| m.esoui_id == esoui_id)
+            .map(|m| m.installed_version.clone())
+            .unwrap_or_default();
+        let version = if info.version.trim().is_empty() {
+            stored_version
+        } else {
+            info.version.trim().to_string()
+        };
+
         // Keep the ZIP hash map: the apply step (update_addon_with_decisions)
         // reuses it as the new baseline instead of re-decompressing and
         // re-hashing the whole archive a second time — the big saving on
         // many-file addons.
-        let (report, zip_hashes) = build_conflict_report(
-            &addons_dir,
-            &folder_name,
-            &kept_path,
-            &info.version,
-            &session_id,
-        )?;
+        let (report, zip_hashes) =
+            build_conflict_report(&addons_dir, &folder_name, &kept_path, &version, &session_id)?;
 
         if let Ok(mut map) = pending_clone.lock() {
             map.insert(
@@ -2635,7 +2785,8 @@ pub async fn scan_update_conflicts(
                     zip_path: kept_path,
                     folder_name: folder_name.clone(),
                     esoui_id,
-                    update_version: info.version,
+                    update_version: version,
+                    artifact_last_update: info.last_update,
                     zip_hashes: Arc::new(zip_hashes),
                 },
             );
@@ -2719,6 +2870,7 @@ pub async fn scan_batch_conflicts(
             kept_path: PathBuf,
             esoui_id: u32,
             api_version: String,
+            artifact_last_update: u64,
         }
 
         let app_clone = app.clone();
@@ -2729,7 +2881,7 @@ pub async fn scan_batch_conflicts(
                     .enumerate()
                     .map(|(i, entry)| {
                         let result = fetch_and_download_with_retry(entry.esoui_id).and_then(
-                            |(tmp, _info)| {
+                            |(tmp, info)| {
                                 let _ = app_clone.emit(
                                     "batch-update-progress",
                                     BatchUpdateProgress {
@@ -2742,10 +2894,14 @@ pub async fn scan_batch_conflicts(
                                 let (_, kept_path) = tmp
                                     .keep()
                                     .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 Ok(Downloaded {
                                     kept_path,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
+                                    artifact_last_update: info.last_update,
                                 })
                             },
                         );
@@ -2805,6 +2961,7 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
+                                        artifact_last_update: dl.artifact_last_update,
                                         zip_hashes: Arc::new(zip_hashes),
                                     },
                                 );
@@ -2959,11 +3116,14 @@ pub async fn update_batch_with_decisions(
                     .for_each_with(tx, |tx, (i, entry)| {
                         let result =
                             fetch_and_download_with_retry(entry.esoui_id).map(|(zip, info)| {
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 StreamedDownload {
                                     zip,
                                     info,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
                                 }
                             });
                         let phase = if result.is_ok() {
@@ -3076,13 +3236,26 @@ fn extract_streamed_downloads(
         };
 
         let session_id = generate_session_id(&folder_name);
+        // A filedetails response can omit its version temporarily. Keep the
+        // installed version for conflict/backup/hash metadata in that case;
+        // persisting an empty version makes the next update ambiguous.
+        let version = if dl.api_version.trim().is_empty() {
+            store
+                .addons
+                .values()
+                .find(|m| m.esoui_id == dl.esoui_id)
+                .map(|m| m.installed_version.clone())
+                .unwrap_or_default()
+        } else {
+            dl.api_version.trim().to_string()
+        };
         // Keep the ZIP hash map: this addon is extracted right below, so the map
         // doubles as the new hash baseline (no second decompression to re-hash).
         let (report, zip_hashes) = match build_conflict_report(
             addons_dir,
             &folder_name,
             dl.zip.path(),
-            &dl.api_version,
+            &version,
             &session_id,
         ) {
             Ok(r) => r,
@@ -3118,7 +3291,8 @@ fn extract_streamed_downloads(
                         zip_path: kept_path,
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
-                        update_version: dl.api_version.clone(),
+                        update_version: version.clone(),
+                        artifact_last_update: dl.info.last_update,
                         zip_hashes: Arc::new(zip_hashes),
                     },
                 );
@@ -3160,7 +3334,7 @@ fn extract_streamed_downloads(
                 &folder_name,
                 &files_to_backup,
                 &from_version,
-                &dl.api_version,
+                &version,
             ) {
                 emit_phase(&folder_name, "failed", index);
                 errors.insert(folder_name.clone(), e);
@@ -3201,7 +3375,7 @@ fn extract_streamed_downloads(
             &skip_files,
             installer::ExtractHooks::NONE,
             dl.esoui_id,
-            &dl.api_version,
+            &version,
             &folder_name,
             hash_overrides.as_ref().unwrap_or(&empty_overrides),
         ) {
@@ -3233,10 +3407,10 @@ fn extract_streamed_downloads(
             addons_dir,
             &installed_folders,
             dl.esoui_id,
-            &dl.api_version,
+            &version,
             &dl.info.title,
             &dl.info.download_url,
-            0,
+            dl.info.last_update,
         );
 
         for f in &installed_folders {
@@ -3271,6 +3445,8 @@ fn extract_streamed_downloads(
             errors.insert(folder.clone(), reason.clone());
             failed.push(folder);
         }
+    } else if !completed.is_empty() {
+        esoui::invalidate_filelist_cache();
     }
 
     StreamingBatchResult {
@@ -3536,10 +3712,17 @@ fn update_with_decisions_inner(
         }
     }
 
-    // Get current version from hash manifest for backup metadata
+    // Get current version from hash manifest for backup metadata. Pending
+    // entries created before version tracking (or from an empty API response)
+    // must not erase this known version when they are applied.
     let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
         .map(|m| m.installed_version)
         .unwrap_or_default();
+    let update_version = if pu.update_version.trim().is_empty() {
+        from_version.clone()
+    } else {
+        pu.update_version.clone()
+    };
 
     // Back up files before overwriting
     if !files_to_backup.is_empty() {
@@ -3548,7 +3731,7 @@ fn update_with_decisions_inner(
             &pu.folder_name,
             &files_to_backup,
             &from_version,
-            &pu.update_version,
+            &update_version,
         )?;
     }
 
@@ -3570,7 +3753,7 @@ fn update_with_decisions_inner(
         &skip_files,
         hooks,
         pu.esoui_id,
-        &pu.update_version,
+        &update_version,
         &pu.folder_name,
         hash_overrides.as_ref().unwrap_or(&empty_overrides),
     )?;
@@ -3603,15 +3786,15 @@ fn update_with_decisions_inner(
         addons_dir,
         &installed_folders,
         pu.esoui_id,
-        &pu.update_version,
+        &update_version,
         &pu.folder_name,
         &download_url,
-        0,
+        pu.artifact_last_update,
     );
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -4147,10 +4330,13 @@ fn auto_link_addons_blocking(
 
             let needs_update = match already_tracked {
                 Some(meta) => {
-                    // Update existing entries: fill in missing esoui_id or last_update
+                    // Update existing entries: fill in missing esoui_id or a
+                    // newer publication marker when its version matches the
+                    // artifact on disk. A stale filelist response must not
+                    // trigger metadata churn or regress the marker.
                     (meta.esoui_id == 0 && api_entry.esoui_id > 0)
-                        || meta.esoui_last_update == 0
-                        || meta.esoui_last_update != api_entry.last_update
+                        || (versions_match(&meta.installed_version, &api_entry.version)
+                            && api_entry.last_update > meta.esoui_last_update)
                 }
                 None => true,
             };
@@ -4168,14 +4354,23 @@ fn auto_link_addons_blocking(
                         installed_at: String::new(),
                         tags: Vec::new(),
                         esoui_last_update: 0,
+                        esoui_marker_installed: false,
                     }
                 });
-                metadata::reconcile_addon(
-                    entry,
-                    api_entry.esoui_id,
-                    api_entry.last_update,
-                    &api_entry.file_info_uri,
-                );
+                if versions_match(&entry.installed_version, &api_entry.version) {
+                    metadata::reconcile_addon(
+                        entry,
+                        api_entry.esoui_id,
+                        api_entry.last_update,
+                        &api_entry.file_info_uri,
+                    );
+                } else {
+                    metadata::reconcile_addon_identity(
+                        entry,
+                        api_entry.esoui_id,
+                        &api_entry.file_info_uri,
+                    );
+                }
                 linked.push(folder_name);
             }
         } else if !store.addons.contains_key(&folder_name) {
@@ -4299,6 +4494,7 @@ pub async fn batch_set_tags(
                             installed_at: String::new(),
                             tags: entry.tags,
                             esoui_last_update: 0,
+                            esoui_marker_installed: false,
                         },
                     );
                 }
@@ -10082,22 +10278,404 @@ fn resolve_native_shell_executable(app: &tauri::AppHandle) -> Result<PathBuf, St
     resolve_native_shell_executable_from(explicit, current_exe, resource_dir, current_dir)
 }
 
-/// Name of the "a native boot is in flight and not yet confirmed" marker in
-/// the app data dir. Written just before spawning the sidecar; deleted by the
-/// sidecar once its event loop is up. A surviving marker on the NEXT launch
-/// means the last native boot died before showing a window — the startup gate
-/// then reverts to the WebView UI instead of crash-looping with no UI at all.
-const NATIVE_BOOT_PENDING: &str = "native-boot.pending";
 /// One-shot note the fallback leaves for the WebView frontend so it can tell
 /// the user native mode was turned off (read + cleared by
 /// [`native_boot_failure_pending`]).
 const NATIVE_BOOT_FAILED: &str = "native-boot-failed";
 
+static WEBVIEW_AUTHORITY: OnceLock<Mutex<Option<crate::native_boot::AuthorityGuard>>> =
+    OnceLock::new();
+static NATIVE_HANDOFF_ACTIVE: AtomicBool = AtomicBool::new(false);
+static NATIVE_HANDOFF_CANCELLED: AtomicBool = AtomicBool::new(false);
+static NATIVE_HANDOFF_IS_STARTUP: AtomicBool = AtomicBool::new(false);
+static STARTUP_WEBVIEW_REQUESTED: AtomicBool = AtomicBool::new(false);
+const NATIVE_HANDOFF_CANCELLED_ERROR: &str =
+    "Native handoff was cancelled to preserve an incoming activation.";
+/// Set when this process released UI authority and could not take it back.
+///
+/// Staying alive in that state is not merely "unauthoritative": the lock is the
+/// only thing that stops the next launch from spawning a sidecar, and a sidecar
+/// that finds the lock free claims it and starts writing. Two independent
+/// writers is exactly what the handshake exists to prevent, so this is fatal —
+/// the same rule the sidecar's own authority failures already follow.
+static WEBVIEW_AUTHORITY_LOST: AtomicBool = AtomicBool::new(false);
+
+fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGuard>> {
+    WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
+}
+
+fn begin_native_handoff(is_startup: bool) -> Result<(), String> {
+    // Serialize admission with activation cancellation and authority release.
+    // Only the admitted invocation may reset the process-global cancel flag.
+    let _authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    NATIVE_HANDOFF_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| "A native performance mode handoff is already in progress.".to_string())?;
+    NATIVE_HANDOFF_CANCELLED.store(
+        is_startup && STARTUP_WEBVIEW_REQUESTED.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    NATIVE_HANDOFF_IS_STARTUP.store(is_startup, Ordering::SeqCst);
+    Ok(())
+}
+
+fn abort_native_handoff() {
+    // The caller reached this only after winning begin_native_handoff, so it
+    // owns both flags. Taking the mutex prevents an activation from observing
+    // a half-reset state.
+    if let Ok(_authority) = webview_authority().lock() {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+        STARTUP_WEBVIEW_REQUESTED.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), String> {
+    let state_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    let guard = crate::native_boot::claim_webview_after_shutdown(
+        &state_dir,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    *authority = Some(guard);
+    STARTUP_WEBVIEW_REQUESTED.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+fn reclaim_webview_authority(state_dir: &Path) -> Result<(), String> {
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if authority.is_some() {
+        return Ok(());
+    }
+    let guard = match crate::native_boot::claim_webview_after_shutdown(
+        state_dir,
+        crate::native_boot::READY_TIMEOUT,
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            // The reclaim polls for the whole timeout, so failing means either
+            // another process held the lock for that entire window — it is the
+            // UI now, not this one — or the lock itself is unusable. Continuing
+            // to render and write either way is the two-writer bug.
+            WEBVIEW_AUTHORITY_LOST.store(true, Ordering::SeqCst);
+            eprintln!(
+                "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
+            );
+            return Err(error);
+        }
+    };
+    *authority = Some(guard);
+    Ok(())
+}
+
+/// Whether this process released UI authority and failed to take it back.
+pub(crate) fn webview_authority_was_lost() -> bool {
+    WEBVIEW_AUTHORITY_LOST.load(Ordering::SeqCst)
+}
+
+/// Whether this process currently holds the cross-process UI authority lock.
+///
+/// A live WebView normally always holds it: startup fails closed if
+/// `claim_webview_authority` cannot, and a reverse-handoff child claims it in
+/// `complete_webview_handoff`. It is false only between releasing authority to
+/// a native child and either that child proving acquisition or this process
+/// reclaiming. Acting on a user activation in that window is what would put two
+/// writers on the same state, so the activation path gates on this.
+pub(crate) fn holds_webview_authority() -> bool {
+    webview_authority()
+        .lock()
+        .map(|authority| authority.is_some())
+        .unwrap_or(false)
+}
+
+/// Preserve an activation in the still-live WebView instead of letting an
+/// in-flight native handoff exit underneath it.
+fn cancel_native_handoff(
+    reclaim: impl FnOnce() -> Result<crate::native_boot::AuthorityGuard, String>,
+) -> Result<bool, String> {
+    // Checking the handoff state and publishing cancellation belong to the
+    // same critical section as authority release. Otherwise commit can pass
+    // between the load and store and exit underneath this activation.
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
+        NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+        eprintln!("[native-shell] cancelling handoff for incoming activation");
+        if authority.is_none() && !NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst) {
+            // The child became ready and the command released authority, but
+            // ExitRequested has not committed yet. Reclaim before the callback
+            // reveals or emits into this WebView.
+            match reclaim() {
+                Ok(guard) => *authority = Some(guard),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Atomically choose between committing the ready child or preserving an
+/// activation that raced the end of the wait. The callback and this function
+/// serialize on the authority mutex, closing the post-ready/pre-exit gap.
+fn commit_native_handoff_authority_release() -> Result<(), String> {
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst) {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+        return Err(NATIVE_HANDOFF_CANCELLED_ERROR.into());
+    }
+    authority.take();
+    Ok(())
+}
+
+pub(crate) fn finish_native_handoff_exit() -> bool {
+    // Serialize the ExitRequested decision with an activation callback that
+    // has entered cancellation but has not published its flag yet.
+    let Ok(_authority) = webview_authority().lock() else {
+        return true;
+    };
+    if !NATIVE_HANDOFF_ACTIVE.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst)
+}
+
+/// Decide an early-startup duplicate result on the UI thread. An activation
+/// callback and this decision are serialized by that thread and this mutex.
+pub(crate) fn should_exit_for_existing_native_startup() -> bool {
+    let Ok(_authority) = webview_authority().lock() else {
+        return false;
+    };
+    !STARTUP_WEBVIEW_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn finish_existing_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<bool, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let exit_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let should_exit = should_exit_for_existing_native_startup();
+        let _ = sender.send(should_exit);
+        if should_exit {
+            exit_handle.exit(0);
+        }
+    })
+    .map_err(|error| format!("Failed to finalize native startup on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())
+}
+
+/// Complete the reverse handoff only after the WebView page/runtime is live.
+/// Called by the main-window finished-load callback while the window is hidden.
+pub(crate) fn complete_webview_handoff(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(launch_id) = std::env::var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    // This process claims authority under the handoff ID rather than minting its
+    // own, so the ID must classify as a WebView owner. Refusing here fails closed
+    // to the still-live native shell, which reclaims on our exit; proceeding
+    // would publish an active record that reads as native.
+    if !crate::native_boot::is_webview_launch_id(&launch_id) {
+        return Err(format!(
+            "WebView handoff launch ID is not WebView-shaped: {launch_id}"
+        ));
+    }
+    let state_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    if !crate::native_boot::signal_ready(&state_dir, &launch_id)? {
+        return Err(format!(
+            "WebView handoff launch ID was rejected: {launch_id}"
+        ));
+    }
+    eprintln!("[native-shell] WebView runtime ready launch_id={launch_id}");
+    let guard = crate::native_boot::claim_after_ready_release(
+        &state_dir,
+        &launch_id,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    *authority = Some(guard);
+    let proof = authority
+        .as_ref()
+        .expect("WebView authority was just stored")
+        .signal_acquired();
+    match proof {
+        Ok(true) => {}
+        Ok(false) => {
+            authority.take();
+            return Err(format!(
+                "WebView handoff authority proof failed for {launch_id}: launch ID was rejected"
+            ));
+        }
+        Err(error) => {
+            authority.take();
+            return Err(format!(
+                "WebView handoff authority proof failed for {launch_id}: {error}"
+            ));
+        }
+    }
+    drop(authority);
+    std::env::remove_var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV);
+    Ok(())
+}
+
+fn acquire_native_launch_guard(
+    state_dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire(
+        crate::native_boot::pending_path(state_dir),
+        crate::transaction_lock::LockOptions {
+            timeout: crate::native_boot::READY_TIMEOUT,
+            cancel,
+        },
+    )
+    .map_err(|error| format!("Could not serialize native launch: {error}"))
+}
+
+#[derive(Clone)]
+enum NativeLaunchMode {
+    Startup(tauri::AppHandle),
+    Handoff(tauri::AppHandle),
+}
+
+impl NativeLaunchMode {
+    fn cancel_flag(&self) -> &'static AtomicBool {
+        &NATIVE_HANDOFF_CANCELLED
+    }
+}
+
+pub(crate) fn cancel_native_handoff_for_activation(
+    app: &tauri::AppHandle,
+    startup_pending: bool,
+) -> Result<bool, String> {
+    if startup_pending {
+        let _authority = webview_authority()
+            .lock()
+            .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+        STARTUP_WEBVIEW_REQUESTED.store(true, Ordering::SeqCst);
+        if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
+            NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+        }
+        return Ok(true);
+    }
+    cancel_native_handoff(|| {
+        let state_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+        crate::native_boot::claim_webview_after_shutdown(
+            &state_dir,
+            crate::native_boot::READY_TIMEOUT,
+        )
+    })
+}
+
+fn finish_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let exit_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = commit_native_handoff_authority_release();
+        let should_exit = result.is_ok();
+        let _ = sender.send(result);
+        if should_exit {
+            exit_handle.exit(0);
+        }
+    })
+    .map_err(|error| format!("Failed to finalize native startup on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())?
+}
+
+fn set_main_webview_visible_on_main_thread(
+    app: &tauri::AppHandle,
+    visible: bool,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let window_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = window_app
+            .get_webview_window("main")
+            .ok_or_else(|| "Main WebView window is unavailable.".to_string())
+            .and_then(|window| {
+                if visible {
+                    window.show().map_err(|error| {
+                        format!("Failed to restore the WebView window: {error}")
+                    })?;
+                    window.set_focus().map_err(|error| {
+                        format!("Failed to focus the restored WebView window: {error}")
+                    })
+                } else {
+                    window
+                        .hide()
+                        .map_err(|error| format!("Failed to quiesce the WebView window: {error}"))
+                }
+            });
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("Failed to update the WebView on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "WebView visibility channel closed unexpectedly.".to_string())?
+}
+
+fn quiesce_then_release_webview_authority(
+    quiesce: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    quiesce()?;
+    commit_native_handoff_authority_release()
+}
+
+fn restore_handoff_webview(mode: &NativeLaunchMode) -> Result<(), String> {
+    match mode {
+        NativeLaunchMode::Handoff(app) => set_main_webview_visible_on_main_thread(app, true),
+        NativeLaunchMode::Startup(_) => Ok(()),
+    }
+}
+
 fn launch_native_shell_process(
     exe_path: &Path,
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
+    mode: NativeLaunchMode,
 ) -> Result<(), String> {
+    let state_dir = app_data_dir.ok_or_else(|| {
+        "Native performance UI requires an application state directory.".to_string()
+    })?;
+    let cancel = mode.cancel_flag();
+    let _pending_guard = match acquire_native_launch_guard(&state_dir, Some(cancel)) {
+        Ok(guard) => guard,
+        Err(_) if cancel.load(Ordering::SeqCst) => {
+            return Err(NATIVE_HANDOFF_CANCELLED_ERROR.to_string());
+        }
+        Err(error) => return Err(error),
+    };
+    let launch_id = crate::native_boot::new_launch_id();
+    crate::native_boot::prepare(&state_dir, &launch_id)?;
     let (render_preset, render_backend) = native_shell_render_config();
     let mut command = std::process::Command::new(exe_path);
     // This process may itself carry re-entry flags from the launch that
@@ -10109,6 +10687,7 @@ fn launch_native_shell_process(
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
         "KALPA_FORCE_WEBVIEW",
+        crate::native_boot::LAUNCH_ID_ENV,
         // Slint reads this one itself. We pass KALPA_SLINT_BACKEND explicitly
         // below and the sidecar prefers it, but leaving an inherited value in
         // the child's environment means the renderer it ends up on is not
@@ -10120,31 +10699,191 @@ fn launch_native_shell_process(
     command
         .env("KALPA_RENDER_PRESET", render_preset)
         .env("KALPA_SLINT_BACKEND", render_backend)
-        .env("KALPA_NATIVE_AUTO_PLACE", "0");
+        .env("KALPA_NATIVE_AUTO_PLACE", "0")
+        .env(crate::native_boot::LAUNCH_ID_ENV, &launch_id)
+        .env("KALPA_NATIVE_STATE_DIR", &state_dir);
 
-    if let Some(path) = &app_data_dir {
-        command.env("KALPA_NATIVE_STATE_DIR", path);
-        // Boot handshake: the sidecar deletes this once its UI is really up.
-        let _ = fs::create_dir_all(path);
-        let _ = fs::write(path.join(NATIVE_BOOT_PENDING), b"1");
-    }
     if let Some(path) = webview_exe {
         command.env("KALPA_WEBVIEW_EXE", path);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Failed to launch native performance UI: {error}"))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(format!("Failed to launch native performance UI: {error}"));
+        }
+    };
 
-    std::thread::sleep(Duration::from_millis(200));
-    match child.try_wait() {
-        Ok(Some(status)) => Err(format!(
-            "Native performance UI exited immediately: {status}"
-        )),
-        Ok(None) => Ok(()),
-        Err(error) => Err(format!(
-            "Failed to verify native performance UI launch: {error}"
-        )),
+    eprintln!("[native-shell] waiting for ready launch_id={launch_id}");
+    let mut cancelled = false;
+    let outcome = crate::native_boot::wait_for_ready(
+        &state_dir,
+        &launch_id,
+        crate::native_boot::READY_TIMEOUT,
+        || {
+            if cancel.load(Ordering::SeqCst) {
+                cancelled = true;
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))?;
+                eprintln!("[native-shell] launch cancelled before ready launch_id={launch_id}");
+                return Ok(crate::native_boot::ChildState::Exited);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!(
+                    "[native-shell] child exited before ready launch_id={launch_id} status={status}"
+                );
+                    Ok(crate::native_boot::ChildState::Exited)
+                }
+                Ok(None) => Ok(crate::native_boot::ChildState::Running),
+                Err(error) => Err(format!(
+                    "Failed to inspect native performance UI launch {launch_id}: {error}"
+                )),
+            }
+        },
+    );
+    // Positive proof of a live owner is the held OS lock alone. Conjoining the
+    // child's `ready` marker would make duplicate acceptance depend on a file
+    // publication the duplicate child may fail to complete.
+    let existing_native_ready = crate::native_boot::live_native_authority_exists(&state_dir);
+    let first_outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(error);
+        }
+    };
+    if first_outcome == crate::native_boot::WaitOutcome::Ready {
+        let release = match &mode {
+            NativeLaunchMode::Handoff(app) => quiesce_then_release_webview_authority(|| {
+                set_main_webview_visible_on_main_thread(app, false)
+            }),
+            NativeLaunchMode::Startup(_) => commit_native_handoff_authority_release(),
+        };
+        if let Err(error) = release {
+            let _ =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            restore_handoff_webview(&mode).map_err(|restore_error| {
+                format!("{error} WebView restoration failed: {restore_error}")
+            })?;
+            return Err(error);
+        }
+        eprintln!("[native-shell] ready launch_id={launch_id}; waiting for authority proof");
+        let acquired = crate::native_boot::wait_for_acquired(
+            &state_dir,
+            &launch_id,
+            crate::native_boot::READY_TIMEOUT,
+            || {
+                if cancel.load(Ordering::SeqCst) {
+                    cancelled = true;
+                    let _ = crate::native_boot::terminate_and_reap_child(
+                        &mut child,
+                        Duration::from_secs(1),
+                    );
+                    return Ok(crate::native_boot::ChildState::Exited);
+                }
+                match child.try_wait() {
+                    Ok(Some(_)) => Ok(crate::native_boot::ChildState::Exited),
+                    Ok(None) => Ok(crate::native_boot::ChildState::Running),
+                    Err(error) => Err(format!(
+                        "Failed to inspect native authority handoff {launch_id}: {error}"
+                    )),
+                }
+            },
+        );
+        if !matches!(acquired, Ok(crate::native_boot::WaitOutcome::Ready)) {
+            let reap =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            let reclaim = if matches!(&mode, NativeLaunchMode::Handoff(_)) {
+                reclaim_webview_authority(&state_dir)
+            } else {
+                Ok(())
+            };
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            if let Err(error) = reap {
+                eprintln!(
+                    "[native-shell] failed to reap unsuccessful launch_id={launch_id}: {error}"
+                );
+            }
+            let failure = if cancelled {
+                NATIVE_HANDOFF_CANCELLED_ERROR.to_string()
+            } else {
+                match acquired {
+                    Ok(_) => {
+                        "Native performance UI failed to acquire UI authority after readiness."
+                            .to_string()
+                    }
+                    Err(error) => format!(
+                        "Failed while waiting for native UI authority after readiness: {error}"
+                    ),
+                }
+            };
+            reclaim
+                .map_err(|error| format!("{failure} WebView authority recovery failed: {error}"))?;
+            restore_handoff_webview(&mode)
+                .map_err(|error| format!("{failure} WebView restoration failed: {error}"))?;
+            return Err(failure);
+        }
+        crate::native_boot::clear_owned(&state_dir, &launch_id);
+        eprintln!("[native-shell] authority acquired launch_id={launch_id}");
+        if let NativeLaunchMode::Startup(app) = &mode {
+            if let Err(error) = finish_native_startup_on_main_thread(app) {
+                let _ = crate::native_boot::terminate_and_reap_child(
+                    &mut child,
+                    Duration::from_secs(1),
+                );
+                crate::native_boot::clear_owned(&state_dir, &launch_id);
+                return Err(error);
+            }
+        }
+        return Ok(());
+    }
+    crate::native_boot::clear_owned(&state_dir, &launch_id);
+    match first_outcome {
+        crate::native_boot::WaitOutcome::Ready => {
+            if existing_native_ready {
+                eprintln!("[native-shell] ready with authority launch_id={launch_id}");
+                if let NativeLaunchMode::Startup(app) = &mode {
+                    finish_native_startup_on_main_thread(app)?;
+                }
+                Ok(())
+            } else {
+                Err(
+                    "Native performance UI reported readiness without owning UI authority."
+                        .to_string(),
+                )
+            }
+        }
+        crate::native_boot::WaitOutcome::ChildExited if cancelled => {
+            Err(NATIVE_HANDOFF_CANCELLED_ERROR.to_string())
+        }
+        crate::native_boot::WaitOutcome::ChildExited if existing_native_ready => {
+            eprintln!(
+                "[native-shell] duplicate child acknowledged live native owner launch_id={launch_id}"
+            );
+            if let NativeLaunchMode::Startup(app) = &mode {
+                finish_native_startup_on_main_thread(app)?;
+            }
+            Ok(())
+        }
+        crate::native_boot::WaitOutcome::ChildExited => Err(
+            "Native performance UI exited before reporting that its event loop was ready."
+                .to_string(),
+        ),
+        crate::native_boot::WaitOutcome::TimedOut => {
+            eprintln!("[native-shell] ready timeout launch_id={launch_id}; keeping WebView");
+            if let Err(error) =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))
+            {
+                eprintln!(
+                    "[native-shell] failed to terminate/reap timed-out launch_id={launch_id}: {error}"
+                );
+            }
+            Err("Native performance UI timed out before its event loop was ready.".to_string())
+        }
     }
 }
 
@@ -10417,6 +11156,11 @@ pub fn native_boot_failure_pending(app: tauri::AppHandle) -> bool {
     }
 }
 
+fn live_native_startup_owner(state_dir: &Path) -> Option<PathBuf> {
+    crate::native_boot::live_native_authority_exists(state_dir)
+        .then(|| crate::native_boot::authority_path(state_dir))
+}
+
 pub fn try_launch_native_performance_mode_on_startup(
     app: &tauri::AppHandle,
 ) -> Result<Option<PathBuf>, String> {
@@ -10430,38 +11174,70 @@ pub fn try_launch_native_performance_mode_on_startup(
         .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
     let settings_path = app_data_dir.join("settings.json");
 
-    // Boot-handshake check: a surviving marker means the LAST native launch
-    // spawned a sidecar that died before its UI came up (GPU/driver failure,
-    // panic during state load, AV interference). Without this, the user is
-    // locked in a windowless crash loop that even reinstalling doesn't clear
-    // (app data survives uninstall). A young marker (<10s) is a boot still in
-    // flight — another activation racing the sidecar's startup — and proceeds
-    // native; the sidecar's single-instance lock collapses the duplicate.
-    let marker = app_data_dir.join(NATIVE_BOOT_PENDING);
-    if let Ok(meta) = fs::metadata(&marker) {
-        let stale = meta
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .map(|age| age > Duration::from_secs(10))
-            // An unreadable mtime counts as stale: failing into the webview is
-            // always recoverable, a crash loop is not.
-            .unwrap_or(true);
-        if stale {
-            revert_performance_mode_to_webview(&settings_path);
-            let _ = fs::remove_file(&marker);
-            let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
-            eprintln!(
-                "Native performance UI never finished starting last launch; \
-                 reverting to the WebView UI."
-            );
-            return Ok(None);
+    // Authority is stronger evidence than any marker. A parent may die after
+    // its child has acquired authority and become ready but before it clears
+    // `pending`; preserve that healthy sidecar instead of misclassifying its
+    // marker as an abandoned launch and reverting the user's mode.
+    if let Some(authority_path) = live_native_startup_owner(&app_data_dir) {
+        eprintln!("[native-shell] live native owner holds authority; exiting duplicate");
+        return finish_existing_native_startup_on_main_thread(app)
+            .map(|should_exit| should_exit.then_some(authority_path));
+    }
+
+    // A surviving marker whose fs4 launch guard is free belongs to an abandoned
+    // launch and triggers the existing crash-loop fallback. If the guard is
+    // held, another parent is actively waiting for its matching child; this
+    // duplicate activation exits without changing the user's setting or marker.
+    if crate::native_boot::has_pending(&app_data_dir) {
+        let marker = crate::native_boot::pending_path(&app_data_dir);
+        match crate::transaction_lock::acquire(
+            &marker,
+            crate::transaction_lock::LockOptions {
+                timeout: Duration::ZERO,
+                cancel: None,
+            },
+        ) {
+            Err(crate::transaction_lock::LockError::Timeout { .. }) => {
+                eprintln!(
+                    "[native-shell] another launcher is awaiting readiness; exiting duplicate"
+                );
+                return finish_existing_native_startup_on_main_thread(app)
+                    .map(|should_exit| should_exit.then_some(marker));
+            }
+            Ok(stale_guard) => {
+                // Keep the launch guard through cleanup so a rapid relaunch
+                // cannot publish a fresh marker between classification and remove.
+                revert_performance_mode_to_webview(&settings_path);
+                let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+                let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+                let _ = fs::remove_file(crate::native_boot::acquired_path(&app_data_dir));
+                let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+                drop(stale_guard);
+                eprintln!(
+                    "[native-shell] stale pending launch found; reverting to the WebView UI."
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                eprintln!("[native-shell] pending launch state unreadable: {error}; falling back");
+                // Without the launch guard we cannot prove the marker still
+                // belongs to the stale launch. Preserve it rather than racing a
+                // new owner; disabling native mode keeps subsequent boots safe.
+                revert_performance_mode_to_webview(&settings_path);
+                let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+                return Err(format!("Could not inspect stale native launch: {error}"));
+            }
         }
     }
 
     if !native_performance_mode_enabled_from_path(&settings_path)? {
         return Ok(None);
     }
+
+    // Startup has not claimed WebView authority yet, but it still participates
+    // in activation cancellation so a duplicate launch cannot disappear while
+    // the sidecar spends up to the handshake timeout becoming ready.
+    begin_native_handoff(true)?;
 
     // Resolve failure = the sidecar is missing entirely (broken or partial
     // install). Same treatment as a boot that died mid-start: self-heal the
@@ -10472,6 +11248,11 @@ pub fn try_launch_native_performance_mode_on_startup(
     let exe_path = match resolve_native_shell_executable(app) {
         Ok(path) => path,
         Err(error) => {
+            let cancelled = NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst);
+            abort_native_handoff();
+            if cancelled {
+                return Ok(None);
+            }
             revert_performance_mode_to_webview(&settings_path);
             let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
             return Err(error);
@@ -10481,12 +11262,21 @@ pub fn try_launch_native_performance_mode_on_startup(
         &exe_path,
         Some(app_data_dir.clone()),
         std::env::current_exe().ok(),
+        NativeLaunchMode::Startup(app.clone()),
     ) {
-        // The sidecar could not even spawn (or died <200ms in): revert NOW so
+        let cancelled = NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst)
+            || error == NATIVE_HANDOFF_CANCELLED_ERROR;
+        abort_native_handoff();
+        if cancelled {
+            return Ok(None);
+        }
+        // The sidecar could not spawn, exited, or timed out before readiness:
         // this launch continues into the webview and the next one doesn't
         // retry a known-broken native mode.
         revert_performance_mode_to_webview(&settings_path);
-        let _ = fs::remove_file(app_data_dir.join(NATIVE_BOOT_PENDING));
+        let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::acquired_path(&app_data_dir));
         let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
         return Err(error);
     }
@@ -10498,22 +11288,38 @@ pub async fn launch_native_performance_mode(
     app: tauri::AppHandle,
 ) -> Result<NativePerformanceLaunch, String> {
     let exe_path = resolve_native_shell_executable(&app)?;
+    begin_native_handoff(false)?;
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
-    tokio::task::spawn_blocking(move || {
-        launch_native_shell_process(&launch_path, app_data_dir, webview_exe)
+    let handoff_app = app.clone();
+    let task_result = tokio::task::spawn_blocking(move || {
+        launch_native_shell_process(
+            &launch_path,
+            app_data_dir,
+            webview_exe,
+            NativeLaunchMode::Handoff(handoff_app),
+        )
     })
-    .await
-    .map_err(|error| format!("Task failed: {error}"))??;
+    .await;
+    let launch_result = task_result
+        .map_err(|error| format!("Native handoff task failed: {error}"))
+        .and_then(|result| result);
+    if let Err(error) = launch_result {
+        abort_native_handoff();
+        if webview_authority_was_lost() {
+            // Returning the error alone would leave a visible, lock-less window
+            // that the next launch would happily spawn a sidecar alongside.
+            eprintln!("[native-shell] exiting: cannot continue without UI authority ({error})");
+            app.exit(1);
+        }
+        return Err(error);
+    }
 
-    let exit_app = app.clone();
-    std::thread::spawn(move || {
-        // Free the WebView process after the Slint shell has spawned; keeping both
-        // alive would defeat the memory-mode toggle.
-        std::thread::sleep(Duration::from_millis(300));
-        exit_app.exit(0);
-    });
+    // The blocking launcher returns only after the matching child has executed
+    // a callback on Slint's live event loop. Every failure keeps this WebView
+    // process authoritative and visible.
+    app.exit(0);
 
     Ok(NativePerformanceLaunch {
         exe_path: exe_path.to_string_lossy().into_owned(),
@@ -10718,6 +11524,197 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn downloaded_artifact_version_uses_fetched_descriptor_after_publish_race() {
+        // The UI observed v1, then v2 was published before the backend fetched
+        // the descriptor and downloaded its checksum-bound artifact.
+        assert_eq!(downloaded_artifact_version("v1", "v2"), "v2");
+    }
+
+    #[test]
+    fn downloaded_artifact_version_falls_back_to_observation_when_fetched_version_empty() {
+        assert_eq!(downloaded_artifact_version("v1", ""), "v1");
+        assert_eq!(downloaded_artifact_version(" v1 ", "   "), "v1");
+    }
+
+    #[test]
+    fn artifact_comparison_ignores_lagging_filelist() {
+        // The downloaded filedetails artifact is v2, while the eventually
+        // consistent filelist still reports v1.
+        assert!(!artifact_is_newer("v2", "v1", 200, 100));
+    }
+
+    #[test]
+    fn artifact_comparison_accepts_newer_filelist_release() {
+        assert!(artifact_is_newer("v1", "v2", 100, 200));
+    }
+
+    fn update_check_fixture(
+        installed_version: &str,
+        installed_marker: u64,
+        remote_version: &str,
+        remote_marker: u64,
+    ) -> (
+        tempfile::TempDir,
+        HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("Addon")).unwrap();
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "Addon",
+            1,
+            installed_version,
+            "https://example.invalid/addon.zip",
+            installed_marker,
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 1,
+                title: "Addon".to_string(),
+                version: remote_version.to_string(),
+                author: "Test".to_string(),
+                last_update: remote_marker,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+        (tmp, lookup)
+    }
+
+    #[test]
+    fn update_check_does_not_downgrade_installed_artifact_from_lagging_filelist() {
+        let (tmp, lookup) = update_check_fixture("v2", 200, "v1", 100);
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.installed_version, "v2");
+        assert_eq!(addon.esoui_last_update, 200);
+    }
+
+    #[test]
+    fn update_check_detects_newer_artifact_from_filelist() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 200);
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.installed_version, "v1");
+        // The remote marker is only persisted once its artifact is actually
+        // downloaded and installed.
+        assert_eq!(addon.esoui_last_update, 100);
+    }
+
+    #[test]
+    fn update_check_keeps_legacy_observation_marker_from_hiding_version_update() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store.version = 1;
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
+    fn lagging_matching_observation_does_not_claim_retained_legacy_marker() {
+        let (tmp, mut lookup) = update_check_fixture("v1", 200, "v1", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert!(!pending[0].has_update);
+        assert!(!metadata::load_metadata(tmp.path()).addons["Addon"].esoui_marker_installed);
+
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).version = "v2".to_string();
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).last_update = 200;
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert!(pending[0].has_update);
+    }
+
+    #[test]
+    fn auto_link_does_not_advance_marker_for_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addon_dir = tmp.path().join("Addon");
+        fs::create_dir(&addon_dir).unwrap();
+        fs::write(
+            addon_dir.join("Addon.txt"),
+            "## Title: Addon\n## Version: v1\n",
+        )
+        .unwrap();
+
+        // This models a legacy pending observation: the identity is not yet
+        // linked, and marker 100 was observed but was not proven to belong to
+        // the local v1 artifact.
+        let mut store = metadata::MetadataStore::default();
+        store.addons.insert(
+            "Addon".to_string(),
+            metadata::AddonMetadata {
+                esoui_id: 0,
+                installed_version: "v1".to_string(),
+                download_url: String::new(),
+                installed_at: String::new(),
+                tags: Vec::new(),
+                esoui_last_update: 100,
+                esoui_marker_installed: false,
+            },
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 7,
+                title: "Addon".to_string(),
+                version: "v2".to_string(),
+                author: "Test".to_string(),
+                last_update: 200,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+
+        let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+        assert_eq!(result.linked, vec!["Addon"]);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_id, 7);
+        assert_eq!(addon.installed_version, "v1");
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
     }
 
     #[test]
@@ -11190,6 +12187,47 @@ mod tests {
     }
 
     #[test]
+    fn update_check_does_not_infer_external_update_from_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: 2.0\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
     fn update_check_does_not_downgrade_an_outdated_version_from_stale_minion_data() {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
@@ -11379,6 +12417,37 @@ mod tests {
             report.safe_files,
             vec!["same.lua".to_string(), "stock.lua".to_string()]
         );
+        assert!(report.has_hash_baseline);
+    }
+
+    #[test]
+    fn conflict_report_discloses_when_protected_edits_has_no_baseline() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MigratedAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- possibly edited").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "MigratedAddon/main.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"-- upstream replacement").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MigratedAddon", &zip_path, "2.0", "session")
+                .unwrap();
+
+        assert!(!report.has_hash_baseline);
+        assert!(report.conflicts.is_empty());
     }
 
     #[test]
@@ -11888,6 +12957,7 @@ mod tests {
                 installed_at: String::new(),
                 tags: vec!["favorite".to_string()],
                 esoui_last_update: 0,
+                esoui_marker_installed: false,
             },
         );
         metadata::save_metadata(src.path(), &store).unwrap();
@@ -12981,4 +14051,189 @@ mod tests {
         // `required` defaults to true when the worker omits it.
         assert!(pack.addons[0].required);
     }
+}
+
+#[test]
+fn a_live_native_owner_wins_over_its_surviving_pending_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::native_boot::prepare(dir.path(), "ready-child-orphaned-parent").unwrap();
+    let _owner =
+        match crate::native_boot::try_claim_authority(dir.path(), "ready-child-orphaned-parent")
+            .unwrap()
+        {
+            crate::native_boot::AuthorityClaim::Held(guard) => guard,
+            crate::native_boot::AuthorityClaim::AlreadyHeld => panic!("fresh authority was held"),
+        };
+
+    assert!(crate::native_boot::has_pending(dir.path()));
+    assert_eq!(
+        live_native_startup_owner(dir.path()),
+        Some(crate::native_boot::authority_path(dir.path()))
+    );
+}
+
+#[test]
+fn native_launch_lock_wait_observes_handoff_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let pending = crate::native_boot::pending_path(dir.path());
+    let _held = crate::transaction_lock::acquire(
+        &pending,
+        crate::transaction_lock::LockOptions {
+            timeout: Duration::ZERO,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    let cancelled = AtomicBool::new(true);
+
+    let error = match acquire_native_launch_guard(dir.path(), Some(&cancelled)) {
+        Ok(_) => panic!("cancelled launch lock wait unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.contains("cancelled"));
+}
+
+/// The single-instance activation path reveals the window and emits the deep
+/// link only when this process holds UI authority. Releasing authority to a
+/// native child and failing to reclaim leaves the WebView alive but not the
+/// writer; acting on an activation there is what puts two writers on the same
+/// state. Pin the predicate that gate reads.
+#[test]
+fn released_authority_is_reported_as_not_held_until_reclaimed() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Establish authority the way startup does.
+    let guard = match crate::native_boot::try_claim_authority(
+        dir.path(),
+        &crate::native_boot::webview_launch_id(),
+    )
+    .unwrap()
+    {
+        crate::native_boot::AuthorityClaim::Held(guard) => guard,
+        crate::native_boot::AuthorityClaim::AlreadyHeld => {
+            panic!("fresh directory was already locked")
+        }
+    };
+    *webview_authority().lock().unwrap() = Some(guard);
+    assert!(holds_webview_authority());
+
+    // The handoff releases it for the child to take.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    let mut quiesced = false;
+    quiesce_then_release_webview_authority(|| {
+        assert!(
+            holds_webview_authority(),
+            "the WebView must still own authority while it is being quiesced"
+        );
+        quiesced = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(quiesced);
+    assert!(
+        !holds_webview_authority(),
+        "a WebView that released authority must not claim to hold it"
+    );
+
+    // Reclaiming restores it, and reclaiming again is a no-op.
+    reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+
+    let error = quiesce_then_release_webview_authority(|| Err("cannot hide".to_string()))
+        .expect_err("failed quiescence must prevent authority release");
+    assert_eq!(error, "cannot hide");
+    assert!(holds_webview_authority());
+    reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+
+    *webview_authority().lock().unwrap() = None;
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// The handoff atomics are process-global, so every case lives in one test.
+/// Splitting them would let the parallel test harness race the flags.
+#[test]
+fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
+    // Manual commands are backend-single-flight. A losing invocation must not
+    // reset cancellation belonging to the admitted invocation.
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+    begin_native_handoff(false).unwrap();
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(begin_native_handoff(false).is_err());
+    assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    abort_native_handoff();
+
+    // Startup has not claimed WebView authority yet. An activation still
+    // cancels its sidecar launch, but must not try to reclaim a lock this
+    // process never held; the caller buffers the activation until startup
+    // falls back to the WebView and claims normally.
+    *webview_authority().lock().unwrap() = None;
+    begin_native_handoff(true).unwrap();
+    assert!(cancel_native_handoff(|| {
+        panic!("startup cancellation unexpectedly tried to reclaim authority")
+    })
+    .unwrap());
+    assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst));
+    abort_native_handoff();
+    assert!(!NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst));
+
+    // Committing a cancelled handoff must refuse to release authority, so the
+    // still-live WebView keeps the activation instead of exiting underneath it.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(commit_native_handoff_authority_release().is_err());
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // Commit cannot pass after an activation enters the authority critical
+    // section but before it publishes cancellation.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let authority = webview_authority().lock().unwrap();
+    let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+    let commit = std::thread::spawn(move || {
+        commit_tx
+            .send(commit_native_handoff_authority_release())
+            .unwrap();
+    });
+    assert!(commit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    drop(authority);
+    assert!(commit_rx.recv().unwrap().is_err());
+    commit.join().unwrap();
+
+    // ExitRequested outside any handoff must never be prevented.
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    assert!(!finish_native_handoff_exit());
+
+    // An uncancelled handoff commits: the exit proceeds and the flag clears.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    assert!(!finish_native_handoff_exit());
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // A handoff cancelled after the wait ended prevents the exit exactly once.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(finish_native_handoff_exit());
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!finish_native_handoff_exit());
+
+    // ExitRequested makes the same serialized decision, so it cannot overtake
+    // an activation that has entered cancellation.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let authority = webview_authority().lock().unwrap();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    let exit = std::thread::spawn(move || {
+        exit_tx.send(finish_native_handoff_exit()).unwrap();
+    });
+    assert!(exit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    drop(authority);
+    assert!(exit_rx.recv().unwrap());
+    exit.join().unwrap();
 }

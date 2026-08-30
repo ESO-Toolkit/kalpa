@@ -399,6 +399,11 @@ pub fn load_hash_manifest(addons_dir: &Path, folder_name: &str) -> Option<HashMa
         return None;
     }
     let mut manifest: HashManifest = metadata::load_json_with_backup(&path);
+    // The backup-aware loader returns Default when every candidate is corrupt.
+    // An empty/mismatched identity therefore means there is no trusted baseline.
+    if manifest.addon_folder != folder_name {
+        return None;
+    }
     // Migrate manifests written before esoui_ids was introduced.
     if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
         manifest.esoui_ids = vec![manifest.esoui_id];
@@ -422,11 +427,12 @@ pub fn load_modified_file_count(addons_dir: &Path, folder_name: &str) -> Option<
     }
     #[derive(Default, Deserialize)]
     struct SlimManifest {
+        addon_folder: String,
         #[serde(default)]
         modified_files: Vec<String>,
     }
     let slim: SlimManifest = metadata::load_json_with_backup(&path);
-    Some(slim.modified_files.len() as u32)
+    (slim.addon_folder == folder_name).then_some(slim.modified_files.len() as u32)
 }
 
 /// Compare current files on disk against stored hashes.
@@ -839,6 +845,17 @@ mod tests {
     fn load_returns_none_for_missing() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(load_hash_manifest(tmp.path(), "NoSuchAddon").is_none());
+    }
+
+    #[test]
+    fn corrupt_manifest_is_not_a_trusted_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hashes = tmp.path().join(".kalpa-hashes");
+        fs::create_dir_all(&hashes).unwrap();
+        fs::write(hashes.join("Broken.json"), "{not valid json").unwrap();
+
+        assert!(load_hash_manifest(tmp.path(), "Broken").is_none());
+        assert!(load_modified_file_count(tmp.path(), "Broken").is_none());
     }
 
     #[test]

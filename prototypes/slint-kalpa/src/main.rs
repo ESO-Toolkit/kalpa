@@ -35,6 +35,8 @@ mod manifest;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/metadata.rs"]
 mod metadata;
+#[path = "../../../src-tauri/src/native_boot.rs"]
+mod native_boot;
 
 #[allow(dead_code)]
 mod commands {
@@ -898,6 +900,25 @@ thread_local! {
 type NativePendingConflictStore = Arc<Mutex<HashMap<String, NativePendingConflict>>>;
 
 static PENDING_NATIVE_CONFLICTS: OnceLock<NativePendingConflictStore> = OnceLock::new();
+static NATIVE_AUTHORITY: OnceLock<Mutex<Option<native_boot::AuthorityGuard>>> = OnceLock::new();
+
+/// Set when this shell released UI authority and could not take it back.
+///
+/// The event loop is already quitting at that point. Callers consult it so they
+/// do not "restore" state on the way out: the settings toggle in particular
+/// would otherwise write `performanceMode` back to native, which is both a
+/// write after authority loss and the worse recovery value - leaving it on
+/// webview means the next launch boots the WebView, whose startup claim
+/// re-requests shutdown of whatever still holds the lock.
+static NATIVE_AUTHORITY_LOST: AtomicBool = AtomicBool::new(false);
+
+fn native_authority_was_lost() -> bool {
+    NATIVE_AUTHORITY_LOST.load(Ordering::SeqCst)
+}
+
+fn native_authority() -> &'static Mutex<Option<native_boot::AuthorityGuard>> {
+    NATIVE_AUTHORITY.get_or_init(|| Mutex::new(None))
+}
 
 /// Serializes every `.kalpa-metadata` read-modify-write inside this process.
 ///
@@ -1302,52 +1323,78 @@ enum NativeShellLock {
     /// This process holds the lock; keep the handle alive for the process
     /// lifetime (the OS releases it on ANY exit, including crashes, so no
     /// stale-lock sweeping is ever needed).
-    Held(#[allow(dead_code)] std::fs::File),
+    Held(#[allow(dead_code)] native_boot::AuthorityGuard),
     /// Another sidecar already holds the lock.
     AlreadyRunning,
-    /// The lock could not be evaluated (IO error); run unguarded rather than
-    /// refusing to start over a bookkeeping failure.
-    Unavailable,
+    /// The lock could not be evaluated (IO error); fail closed so this process
+    /// can never acknowledge readiness without exclusive writer authority.
+    Unavailable(String),
 }
 
 fn acquire_native_shell_lock() -> NativeShellLock {
     let dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("native-shell.lock");
-    #[cfg(windows)]
-    let attempt = {
-        use std::os::windows::fs::OpenOptionsExt;
-        // share_mode(0): while this handle lives, any second open fails with
-        // ERROR_SHARING_VIOLATION — the exact "already running" signal.
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .share_mode(0)
-            .open(&path)
-    };
-    #[cfg(not(windows))]
-    let attempt = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&path);
-    match attempt {
-        Ok(file) => NativeShellLock::Held(file),
-        Err(error) if error.raw_os_error() == Some(32) => NativeShellLock::AlreadyRunning,
-        Err(_) => NativeShellLock::Unavailable,
+    let launch_id = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(native_boot::new_launch_id);
+    // A parent duplicate-authority probe can hold the OS lock for a few
+    // instructions while this child starts. Give that transient proof handle
+    // time to drain before classifying the launch as a duplicate.
+    match native_boot::try_claim_authority_with_grace(&dir, &launch_id, Duration::from_millis(100))
+    {
+        Ok(native_boot::AuthorityClaim::Held(guard)) => NativeShellLock::Held(guard),
+        Ok(native_boot::AuthorityClaim::AlreadyHeld) => NativeShellLock::AlreadyRunning,
+        Err(error) => {
+            eprintln!("[native-shell] authority lock unavailable: {error}");
+            NativeShellLock::Unavailable(error)
+        }
     }
 }
 
-/// The launcher (kalpa.exe) writes `native-boot.pending` into the state dir
-/// before exiting in favor of this process. Deleting it is the "native mode
-/// booted OK" acknowledgement: if this process dies before its event loop
-/// starts, the marker survives and the next kalpa.exe launch auto-falls back
-/// to the WebView UI instead of crash-looping with no window at all.
-fn confirm_native_boot_marker() {
-    if let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
-        let _ = std::fs::remove_file(dir.join("native-boot.pending"));
+/// Publish the matching half of the launcher's `native-boot.pending` record.
+/// This callback runs from Slint's event loop, so construction/show failures
+/// leave the pending record for the parent to handle without false readiness.
+fn confirm_native_boot_ready() {
+    let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) else {
+        eprintln!("[native-shell] no state directory; cannot acknowledge readiness");
+        return;
+    };
+    let Some(launch_id) = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!("[native-shell] no launch ID; running without a parent handshake");
+        return;
+    };
+    match native_boot::signal_ready(&dir, &launch_id) {
+        Ok(true) => {
+            eprintln!("[native-shell] event loop ready launch_id={launch_id}");
+            match native_authority().lock() {
+                Ok(authority) => match authority.as_ref() {
+                    Some(guard) => match guard.signal_acquired() {
+                        Ok(true) => eprintln!(
+                            "[native-shell] authority acquired launch_id={launch_id}"
+                        ),
+                        Ok(false) => eprintln!(
+                            "[native-shell] authority proof rejected launch_id={launch_id}"
+                        ),
+                        Err(error) => eprintln!(
+                            "[native-shell] failed to publish authority launch_id={launch_id}: {error}"
+                        ),
+                    },
+                    None => eprintln!(
+                        "[native-shell] ready without authority launch_id={launch_id}"
+                    ),
+                },
+                Err(_) => eprintln!("[native-shell] authority state is unavailable"),
+            }
+        }
+        Ok(false) => eprintln!("[native-shell] rejected stale launch_id={launch_id}"),
+        Err(error) => {
+            eprintln!("[native-shell] failed to acknowledge launch_id={launch_id}: {error}")
+        }
     }
 }
 
@@ -1366,13 +1413,45 @@ fn main() -> Result<(), slint::PlatformError> {
     // while the shell is up) must not stack another full window. The running
     // instance is living proof native mode works, so this activation also
     // acknowledges the boot marker before bowing out.
-    let _instance_lock = match acquire_native_shell_lock() {
+    let handoff_launch_id = std::env::var(native_boot::LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (initial_authority, handoff_pending) = match acquire_native_shell_lock() {
         NativeShellLock::AlreadyRunning => {
-            confirm_native_boot_marker();
+            let active_kind = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+                .map(PathBuf::from)
+                .map(|dir| {
+                    (
+                        native_boot::native_authority_is_active(&dir),
+                        native_boot::webview_authority_is_active(&dir),
+                    )
+                })
+                .unwrap_or((false, false));
+            if active_kind.1 && handoff_launch_id.is_some() {
+                // The WebView parent deliberately retains authority until this
+                // child's event loop proves ready. Construct hidden, acknowledge,
+                // then acquire/show after the parent releases.
+                (None, true)
+            } else if active_kind.0 {
+                confirm_native_boot_ready();
+                return Ok(());
+            } else {
+                eprintln!("[native-shell] WebView retains UI authority; rejecting sidecar");
+                return Ok(());
+            }
+        }
+        NativeShellLock::Unavailable(error) => {
+            eprintln!("[native-shell] refusing unguarded startup: {error}");
             return Ok(());
         }
-        held_or_unavailable => held_or_unavailable,
+        NativeShellLock::Held(guard) => (Some(guard), false),
     };
+    if let Ok(mut authority) = native_authority().lock() {
+        *authority = initial_authority;
+    } else {
+        eprintln!("[native-shell] authority state is unavailable");
+        return Ok(());
+    }
 
     let render_config = native_render_config();
 
@@ -1456,12 +1535,117 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_open_migration();
     }
     start_native_app_update_check(ui.as_weak(), true);
+    let shutdown_timer = slint::Timer::default();
+    if let Some(state_dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
+        shutdown_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(50),
+            move || {
+                let launch_id = native_authority()
+                    .lock()
+                    .ok()
+                    .and_then(|authority| {
+                        authority
+                            .as_ref()
+                            .map(|guard| guard.launch_id().to_string())
+                    });
+                if let Some(launch_id) = launch_id {
+                    if native_boot::shutdown_requested(&state_dir, &launch_id) {
+                        eprintln!(
+                            "[native-shell] releasing UI authority launch_id={launch_id} for WebView"
+                        );
+                        let _ = slint::quit_event_loop();
+                    }
+                }
+            },
+        );
+    }
     // Everything is constructed and the event loop is about to take over:
     // acknowledge the launcher's boot marker so future launches keep native
     // mode. Anything that dies before this line leaves the marker in place,
     // and the next kalpa.exe start falls back to the WebView UI.
-    confirm_native_boot_marker();
-    let result = ui.run();
+    if handoff_pending {
+        let state_dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+            .map(PathBuf::from)
+            .expect("handoff launch has a native state directory");
+        let launch_id = handoff_launch_id.expect("handoff launch has an ID");
+        let handoff_ui = ui.as_weak();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            match native_boot::signal_ready(&state_dir, &launch_id) {
+                Ok(true) => eprintln!("[native-shell] event loop ready launch_id={launch_id}"),
+                Ok(false) => {
+                    eprintln!("[native-shell] rejected stale launch_id={launch_id}");
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[native-shell] failed to acknowledge launch_id={launch_id}: {error}"
+                    );
+                    let _ = slint::quit_event_loop();
+                    return;
+                }
+            }
+            match native_boot::claim_after_ready_release(
+                &state_dir,
+                &launch_id,
+                native_boot::READY_TIMEOUT,
+            ) {
+                Ok(guard) => {
+                    let mut authority = match native_authority().lock() {
+                        Ok(authority) => authority,
+                        Err(_) => {
+                            eprintln!("[native-shell] authority state is unavailable");
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    };
+                    *authority = Some(guard);
+                    if let Some(ui) = handoff_ui.upgrade() {
+                        if let Err(error) = ui.show() {
+                            eprintln!("[native-shell] failed to show ready UI: {error}");
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                    }
+                    let proof = authority
+                        .as_ref()
+                        .expect("native authority was just stored")
+                        .signal_acquired();
+                    match proof {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            eprintln!(
+                                "[native-shell] rejected authority proof launch_id={launch_id}"
+                            );
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[native-shell] failed to publish authority launch_id={launch_id}: {error}"
+                            );
+                            authority.take();
+                            let _ = slint::quit_event_loop();
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[native-shell] authority transfer failed: {error}");
+                    let _ = slint::quit_event_loop();
+                }
+            }
+        });
+    } else {
+        slint::Timer::single_shot(Duration::ZERO, confirm_native_boot_ready);
+    }
+    let result = if handoff_pending {
+        slint::run_event_loop()
+    } else {
+        ui.run()
+    };
+    shutdown_timer.stop();
     // The sign-in WebView2 window is a separate process; close it with the shell
     // instead of leaving an orphaned login on screen.
     kill_login_subprocess();
@@ -2344,6 +2528,9 @@ fn real_addon_draft(addon_dir: &Path) -> Result<RealAddonDraft, String> {
         entry.badge3 = "Disabled".into();
         entry.badge3_kind = 5;
     }
+    entry.protected_edits_baseline = addon_dir.parent().is_some_and(|addons_root| {
+        file_hashes::load_hash_manifest(addons_root, &folder_name).is_some()
+    });
 
     Ok(RealAddonDraft {
         entry,
@@ -2792,6 +2979,39 @@ fn apply_addon_update_check_results(
     }
 
     available
+}
+
+fn unprotected_update_count(models: &AddonModels) -> usize {
+    models
+        .all
+        .borrow()
+        .iter()
+        .filter(|addon| addon_has_update(addon) && !addon.protected_edits_baseline)
+        .count()
+}
+
+fn unprotected_target_count(addons_root: &Path, targets: &[NativeAddonUpdateTarget]) -> usize {
+    targets
+        .iter()
+        .filter(|target| {
+            file_hashes::load_hash_manifest(addons_root, &target.folder_name).is_none()
+        })
+        .count()
+}
+
+fn update_start_message(targets: &[NativeAddonUpdateTarget], unprotected: usize) -> String {
+    if unprotected > 0 {
+        format!(
+            "Protected Edits unavailable for {unprotected} addon{}: no trusted file baseline exists, so Kalpa cannot detect changed files. Updating may overwrite edits.",
+            if unprotected == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Applying {} addon update{}...",
+            targets.len(),
+            if targets.len() == 1 { "" } else { "s" }
+        )
+    }
 }
 
 fn native_update_targets(models: &AddonModels) -> Vec<NativeAddonUpdateTarget> {
@@ -3956,6 +4176,7 @@ fn addon_entry(
         selected: false,
         is_library,
         disabled,
+        protected_edits_baseline: true,
         state,
         badge: badge.into(),
         badge_kind,
@@ -9071,6 +9292,15 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
             }
+            Err(error) if native_authority_was_lost() => {
+                // This shell is on its way out and no longer owns the UI. Do
+                // not write `performanceMode` back to native: the value that
+                // recovers is webview, and the status message would never be
+                // rendered anyway.
+                eprintln!(
+                    "[native-shell] leaving performanceMode=webview after authority loss: {error}"
+                );
+            }
             Err(error) => {
                 ui.set_settings_native_performance_mode(true);
                 persist_native_settings(&native_settings_from_ui(&ui));
@@ -10415,6 +10645,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         let available = apply_addon_update_check_results(&update_finished_models, &update_rows);
         ui.set_checking_updates(false);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&update_finished_models) as i32);
         apply_addon_view(&ui, &update_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10430,6 +10661,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_checking_updates(false);
         ui.set_pending_conflict_count(conflict_count);
         ui.set_update_available_count(available as i32);
+        ui.set_unprotected_update_count(unprotected_update_count(&apply_finished_models) as i32);
         apply_addon_view(&ui, &apply_finished_models);
         ui.set_status_error_message(message);
     });
@@ -10747,11 +10979,9 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             } else {
                 let eso_running = addon_write_eso_running_warning_active(&ui);
                 ui.set_checking_updates(true);
-                let message = format!(
-                    "Applying {} safe addon update{}...",
-                    targets.len(),
-                    if targets.len() == 1 { "" } else { "s" }
-                );
+                let unprotected = unprotected_target_count(&addons_root, &targets);
+                ui.set_unprotected_update_count(unprotected as i32);
+                let message = update_start_message(&targets, unprotected);
                 ui.set_status_error_message(
                     addon_write_status_message(message, eso_running).into(),
                 );
@@ -11124,13 +11354,24 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_checking_updates(true);
+        let targets = vec![target];
+        let unprotected = unprotected_target_count(&addons_root, &targets);
+        ui.set_unprotected_update_count(unprotected as i32);
         ui.set_status_error_message(
-            addon_write_status_message(format!("Updating {}...", addon.title), eso_running).into(),
+            addon_write_status_message(
+                if unprotected > 0 {
+                    update_start_message(&targets, unprotected)
+                } else {
+                    format!("Updating {}...", addon.title)
+                },
+                eso_running,
+            )
+            .into(),
         );
         start_native_addon_update_apply(
             ui.as_weak(),
             addons_root,
-            vec![target],
+            targets,
             ui.get_settings_conflict_policy().clamp(0, 2),
             eso_running,
         );
@@ -12740,6 +12981,63 @@ fn normalized_addon_version(version: &str) -> &str {
         .unwrap_or(version.trim())
 }
 
+fn native_artifact_has_update(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    let local_version = normalized_addon_version(local_version);
+    let remote_version = normalized_addon_version(remote_version);
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+fn reconcile_native_update_observation(
+    entry: &mut metadata::AddonMetadata,
+    remote_version: &str,
+    remote_marker: u64,
+    has_update: bool,
+) -> bool {
+    let local_version = normalized_addon_version(&entry.installed_version);
+    let remote_version_normalized = normalized_addon_version(remote_version);
+
+    // A filelist observation is not proof that its artifact was installed.
+    // Only attach its version and publication marker when it matches the
+    // non-empty version already on disk.
+    if has_update
+        || local_version.is_empty()
+        || remote_version_normalized.is_empty()
+        || local_version != remote_version_normalized
+    {
+        return false;
+    }
+
+    let mut changed = false;
+    if entry.installed_version != remote_version {
+        entry.installed_version = remote_version.to_string();
+        changed = true;
+    }
+    if remote_marker > entry.esoui_last_update {
+        entry.esoui_last_update = remote_marker;
+        entry.esoui_marker_installed = true;
+        changed = true;
+    } else if remote_marker > 0
+        && remote_marker == entry.esoui_last_update
+        && !entry.esoui_marker_installed
+    {
+        entry.esoui_marker_installed = true;
+        changed = true;
+    }
+    changed
+}
+
 fn check_native_addon_updates_blocking(
     addons_dir: &Path,
 ) -> Result<Vec<NativeAddonUpdateCheck>, String> {
@@ -12766,21 +13064,21 @@ fn check_native_addon_updates_blocking(
             continue;
         };
 
-        let local_version = normalized_addon_version(&meta.installed_version);
-        let remote_version = normalized_addon_version(&api_entry.version);
-        let has_update = !remote_version.is_empty()
-            && !local_version.is_empty()
-            && remote_version != local_version;
+        let has_update = native_artifact_has_update(
+            &meta.installed_version,
+            &api_entry.version,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(&folder_name) {
-            if !has_update && entry.installed_version != api_entry.version {
-                entry.installed_version = api_entry.version.clone();
-                metadata_changed = true;
-            }
-            if entry.esoui_last_update != api_entry.last_update {
-                entry.esoui_last_update = api_entry.last_update;
-                metadata_changed = true;
-            }
+            metadata_changed |= reconcile_native_update_observation(
+                entry,
+                &api_entry.version,
+                api_entry.last_update,
+                has_update,
+            );
         }
 
         results.push(NativeAddonUpdateCheck {
@@ -13950,6 +14248,7 @@ fn persist_addon_tags(
                     installed_at: String::new(),
                     tags,
                     esoui_last_update: 0,
+                    esoui_marker_installed: false,
                 },
             );
         }
@@ -18301,6 +18600,35 @@ fn open_path(path: &Path) {
     }
 }
 
+/// Mint the reverse-handoff launch ID and publish its pending record.
+///
+/// Extracted so the ID's shape is testable. The child claims authority under
+/// THIS ID, so it is also what `native_authority_is_active` classifies the
+/// resulting owner by: an unprefixed ID makes the WebView read as a *native*
+/// owner, and a later native toggle then sees a "live native owner", exits the
+/// WebView, and leaves the user with no window at all.
+fn prepare_webview_handoff(state_dir: &Path) -> Result<String, String> {
+    let launch_id = native_boot::webview_launch_id();
+    native_boot::prepare(state_dir, &launch_id)?;
+    Ok(launch_id)
+}
+
+fn cleanup_failed_webview_ready_wait(
+    state_dir: &Path,
+    launch_id: &str,
+    original_error: String,
+    terminate_and_reap: impl FnOnce() -> Result<(), String>,
+) -> String {
+    let reap = terminate_and_reap();
+    native_boot::clear_owned(state_dir, launch_id);
+    if let Err(error) = reap {
+        eprintln!(
+            "[native-shell] failed to reap WebView after readiness polling error launch_id={launch_id}: {error}"
+        );
+    }
+    original_error
+}
+
 fn return_to_webview_shell(
     start_app_update: bool,
     start_log_uploader: bool,
@@ -18317,6 +18645,20 @@ fn return_to_webview_shell(
         ));
     }
 
+    let state_dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "native state directory was not provided".to_string())?;
+    let pending_path = native_boot::pending_path(&state_dir);
+    let _pending_guard = transaction_lock::acquire(
+        &pending_path,
+        transaction_lock::LockOptions {
+            timeout: native_boot::READY_TIMEOUT,
+            cancel: None,
+        },
+    )
+    .map_err(|error| format!("Could not serialize WebView handoff: {error}"))?;
+    let launch_id = prepare_webview_handoff(&state_dir)?;
+
     let mut command = std::process::Command::new(&exe);
     // Children inherit this process's environment, and THIS process may itself
     // carry KALPA_START_* from the launch that created it. Clear every re-entry
@@ -18327,10 +18669,13 @@ fn return_to_webview_shell(
         "KALPA_START_LOG_UPLOADER",
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
+        native_boot::LAUNCH_ID_ENV,
+        native_boot::WEBVIEW_LAUNCH_ID_ENV,
     ] {
         command.env_remove(stale);
     }
     command.env("KALPA_FORCE_WEBVIEW", "1");
+    command.env(native_boot::WEBVIEW_LAUNCH_ID_ENV, &launch_id);
     if start_app_update {
         command.env("KALPA_START_APP_UPDATE", "1");
     }
@@ -18344,10 +18689,136 @@ fn return_to_webview_shell(
         command.env("KALPA_START_PACK_HUB_ID", pack_id);
     }
 
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("failed to launch webview shell: {error}"))
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(format!("failed to launch webview shell: {error}"));
+        }
+    };
+    eprintln!("[native-shell] waiting for WebView ready launch_id={launch_id}");
+    let outcome = native_boot::wait_for_ready(
+        &state_dir,
+        &launch_id,
+        native_boot::READY_TIMEOUT,
+        || match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "[native-shell] WebView exited before ready launch_id={launch_id} status={status}"
+                );
+                Ok(native_boot::ChildState::Exited)
+            }
+            Ok(None) => Ok(native_boot::ChildState::Running),
+            Err(error) => Err(format!("failed to inspect WebView handoff: {error}")),
+        },
+    );
+    let first_outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(cleanup_failed_webview_ready_wait(
+                &state_dir,
+                &launch_id,
+                error,
+                || native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1)),
+            ));
+        }
+    };
+    if first_outcome == native_boot::WaitOutcome::Ready {
+        let released = native_authority()
+            .lock()
+            .map_err(|_| "native authority state is unavailable".to_string())?
+            .take();
+        if released.is_none() {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            return Err("native UI authority was unavailable for WebView handoff".to_string());
+        }
+        drop(released);
+        eprintln!(
+            "[native-shell] WebView ready launch_id={launch_id}; waiting for authority proof"
+        );
+        let acquired = native_boot::wait_for_acquired(
+            &state_dir,
+            &launch_id,
+            native_boot::READY_TIMEOUT,
+            || match child.try_wait() {
+                Ok(Some(_)) => Ok(native_boot::ChildState::Exited),
+                Ok(None) => Ok(native_boot::ChildState::Running),
+                Err(error) => Err(format!(
+                    "failed to inspect WebView authority handoff: {error}"
+                )),
+            },
+        );
+        if matches!(acquired, Ok(native_boot::WaitOutcome::Ready)) {
+            native_boot::clear_owned(&state_dir, &launch_id);
+            eprintln!("[native-shell] WebView authority acquired launch_id={launch_id}");
+            return Ok(());
+        }
+
+        let reap = native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+        let reclaim_id = format!("native-reclaim-{}", native_boot::new_launch_id());
+        let reclaimed = native_boot::claim_after_ready_release(
+            &state_dir,
+            &reclaim_id,
+            native_boot::READY_TIMEOUT,
+        );
+        native_boot::clear_owned(&state_dir, &launch_id);
+        let failure = match acquired {
+            Ok(_) => "WebView failed to acquire UI authority after readiness.".to_string(),
+            Err(error) => {
+                format!("Failed while waiting for WebView UI authority after readiness: {error}")
+            }
+        };
+        let guard = match reclaimed {
+            Ok(guard) => guard,
+            Err(error) => {
+                // Same rule the forward-handoff child follows: a shell that
+                // cannot hold UI authority must not keep rendering. Staying up
+                // leaves the lock free, so the next launch spawns a second
+                // sidecar and both write. The shutdown timer is keyed on the
+                // guard's launch ID too, so an unauthoritative shell would not
+                // even hear a later release request.
+                eprintln!(
+                    "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
+                );
+                NATIVE_AUTHORITY_LOST.store(true, Ordering::SeqCst);
+                let _ = slint::quit_event_loop();
+                return Err(format!(
+                    "{failure} Native authority recovery failed: {error}"
+                ));
+            }
+        };
+        *native_authority()
+            .lock()
+            .map_err(|_| "native authority state is unavailable".to_string())? = Some(guard);
+        if let Err(error) = reap {
+            eprintln!(
+                "[native-shell] failed to reap unsuccessful WebView launch_id={launch_id}: {error}"
+            );
+        }
+        return Err(failure);
+    }
+    native_boot::clear_owned(&state_dir, &launch_id);
+    match first_outcome {
+        native_boot::WaitOutcome::Ready => {
+            unreachable!("ready handoff returned above")
+        }
+        native_boot::WaitOutcome::ChildExited => {
+            Err("WebView exited before reporting that its runtime was ready.".to_string())
+        }
+        native_boot::WaitOutcome::TimedOut => {
+            eprintln!(
+                "[native-shell] WebView ready timeout launch_id={launch_id}; keeping native UI"
+            );
+            if let Err(error) =
+                native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))
+            {
+                eprintln!(
+                    "[native-shell] failed to terminate/reap WebView launch_id={launch_id}: {error}"
+                );
+            }
+            Err("WebView timed out before its runtime was ready.".to_string())
+        }
+    }
 }
 
 fn open_url(url: &str) {
@@ -22734,6 +23205,7 @@ CombatMetrics_SavedVariables = {
             installed_at: "2026-07-02T18:45:00Z".to_string(),
             tags: vec!["favorite".to_string(), "pvp-build".to_string()],
             esoui_last_update: 1_782_864_000_000,
+            esoui_marker_installed: true,
         };
 
         hydrate_addon_from_metadata(&mut entry, &meta);
@@ -22746,6 +23218,53 @@ CombatMetrics_SavedVariables = {
         assert!(entry.favorite);
         assert!(tag_model_has_active(&entry.tags, "favorite"));
         assert!(tag_model_has_active(&entry.tags, "pvp-build"));
+    }
+
+    #[test]
+    fn native_pending_update_preserves_installed_publication_marker() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: true,
+        };
+
+        assert!(!reconcile_native_update_observation(
+            &mut meta, "v2", 200, true
+        ));
+        assert_eq!(meta.installed_version, "v1");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn native_update_check_rejects_a_stale_filelist_downgrade() {
+        assert!(!native_artifact_has_update("v2", "v1", 200, true, 100));
+        assert!(native_artifact_has_update("v1", "v2", 100, true, 200));
+        assert!(native_artifact_has_update("v2", "v1", 200, false, 100));
+    }
+
+    #[test]
+    fn native_matching_observation_can_establish_marker_provenance() {
+        let mut meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v1".to_string(),
+            download_url: String::new(),
+            installed_at: String::new(),
+            tags: Vec::new(),
+            esoui_last_update: 100,
+            esoui_marker_installed: false,
+        };
+
+        assert!(reconcile_native_update_observation(
+            &mut meta, " 1 ", 100, false
+        ));
+        assert_eq!(meta.installed_version, " 1 ");
+        assert_eq!(meta.esoui_last_update, 100);
+        assert!(meta.esoui_marker_installed);
     }
 
     #[test]
@@ -22792,6 +23311,7 @@ CombatMetrics_SavedVariables = {
             "",
             0,
         );
+        stale.protected_edits_baseline = false;
         stale.last_updated = "Jan 1, 2025".into();
         let models = test_addon_models(vec![current, stale]);
         let updates = vec![
@@ -22810,15 +23330,34 @@ CombatMetrics_SavedVariables = {
         ];
 
         let available = apply_addon_update_check_results(&models, &updates);
+        let unprotected = unprotected_update_count(&models);
         let addons = models.all.borrow();
 
         assert_eq!(available, 1);
+        assert_eq!(unprotected, 1);
         assert_eq!(addons[0].badge.as_str(), "");
         assert_eq!(addons[0].state, 0);
         assert_eq!(addons[0].last_updated.as_str(), "Jul 1, 2026");
         assert_eq!(addons[1].state, 1);
         assert_eq!(addons[1].badge.as_str(), "Update");
         assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
+    }
+
+    #[test]
+    fn native_update_start_copy_discloses_missing_baseline_without_claiming_safety() {
+        let targets = vec![NativeAddonUpdateTarget {
+            folder_name: "MigratedAddon".to_string(),
+            esoui_id: 42,
+        }];
+
+        let disclosed = update_start_message(&targets, 1);
+        assert!(disclosed.contains("Protected Edits unavailable"));
+        assert!(disclosed.contains("no trusted file baseline"));
+        assert!(!disclosed.to_ascii_lowercase().contains("safe"));
+
+        let covered = update_start_message(&targets, 0);
+        assert_eq!(covered, "Applying 1 addon update...");
+        assert!(!covered.to_ascii_lowercase().contains("safe"));
     }
 
     #[test]
@@ -24338,5 +24877,62 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title.as_str(), "Dolgubon's Lazy Writ Crafter");
         assert_eq!(entries[0].rank, 1);
+    }
+
+    /// The reverse handoff hands its launch ID to the WebView child, which
+    /// claims UI authority under it. `native-shell.active` is therefore
+    /// classified by that ID, so minting it without the WebView prefix makes
+    /// the WebView read as a *native* owner. A later "turn native mode on"
+    /// then finds a "live native owner", exits the WebView, and leaves the
+    /// user with no window. Guard the mint, not just the classifier.
+    #[test]
+    fn reverse_handoff_mints_a_webview_shaped_launch_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path();
+
+        let launch_id = prepare_webview_handoff(state_dir).expect("prepare handoff");
+
+        assert!(
+            native_boot::is_webview_launch_id(&launch_id),
+            "reverse-handoff launch ID must be WebView-shaped, got {launch_id}"
+        );
+        assert!(native_boot::has_pending(state_dir));
+
+        // Claim under exactly the ID the child would use, then assert the
+        // owner classifies as WebView and never as a live native owner.
+        let _guard = match native_boot::try_claim_authority(state_dir, &launch_id).unwrap() {
+            native_boot::AuthorityClaim::Held(guard) => guard,
+            native_boot::AuthorityClaim::AlreadyHeld => panic!("authority was unexpectedly held"),
+        };
+        assert!(native_boot::webview_authority_is_active(state_dir));
+        assert!(!native_boot::native_authority_is_active(state_dir));
+        assert!(!native_boot::live_native_authority_exists(state_dir));
+    }
+
+    #[test]
+    fn reverse_handoff_polling_error_reaps_and_clears_owned_markers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_dir = temp.path();
+        let launch_id = prepare_webview_handoff(state_dir).expect("prepare handoff");
+        assert!(native_boot::signal_ready(state_dir, &launch_id).unwrap());
+        assert!(native_boot::has_pending(state_dir));
+        assert!(native_boot::ready_matches(state_dir, &launch_id));
+
+        let mut reaped = false;
+        let error = cleanup_failed_webview_ready_wait(
+            state_dir,
+            &launch_id,
+            "poll failed".to_string(),
+            || {
+                reaped = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(error, "poll failed");
+        assert!(reaped, "the spawned WebView must be terminated and reaped");
+        assert!(!native_boot::has_pending(state_dir));
+        assert!(!native_boot::ready_matches(state_dir, &launch_id));
+        assert!(!native_boot::acquired_matches(state_dir, &launch_id));
     }
 }
