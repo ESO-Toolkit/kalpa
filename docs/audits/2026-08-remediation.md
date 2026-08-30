@@ -20,7 +20,7 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | F2 | todo | - | - | - | - | - | Uploader log-directory sequencing. |
 | F3 | todo | - | - | - | - | - | Imported log must use fresh list data. |
 | F4 | todo | - | - | - | - | - | Logout invalidates private loads. |
-| F5 | todo | - | - | - | - | - | Controlled-state parent veto. |
+| F5 | pr-open | `fix/audit-f5-controlled-state-veto` | [#370](https://github.com/ESO-Toolkit/kalpa/pull/370) (draft, stacked on W1) | - | not required | APPROVE | Focused 10/10; frontend check; 493 tests | Controlled values remain authoritative when a parent vetoes a change; uncontrolled behavior is preserved. |
 | F6 | todo | - | - | - | - | - | - | Optimistic-state sequencing. |
 | H1 | todo | - | - | - | - | - | - | Generate release copy from matching CHANGELOG section. |
 | H2 | todo | - | - | - | - | - | - | Decide theme-image provenance and tracking policy. |
@@ -98,6 +98,16 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 - Fresh Sol review returned `REVISE` with four findings: orphan detail adoption during account purge; stale same-author operations crossing slug reuse; vote/install counters committing before a fallible KV mirror; and a backup write racing account deletion. The single prescribed follow-up also returned `REVISE` after verifying those cases.
 - Addressed every follow-up finding with author-scoped orphan hydration, created-at lifecycle compare-and-swap for update/delete, durable dirty-mirror markers repaired by alarm, and DO-serialized backup/account deletion guarded by a deleted-author latch. Added exact failure/retry regressions.
 - Final local evidence: Worker TypeScript check passes; all 184 tests pass; Wrangler dry-run passes; `wrangler.toml` remains `kalpa-pack-hub`. No deploy, merge, schema change, or Worker rename was performed.
+### 2026-08-26 — Codex (F5)
+
+- Active branch: `fix/audit-f5-controlled-state-veto`, rebased onto `main` after W1 landed.
+- Completed: reproduced the controlled-state divergence with failing-first hook and dialog tests; implemented the minimum fix so controlled mode renders only the supplied value and uncontrolled mode alone mutates internal state; added controlled-veto and uncontrolled dialog regressions.
+- Evidence: before the fix, the hook rendered `requested-value` instead of the vetoing parent's `parent-value`, and the dialog context changed from `open` to `closed`. After the fix, the focused suite passes 10/10, `npm run check` passes, and `npm test` passes 593/593.
+- Review: Sol `APPROVE` with no findings or missing tests, wire contract `OK`, and a clean bug-class sweep across dialog, checkbox, tooltip, and popover.
+- Handoff: pushed the branch and opened draft PR [#370](https://github.com/ESO-Toolkit/kalpa/pull/370). No persisted-data, wire-format, dependency, or visual changes.
+- Blockers: none known; CI and maintainer review remain.
+- Exact next action: confirm the rebased diff contains only F5 and wait for green CI before marking it ready.
+
 ### 2026-08-27 — Codex W3 revalidation
 
 - Merged updated W2 commit `4b2c18d0` forward with a normal merge. The authority-route conflict was resolved additively: W3's bounded streaming reader now protects W2's exact `authority` and `unowned_d1_ids` validation; D-W2-2 and W3 tracker history were both preserved.
