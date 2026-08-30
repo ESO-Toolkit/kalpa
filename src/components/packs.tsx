@@ -294,6 +294,7 @@ export function Packs({
       const pack = await invokeOrThrow<Pack>("get_pack", { id });
       if (seq !== selectPackSeqRef.current) return;
       setSelectedPack(pack);
+      setConfirmInstall(false);
     } catch (e) {
       if (seq !== selectPackSeqRef.current) return;
       toast.error(`Failed to load pack: ${getTauriErrorMessage(e)}`);
