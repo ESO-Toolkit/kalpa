@@ -17,7 +17,6 @@ import type {
 import { runBatchPackInstall } from "@/lib/pack-install";
 import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { getSetting, setSetting } from "@/lib/store";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { PackTypeFilter, SortOption, TabMode } from "./pack-constants";
 
 interface VoteResponse {
@@ -461,24 +460,6 @@ export function Packs({
   };
 
   const handleExportPackFile = async (pack: Pack) => {
-    const safeName = pack.title
-      .replace(/[^a-zA-Z0-9-_ ]/g, "")
-      .trim()
-      .replace(/\s+/g, "-");
-    // Inside try/catch: a denied dialog permission rejects here, and an
-    // unhandled rejection from the click handler would look like a dead button.
-    let path: string | null;
-    try {
-      path = await saveFileDialog({
-        defaultPath: `${safeName}.esopack`,
-        filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-      });
-    } catch (e) {
-      toast.error(`Couldn't open the save dialog: ${getTauriErrorMessage(e)}`);
-      return;
-    }
-    if (!path) return;
-
     let settings: Record<string, AddonSettings> | undefined;
     if (exportIncludeSettings) {
       try {
@@ -516,7 +497,7 @@ export function Packs({
     }
 
     try {
-      await invokeOrThrow("export_pack_file", {
+      const exported = await invokeOrThrow<boolean>("export_pack_file", {
         pack: {
           format: "esopack",
           version: settings ? 2 : 1,
@@ -531,8 +512,8 @@ export function Packs({
           sharedBy: authUser?.userName ?? "Anonymous",
           ...(settings ? { settings } : {}),
         },
-        path,
       });
+      if (!exported) return;
       if (settings) {
         const addonCount = Object.keys(settings).length;
         const totalDrops = Object.values(settings).reduce(
@@ -589,18 +570,13 @@ export function Packs({
   const handleImportFile = async () => {
     const operationId = ++importOperationSeqRef.current;
     setResolvingCode(false);
-    const path = await openFileDialog({
-      filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-      multiple: false,
-    });
-    if (!path || operationId !== importOperationSeqRef.current) return;
-
-    setImportError(null);
-    setImportedPack(null);
-    setImportedFileSettings(null);
     try {
-      const result = await invokeOrThrow<EsoPackFile>("import_pack_file", { path });
-      if (operationId !== importOperationSeqRef.current) return;
+      const result = await invokeOrThrow<EsoPackFile | null>("import_pack_file");
+      if (!result || operationId !== importOperationSeqRef.current) return;
+
+      setImportError(null);
+      setImportedPack(null);
+      setImportedFileSettings(null);
       setImportedPack({
         title: result.pack.title,
         description: result.pack.description,

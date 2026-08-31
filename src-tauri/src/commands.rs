@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -9637,10 +9638,16 @@ pub struct EsoPackData {
     pub addons: Vec<PackAddonEntry>,
 }
 
-#[tauri::command]
-pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
-    let file_path = PathBuf::from(&path);
+fn pack_export_file_name(title: &str) -> String {
+    let safe_name: String = title
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "-_ ".contains(*character))
+        .collect();
+    let safe_name = safe_name.split_whitespace().collect::<Vec<_>>().join("-");
+    format!("{safe_name}.esopack")
+}
 
+fn export_pack_to_path(pack: EsoPackFile, file_path: &Path) -> Result<(), String> {
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Export path must have .esopack extension.".to_string());
     }
@@ -9669,9 +9676,25 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
-    let file_path = PathBuf::from(&path);
+pub async fn export_pack_file(app: AppHandle, pack: EsoPackFile) -> Result<bool, String> {
+    let file_name = pack_export_file_name(&pack.pack.title);
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .add_filter("ESO Pack", &["esopack"])
+        .set_file_name(file_name)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let file_path = selected_path
+        .into_path()
+        .map_err(|_| "The save dialog did not return a local file path.".to_string())?;
+    export_pack_to_path(pack, &file_path)?;
+    Ok(true)
+}
 
+fn import_pack_from_path(file_path: &Path) -> Result<EsoPackFile, String> {
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Only .esopack files can be imported.".to_string());
     }
@@ -9704,6 +9727,22 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     }
 
     Ok(pack)
+}
+
+#[tauri::command]
+pub async fn import_pack_file(app: AppHandle) -> Result<Option<EsoPackFile>, String> {
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .add_filter("ESO Pack", &["esopack"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let file_path = selected_path
+        .into_path()
+        .map_err(|_| "The open dialog did not return a local file path.".to_string())?;
+    import_pack_from_path(&file_path).map(Some)
 }
 
 /// Export the SavedVariables settings block for a list of addon folder names.
@@ -15110,8 +15149,8 @@ mod tests {
             shared_by: String::new(),
             settings: HashMap::new(),
         };
-        assert!(export_pack_file(pack.clone(), "C:\\test.json".to_string()).is_err());
-        assert!(export_pack_file(pack, "C:\\test.exe".to_string()).is_err());
+        assert!(export_pack_to_path(pack.clone(), Path::new("C:\\test.json")).is_err());
+        assert!(export_pack_to_path(pack, Path::new("C:\\test.exe")).is_err());
     }
 
     #[test]
@@ -15138,7 +15177,7 @@ mod tests {
             shared_by: String::new(),
             settings: HashMap::new(),
         };
-        export_pack_file(pack, dest.to_string_lossy().to_string()).unwrap();
+        export_pack_to_path(pack, &dest).unwrap();
 
         let written = fs::read_to_string(&dest).unwrap();
         assert!(written.contains("Replacement"));
@@ -15173,7 +15212,7 @@ mod tests {
                         settings: HashMap::new(),
                     };
                     start.wait();
-                    export_pack_file(pack, destination.to_string_lossy().to_string()).unwrap();
+                    export_pack_to_path(pack, &destination).unwrap();
                 })
             })
             .collect();
