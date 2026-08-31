@@ -127,7 +127,15 @@ const addon: AddonManifest = {
   modifiedFileCount: 0,
 };
 
-function Harness({ children }: { children?: ReactNode }) {
+function Harness({
+  children,
+  onRemoveAddon,
+  removalBlockedReason,
+}: {
+  children?: ReactNode;
+  onRemoveAddon?: (folderName: string) => void;
+  removalBlockedReason?: string;
+}) {
   const [viewMode, setViewMode] = useState<ViewMode>("installed");
 
   return (
@@ -158,6 +166,8 @@ function Harness({ children }: { children?: ReactNode }) {
         onSelectDiscoverResult={vi.fn()}
         selectedDiscoverResultId={null}
         installedEsouiIds={new Set([addon.esouiId!])}
+        onRemoveAddon={onRemoveAddon}
+        removalBlockedReason={removalBlockedReason}
       />
       {children}
     </>
@@ -175,5 +185,25 @@ describe("AddonList", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "My Addons" }));
     expect(await screen.findByText(addon.title)).toBeInTheDocument();
+  });
+
+  it("blocks context-menu removal with an explanation, then restores it", async () => {
+    const onRemoveAddon = vi.fn();
+    const reason = "Wait for the current update batch to finish before removing addons.";
+    const { rerender } = render(
+      <Harness onRemoveAddon={onRemoveAddon} removalBlockedReason={reason} />
+    );
+
+    fireEvent.contextMenu(await screen.findByText(addon.title), { clientX: 10, clientY: 10 });
+    const blockedRemove = await screen.findByRole("menuitem", { name: `Remove — ${reason}` });
+    expect(blockedRemove).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(blockedRemove);
+    expect(onRemoveAddon).not.toHaveBeenCalled();
+
+    rerender(<Harness onRemoveAddon={onRemoveAddon} />);
+    const enabledRemove = await screen.findByRole("menuitem", { name: "Remove" });
+    expect(enabledRemove).toBeEnabled();
+    fireEvent.click(enabledRemove);
+    expect(onRemoveAddon).toHaveBeenCalledWith(addon.folderName);
   });
 });

@@ -37,7 +37,6 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
   const actionItems = items
     .map((item, i) => (isSeparator(item) ? null : { item, index: i }))
     .filter(Boolean) as { item: ContextMenuItem; index: number }[];
-  const enabledItems = actionItems.filter(({ item }) => !item.disabled);
 
   useEffect(() => {
     menuRef.current?.focus();
@@ -54,18 +53,20 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActiveIndex((prev) => {
-          const currentPos = enabledItems.findIndex((a) => a.index === prev);
-          const next = currentPos < enabledItems.length - 1 ? currentPos + 1 : 0;
-          return enabledItems[next]!.index;
+          if (actionItems.length === 0) return -1;
+          const currentPos = actionItems.findIndex((a) => a.index === prev);
+          const next = currentPos < actionItems.length - 1 ? currentPos + 1 : 0;
+          return actionItems[next]!.index;
         });
       }
 
       if (e.key === "ArrowUp") {
         e.preventDefault();
         setActiveIndex((prev) => {
-          const currentPos = enabledItems.findIndex((a) => a.index === prev);
-          const next = currentPos > 0 ? currentPos - 1 : enabledItems.length - 1;
-          return enabledItems[next]!.index;
+          if (actionItems.length === 0) return -1;
+          const currentPos = actionItems.findIndex((a) => a.index === prev);
+          const next = currentPos > 0 ? currentPos - 1 : actionItems.length - 1;
+          return actionItems[next]!.index;
         });
       }
 
@@ -78,7 +79,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         }
       }
     },
-    [actionItems, activeIndex, enabledItems, onClose]
+    [actionItems, activeIndex, onClose]
   );
 
   useEffect(() => {
@@ -134,17 +135,18 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
             id={`addon-action-${i}`}
             role="menuitem"
             tabIndex={-1}
-            disabled={entry.disabled}
+            aria-disabled={entry.disabled || undefined}
             className={cn(
               "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors outline-none",
               entry.destructive
                 ? "text-status-danger hover:bg-status-danger-strong/10"
                 : "text-foreground hover:bg-structure-06 hover:text-foreground",
-              entry.disabled && "opacity-40 pointer-events-none",
+              entry.disabled && "opacity-40 cursor-not-allowed",
               activeIndex === i &&
                 (entry.destructive ? "bg-status-danger-strong/10" : "bg-structure-06")
             )}
             onClick={() => {
+              if (entry.disabled) return;
               entry.onClick();
               onClose();
             }}

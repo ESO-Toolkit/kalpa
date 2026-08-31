@@ -72,6 +72,7 @@ interface AddonListProps {
   isOffline?: boolean;
   onUpdateAddon?: (folderName: string) => void;
   onRemoveAddon?: (folderName: string) => void;
+  removalBlockedReason?: string;
   onToggleDisable?: (folderName: string, disabled: boolean) => void;
   onOpenFolder?: (folderName: string) => void;
   onToggleFavorite?: (folderName: string, tags: string[]) => void;
@@ -562,6 +563,7 @@ function AddonListBase({
   isOffline,
   onUpdateAddon,
   onRemoveAddon,
+  removalBlockedReason,
   onToggleDisable,
   onOpenFolder,
   onToggleFavorite,
@@ -692,9 +694,10 @@ function AddonListBase({
     if (onRemoveAddon) {
       items.push({ separator: true });
       items.push({
-        label: "Remove",
+        label: removalBlockedReason ? `Remove — ${removalBlockedReason}` : "Remove",
         icon: Trash2,
         destructive: true,
+        disabled: Boolean(removalBlockedReason),
         onClick: () => onRemoveAddon(addon.folderName),
       });
     }
@@ -711,6 +714,7 @@ function AddonListBase({
     onToggleDisable,
     onToggleSelect,
     onRemoveAddon,
+    removalBlockedReason,
   ]);
 
   return (

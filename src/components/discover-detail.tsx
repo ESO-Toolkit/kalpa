@@ -21,6 +21,7 @@ interface DiscoverDetailProps {
   addonsPath: string;
   onInstalled: () => void;
   onRemoveByEsouiId?: (esouiId: number) => void;
+  removalBlockedReason?: string;
   installedEsouiIds: Set<number>;
   isOffline?: boolean;
 }
@@ -30,6 +31,7 @@ function DiscoverDetailBase({
   addonsPath,
   onInstalled,
   onRemoveByEsouiId,
+  removalBlockedReason,
   installedEsouiIds,
   isOffline,
 }: DiscoverDetailProps) {
@@ -167,17 +169,31 @@ function DiscoverDetailBase({
           <div className="flex flex-col gap-1.5 items-end shrink-0">
             <div className="flex items-center gap-1.5">
               {(installSuccess || installedEsouiIds.has(result.id)) && onRemoveByEsouiId && (
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    onRemoveByEsouiId(result.id);
-                    setInstallSuccess(null);
-                  }}
-                  className="border-status-danger/20 text-status-danger hover:bg-status-danger/[0.08] hover:text-status-danger"
-                >
-                  <Trash2 className="size-3.5" />
-                  Uninstall
-                </Button>
+                <SimpleTooltip content={removalBlockedReason ?? "Uninstall this addon"}>
+                  <span
+                    className="inline-flex"
+                    tabIndex={removalBlockedReason ? 0 : undefined}
+                    aria-label={
+                      removalBlockedReason
+                        ? `Uninstall addon unavailable. ${removalBlockedReason}`
+                        : undefined
+                    }
+                  >
+                    <Button
+                      variant="outline"
+                      disabled={Boolean(removalBlockedReason)}
+                      aria-label="Uninstall addon"
+                      onClick={() => {
+                        onRemoveByEsouiId(result.id);
+                        setInstallSuccess(null);
+                      }}
+                      className="border-status-danger/20 text-status-danger hover:bg-status-danger/[0.08] hover:text-status-danger"
+                    >
+                      <Trash2 className="size-3.5" />
+                      Uninstall
+                    </Button>
+                  </span>
+                </SimpleTooltip>
               )}
               <SimpleTooltip content={isOffline ? "Installs require an internet connection" : ""}>
                 <Button
@@ -226,16 +242,30 @@ function DiscoverDetailBase({
                 ` (skipped: ${installSuccess.skippedDeps.join(", ")})`}
             </span>
             {onRemoveByEsouiId && result && (
-              <button
-                onClick={() => {
-                  onRemoveByEsouiId(result.id);
-                  setInstallSuccess(null);
-                }}
-                className="shrink-0 rounded-lg border border-status-danger/20 bg-status-danger/[0.06] px-2.5 py-1 text-xs font-medium text-status-danger hover:bg-status-danger/[0.12] transition-colors"
-              >
-                <Trash2 className="size-3 inline -mt-px mr-1" />
-                Uninstall
-              </button>
+              <SimpleTooltip content={removalBlockedReason ?? "Uninstall this addon"}>
+                <span
+                  className="inline-flex"
+                  tabIndex={removalBlockedReason ? 0 : undefined}
+                  aria-label={
+                    removalBlockedReason
+                      ? `Uninstall addon unavailable. ${removalBlockedReason}`
+                      : undefined
+                  }
+                >
+                  <button
+                    disabled={Boolean(removalBlockedReason)}
+                    aria-label="Uninstall addon"
+                    onClick={() => {
+                      onRemoveByEsouiId(result.id);
+                      setInstallSuccess(null);
+                    }}
+                    className="shrink-0 rounded-lg border border-status-danger/20 bg-status-danger/[0.06] px-2.5 py-1 text-xs font-medium text-status-danger hover:bg-status-danger/[0.12] transition-colors disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    <Trash2 className="size-3 inline -mt-px mr-1" />
+                    Uninstall
+                  </button>
+                </span>
+              </SimpleTooltip>
             )}
           </div>
         )}

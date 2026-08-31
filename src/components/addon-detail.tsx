@@ -81,6 +81,7 @@ interface AddonDetailProps {
    * App's scan deliberately re-resolves the selected addon across a rescan. */
   onRefresh: () => void;
   onRemoveAddon: (folderName: string) => void;
+  removalBlockedReason?: string;
   onToggleDisable: (folderName: string, currentlyDisabled: boolean) => void;
   updateResult: UpdateCheckResult | null;
   onAddonUpdated: (esouiId: number) => void;
@@ -96,6 +97,7 @@ function AddonDetailBase({
   addonsPath,
   onRefresh,
   onRemoveAddon,
+  removalBlockedReason,
   onToggleDisable,
   updateResult,
   onAddonUpdated,
@@ -111,7 +113,6 @@ function AddonDetailBase({
   const [updateSuccess, setUpdateSuccess] = useState(false);
   const [installingDep, setInstallingDep] = useState<string | null>(null);
   const [justInstalledDeps, setJustInstalledDeps] = useState<Set<string>>(new Set());
-  const [removingDep, setRemovingDep] = useState<string | null>(null);
   const [customTagInput, setCustomTagInput] = useState("");
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
@@ -433,22 +434,6 @@ function AddonDetailBase({
       toast.error(`Failed to install ${depName}: ${getTauriErrorMessage(e)}`);
     } finally {
       setInstallingDep(null);
-    }
-  };
-
-  const handleRemoveDep = async (depName: string) => {
-    setRemovingDep(depName);
-    try {
-      await invokeOrThrow("remove_addon", {
-        addonsPath,
-        folderName: depName,
-      });
-      toast.success(`Removed ${depName}`);
-      onRefresh(); // refresh addon list, keeping this addon selected
-    } catch (e) {
-      toast.error(`Failed to remove ${depName}: ${getTauriErrorMessage(e)}`);
-    } finally {
-      setRemovingDep(null);
     }
   };
 
@@ -887,18 +872,27 @@ function AddonDetailBase({
                             </SimpleTooltip>
                           )}
                           {removeTarget && (
-                            <SimpleTooltip content={`Remove ${removeTarget}`}>
-                              <button
-                                className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:opacity-50"
-                                onClick={() => handleRemoveDep(removeTarget)}
-                                disabled={removingDep === removeTarget}
+                            <SimpleTooltip
+                              content={removalBlockedReason ?? `Remove ${removeTarget}`}
+                            >
+                              <span
+                                className="inline-flex"
+                                tabIndex={removalBlockedReason ? 0 : undefined}
+                                aria-label={
+                                  removalBlockedReason
+                                    ? `Remove ${removeTarget} unavailable. ${removalBlockedReason}`
+                                    : undefined
+                                }
                               >
-                                {removingDep === removeTarget ? (
-                                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-danger" />
-                                ) : (
+                                <button
+                                  className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:pointer-events-none disabled:opacity-50"
+                                  onClick={() => onRemoveAddon(removeTarget)}
+                                  disabled={Boolean(removalBlockedReason)}
+                                  aria-label={`Remove ${removeTarget}`}
+                                >
                                   <Trash2 className="size-3.5" />
-                                )}
-                              </button>
+                                </button>
+                              </span>
                             </SimpleTooltip>
                           )}
                         </div>
@@ -970,18 +964,25 @@ function AddonDetailBase({
                       </div>
                       {present ? (
                         removeTarget ? (
-                          <SimpleTooltip content={`Remove ${removeTarget}`}>
-                            <button
-                              className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:opacity-50"
-                              onClick={() => handleRemoveDep(removeTarget)}
-                              disabled={removingDep === removeTarget}
+                          <SimpleTooltip content={removalBlockedReason ?? `Remove ${removeTarget}`}>
+                            <span
+                              className="inline-flex"
+                              tabIndex={removalBlockedReason ? 0 : undefined}
+                              aria-label={
+                                removalBlockedReason
+                                  ? `Remove ${removeTarget} unavailable. ${removalBlockedReason}`
+                                  : undefined
+                              }
                             >
-                              {removingDep === removeTarget ? (
-                                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-danger" />
-                              ) : (
+                              <button
+                                className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:pointer-events-none disabled:opacity-50"
+                                onClick={() => onRemoveAddon(removeTarget)}
+                                disabled={Boolean(removalBlockedReason)}
+                                aria-label={`Remove ${removeTarget}`}
+                              >
                                 <Trash2 className="size-3.5" />
-                              )}
-                            </button>
+                              </button>
+                            </span>
                           </SimpleTooltip>
                         ) : null
                       ) : (
@@ -1081,9 +1082,24 @@ function AddonDetailBase({
             {dependents.length === 1 ? "depends" : "depend"} on this addon.
           </p>
         )}
-        <Button variant="destructive" onClick={() => onRemoveAddon(addon.folderName)}>
-          Remove Addon
-        </Button>
+        <SimpleTooltip content={removalBlockedReason ?? "Remove this addon"}>
+          <span
+            className="inline-flex"
+            tabIndex={removalBlockedReason ? 0 : undefined}
+            aria-label={
+              removalBlockedReason ? `Remove addon unavailable. ${removalBlockedReason}` : undefined
+            }
+          >
+            <Button
+              variant="destructive"
+              disabled={Boolean(removalBlockedReason)}
+              aria-label="Remove addon"
+              onClick={() => onRemoveAddon(addon.folderName)}
+            >
+              Remove Addon
+            </Button>
+          </span>
+        </SimpleTooltip>
       </div>
     </div>
   );

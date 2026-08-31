@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { BatchUpdateLatch } from "../batch-update-latch";
+import { describe, expect, it, vi } from "vitest";
+import { BatchUpdateLatch, refuseRemovalWhileBatchActive } from "../batch-update-latch";
 
 describe("BatchUpdateLatch", () => {
   it("refuses a second trigger during the async preamble", () => {
@@ -72,5 +72,26 @@ describe("BatchUpdateLatch", () => {
 
     expect(latch.isPreflight).toBe(true);
     expect(latch.tryEnterPreflight()).toBe(false);
+  });
+
+  it("refuses removals throughout preflight and the running batch", () => {
+    const latch = new BatchUpdateLatch();
+    const onRefused = vi.fn();
+    const removeAddon = vi.fn();
+    const staleRemovalHandler = () => {
+      if (refuseRemovalWhileBatchActive(latch, onRefused)) return;
+      removeAddon();
+    };
+
+    latch.tryEnterPreflight();
+    staleRemovalHandler();
+
+    // Represents the same handler after the synchronous handoff but before
+    // React has painted `updatingAll=true`.
+    latch.promoteToRunning();
+    staleRemovalHandler();
+
+    expect(removeAddon).not.toHaveBeenCalled();
+    expect(onRefused).toHaveBeenCalledTimes(2);
   });
 });
