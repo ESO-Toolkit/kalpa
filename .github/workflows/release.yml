@@ -54,7 +54,15 @@ jobs:
       # first job, and additionally catches Cargo.toml drift that the publish
       # gate cannot see.
       - name: Version consistency
-        run: node scripts/check-versions.js --expect "${{ github.ref_name }}"
+        # ref_name via env, never spliced into the script text: git ref names
+        # permit `$()` and backticks, which GitHub would expand before the
+        # shell parses this line. The publish job already uses this pattern.
+        # shell: bash so `$REF_NAME` reads the env var on the Windows matrix
+        # job too (its default shell is pwsh, where $REF_NAME would be empty).
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node scripts/check-versions.js --expect "$REF_NAME"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -88,7 +96,12 @@ jobs:
 
       - name: Generate release notes from CHANGELOG
         id: release-notes
-        run: node .github/scripts/release-body.cjs --version "${{ github.ref_name }}" --github-output
+        # See the Version consistency step: ref_name as data, not source text,
+        # and shell: bash so it resolves on the Windows matrix job.
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node .github/scripts/release-body.cjs --version "$REF_NAME" --github-output
 
       # macOS code signing + notarization activate automatically once an Apple
       # Developer ID certificate is added to the repo secrets. The env vars are
