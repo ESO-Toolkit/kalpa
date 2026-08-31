@@ -5,6 +5,8 @@ import {
   putPack,
   getVotedPackIds,
   getVote,
+  deleteVote,
+  deleteVotesForPack,
   restoreVote,
   listAllVotes,
 } from "./kv";
@@ -14,6 +16,7 @@ import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 import { reconcileD1, recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
+import type { RestoreJobState } from "./pack-index-do";
 export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
@@ -78,6 +81,20 @@ export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
     await recordD1MirrorFailure(env, isPublished ? "upsert" : "delete", pack.id, err);
+  }
+}
+
+async function d1DeletePack(env: Env, id: string): Promise<void> {
+  if (!env.ROSTER_HUB_DB) return;
+  try {
+    await env.ROSTER_HUB_DB.batch([
+      env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+      env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+    ]);
+  } catch (err) {
+    console.error(`D1 delete failed [${id}]:`, err);
+    if (err instanceof Error && err.message.includes("no such table")) return;
+    await recordD1MirrorFailure(env, "delete", id, err);
   }
 }
 
@@ -377,6 +394,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     );
   }
 
+  await env.ESO_PACKS.delete(deletedUserKey(userId));
   await invalidatePackListCache(url);
   return json(request, { pack: added.pack }, 201);
 }
@@ -781,12 +799,12 @@ function deletedUserKey(userId: string): string {
 /**
  * How long a deletion tombstone outlives the deletion.
  *
- * Only has to cover the window in which a backup read can still be in flight —
- * a single cron invocation — so this is enormously generous. It expires because
- * an unbounded set of tombstones is its own storage problem, and after a full
- * backup cycle no live snapshot can still contain the user.
+ * Retained dated backups live for 90 days; keep the tombstone beyond that
+ * retention window so restore cannot replay a deleted user from an older
+ * backup. It expires because an unbounded set of tombstones is its own storage
+ * problem.
  */
-const DELETED_USER_TTL_SECONDS = 30 * 86400;
+const DELETED_USER_TTL_SECONDS = 97 * 86400;
 
 /**
  * Remove records belonging to deleted users from a snapshot before it is written.
@@ -794,10 +812,16 @@ const DELETED_USER_TTL_SECONDS = 30 * 86400;
  * See the call site for why this happens at write time rather than by ordering
  * the read against the delete.
  */
-async function dropDeletedUsers(
+type DeletedUserFilterSnapshot = {
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: Record<string, VoteRecord>;
+};
+
+async function dropDeletedUsers<T extends DeletedUserFilterSnapshot>(
   env: Env,
-  snapshot: { packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> },
-): Promise<{ packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> }> {
+  snapshot: T,
+): Promise<T> {
   const userIds = new Set<string>();
   for (const pack of snapshot.packs) if (pack.author_id) userIds.add(String(pack.author_id));
   for (const pack of Object.values(snapshot.packBodies)) {
@@ -827,6 +851,7 @@ async function dropDeletedUsers(
 
   console.log(`Backup excluding ${deleted.size} deleted user(s)`);
   return {
+    ...snapshot,
     packs: snapshot.packs.filter((p) => !deleted.has(String(p.author_id))),
     packBodies: Object.fromEntries(
       Object.entries(snapshot.packBodies).filter(([, p]) => !deleted.has(String(p?.author_id))),
@@ -928,16 +953,16 @@ async function handleScheduled(env: Env): Promise<void> {
  * KV/D1/DO binding call against the same per-request subrequest ceiling as
  * `fetch`, so this is what actually bounds a page:
  *
- * - a published pack: `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
- *   tag batch) = 3
+ * - a published pack: tombstone check + `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
+ *   tag batch) = 4
  * - a draft pack: `putPack` + one D1 batch = 2
- * - a vote: `restoreVote` writes both `vote:` and the user index = 2
+ * - a vote: tombstone checks for the author/voter + `restoreVote` writes both `vote:` and the user index = 4
  *
  * Derive the caps from this rather than picking a round number: a page cap of
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
  * is the failure the paging was added to avoid in the first place.
  */
-export const SUBREQUESTS_PER_RECORD = 3;
+export const SUBREQUESTS_PER_RECORD = 4;
 /** Per-request subrequest ceiling on Workers Paid. */
 export const SUBREQUEST_CEILING = 1000;
 /** Held back for the backup read, the fresh index read, the DO index swap and
@@ -965,50 +990,20 @@ function readCursor(value: unknown): number {
   return Math.floor(value);
 }
 
-/**
- * Fingerprint of the snapshot AND the exact cursor a page was issued for.
- *
- * Not a security token — it is an incident-recovery consistency check, behind
- * the admin API key. `cursor` stops a token from validating a position it was
- * never issued for: a snapshot-wide token let any in-range cursor through, so a
- * mistyped offset could skip whole pages and the final page would still publish
- * an index for bodies that were never replayed.
- *
- * `created_at` and the record count cover the snapshot changing mid-restore, and
- * they are enough only because of WHICH rewriters exist. This worker has exactly
- * two. The midnight cron writes a fresh `created_at`, so it is caught by the
- * timestamp. `purgeUserFromLatestBackup` deliberately preserves `created_at`
- * (pinning to the dated twin would resurrect GDPR-deleted data) but returns
- * early unless `removed > 0`, so any write it performs has dropped at least one
- * record and is caught by the count.
- *
- * That is a narrower guarantee than a content hash: two snapshots with the same
- * timestamp AND the same record count but different records would collide. No
- * path here produces that, and this pair is not a general-purpose fingerprint —
- * a third rewriter that swaps records without changing the count would need a
- * digest of the ordered work list added here.
- *
- * It catches ACCIDENTS, not reconstruction. The value is plaintext and its
- * derivation is right here, so a caller who decides to skip pages can recompute
- * a matching token for any in-range cursor and the corpus ends up advertising
- * bodies that were never written.
- *
- * HMAC does not fix that, which is why it is not used: the only secret this
- * worker holds is `ADMIN_API_KEY`, and every caller who can reach this endpoint
- * already presents it. Signing with a secret the forger holds buys nothing.
- * Real tamper-evidence needs continuation state the CALLER does not own —
- * server-side issued cursors — which is the server-owned restore job already
- * recorded as the follow-up on this PR, together with staged writes and an
- * atomic promote. Until that exists, an operator must finish a restore they
- * start, and the 409 says so rather than inviting a token edit.
- */
-function restoreToken(
-  backupKey: string,
-  snapshot: PackBackupSnapshot,
-  total: number,
-  cursor: number,
-): string {
-  return `${backupKey}|${snapshot.created_at ?? "unknown"}|${total}|${cursor}`;
+const RESTORE_SNAPSHOT_PREFIX = "restore:snapshot:";
+const RESTORE_JOB_TTL_SECONDS = 24 * 60 * 60;
+const RESTORE_TOKEN_SHAPE =
+  /^rst_v1_([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.[A-Za-z0-9_-]{32,}$/i;
+
+function base64Url(bytes: ArrayBuffer | Uint8Array): string {
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = "";
+  for (const byte of array) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function sha256Base64Url(value: string): Promise<string> {
+  return base64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
 }
 
 function clampLimit(value: unknown): number {
@@ -1024,23 +1019,68 @@ function clampLimit(value: unknown): number {
 /** `backup:latest` or `backup:YYYY-MM-DD` — the only keys a restore may read. */
 const BACKUP_KEY_SHAPE = /^backup:(latest|\d{4}-\d{2}-\d{2})$/;
 
-/**
- * The snapshot a continuation refers to, read back out of its own token.
- *
- * A paged restore of a DATED snapshot was impossible without this. The response
- * carried `cursor` and `token` but not `date`, and the docs said to pass the
- * response straight back — so the next call fell through to `backup:latest`,
- * compared it against a token minted for `backup:YYYY-MM-DD`, and 409'd. Making
- * the token carry the snapshot identity means one field round-trips instead of
- * three, and a resume cannot silently retarget a different backup.
- *
- * Shape-checked rather than trusted: the token picks which KV key gets read, and
- * even behind the admin key that should not be arbitrary.
- */
-function backupKeyFromToken(token: unknown): string | null {
+function restoreJobIdFromToken(token: unknown): string | null {
   if (typeof token !== "string") return null;
-  const key = token.split("|")[0] ?? "";
-  return BACKUP_KEY_SHAPE.test(key) ? key : null;
+  return RESTORE_TOKEN_SHAPE.exec(token)?.[1] ?? null;
+}
+
+function isLegacyRestoreToken(token: unknown): boolean {
+  if (typeof token !== "string" || !token.includes("|")) return false;
+  const [key] = token.split("|");
+  return BACKUP_KEY_SHAPE.test(key ?? "");
+}
+
+function backupKeyFromDate(dateInput: unknown): string {
+  return typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
+    ? `backup:${dateInput}`
+    : "backup:latest";
+}
+
+function normalizeBackupSnapshot(snapshot: Partial<PackBackupSnapshot>): PackBackupSnapshot {
+  const packBodies =
+    snapshot.packBodies && Object.keys(snapshot.packBodies).length > 0
+      ? snapshot.packBodies
+      : Object.fromEntries((snapshot.packs ?? []).map((p): [string, Pack] => [p.id, p]));
+  return {
+    created_at: snapshot.created_at ?? "unknown",
+    packs: snapshot.packs ?? Object.values(packBodies),
+    packBodies,
+    votes: snapshot.votes ?? {},
+  };
+}
+
+interface RestorePlan {
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: VoteRecord[];
+  voteMap: Record<string, VoteRecord>;
+  packIds: string[];
+  total: number;
+}
+
+function buildRestorePlan(snapshot: PackBackupSnapshot): RestorePlan {
+  const bodyEntries = Object.entries(snapshot.packBodies ?? {})
+    .filter((entry): entry is [string, Pack] => Boolean(entry[1]?.id))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const packBodies = Object.fromEntries(bodyEntries) as Record<string, Pack>;
+  const packIds = Object.keys(packBodies);
+  const packs = packIds.map((id) => packBodies[id]!).filter(Boolean);
+  const livePackIds = new Set(packIds);
+  const votes = Object.values(snapshot.votes ?? {})
+    .filter((record) => Boolean(record?.packId && record?.userId && livePackIds.has(record.packId)))
+    .sort((a, b) => `${a.packId}:${a.userId}`.localeCompare(`${b.packId}:${b.userId}`));
+  const voteMap = Object.fromEntries(votes.map((vote): [string, VoteRecord] => [`${vote.packId}:${vote.userId}`, vote]));
+  return { packs, packBodies, votes, voteMap, packIds, total: packs.length + votes.length };
+}
+
+async function fingerprintRestorePlan(plan: RestorePlan): Promise<string> {
+  return sha256Base64Url(JSON.stringify({ packs: plan.packs, votes: plan.votes }));
+}
+
+async function findDeletedUsers(env: Env, ids: Iterable<string>): Promise<Set<string>> {
+  const unique = [...new Set([...ids].map(String).filter(Boolean))];
+  const present = await Promise.all(unique.map((id) => env.ESO_PACKS.get(deletedUserKey(id))));
+  return new Set(unique.filter((_, i) => present[i] !== null));
 }
 
 /** Run `tasks` with at most `concurrency` in flight, preserving fail-fast. */
@@ -1055,38 +1095,9 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
   await Promise.all(workers);
 }
 /**
- * Restore the pack corpus from a `backup:YYYY-MM-DD` (or `backup:latest`)
- * snapshot written by the scheduled backup (handleScheduled). Unlike
- * /admin/seed this is a production incident-recovery tool, so it is gated
- * only behind requireAuth (the admin API key) — NOT env.ALLOW_SEED, which
- * exists specifically to disable seed-with-fake-data in production and
- * would defeat the purpose of a restore endpoint if reused here.
- *
- * Replays pack bodies (+ D1 mirror) and vote records directly to KV, then
- * atomically replaces the index via the PackIndexDO — never via raw
- * putPackIndex, which would race a concurrent mutation (see kv.ts's
- * getPackIndex comment on why counter/index writes go through the DO). The
- * replacement index is built from only the ids we actually restored a body
- * for (so drifted "ghost" ids in snapshot.packs don't reappear) unioned with
- * any pack in the current live index that predates or postdates the
- * snapshot entirely (so a pack created after the backup isn't deleted).
- *
- * Paged. A call restores `RESTORE_PAGE_SIZE` records by default, or up to
- * `RESTORE_MAX_PAGE_SIZE` — twice that — when the caller passes `limit`. Quote
- * the max, not the default, when reasoning about the subrequest budget: the
- * default is deliberately half the cap, so checking headroom against it hides
- * the factor of two an operator gets just by passing `limit`. If more records
- * remain, returns `{ done: false, cursor, token }` for the operator to pass
- * straight back in the next request body — the endpoint is a manual incident
- * tool, so a caller-driven cursor beats a background job that can fail
- * unobserved. The token both names the snapshot and binds the cursor to it, so
- * a continuation needs only `{ cursor, token }` even for a dated backup, and
- * resuming against a snapshot that changed underneath is a 409, never a partial
- * restore. The
- * index swap and cache invalidation happen only on the final page, so a restore
- * abandoned half-way leaves the previous index in place rather than publishing a
- * partial corpus. Pages are idempotent, so replaying one after a failure is
- * safe. A snapshot that fits in a single page behaves exactly as before.
+ * Restore the pack corpus from a retained backup through a server-owned Durable
+ * Object job. The opaque token identifies the job; caller-supplied cursors are
+ * treated only as a consistency check and never as authority to advance work.
  */
 async function handleRestore(request: Request, env: Env, url: URL): Promise<Response> {
   if (!requireAuth(request, env)) {
@@ -1097,6 +1108,7 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   let cursorInput: unknown;
   let limitInput: unknown;
   let tokenInput: unknown;
+  let restartInput: unknown;
   const parsed = await readJsonBody(request);
   if (parsed.ok) {
     const body = parsed.body as Record<string, unknown> | null;
@@ -1104,164 +1116,320 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     cursorInput = body?.cursor;
     limitInput = body?.limit;
     tokenInput = body?.token;
+    restartInput = body?.restart;
   } else if (parsed.reason === "too-large") {
     return json(request, { error: "Request body is too large" }, 413);
-  } else {
-    // No/invalid JSON body — fall back to backup:latest below.
   }
 
-  // A continuation names its snapshot through the token it was issued with, so
-  // resuming a dated restore does not depend on the caller also re-sending
-  // `date`. `date` selects the snapshot for the FIRST page only.
-  const resumeKey = readCursor(cursorInput) > 0 ? backupKeyFromToken(tokenInput) : null;
-  const backupKey =
-    resumeKey ??
-    (typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
-      ? `backup:${dateInput}`
-      : "backup:latest");
-
-  const raw = await env.ESO_PACKS.get(backupKey);
-  if (!raw) {
-    return notFound(request, `No backup snapshot found for "${backupKey}"`);
-  }
-
+  const index = getPackIndexDO(env);
+  const limit = clampLimit(limitInput);
+  const requestedCursor = readCursor(cursorInput);
   let snapshot: PackBackupSnapshot;
-  try {
-    snapshot = JSON.parse(raw) as PackBackupSnapshot;
-  } catch {
-    return json(request, { error: `Backup "${backupKey}" is corrupt` }, 500);
+  let job: RestoreJobState;
+  let token: string;
+  let tokenHash: string;
+
+  if (tokenInput !== undefined) {
+    if (typeof tokenInput !== "string" || isLegacyRestoreToken(tokenInput)) {
+      return json(
+        request,
+        { error: "Restore continuation token is invalid. Start again with no cursor." },
+        409,
+      );
+    }
+
+    const jobId = restoreJobIdFromToken(tokenInput);
+    if (!jobId) {
+      return json(
+        request,
+        { error: "Restore continuation token is invalid. Start again with no cursor." },
+        409,
+      );
+    }
+
+    token = tokenInput;
+    tokenHash = await sha256Base64Url(token);
+    const resolved = await index.resolveRestoreJob(tokenHash);
+    if (!resolved) {
+      return json(
+        request,
+        { error: "Restore job expired or was not found. Start again with no cursor." },
+        410,
+      );
+    }
+    job = resolved;
+
+    if (job.status === "done") {
+      return json(request, {
+        ok: true,
+        done: true,
+        cursor: null,
+        total: job.total,
+        restored_packs: 0,
+        restored_votes: 0,
+      });
+    }
+
+    if (job.status === "cancelled") {
+      return json(
+        request,
+        { error: "Restore job is no longer active. Start again with no cursor." },
+        410,
+      );
+    }
+
+    const rawSnapshot = await env.ESO_PACKS.get(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
+    if (!rawSnapshot) {
+      await index.cancelActiveRestoreJob(tokenHash);
+      return json(
+        request,
+        { error: "Restore job snapshot expired. Start again with no cursor." },
+        410,
+      );
+    }
+
+    try {
+      snapshot = normalizeBackupSnapshot(JSON.parse(rawSnapshot) as PackBackupSnapshot);
+    } catch {
+      await index.cancelActiveRestoreJob(tokenHash);
+      return json(request, { error: "Restore job snapshot is corrupt" }, 500);
+    }
+  } else {
+    if (cursorInput !== undefined && requestedCursor > 0) {
+      return json(
+        request,
+        { error: "Restore cursor requires an opaque server-owned token. Start again with no cursor." },
+        409,
+      );
+    }
+
+    const backupKey = backupKeyFromDate(dateInput);
+    const raw = await env.ESO_PACKS.get(backupKey);
+    if (!raw) {
+      return notFound(request, `No backup snapshot found for "${backupKey}"`);
+    }
+
+    try {
+      snapshot = normalizeBackupSnapshot(JSON.parse(raw) as PackBackupSnapshot);
+    } catch {
+      return json(request, { error: `Backup "${backupKey}" is corrupt` }, 500);
+    }
+
+    const filtered = await dropDeletedUsers(env, snapshot);
+    snapshot = normalizeBackupSnapshot({
+      created_at: snapshot.created_at,
+      packs: filtered.packs,
+      packBodies: filtered.packBodies,
+      votes: filtered.votes,
+    });
+
+    const initialPlan = buildRestorePlan(snapshot);
+    const snapshotFingerprint = await fingerprintRestorePlan(initialPlan);
+    const begun = await index.beginRestoreJob({
+      backupKey,
+      snapshotCreatedAt: snapshot.created_at ?? null,
+      snapshotFingerprint,
+      total: initialPlan.total,
+      restart: restartInput === true,
+    });
+
+    if (!begun.ok) {
+      return json(
+        request,
+        {
+          error: "Another restore job is already active.",
+          active_restore: begun.job,
+        },
+        409,
+      );
+    }
+
+    token = begun.token;
+    tokenHash = await sha256Base64Url(token);
+    job = begun.job;
+
+    try {
+      await env.ESO_PACKS.put(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`, JSON.stringify(snapshot), {
+        expirationTtl: RESTORE_JOB_TTL_SECONDS,
+      });
+    } catch {
+      await index.cancelActiveRestoreJob(tokenHash);
+      return json(request, { error: "Failed to stage restore snapshot" }, 500);
+    }
   }
 
-  // Older backups (pre-packBodies) only carry the index-mirroring `packs`
-  // array — rebuild the per-id map from it so restore still works on them.
-  const packBodies =
-    snapshot.packBodies && Object.keys(snapshot.packBodies).length > 0
-      ? snapshot.packBodies
-      : Object.fromEntries((snapshot.packs ?? []).map((p): [string, Pack] => [p.id, p]));
+  const plan = buildRestorePlan(snapshot);
+  const snapshotFingerprint = await fingerprintRestorePlan(plan);
+  if (plan.total !== job.total || snapshotFingerprint !== job.snapshotFingerprint) {
+    await index.cancelActiveRestoreJob(tokenHash);
+    return json(
+      request,
+      { error: "Restore job snapshot changed while restore was in progress. Start again with no cursor." },
+      409,
+    );
+  }
 
-  const packs = Object.values(packBodies);
-  const votes = snapshot.votes ?? {};
-  const restorablePackIds = new Set(Object.keys(packBodies));
-  const voteRecords = Object.values(votes).filter((record) =>
-    restorablePackIds.has(record.packId),
+  const claim = await index.claimRestorePage({
+    tokenHash,
+    limit,
+    ...(cursorInput !== undefined ? { cursor: requestedCursor } : {}),
+  });
+
+  if (!claim.ok) {
+    if (claim.reason === "done") {
+      return json(request, {
+        ok: true,
+        done: true,
+        cursor: null,
+        total: claim.job?.total ?? job.total,
+        restored_packs: 0,
+        restored_votes: 0,
+      });
+    }
+
+    if (claim.reason === "cursor-mismatch") {
+      return json(
+        request,
+        {
+          error: "Restore cursor does not match the server-owned job cursor.",
+          expected_cursor: claim.job?.nextCursor ?? job.nextCursor,
+        },
+        409,
+      );
+    }
+
+    if (claim.reason === "in-flight") {
+      return json(request, { error: "Restore page is already in progress." }, 409);
+    }
+
+    return json(
+      request,
+      { error: "Restore job expired or was not found. Start again with no cursor." },
+      410,
+    );
+  }
+
+  type RestoreWorkItem = { kind: "pack"; pack: Pack } | { kind: "vote"; vote: VoteRecord };
+  const packAuthorById = new Map(plan.packs.map((pack): [string, string] => [pack.id, String(pack.author_id)]));
+  const work: RestoreWorkItem[] = [
+    ...plan.packs.map((pack): RestoreWorkItem => ({ kind: "pack", pack })),
+    ...plan.votes.map((vote): RestoreWorkItem => ({ kind: "vote", vote })),
+  ];
+  const page = work.slice(claim.start, claim.end);
+  const pageUserIds = new Set<string>();
+  for (const item of page) {
+    if (item.kind === "pack") {
+      pageUserIds.add(String(item.pack.author_id));
+    } else {
+      pageUserIds.add(String(item.vote.userId));
+      const authorId = packAuthorById.get(item.vote.packId);
+      if (authorId) pageUserIds.add(authorId);
+    }
+  }
+  const deletedUsers = await findDeletedUsers(env, pageUserIds);
+
+  let restoredPacks = 0;
+  let restoredVotes = 0;
+  await runBounded(
+    page.map((item) => async () => {
+      if (item.kind === "pack") {
+        if (deletedUsers.has(String(item.pack.author_id))) return;
+        await putPack(env, item.pack);
+        await d1UpsertPack(env, item.pack);
+        restoredPacks++;
+        return;
+      }
+
+      const authorId = packAuthorById.get(item.vote.packId);
+      if (!authorId || deletedUsers.has(authorId) || deletedUsers.has(String(item.vote.userId))) {
+        return;
+      }
+      await restoreVote(env, item.vote.packId, item.vote.userId, item.vote);
+      restoredVotes++;
+    }),
+    RESTORE_CONCURRENCY,
   );
 
-  // One flat, deterministically ordered work list so a cursor means the same
-  // position on every call against the same snapshot.
-  const work: (() => Promise<void>)[] = [
-    ...packs.map((pack) => async () => {
-      await putPack(env, pack);
-      await d1UpsertPack(env, pack);
-    }),
-    // Use each record's own packId/userId fields rather than parsing the
-    // "<packId>:<userId>" map key, since userId could itself contain ":".
-    ...voteRecords.map((record) => async () => {
-      await restoreVote(env, record.packId, record.userId, record);
-    }),
-  ];
-
-  // A cursor only means anything against the snapshot that issued it. Two ways
-  // it can go stale: the daily cron overwrites `backup:latest` at midnight UTC,
-  // so a paged restore straddling midnight would silently change snapshots
-  // mid-run; or an operator re-runs an old cursor by hand. Either way the
-  // numeric offset then points somewhere else in a different work list, the
-  // records before it are never replayed, and the final page still publishes an
-  // index listing every pack in the snapshot — so the corpus ends up advertising
-  // pack bodies that were never written. Bind the cursor to its snapshot and
-  // refuse a mismatch rather than resuming into the wrong list.
-  const start = readCursor(cursorInput);
-  if (start > 0 && tokenInput !== restoreToken(backupKey, snapshot, work.length, start)) {
-    // Deliberately does NOT hand back the token it expected. A snapshot-wide
-    // token let any in-range cursor pass, so echoing the correct one invited an
-    // operator to retry their WRONG cursor with the RIGHT token — skipping every
-    // page in between while the final page still published the whole index.
-    return json(
-      request,
-      {
-        error:
-          "Restore cursor and token do not match — the token was issued for a different cursor, " +
-          "or the snapshot changed mid-restore. Start again with no cursor.",
-      },
-      409,
-    );
-  }
-  // `>=`, not `>`. A cursor exactly equal to `total` slices to an empty page and
-  // then falls straight into the final-page branch, republishing the index for
-  // records this call never wrote — the same hazard as an over-long cursor, and
-  // easy to hit by copying `total` out of the response instead of `cursor`.
-  // `start === 0` is always legitimate: it is a fresh restore, including of an
-  // empty snapshot.
-  if (start > 0 && start >= work.length) {
-    return json(
-      request,
-      {
-        error:
-          `Restore cursor ${start} is not inside this snapshot (${work.length} records). ` +
-          "A completed restore reports done:true — pass the returned cursor, not the total.",
-      },
-      409,
-    );
-  }
-
-  const limit = clampLimit(limitInput);
-  const end = Math.min(start + limit, work.length);
-  await runBounded(work.slice(start, end), RESTORE_CONCURRENCY);
-
-  // Not done yet: hand back a cursor and stop BEFORE touching the index. Every
-  // pack write is an idempotent put, so a page replayed after a network failure
-  // is harmless.
-  //
-  // Deferring the index swap is NOT a rollback, and this comment used to imply
-  // it was. Each page has already written pack bodies to KV and mirrored them
-  // into D1, and `/packs/:id` reads the KV body directly rather than going
-  // through the index — so an abandoned restore leaves a corpus that is
-  // genuinely part-old, part-new, with the website mirror updated too. Holding
-  // the index back only avoids ADDING entries for bodies that were never
-  // written; it cannot un-write the ones that were.
-  //
-  // That property predates the paging (the single-request version wrote every
-  // pack the same way before swapping the index) but paging makes abandonment
-  // far more likely, since stopping between pages is now a normal thing to do.
-  // Fixing it properly means a server-owned job with staged writes and an
-  // atomic promote — see the follow-up note on the PR. Until then an operator
-  // must finish a restore they start.
-  if (end < work.length) {
-    return json(request, {
-      ok: true,
-      done: false,
-      cursor: end,
-      // Minted for THIS cursor, not the snapshot at large. Pass the pair back
-      // together: a token only validates the offset it was issued for, so a
-      // mistyped cursor is refused instead of silently skipping the pages
-      // between.
-      token: restoreToken(backupKey, snapshot, work.length, end),
-      total: work.length,
-      restored_packs: Math.min(end, packs.length) - Math.min(start, packs.length),
-      restored_votes: Math.max(0, end - Math.max(start, packs.length)),
+  let finalReplacement: { packs: Pack[]; restoredIds: string[] } | undefined;
+  if (claim.final) {
+    const filtered = await dropDeletedUsers(env, {
+      created_at: snapshot.created_at,
+      packs: plan.packs,
+      packBodies: plan.packBodies,
+      votes: plan.voteMap,
     });
+    const finalSnapshot = normalizeBackupSnapshot({
+      created_at: snapshot.created_at,
+      packs: filtered.packs,
+      packBodies: filtered.packBodies,
+      votes: filtered.votes,
+    });
+    const finalPlan = buildRestorePlan(finalSnapshot);
+    const keptPackIds = new Set(finalPlan.packIds);
+    const keptVoteKeys = new Set(Object.keys(finalPlan.voteMap));
+    const excludedPackIds = plan.packIds.filter((id) => !keptPackIds.has(id));
+    const excludedVotes = plan.votes.filter(
+      (vote) => !keptVoteKeys.has(`${vote.packId}:${vote.userId}`),
+    );
+
+    await runBounded(
+      [
+        ...excludedPackIds.map((id) => async () => {
+          await env.ESO_PACKS.delete(`pack:${id}`);
+          await deleteVotesForPack(env, id);
+          await d1DeletePack(env, id);
+        }),
+        ...excludedVotes.map((vote) => async () => {
+          await deleteVote(env, vote.packId, vote.userId);
+        }),
+      ],
+      RESTORE_CONCURRENCY,
+    );
+
+    finalReplacement = { packs: finalPlan.packs, restoredIds: plan.packIds };
   }
 
-  // Rebuild the index from only the packs we actually have bodies for (drops
-  // "ghost" entries that are in snapshot.packs but absent from packBodies —
-  // exactly the index/per-key drift this backup's packBodies capture exists
-  // to repair), then union in any pack from the CURRENT live index that isn't
-  // part of this snapshot at all, so packs created after the backup was taken
-  // aren't deleted by the restore.
-  // Fresh read: a pack created inside the 60s cache window would otherwise be
-  // absent from `preservedPacks` and dropped from the rebuilt index — which is
-  // exactly what the preservation above promises not to do, and restore runs
-  // at incident time when recent writes are most likely in flight.
-  await getPackIndexDO(env).replaceIndexPreserving({ packs }, Object.keys(packBodies));
+  const completed = await index.completeRestorePage({
+    tokenHash,
+    claimId: claim.claimId,
+    end: claim.end,
+    ...(finalReplacement ? { finalReplacement } : {}),
+  });
 
-  await invalidatePackListCache(url);
+  if (!completed.ok) {
+    if (completed.reason === "done") {
+      return json(request, {
+        ok: true,
+        done: true,
+        cursor: null,
+        total: completed.job?.total ?? job.total,
+        restored_packs: restoredPacks,
+        restored_votes: restoredVotes,
+      });
+    }
+
+    const status = completed.reason === "claim-mismatch" ? 409 : 410;
+    return json(
+      request,
+      { error: "Restore job could not be completed. Start again with no cursor." },
+      status,
+    );
+  }
+
+  const done = completed.job.status === "done";
+  if (done) {
+    await env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
+    await invalidatePackListCache(url);
+  }
 
   return json(request, {
     ok: true,
-    done: true,
-    cursor: null,
-    total: work.length,
-    restored_packs: packs.length - Math.min(start, packs.length),
-    restored_votes: voteRecords.length - Math.max(0, start - packs.length),
+    done,
+    cursor: done ? null : completed.job.nextCursor,
+    ...(done ? {} : { token }),
+    total: plan.total,
+    restored_packs: restoredPacks,
+    restored_votes: restoredVotes,
   });
 }
 
