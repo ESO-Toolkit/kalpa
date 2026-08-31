@@ -554,6 +554,7 @@ export interface DryRunAddon {
 }
 
 export interface DryRunResult {
+  planDigest: string;
   willTrack: DryRunAddon[];
   alreadyTracked: DryRunAddon[];
   missingOnDisk: DryRunAddon[];
@@ -566,6 +567,15 @@ export interface SafeMigrationResult {
   skippedMissing: number;
   addonCount: number;
 }
+
+export type MigrationExecuteOutcome =
+  | { status: "applied"; result: SafeMigrationResult }
+  | {
+      status: "planChanged";
+      expectedDigest: string;
+      actualDigest: string;
+      freshPlan: DryRunResult;
+    };
 
 export interface IntegrityResult {
   addonsFolderOk: boolean;

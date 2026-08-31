@@ -19,6 +19,7 @@ import type {
   SnapshotManifest,
   DryRunResult,
   SafeMigrationResult,
+  MigrationExecuteOutcome,
 } from "@/types";
 
 type MigrationPhase =
@@ -103,12 +104,28 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
   };
 
   const handleExecute = async () => {
+    if (!dryRun) {
+      setError("Run the preview before importing metadata.");
+      setPhase("dry-run");
+      return;
+    }
+
     setPhase("migrating");
     setLoading(true);
     setError(null);
     try {
-      const res = await invokeOrThrow<SafeMigrationResult>("migration_execute", { addonsPath });
-      setResult(res);
+      const outcome = await invokeOrThrow<MigrationExecuteOutcome>("migration_execute", {
+        addonsPath,
+        expectedPlanDigest: dryRun.planDigest,
+      });
+      if (outcome.status === "planChanged") {
+        setDryRun(outcome.freshPlan);
+        setError("Migration plan changed. Review the updated preview before importing.");
+        setPhase("confirm");
+        return;
+      }
+
+      setResult(outcome.result);
       setPhase("complete");
       onRefresh();
     } catch (e) {
@@ -439,7 +456,7 @@ function DryRunPhase({
         )}
         {dryRun.missingOnDisk.length > 0 && (
           <DiffSection
-            title={`In Minion but not on disk (metadata only) (${dryRun.missingOnDisk.length})`}
+            title={`In Minion but not on disk (will be skipped) (${dryRun.missingOnDisk.length})`}
             color="amber"
             items={dryRun.missingOnDisk.map((a) => `${a.folderName} (ESOUI #${a.esouiId})`)}
           />

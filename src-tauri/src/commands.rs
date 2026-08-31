@@ -8327,13 +8327,19 @@ pub async fn migrate_from_minion(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        let result = safe_migration::execute_migration(&addons_dir)?;
-        Ok(MinionMigrationResult {
-            found: true,
-            addon_count: result.addon_count,
-            imported: result.imported,
-            already_tracked: result.already_tracked,
-        })
+        match safe_migration::execute_migration(&addons_dir, None)? {
+            safe_migration::MigrationExecuteOutcome::Applied { result } => {
+                Ok(MinionMigrationResult {
+                    found: true,
+                    addon_count: result.addon_count,
+                    imported: result.imported,
+                    already_tracked: result.already_tracked,
+                })
+            }
+            safe_migration::MigrationExecuteOutcome::PlanChanged { .. } => {
+                Err("Migration plan changed unexpectedly.".to_string())
+            }
+        }
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8386,7 +8392,8 @@ pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
-) -> Result<safe_migration::MigrationResult, String> {
+    expected_plan_digest: Option<String>,
+) -> Result<safe_migration::MigrationExecuteOutcome, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
@@ -8394,7 +8401,7 @@ pub async fn migration_execute(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        safe_migration::execute_migration(&addons_dir)
+        safe_migration::execute_migration(&addons_dir, expected_plan_digest.as_deref())
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?

@@ -80,10 +80,70 @@ pub struct DryRunAddon {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DryRunResult {
+    pub plan_digest: String,
     pub will_track: Vec<DryRunAddon>,
     pub already_tracked: Vec<DryRunAddon>,
     pub missing_on_disk: Vec<DryRunAddon>,
     pub unmanaged_on_disk: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MigrationTrackAction {
+    folder_name: String,
+    esoui_id: u32,
+    installed_version: String,
+    download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct MigrationPlan {
+    dry_run: DryRunResult,
+    actions: Vec<MigrationTrackAction>,
+    addon_count: u32,
+}
+
+fn migration_download_url(esoui_id: u32) -> String {
+    format!("https://www.esoui.com/downloads/landing.php?fileid={esoui_id}")
+}
+
+fn update_plan_digest_str(hasher: &mut Sha256, field: &str, value: &str) {
+    hasher.update(field.as_bytes());
+    hasher.update([0]);
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn update_plan_digest_u32(hasher: &mut Sha256, field: &str, value: u32) {
+    hasher.update(field.as_bytes());
+    hasher.update([0]);
+    hasher.update(4u64.to_le_bytes());
+    hasher.update(value.to_le_bytes());
+}
+
+fn migration_plan_digest(actions: &[MigrationTrackAction]) -> String {
+    let mut sorted: Vec<&MigrationTrackAction> = actions.iter().collect();
+    sorted.sort_unstable_by(|left, right| {
+        left.folder_name
+            .cmp(&right.folder_name)
+            .then(left.esoui_id.cmp(&right.esoui_id))
+            .then(left.installed_version.cmp(&right.installed_version))
+            .then(left.download_url.cmp(&right.download_url))
+    });
+
+    let mut hasher = Sha256::new();
+    update_plan_digest_str(&mut hasher, "schema", "kalpa.minion-migration.plan.v1");
+    hasher.update(b"actions");
+    hasher.update([0]);
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for action in sorted {
+        hasher.update(b"action");
+        hasher.update([0]);
+        update_plan_digest_str(&mut hasher, "folderName", &action.folder_name);
+        update_plan_digest_u32(&mut hasher, "esouiId", action.esoui_id);
+        update_plan_digest_str(&mut hasher, "installedVersion", &action.installed_version);
+        update_plan_digest_str(&mut hasher, "downloadUrl", &action.download_url);
+    }
+    crate::file_hashes::to_hex(&hasher.finalize())
 }
 
 // ─── Integrity check types ──────────────────────────────────────────────────
@@ -559,22 +619,29 @@ fn minion_addons_for_migration<'a>(
         .collect()
 }
 
-/// Phase 2: Dry-run migration — compare Minion data with disk state.
-pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
+fn load_minion_addons_for_migration() -> Result<Vec<crate::commands::MinionAddon>, String> {
     let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
     let content =
         fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
-    let minion_addons = crate::commands::parse_minion_addons(&content);
-    let minion_addons = minion_addons_for_migration(&minion_addons, addons_dir);
+    Ok(crate::commands::parse_minion_addons(&content))
+}
 
-    let store = metadata::load_metadata(addons_dir);
+fn build_migration_plan_from_addons(
+    minion_addons: &[crate::commands::MinionAddon],
+    addons_dir: &Path,
+    store: &metadata::MetadataStore,
+) -> MigrationPlan {
+    let minion_addons = minion_addons_for_migration(minion_addons, addons_dir);
 
     let mut will_track: Vec<DryRunAddon> = Vec::new();
     let mut already_tracked: Vec<DryRunAddon> = Vec::new();
     let mut missing_on_disk: Vec<DryRunAddon> = Vec::new();
+    let mut actions: Vec<MigrationTrackAction> = Vec::new();
 
-    // Track which disk folders are referenced by Minion
+    // Track which disk folders are referenced by Minion.
     let mut minion_folders: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut effectively_tracked: std::collections::HashSet<String> =
+        store.addons.keys().cloned().collect();
 
     for addon in &minion_addons {
         for folder in &addon.folders {
@@ -587,12 +654,20 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
                 status: String::new(),
             };
 
-            if store.addons.contains_key(folder) {
+            if effectively_tracked.contains(folder) {
                 already_tracked.push(DryRunAddon {
                     status: "already_tracked".to_string(),
                     ..entry
                 });
             } else if addons_dir.join(folder).is_dir() {
+                let action = MigrationTrackAction {
+                    folder_name: folder.clone(),
+                    esoui_id: addon.uid,
+                    installed_version: addon.version.clone(),
+                    download_url: migration_download_url(addon.uid),
+                };
+                actions.push(action);
+                effectively_tracked.insert(folder.clone());
                 will_track.push(DryRunAddon {
                     status: "will_track".to_string(),
                     ..entry
@@ -606,7 +681,7 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
         }
     }
 
-    // Find addons on disk that Minion doesn't know about
+    // Find addons on disk that Minion doesn't know about.
     let mut unmanaged_on_disk: Vec<String> = Vec::new();
     if let Ok(entries) = fs::read_dir(addons_dir) {
         for entry in entries.flatten() {
@@ -618,12 +693,11 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            // Skip Kalpa internal folders
+            // Skip Kalpa internal folders.
             if name.starts_with("kalpa") {
                 continue;
             }
             if !minion_folders.contains(&name) && !store.addons.contains_key(&name) {
-                // Has a manifest? Then it's a real addon
                 let manifest_path = addons_dir.join(&name).join(format!("{name}.txt"));
                 let addon_manifest = addons_dir.join(&name).join(format!("{name}.addon"));
                 if manifest_path.exists() || addon_manifest.exists() {
@@ -634,62 +708,75 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
     }
     unmanaged_on_disk.sort();
 
-    Ok(DryRunResult {
-        will_track,
-        already_tracked,
-        missing_on_disk,
-        unmanaged_on_disk,
-    })
+    let plan_digest = migration_plan_digest(&actions);
+    MigrationPlan {
+        dry_run: DryRunResult {
+            plan_digest,
+            will_track,
+            already_tracked,
+            missing_on_disk,
+            unmanaged_on_disk,
+        },
+        actions,
+        addon_count: minion_addons.len() as u32,
+    }
+}
+
+/// Phase 2: Dry-run migration — compare Minion data with disk state.
+pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
+    let minion_addons = load_minion_addons_for_migration()?;
+    let store = metadata::load_metadata(addons_dir);
+    Ok(build_migration_plan_from_addons(&minion_addons, addons_dir, &store).dry_run)
 }
 
 /// Phase 3: Execute the metadata-only migration.
 /// Only writes kalpa.json — does NOT move/delete any addon folders or SavedVariables.
-pub fn execute_migration(addons_dir: &Path) -> Result<MigrationResult, String> {
+pub fn execute_migration(
+    addons_dir: &Path,
+    expected_plan_digest: Option<&str>,
+) -> Result<MigrationExecuteOutcome, String> {
+    let minion_addons = load_minion_addons_for_migration()?;
+    execute_migration_from_addons(addons_dir, &minion_addons, expected_plan_digest)
+}
+
+fn execute_migration_from_addons(
+    addons_dir: &Path,
+    minion_addons: &[crate::commands::MinionAddon],
+    expected_plan_digest: Option<&str>,
+) -> Result<MigrationExecuteOutcome, String> {
     let start = now_timestamp();
 
-    let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
-    let content =
-        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
-    let minion_addons = crate::commands::parse_minion_addons(&content);
-    let minion_addons = minion_addons_for_migration(&minion_addons, addons_dir);
-
     let mut store = metadata::load_metadata(addons_dir);
-    let mut imported: u32 = 0;
-    let mut already_tracked: u32 = 0;
-    let mut skipped_missing: u32 = 0;
+    let plan = build_migration_plan_from_addons(minion_addons, addons_dir, &store);
 
-    for addon in &minion_addons {
-        for folder in &addon.folders {
-            if store.addons.contains_key(folder) {
-                already_tracked += 1;
-                continue;
-            }
-            if addons_dir.join(folder).is_dir() {
-                metadata::record_install(
-                    &mut store,
-                    folder,
-                    addon.uid,
-                    &addon.version,
-                    &format!(
-                        "https://www.esoui.com/downloads/landing.php?fileid={}",
-                        addon.uid
-                    ),
-                );
-                imported += 1;
-            } else {
-                skipped_missing += 1;
-            }
+    if let Some(expected_digest) = expected_plan_digest {
+        if expected_digest != plan.dry_run.plan_digest {
+            return Ok(MigrationExecuteOutcome::PlanChanged {
+                expected_digest: expected_digest.to_string(),
+                actual_digest: plan.dry_run.plan_digest.clone(),
+                fresh_plan: plan.dry_run,
+            });
         }
+    }
+
+    for action in &plan.actions {
+        metadata::record_install(
+            &mut store,
+            &action.folder_name,
+            action.esoui_id,
+            &action.installed_version,
+            &action.download_url,
+        );
     }
 
     // Atomic write of kalpa.json only
     metadata::save_metadata(addons_dir, &store)?;
 
     let result = MigrationResult {
-        imported,
-        already_tracked,
-        skipped_missing,
-        addon_count: minion_addons.len() as u32,
+        imported: plan.actions.len() as u32,
+        already_tracked: plan.dry_run.already_tracked.len() as u32,
+        skipped_missing: plan.dry_run.missing_on_disk.len() as u32,
+        addon_count: plan.addon_count,
     };
 
     // Log the operation
@@ -710,7 +797,7 @@ pub fn execute_migration(addons_dir: &Path) -> Result<MigrationResult, String> {
         },
     );
 
-    Ok(result)
+    Ok(MigrationExecuteOutcome::Applied { result })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -720,6 +807,19 @@ pub struct MigrationResult {
     pub already_tracked: u32,
     pub skipped_missing: u32,
     pub addon_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum MigrationExecuteOutcome {
+    Applied {
+        result: MigrationResult,
+    },
+    PlanChanged {
+        expected_digest: String,
+        actual_digest: String,
+        fresh_plan: DryRunResult,
+    },
 }
 
 /// Create a pre-operation snapshot (for bulk operations like update-all, pack install).
@@ -1112,6 +1212,20 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
 mod tests {
     use super::*;
 
+    fn test_minion_addon(
+        uid: u32,
+        version: &str,
+        folders: &[&str],
+        addons_path: &Path,
+    ) -> crate::commands::MinionAddon {
+        crate::commands::MinionAddon {
+            uid,
+            version: version.to_string(),
+            folders: folders.iter().map(|folder| (*folder).to_string()).collect(),
+            addons_path: Some(addons_path.to_path_buf()),
+        }
+    }
+
     #[test]
     fn minion_migration_uses_only_the_selected_addons_root() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1139,6 +1253,120 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].version, "2.0");
+    }
+
+    #[test]
+    fn migration_plan_digest_is_deterministic_and_order_independent_over_actions() {
+        let actions = vec![
+            MigrationTrackAction {
+                folder_name: "AddonB".to_string(),
+                esoui_id: 20,
+                installed_version: "2.0".to_string(),
+                download_url: migration_download_url(20),
+            },
+            MigrationTrackAction {
+                folder_name: "AddonA".to_string(),
+                esoui_id: 10,
+                installed_version: "1.0".to_string(),
+                download_url: migration_download_url(10),
+            },
+        ];
+        let reversed = vec![actions[1].clone(), actions[0].clone()];
+
+        let digest = migration_plan_digest(&actions);
+
+        assert_eq!(digest, migration_plan_digest(&actions));
+        assert_eq!(digest, migration_plan_digest(&reversed));
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let mut changed = actions.clone();
+        changed[0].installed_version = "2.1".to_string();
+        assert_ne!(digest, migration_plan_digest(&changed));
+    }
+
+    #[test]
+    fn execute_migration_with_stale_digest_refuses_and_writes_nothing_to_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("AddonA")).unwrap();
+        fs::create_dir_all(addons_dir.join("AddonB")).unwrap();
+
+        let reviewed_addons = vec![test_minion_addon(1, "1.0", &["AddonA"], &addons_dir)];
+        let fresh_addons = vec![
+            test_minion_addon(1, "1.0", &["AddonA"], &addons_dir),
+            test_minion_addon(2, "2.0", &["AddonB"], &addons_dir),
+        ];
+        let reviewed_plan = build_migration_plan_from_addons(
+            &reviewed_addons,
+            &addons_dir,
+            &metadata::MetadataStore::default(),
+        );
+
+        let outcome = execute_migration_from_addons(
+            &addons_dir,
+            &fresh_addons,
+            Some(&reviewed_plan.dry_run.plan_digest),
+        )
+        .unwrap();
+
+        match outcome {
+            MigrationExecuteOutcome::PlanChanged {
+                expected_digest,
+                actual_digest,
+                fresh_plan,
+            } => {
+                assert_eq!(expected_digest, reviewed_plan.dry_run.plan_digest);
+                assert_ne!(actual_digest, expected_digest);
+                assert_eq!(fresh_plan.will_track.len(), 2);
+                assert_eq!(fresh_plan.plan_digest, actual_digest);
+            }
+            MigrationExecuteOutcome::Applied { .. } => panic!("stale digest should be refused"),
+        }
+        assert!(!addons_dir.join("kalpa.json").exists());
+        assert!(metadata::load_metadata(&addons_dir).addons.is_empty());
+        assert!(read_ops_log(&addons_dir).is_empty());
+    }
+
+    #[test]
+    fn execute_migration_with_matching_digest_applies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("AddonA")).unwrap();
+
+        let minion_addons = vec![test_minion_addon(
+            1,
+            "1.0",
+            &["AddonA", "MissingAddon"],
+            &addons_dir,
+        )];
+        let reviewed_plan = build_migration_plan_from_addons(
+            &minion_addons,
+            &addons_dir,
+            &metadata::MetadataStore::default(),
+        );
+
+        let outcome = execute_migration_from_addons(
+            &addons_dir,
+            &minion_addons,
+            Some(&reviewed_plan.dry_run.plan_digest),
+        )
+        .unwrap();
+
+        let MigrationExecuteOutcome::Applied { result } = outcome else {
+            panic!("matching digest should apply");
+        };
+        assert_eq!(result.imported, 1);
+        assert_eq!(result.already_tracked, 0);
+        assert_eq!(result.skipped_missing, 1);
+        assert_eq!(result.addon_count, 1);
+
+        let store = metadata::load_metadata(&addons_dir);
+        let imported = store.addons.get("AddonA").unwrap();
+        assert_eq!(imported.esoui_id, 1);
+        assert_eq!(imported.installed_version, "1.0");
+        assert_eq!(imported.download_url, migration_download_url(1));
+        assert!(!store.addons.contains_key("MissingAddon"));
     }
 
     #[test]
