@@ -120,7 +120,7 @@ function AddonDetailBase({
   // makes the "no request on addon select" guarantee independent of that.
   const [esouiTabOpened, setEsouiTabOpened] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
-  const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
+  const [dismissedConflictSessionId, setDismissedConflictSessionId] = useState<string | null>(null);
   // Per-file extraction progress for THIS addon's in-flight update, correlated
   // by operation id. Drives the "Extracting N of M" label and the Stop button.
   const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
@@ -580,55 +580,59 @@ function AddonDetailBase({
         </div>
       )}
 
-      {!conflictReport && pendingConflict && !pendingConflictDismissed && (
-        <div className="mb-4">
-          <Suspense fallback={null}>
-            <UpdateConflictPanel
-              folderName={pendingConflict.folderName}
-              currentVersion={updateResult?.currentVersion ?? addon.version}
-              updateVersion={pendingConflict.updateVersion}
-              conflicts={pendingConflict.conflicts}
-              autoKeptFiles={pendingConflict.autoKeptFiles}
-              safeFileCount={0}
-              sessionId={pendingConflict.sessionId}
-              addonsPath={addonsPath}
-              onResolve={async (decisions) => {
-                if (updating) return;
-                setUpdating(true);
-                setUpdateError(null);
-                if (!(await ensureEsoNotBlocking())) {
-                  setUpdating(false);
-                  return;
-                }
-                try {
-                  await applyUpdate(pendingConflict.sessionId, decisions);
-                  toast.success(`Updated ${addon.title}`);
-                  onConflictResolved?.(addon.folderName);
-                  if (updateResult) onAddonUpdated(updateResult.esouiId);
-                } catch (e) {
-                  if (isCancellation(e)) {
-                    setPendingConflictDismissed(true);
-                    if (onConflictResolved) {
-                      onConflictResolved(addon.folderName);
-                    } else if (updateResult) {
-                      onAddonUpdated(updateResult.esouiId);
-                    }
-                    toast.info(`Stopped updating ${addon.title}`, {
-                      description: "It may be partially updated — run the update again to finish.",
-                    });
-                  } else {
-                    setUpdateError(getTauriErrorMessage(e));
+      {!conflictReport &&
+        pendingConflict &&
+        pendingConflict.sessionId !== dismissedConflictSessionId && (
+          <div className="mb-4">
+            <Suspense fallback={null}>
+              <UpdateConflictPanel
+                key={pendingConflict.sessionId}
+                folderName={pendingConflict.folderName}
+                currentVersion={updateResult?.currentVersion ?? addon.version}
+                updateVersion={pendingConflict.updateVersion}
+                conflicts={pendingConflict.conflicts}
+                autoKeptFiles={pendingConflict.autoKeptFiles}
+                safeFileCount={0}
+                sessionId={pendingConflict.sessionId}
+                addonsPath={addonsPath}
+                onResolve={async (decisions) => {
+                  if (updating) return;
+                  setUpdating(true);
+                  setUpdateError(null);
+                  if (!(await ensureEsoNotBlocking())) {
+                    setUpdating(false);
+                    return;
                   }
-                } finally {
-                  endOperation();
-                  setUpdating(false);
-                }
-              }}
-              onSkip={() => setPendingConflictDismissed(true)}
-            />
-          </Suspense>
-        </div>
-      )}
+                  try {
+                    await applyUpdate(pendingConflict.sessionId, decisions);
+                    toast.success(`Updated ${addon.title}`);
+                    onConflictResolved?.(addon.folderName);
+                    if (updateResult) onAddonUpdated(updateResult.esouiId);
+                  } catch (e) {
+                    if (isCancellation(e)) {
+                      setDismissedConflictSessionId(pendingConflict.sessionId);
+                      if (onConflictResolved) {
+                        onConflictResolved(addon.folderName);
+                      } else if (updateResult) {
+                        onAddonUpdated(updateResult.esouiId);
+                      }
+                      toast.info(`Stopped updating ${addon.title}`, {
+                        description:
+                          "It may be partially updated — run the update again to finish.",
+                      });
+                    } else {
+                      setUpdateError(getTauriErrorMessage(e));
+                    }
+                  } finally {
+                    endOperation();
+                    setUpdating(false);
+                  }
+                }}
+                onSkip={() => setDismissedConflictSessionId(pendingConflict.sessionId)}
+              />
+            </Suspense>
+          </div>
+        )}
 
       <Tabs
         defaultValue="details"

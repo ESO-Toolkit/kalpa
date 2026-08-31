@@ -349,6 +349,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
           }
         >
           <AddonFileEditor
+            key={editingFile}
             addonsPath={addonsPath}
             folderName={folderName}
             relativePath={editingFile}
