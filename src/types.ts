@@ -237,6 +237,8 @@ export interface ActivateProfileResult {
 
 /** Read-only preview of what activating a profile would change. */
 export interface ProfilePlan {
+  /** SHA-256 digest of the canonical preview lists. */
+  digest: string;
   toEnable: string[];
   toDisable: string[];
   keptDependencies: string[];
@@ -245,6 +247,10 @@ export interface ProfilePlan {
    * folders exist on disk. */
   blocked: string[];
 }
+
+export type ActivateProfileOutcome =
+  | { status: "applied"; result: ActivateProfileResult }
+  | { status: "planChanged"; plan: ProfilePlan };
 
 export interface CopyAddonsResult {
   copied: string[];
@@ -548,6 +554,7 @@ export interface DryRunAddon {
 }
 
 export interface DryRunResult {
+  planDigest: string;
   willTrack: DryRunAddon[];
   alreadyTracked: DryRunAddon[];
   missingOnDisk: DryRunAddon[];
@@ -560,6 +567,15 @@ export interface SafeMigrationResult {
   skippedMissing: number;
   addonCount: number;
 }
+
+export type MigrationExecuteOutcome =
+  | { status: "applied"; result: SafeMigrationResult }
+  | {
+      status: "planChanged";
+      expectedDigest: string;
+      actualDigest: string;
+      freshPlan: DryRunResult;
+    };
 
 export interface IntegrityResult {
   addonsFolderOk: boolean;

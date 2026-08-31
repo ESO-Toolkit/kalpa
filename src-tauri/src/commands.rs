@@ -13,6 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6821,6 +6822,9 @@ pub struct ActivateProfileResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilePlan {
+    /// SHA-256 digest of the canonical plan contents, used to bind activation
+    /// to the preview the user reviewed.
+    pub digest: String,
     pub to_enable: Vec<String>,
     pub to_disable: Vec<String>,
     /// See [`ActivateProfileResult::kept_dependencies`].
@@ -6829,6 +6833,49 @@ pub struct ProfilePlan {
     /// Addons the plan wants disabled but cannot: both `Foo/` and
     /// `Foo.disabled/` exist, so the rename would collide.
     pub blocked: Vec<String>,
+}
+
+// `rename_all_fields` for the struct-variant fields; the current field names
+// are single lowercase words so it is inert today, but a future snake_case
+// field must not silently break the TS contract (see uploader::watcher).
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ActivateProfileOutcome {
+    Applied { result: ActivateProfileResult },
+    PlanChanged { plan: ProfilePlan },
+}
+
+fn update_profile_plan_digest_list(hasher: &mut Sha256, field: &str, values: &[String]) {
+    let mut sorted: Vec<&str> = values.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+
+    hasher.update(field.as_bytes());
+    hasher.update([0]);
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for value in sorted {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+}
+
+fn profile_plan_digest(plan: &ProfilePlan) -> String {
+    let mut hasher = Sha256::new();
+    // Schema tag mirrors migration_plan_digest; digests never persist, so
+    // changing the byte layout has no compatibility surface.
+    hasher.update(b"schema");
+    hasher.update([0]);
+    hasher.update((b"kalpa.profile.plan.v1".len() as u64).to_le_bytes());
+    hasher.update(b"kalpa.profile.plan.v1");
+    update_profile_plan_digest_list(&mut hasher, "to_enable", &plan.to_enable);
+    update_profile_plan_digest_list(&mut hasher, "to_disable", &plan.to_disable);
+    update_profile_plan_digest_list(&mut hasher, "kept_dependencies", &plan.kept_dependencies);
+    update_profile_plan_digest_list(&mut hasher, "missing", &plan.missing);
+    update_profile_plan_digest_list(&mut hasher, "blocked", &plan.blocked);
+    file_hashes::to_hex(&hasher.finalize())
 }
 
 /// On-disk copies of one addon base name: `Foo/` and/or `Foo.disabled/`.
@@ -7025,23 +7072,19 @@ pub(crate) fn plan_profile(addons_dir: &std::path::Path, profile: &AddonProfile)
     missing.sort();
     kept_dependencies.sort();
 
-    ProfilePlan {
+    let mut plan = ProfilePlan {
+        digest: String::new(),
         to_enable,
         to_disable,
         kept_dependencies,
         missing,
         blocked,
-    }
+    };
+    plan.digest = profile_plan_digest(&plan);
+    plan
 }
 
-/// Execute a profile activation: recompute the plan against the CURRENT disk
-/// state, then perform the renames it calls for.
-pub(crate) fn apply_profile(
-    addons_dir: &std::path::Path,
-    profile: &AddonProfile,
-) -> ActivateProfileResult {
-    let plan = plan_profile(addons_dir, profile);
-
+fn apply_profile_plan(addons_dir: &std::path::Path, plan: ProfilePlan) -> ActivateProfileResult {
     let mut enabled: Vec<String> = Vec::new();
     let mut disabled: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
@@ -7078,12 +7121,38 @@ pub(crate) fn apply_profile(
     }
 }
 
+/// Execute a profile activation: recompute the plan against the CURRENT disk
+/// state, then perform the renames it calls for.
+pub(crate) fn apply_profile(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+) -> ActivateProfileResult {
+    let plan = plan_profile(addons_dir, profile);
+    apply_profile_plan(addons_dir, plan)
+}
+
+pub(crate) fn apply_profile_with_expected_plan(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+    expected_plan_digest: Option<&str>,
+) -> ActivateProfileOutcome {
+    let plan = plan_profile(addons_dir, profile);
+    if expected_plan_digest.is_some_and(|expected| expected != plan.digest) {
+        return ActivateProfileOutcome::PlanChanged { plan };
+    }
+
+    ActivateProfileOutcome::Applied {
+        result: apply_profile_plan(addons_dir, plan),
+    }
+}
+
 #[tauri::command]
 pub async fn activate_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     profile_name: String,
-) -> Result<ActivateProfileResult, String> {
+    expected_plan_digest: Option<String>,
+) -> Result<ActivateProfileOutcome, String> {
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
@@ -7104,7 +7173,17 @@ pub async fn activate_profile(
         // Unlocked: the renames take seconds, and holding the lock across them
         // would freeze every other profile command for the duration. The
         // AddOns transaction lock remains held so installs cannot race them.
-        let result = apply_profile(&addons_dir, &profile);
+        let outcome = match expected_plan_digest.as_deref() {
+            Some(expected_plan_digest) => {
+                apply_profile_with_expected_plan(&addons_dir, &profile, Some(expected_plan_digest))
+            }
+            None => ActivateProfileOutcome::Applied {
+                result: apply_profile(&addons_dir, &profile),
+            },
+        };
+        if matches!(outcome, ActivateProfileOutcome::PlanChanged { .. }) {
+            return Ok(outcome);
+        }
 
         // Re-load rather than writing the pre-apply snapshot back: a profile
         // created, renamed or deleted while the renames ran must survive.
@@ -7114,7 +7193,7 @@ pub async fn activate_profile(
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
 
-        Ok(result)
+        Ok(outcome)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8261,13 +8340,19 @@ pub async fn migrate_from_minion(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        let result = safe_migration::execute_migration(&addons_dir)?;
-        Ok(MinionMigrationResult {
-            found: true,
-            addon_count: result.addon_count,
-            imported: result.imported,
-            already_tracked: result.already_tracked,
-        })
+        match safe_migration::execute_migration(&addons_dir, None)? {
+            safe_migration::MigrationExecuteOutcome::Applied { result } => {
+                Ok(MinionMigrationResult {
+                    found: true,
+                    addon_count: result.addon_count,
+                    imported: result.imported,
+                    already_tracked: result.already_tracked,
+                })
+            }
+            safe_migration::MigrationExecuteOutcome::PlanChanged { .. } => {
+                Err("Migration plan changed unexpectedly.".to_string())
+            }
+        }
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8320,7 +8405,8 @@ pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
-) -> Result<safe_migration::MigrationResult, String> {
+    expected_plan_digest: Option<String>,
+) -> Result<safe_migration::MigrationExecuteOutcome, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
@@ -8328,7 +8414,7 @@ pub async fn migration_execute(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        safe_migration::execute_migration(&addons_dir)
+        safe_migration::execute_migration(&addons_dir, expected_plan_digest.as_deref())
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -14199,6 +14285,82 @@ mod tests {
         assert!(tmp.path().join("AddonB.disabled").is_dir());
         assert!(tmp.path().join("Dup").is_dir());
         assert!(tmp.path().join("Dup.disabled").is_dir());
+    }
+
+    #[test]
+    fn activate_profile_outcome_serializes_camel_case() {
+        let outcome = ActivateProfileOutcome::PlanChanged {
+            plan: ProfilePlan {
+                digest: "aa".to_string(),
+                to_enable: vec![],
+                to_disable: vec![],
+                kept_dependencies: vec![],
+                missing: vec![],
+                blocked: vec![],
+            },
+        };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        // Pins the wire keys the TS ActivateProfileOutcome contract reads, so a
+        // future snake_case field cannot silently serialize wrong (the enum's
+        // rename_all_fields comment becomes enforceable).
+        assert_eq!(value["status"], "planChanged");
+        assert!(value["plan"].get("toEnable").is_some());
+        assert!(value["plan"].get("keptDependencies").is_some());
+    }
+
+    #[test]
+    fn profile_plan_digest_is_deterministic_and_order_independent() {
+        let plan_a = ProfilePlan {
+            digest: "ignored".to_string(),
+            to_enable: vec!["AddonB".to_string(), "AddonA".to_string()],
+            to_disable: vec!["AddonD".to_string(), "AddonC".to_string()],
+            kept_dependencies: vec!["LibB".to_string(), "LibA".to_string()],
+            missing: vec!["GoneB".to_string(), "GoneA".to_string()],
+            blocked: vec!["BlockedB".to_string(), "BlockedA".to_string()],
+        };
+        let plan_b = ProfilePlan {
+            digest: "also ignored".to_string(),
+            to_enable: vec!["AddonA".to_string(), "AddonB".to_string()],
+            to_disable: vec!["AddonC".to_string(), "AddonD".to_string()],
+            kept_dependencies: vec!["LibA".to_string(), "LibB".to_string()],
+            missing: vec!["GoneA".to_string(), "GoneB".to_string()],
+            blocked: vec!["BlockedA".to_string(), "BlockedB".to_string()],
+        };
+
+        let digest = profile_plan_digest(&plan_a);
+
+        assert_eq!(digest, profile_plan_digest(&plan_b));
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn apply_profile_with_stale_digest_refuses_and_renames_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        write_addon(tmp.path(), "AddonB.disabled", "");
+
+        let profile = profile_of(&["AddonB"]);
+        let reviewed_plan = plan_profile(tmp.path(), &profile);
+        write_addon(tmp.path(), "AddonC", "");
+
+        let outcome =
+            apply_profile_with_expected_plan(tmp.path(), &profile, Some(&reviewed_plan.digest));
+
+        match outcome {
+            ActivateProfileOutcome::PlanChanged { plan } => {
+                assert_eq!(plan.to_enable, vec!["AddonB"]);
+                assert_eq!(plan.to_disable, vec!["AddonA", "AddonC"]);
+            }
+            ActivateProfileOutcome::Applied { .. } => panic!("stale digest should be refused"),
+        }
+        assert!(tmp.path().join("AddonA").is_dir());
+        assert!(tmp.path().join("AddonB.disabled").is_dir());
+        assert!(tmp.path().join("AddonC").is_dir());
+        assert!(!tmp.path().join("AddonA.disabled").exists());
+        assert!(!tmp.path().join("AddonB").exists());
+        assert!(!tmp.path().join("AddonC.disabled").exists());
     }
 
     #[test]
