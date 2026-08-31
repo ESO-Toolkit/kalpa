@@ -910,8 +910,16 @@ function App() {
   // keep dependents' "N missing" badges correct. Returns false in the common
   // case (toggling a non-dependency addon), preserving the no-rescan perf win.
   const togglingAffectsDependencies = useCallback(
-    (toggledFolders: Set<string>) =>
-      addons.some((addon) => addon.dependsOn.some((dep) => toggledFolders.has(dep.name))),
+    (toggledFolders: Set<string>) => {
+      // ESO resolves addon names case-insensitively (normalize_addon_name in
+      // commands.rs is the backend twin), so the manifest's DependsOn token
+      // and the on-disk folder casing may differ; compare both lowercased or
+      // a cased mismatch skips the rescan and leaves dependents' badges stale.
+      const toggled = new Set([...toggledFolders].map((folder) => folder.trim().toLowerCase()));
+      return addons.some((addon) =>
+        addon.dependsOn.some((dep) => toggled.has(dep.name.trim().toLowerCase()))
+      );
+    },
     [addons]
   );
 
