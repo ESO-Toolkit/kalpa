@@ -6,6 +6,48 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.22] — 2026-08-31
+
+Every confirmation in Kalpa now means exactly what it says. This release
+closes a whole class of subtle bugs where you approved one thing and the app
+quietly acted on another — a consent box that stayed ticked while the report
+behind it changed, a file editor that could save your edits into the wrong
+file, a profile that activated a different plan than the one you previewed.
+
+### Bug Fixes
+
+- **The support dialog's consent is now bound to the exact report you
+  reviewed.** If anything in the report changes after you tick the box — an
+  update check finishing, a new error arriving — the box unticks itself, the
+  change is announced to screen readers, and you're asked to review again.
+  The dependency-warning count in the report also now agrees with the
+  addons-needing-attention list it summarizes.
+  ([#405](https://github.com/ESO-Toolkit/kalpa/pull/405))
+- **The addon file editor can no longer save one file's text into another.**
+  Switching files while an edit was loading kept the previous file's contents
+  and its "Enable Editing" unlock; the editor now fully re-locks and reloads
+  per file, and re-locks when an open file returns to stock — without ever
+  discarding unsaved edits. Batch-update conflict dismissals are now scoped
+  to the specific conflict you saw, so a fresh conflict for the same addon
+  can't be hidden by an old dismissal or inherit your previous keep/replace
+  choices. An armed pack-install confirmation now disarms the moment a
+  different pack loads. ([#406](https://github.com/ESO-Toolkit/kalpa/pull/406))
+- **Profile activation and Minion migration now verify the plan you approved
+  is still the plan being applied.** Both previews carry a fingerprint of the
+  reviewed plan; if your disk changed in between, Kalpa refuses, shows you the
+  updated plan, and asks you to confirm again — instead of silently doing
+  something different from what you read.
+  ([#407](https://github.com/ESO-Toolkit/kalpa/pull/407))
+- **Dependency badges no longer go stale after enabling or disabling an addon
+  whose folder name differs in letter case from how other addons declare it.**
+  ([#409](https://github.com/ESO-Toolkit/kalpa/pull/409))
+- **Pack Hub housekeeping (server-side).** Admin restore operations now use
+  tamper-proof server-issued continuation state, and account deletion is
+  guarded so that no backup or restore — however unluckily timed — can
+  republish data a deleted account asked to erase, while a returning user can
+  publish again immediately.
+  ([#408](https://github.com/ESO-Toolkit/kalpa/pull/408))
+
 ## [0.1.0-beta.21] — 2026-08-30
 
 This release closes out a month-long safety audit of how Kalpa touches your
@@ -778,6 +820,7 @@ to it.
 -->
 
 [Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...HEAD
+[0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
 [0.1.0-beta.21]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...v0.1.0-beta.21
 [0.1.0-beta.20]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...v0.1.0-beta.20
 [0.1.0-beta.19]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...v0.1.0-beta.19
