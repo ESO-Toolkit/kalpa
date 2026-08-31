@@ -6864,6 +6864,12 @@ fn update_profile_plan_digest_list(hasher: &mut Sha256, field: &str, values: &[S
 
 fn profile_plan_digest(plan: &ProfilePlan) -> String {
     let mut hasher = Sha256::new();
+    // Schema tag mirrors migration_plan_digest; digests never persist, so
+    // changing the byte layout has no compatibility surface.
+    hasher.update(b"schema");
+    hasher.update([0]);
+    hasher.update((b"kalpa.profile.plan.v1".len() as u64).to_le_bytes());
+    hasher.update(b"kalpa.profile.plan.v1");
     update_profile_plan_digest_list(&mut hasher, "to_enable", &plan.to_enable);
     update_profile_plan_digest_list(&mut hasher, "to_disable", &plan.to_disable);
     update_profile_plan_digest_list(&mut hasher, "kept_dependencies", &plan.kept_dependencies);
@@ -14279,6 +14285,28 @@ mod tests {
         assert!(tmp.path().join("AddonB.disabled").is_dir());
         assert!(tmp.path().join("Dup").is_dir());
         assert!(tmp.path().join("Dup.disabled").is_dir());
+    }
+
+    #[test]
+    fn activate_profile_outcome_serializes_camel_case() {
+        let outcome = ActivateProfileOutcome::PlanChanged {
+            plan: ProfilePlan {
+                digest: "aa".to_string(),
+                to_enable: vec![],
+                to_disable: vec![],
+                kept_dependencies: vec![],
+                missing: vec![],
+                blocked: vec![],
+            },
+        };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        // Pins the wire keys the TS ActivateProfileOutcome contract reads, so a
+        // future snake_case field cannot silently serialize wrong (the enum's
+        // rename_all_fields comment becomes enforceable).
+        assert_eq!(value["status"], "planChanged");
+        assert!(value["plan"].get("toEnable").is_some());
+        assert!(value["plan"].get("keptDependencies").is_some());
     }
 
     #[test]
