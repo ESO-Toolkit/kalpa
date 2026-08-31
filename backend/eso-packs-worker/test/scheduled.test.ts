@@ -96,7 +96,9 @@ describe("scheduled backup", () => {
     await putVote(e, "purge-me", "9003");
     await putVote(e, "keep-me", "9002");
 
-    await e.ESO_PACKS.put("deleted:9001", new Date().toISOString());
+    await e.ESO_PACKS.put("deleted:9001", new Date().toISOString(), {
+      expirationTtl: 97 * 24 * 60 * 60,
+    });
 
     const ctrl = createScheduledController({
       scheduledTime: new Date(),

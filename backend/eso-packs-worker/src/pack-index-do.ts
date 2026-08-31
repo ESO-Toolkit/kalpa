@@ -18,6 +18,12 @@ const RECONCILIATION_LEASE_MS = 48 * 60 * 60 * 1000;
 const VOTE_MEMO_LIMIT = 5000;
 const RETRY_DELAY_MS = 30_000;
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
+const DELETED_AUTHOR_TTL_MS = 97 * 86400 * 1000;
+const RESTORE_ACTIVE_KEY = "restore:active";
+const RESTORE_JOB_PREFIX = "restore:job:";
+const RESTORE_SNAPSHOT_PREFIX = "restore:snapshot:";
+const RESTORE_JOB_TTL_MS = 24 * 60 * 60 * 1000;
+const RESTORE_CLAIM_TTL_MS = 5 * 60 * 1000;
 
 interface BackupSnapshot {
   created_at: string;
@@ -33,6 +39,76 @@ interface BackupMeta {
   pack_body_count: number;
   vote_count: number;
 }
+
+interface DeletedAuthorMarker {
+  v: 1;
+  userId: string;
+  deletedAt: string;
+  expiresAt: number;
+}
+
+type DeletedAuthorStored = DeletedAuthorMarker | string;
+
+interface RestoreActiveJob {
+  v: 1;
+  jobId: string;
+  expiresAt: number;
+}
+
+interface RestoreInFlight {
+  claimId: string;
+  start: number;
+  end: number;
+  expiresAt: number;
+}
+
+interface RestoreJobRecord {
+  v: 1;
+  jobId: string;
+  tokenHash: string;
+  backupKey: string;
+  snapshotCreatedAt: string | null;
+  snapshotFingerprint: string;
+  total: number;
+  nextCursor: number;
+  status: "running" | "done" | "cancelled";
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  inFlight?: RestoreInFlight;
+}
+
+export interface RestoreJobState {
+  jobId: string;
+  backupKey: string;
+  snapshotCreatedAt: string | null;
+  snapshotFingerprint: string;
+  total: number;
+  nextCursor: number;
+  status: "running" | "done" | "cancelled";
+  expiresAt: number;
+  inFlight?: RestoreInFlight;
+}
+
+export type BeginRestoreJobResult =
+  | { ok: true; token: string; job: RestoreJobState }
+  | { ok: false; reason: "active"; job: RestoreJobState };
+
+export type RestoreClaimResult =
+  | { ok: true; job: RestoreJobState; claimId: string; start: number; end: number; final: boolean }
+  | {
+      ok: false;
+      reason: "not-found" | "expired" | "done" | "cancelled" | "cursor-mismatch" | "in-flight";
+      job?: RestoreJobState;
+    };
+
+export type RestoreCompleteResult =
+  | { ok: true; job: RestoreJobState }
+  | {
+      ok: false;
+      reason: "not-found" | "expired" | "done" | "cancelled" | "claim-mismatch";
+      job?: RestoreJobState;
+    };
 
 const INSTALL_WINDOW_MS = 60 * 60 * 1000;
 const INSTALL_RING_SIZE = 5000;
@@ -110,6 +186,23 @@ interface ReconciliationLease {
   expires_at: number;
 }
 
+function base64Url(bytes: ArrayBuffer | Uint8Array): string {
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = "";
+  for (const byte of array) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function sha256Base64Url(value: string): Promise<string> {
+  return base64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+}
+
+function randomBase64Url(length: number): string {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return base64Url(bytes);
+}
+
 /** Serializes mutations while migrating authority from KV to DO storage. */
 export class PackIndexDO extends DurableObject<Env> {
   private readonly voteMemo = new Map<string, boolean>();
@@ -144,8 +237,10 @@ export class PackIndexDO extends DurableObject<Env> {
       }
 
       const operation = this.createOperation("create", pack, pack.author_id);
+      // The author's deleted-author marker is deliberately NOT cleared here:
+      // filtering is scoped to the deletion timestamp, so this new pack passes
+      // while the author's pre-deletion corpus stays out of backups/restores.
       await this.ctx.storage.transaction(async (txn) => {
-        await txn.delete(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`);
         await txn.delete(this.tombstoneKey(pack.id));
         await txn.put(this.packKey(pack.id), pack);
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
@@ -290,6 +385,287 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
+  async beginRestoreJob(input: {
+    backupKey: string;
+    snapshotCreatedAt: string | null;
+    snapshotFingerprint: string;
+    total: number;
+    restart?: boolean;
+    now?: number;
+    ttlMs?: number;
+  }): Promise<BeginRestoreJobResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const ttlMs = input.ttlMs ?? RESTORE_JOB_TTL_MS;
+      const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+      if (active) {
+        const activeKey = this.restoreJobKey(active.jobId);
+        const activeJob = await this.ctx.storage.get<RestoreJobRecord>(activeKey);
+        const stillRunning =
+          active.expiresAt > now &&
+          activeJob !== undefined &&
+          activeJob.expiresAt > now &&
+          activeJob.status === "running";
+        if (stillRunning) {
+          if (!input.restart) {
+            return { ok: false, reason: "active", job: this.publicRestoreState(activeJob) };
+          }
+          await this.ctx.storage.put(activeKey, {
+            ...activeJob,
+            status: "cancelled",
+            updatedAt: now,
+          });
+          await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${active.jobId}`);
+        }
+        await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+      }
+
+      const jobId = crypto.randomUUID();
+      const token = `rst_v1_${jobId}.${randomBase64Url(32)}`;
+      const job: RestoreJobRecord = {
+        v: 1,
+        jobId,
+        tokenHash: await sha256Base64Url(token),
+        backupKey: input.backupKey,
+        snapshotCreatedAt: input.snapshotCreatedAt,
+        snapshotFingerprint: input.snapshotFingerprint,
+        total: Math.max(0, Math.floor(input.total)),
+        nextCursor: 0,
+        status: "running",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: now + ttlMs,
+      };
+
+      await this.ctx.storage.put(this.restoreJobKey(job.jobId), job);
+      await this.ctx.storage.put(RESTORE_ACTIVE_KEY, {
+        v: 1,
+        jobId: job.jobId,
+        expiresAt: job.expiresAt,
+      } satisfies RestoreActiveJob);
+      await this.scheduleAlarmAt(job.expiresAt);
+      return { ok: true, token, job: this.publicRestoreState(job) };
+    });
+  }
+
+  async resolveRestoreJob(tokenHash: string, now = Date.now()): Promise<RestoreJobState | null> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const found = await this.findRestoreJobByHash(tokenHash);
+      if (!found) return null;
+      if (found.job.expiresAt <= now || found.job.status === "cancelled") {
+        await this.ctx.storage.delete(found.key);
+        await this.deleteActiveRestoreIf(found.job.jobId);
+        await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${found.job.jobId}`);
+        return null;
+      }
+      return this.publicRestoreState(found.job);
+    });
+  }
+
+  async claimRestorePage(input: {
+    tokenHash: string;
+    limit: number;
+    cursor?: number;
+    now?: number;
+  }): Promise<RestoreClaimResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const found = await this.findRestoreJobByHash(input.tokenHash);
+      if (!found) return { ok: false, reason: "not-found" };
+      const job = found.job;
+      const state = () => this.publicRestoreState(job);
+      if (job.expiresAt <= now) return { ok: false, reason: "expired", job: state() };
+      if (job.status === "cancelled") return { ok: false, reason: "cancelled", job: state() };
+      if (job.status === "done") return { ok: false, reason: "done", job: state() };
+
+      const requestedCursor = input.cursor ?? job.nextCursor;
+      if (requestedCursor !== job.nextCursor) {
+        return { ok: false, reason: "cursor-mismatch", job: state() };
+      }
+      if (job.inFlight && job.inFlight.expiresAt > now) {
+        return { ok: false, reason: "in-flight", job: state() };
+      }
+
+      const start = job.nextCursor;
+      const pageSize = Math.max(1, Math.floor(input.limit));
+      const end = Math.min(start + pageSize, job.total);
+      const claimId = crypto.randomUUID();
+      job.inFlight = {
+        claimId,
+        start,
+        end,
+        expiresAt: now + RESTORE_CLAIM_TTL_MS,
+      };
+      job.updatedAt = now;
+      await this.ctx.storage.put(found.key, job);
+      await this.scheduleAlarmAt(Math.min(job.inFlight.expiresAt, job.expiresAt));
+      return {
+        ok: true,
+        job: this.publicRestoreState(job),
+        claimId,
+        start,
+        end,
+        final: end >= job.total,
+      };
+    });
+  }
+
+  async completeRestorePage(input: {
+    tokenHash: string;
+    claimId: string;
+    end: number;
+    finalReplacement?: { packs: Pack[]; restoredIds: string[] };
+    now?: number;
+  }): Promise<RestoreCompleteResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const found = await this.findRestoreJobByHash(input.tokenHash);
+      if (!found) return { ok: false, reason: "not-found" };
+      const job = found.job;
+      const state = () => this.publicRestoreState(job);
+      if (job.expiresAt <= now) return { ok: false, reason: "expired", job: state() };
+      if (job.status === "cancelled") return { ok: false, reason: "cancelled", job: state() };
+      if (job.status === "done") return { ok: false, reason: "done", job: state() };
+      if (
+        !job.inFlight ||
+        job.inFlight.claimId !== input.claimId ||
+        job.inFlight.end !== input.end
+      ) {
+        return { ok: false, reason: "claim-mismatch", job: state() };
+      }
+      if (job.inFlight.expiresAt <= now) {
+        delete job.inFlight;
+        job.updatedAt = now;
+        await this.ctx.storage.put(found.key, job);
+        return { ok: false, reason: "expired", job: this.publicRestoreState(job) };
+      }
+
+      if (input.finalReplacement) {
+        const current = await this.loadPacks();
+        const restored = new Set(input.finalReplacement.restoredIds);
+        const preserved = current.filter(({ id }) => !restored.has(id));
+        const desired = new Map<string, Pack>();
+        for (const pack of [...input.finalReplacement.packs, ...preserved]) {
+          desired.set(pack.id, pack);
+        }
+        await this.applyReplacement([...desired.values()], false);
+      }
+
+      job.nextCursor = input.end;
+      job.updatedAt = now;
+      delete job.inFlight;
+      if (input.end >= job.total) {
+        job.status = "done";
+        await this.deleteActiveRestoreIf(job.jobId);
+      }
+      await this.ctx.storage.put(found.key, job);
+      return { ok: true, job: this.publicRestoreState(job) };
+    });
+  }
+
+  async cancelActiveRestoreJob(tokenHash?: string, now = Date.now()): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let found: { key: string; job: RestoreJobRecord } | null = null;
+      if (tokenHash) {
+        // A supplied hash must match: falling back to "whatever is active"
+        // would let a caller with a stale token cancel someone else's job.
+        found = await this.findRestoreJobByHash(tokenHash);
+        if (!found) return false;
+      }
+      if (!found) {
+        const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+        if (!active) return false;
+        const job = await this.ctx.storage.get<RestoreJobRecord>(this.restoreJobKey(active.jobId));
+        if (!job) {
+          await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+          return false;
+        }
+        found = { key: this.restoreJobKey(active.jobId), job };
+      }
+
+      found.job.status = "cancelled";
+      found.job.updatedAt = now;
+      delete found.job.inFlight;
+      await this.ctx.storage.put(found.key, found.job);
+      await this.deleteActiveRestoreIf(found.job.jobId);
+      await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${found.job.jobId}`);
+      return true;
+    });
+  }
+
+  async cleanupDeletedAuthors(now = Date.now()): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let removed = 0;
+      let nextExpiry: number | undefined;
+      let startAfter: string | undefined;
+      while (true) {
+        const markers = await this.ctx.storage.list<DeletedAuthorStored>({
+          prefix: DELETED_AUTHOR_PREFIX,
+          startAfter,
+          limit: 1000,
+        });
+        for (const [key, marker] of markers) {
+          const expiresAt = this.deletedAuthorExpiresAt(marker);
+          if (expiresAt <= now) {
+            await this.ctx.storage.delete(key);
+            removed += 1;
+          } else if (Number.isFinite(expiresAt)) {
+            nextExpiry = Math.min(nextExpiry ?? expiresAt, expiresAt);
+          }
+        }
+        if (markers.size < 1000) break;
+        startAfter = [...markers.keys()].at(-1);
+      }
+      if (nextExpiry !== undefined) await this.scheduleAlarmAt(nextExpiry);
+      return removed;
+    });
+  }
+
+  async cleanupRestoreJobs(now = Date.now()): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let removed = 0;
+      let nextExpiry: number | undefined;
+      let startAfter: string | undefined;
+      while (true) {
+        const jobs = await this.ctx.storage.list<RestoreJobRecord>({
+          prefix: RESTORE_JOB_PREFIX,
+          startAfter,
+          limit: 1000,
+        });
+        for (const [key, job] of jobs) {
+          if (job.expiresAt <= now) {
+            await this.ctx.storage.delete(key);
+            await this.deleteActiveRestoreIf(job.jobId);
+            await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
+            removed += 1;
+            continue;
+          }
+          // An abandoned claim must be cleared here, not just tolerated: its
+          // past expiresAt would otherwise feed scheduleAlarmAt below and the
+          // alarm would refire immediately, every time, until the job's own
+          // 24h TTL — a hot loop on the DO that serializes all pack mutations.
+          if (job.inFlight && job.inFlight.expiresAt <= now) {
+            delete job.inFlight;
+            job.updatedAt = now;
+            await this.ctx.storage.put(key, job);
+          }
+          nextExpiry = Math.min(nextExpiry ?? job.expiresAt, job.expiresAt);
+          if (job.inFlight) {
+            nextExpiry = Math.min(nextExpiry, job.inFlight.expiresAt);
+          }
+        }
+        if (jobs.size < 1000) break;
+        startAfter = [...jobs.keys()].at(-1);
+      }
+      const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+      if (active?.expiresAt !== undefined && active.expiresAt <= now) {
+        await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+      }
+      if (nextExpiry !== undefined) await this.scheduleAlarmAt(nextExpiry);
+      return removed;
+    });
+  }
+
   async toggleVote(
     packId: string,
     userId: string,
@@ -357,7 +733,16 @@ export class PackIndexDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       // This latch shares the same serialization boundary as backup writes.
       // Once present, no stale cron snapshot can publish this author's data.
-      await this.ctx.storage.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, new Date().toISOString());
+      const now = Date.now();
+      const deletedAt = new Date(now).toISOString();
+      const marker = {
+        v: 1,
+        userId: authorId,
+        deletedAt,
+        expiresAt: now + DELETED_AUTHOR_TTL_MS,
+      } satisfies DeletedAuthorMarker;
+      await this.ctx.storage.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, marker);
+      await this.scheduleAlarmAt(marker.expiresAt);
       await this.loadPacks();
       await this.hydrateDetailsByAuthor(authorId);
       const packs = await this.getStoredPacks();
@@ -389,21 +774,20 @@ export class PackIndexDO extends DurableObject<Env> {
     incoming: BackupSnapshot,
   ): Promise<BackupMeta> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const deletedEntries = await this.ctx.storage.list<string>({
-        prefix: DELETED_AUTHOR_PREFIX,
-      });
-      const deletedAuthors = new Set(
-        [...deletedEntries.keys()].map((key) => key.slice(DELETED_AUTHOR_PREFIX.length)),
-      );
+      const deletedAuthors = await this.getDeletedAuthorMarkers();
       const incomingIds = new Set(incoming.packs.map(({ id }) => id));
       const packs = (await this.loadPacks()).filter(
-        (pack) => incomingIds.has(pack.id) && !deletedAuthors.has(String(pack.author_id)),
+        (pack) => incomingIds.has(pack.id) && !this.packPredatesDeletion(deletedAuthors, pack),
       );
       const liveIds = new Set(packs.map(({ id }) => id));
       const votes = Object.fromEntries(
-        Object.entries(incoming.votes).filter(([, vote]) =>
-          liveIds.has(vote.packId) && !deletedAuthors.has(String(vote.userId)),
-        ),
+        Object.entries(incoming.votes).filter(([, vote]) => {
+          if (!liveIds.has(vote.packId)) return false;
+          const deletedAt = deletedAuthors.get(String(vote.userId));
+          if (deletedAt === undefined) return true;
+          const stamp = Date.parse(vote.votedAt ?? "");
+          return (Number.isFinite(stamp) ? stamp : 0) > deletedAt;
+        }),
       );
       const snapshot: BackupSnapshot = {
         created_at: incoming.created_at,
@@ -467,6 +851,8 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.cleanupInstallClaims();
+    await this.cleanupDeletedAuthors();
+    await this.cleanupRestoreJobs();
     await this.ctx.blockConcurrencyWhile(async () => {
       const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX });
       for (const operationId of pending.values()) {
@@ -730,16 +1116,123 @@ export class PackIndexDO extends DurableObject<Env> {
     return pack.created_at === createdAt;
   }
 
+  private restoreJobKey(jobId: string): string {
+    return `${RESTORE_JOB_PREFIX}${jobId}`;
+  }
+
+  private publicRestoreState(job: RestoreJobRecord): RestoreJobState {
+    return {
+      jobId: job.jobId,
+      backupKey: job.backupKey,
+      snapshotCreatedAt: job.snapshotCreatedAt,
+      snapshotFingerprint: job.snapshotFingerprint,
+      total: job.total,
+      nextCursor: job.nextCursor,
+      status: job.status,
+      expiresAt: job.expiresAt,
+      ...(job.inFlight ? { inFlight: job.inFlight } : {}),
+    };
+  }
+
+  private async findRestoreJobByHash(
+    tokenHash: string,
+  ): Promise<{ key: string; job: RestoreJobRecord } | null> {
+    let startAfter: string | undefined;
+    while (true) {
+      const jobs = await this.ctx.storage.list<RestoreJobRecord>({
+        prefix: RESTORE_JOB_PREFIX,
+        startAfter,
+        limit: 1000,
+      });
+      for (const [key, job] of jobs) {
+        if (job.tokenHash === tokenHash) return { key, job };
+      }
+      if (jobs.size < 1000) return null;
+      startAfter = [...jobs.keys()].at(-1);
+    }
+  }
+
+  private async deleteActiveRestoreIf(jobId: string): Promise<void> {
+    const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+    if (active?.jobId === jobId) await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+  }
+
+  private deletedAuthorExpiresAt(marker: DeletedAuthorStored): number {
+    if (
+      typeof marker === "object" &&
+      marker !== null &&
+      "expiresAt" in marker &&
+      typeof marker.expiresAt === "number"
+    ) {
+      return marker.expiresAt;
+    }
+    return Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * Active deletion markers, keyed by author id, valued by the deletion time
+   * in ms. Consumers scope their filtering to records that PREDATE the
+   * deletion, so a user who deletes their account and later returns publishes
+   * normally while everything they asked to erase stays erased. Markers whose
+   * deletion time cannot be recovered (legacy string form carries the ISO
+   * timestamp as its value) collapse to +Infinity — filter everything.
+   */
+  private async getDeletedAuthorMarkers(now = Date.now()): Promise<Map<string, number>> {
+    const deleted = new Map<string, number>();
+    let startAfter: string | undefined;
+    while (true) {
+      const entries = await this.ctx.storage.list<DeletedAuthorStored>({
+        prefix: DELETED_AUTHOR_PREFIX,
+        startAfter,
+        limit: 1000,
+      });
+      for (const [key, marker] of entries) {
+        const expiresAt = this.deletedAuthorExpiresAt(marker);
+        if (expiresAt <= now) {
+          await this.ctx.storage.delete(key);
+          continue;
+        }
+        const isRecord = typeof marker === "object" && marker !== null;
+        const userId =
+          isRecord && "userId" in marker && typeof marker.userId === "string"
+            ? marker.userId
+            : key.slice(DELETED_AUTHOR_PREFIX.length);
+        const deletedAtIso = isRecord
+          ? marker.deletedAt
+          : typeof marker === "string"
+            ? marker
+            : undefined;
+        const deletedAt = deletedAtIso ? Date.parse(deletedAtIso) : Number.NaN;
+        deleted.set(userId, Number.isFinite(deletedAt) ? deletedAt : Number.POSITIVE_INFINITY);
+        if (Number.isFinite(expiresAt)) await this.scheduleAlarmAt(expiresAt);
+      }
+      if (entries.size < 1000) break;
+      startAfter = [...entries.keys()].at(-1);
+    }
+    return deleted;
+  }
+
+  /** True when `pack` belongs to a deleted author AND predates the deletion. */
+  private packPredatesDeletion(markers: Map<string, number>, pack: Pack): boolean {
+    const deletedAt = markers.get(String(pack.author_id));
+    if (deletedAt === undefined) return false;
+    const stamp = Date.parse(pack.updated_at ?? pack.created_at ?? "");
+    return (Number.isFinite(stamp) ? stamp : 0) <= deletedAt;
+  }
+
+  private async scheduleAlarmAt(timestamp: number): Promise<void> {
+    if (!Number.isFinite(timestamp)) return;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > timestamp) await this.ctx.storage.setAlarm(timestamp);
+  }
+
   private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
     const current = await this.getStoredPacks();
-    const deletedEntries = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
-    const deletedAuthors = new Set(
-      [...deletedEntries.keys()].map((key) => key.slice(DELETED_AUTHOR_PREFIX.length)),
-    );
+    const deletedAuthors = await this.getDeletedAuthorMarkers();
     const accepted: Pack[] = [];
     for (const pack of packs) {
       const pending = await this.getPending(pack.id);
-      if (pending?.kind !== "delete" && !deletedAuthors.has(String(pack.author_id))) {
+      if (pending?.kind !== "delete" && !this.packPredatesDeletion(deletedAuthors, pack)) {
         accepted.push(pack);
       }
     }

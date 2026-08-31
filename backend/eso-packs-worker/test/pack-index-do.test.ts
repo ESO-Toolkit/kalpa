@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { putPack, putVote } from "../src/kv";
-import type { Env, Pack } from "../src/types";
+import type { Env, Pack, VoteRecord } from "../src/types";
 import { makePack } from "./helpers";
 
 const e = env as unknown as Env;
@@ -11,10 +11,37 @@ function packIndex() {
   return e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton"));
 }
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function restoreTokenHash(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return bytesToBase64Url(new Uint8Array(digest));
+}
+
+interface BackupForTest {
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: Record<string, VoteRecord>;
+  created_at: string;
+}
+
 describe("PackIndexDO authoritative mutations", () => {
   beforeEach(async () => {
-    await packIndex().setAuthority("kv", []);
-    await packIndex().replaceIndex({ packs: [] });
+    const index = packIndex();
+    await index.cancelActiveRestoreJob();
+    await runInDurableObject(index, async (_instance, state) => {
+      const restoreKeys = [...(await state.storage.list({ prefix: "restore:" })).keys()];
+      const deletedAuthorKeys = [...(await state.storage.list({ prefix: "deleted-author:" })).keys()];
+      await Promise.all([...restoreKeys, ...deletedAuthorKeys].map((key) => state.storage.delete(key)));
+    });
+    await index.setAuthority("kv", []);
+    await index.replaceIndex({ packs: [] });
   });
 
   it("accepts only one concurrent create for the same id", async () => {
@@ -519,6 +546,241 @@ describe("PackIndexDO authoritative mutations", () => {
     );
   });
 
+  // Restore-job tests anchor their injected clocks to the real Date.now():
+  // job/claim expiries derived from a synthetic epoch land in the past on the
+  // real clock, so the alarm the DO schedules fires immediately and its
+  // cleanup (which runs on real time) deletes the job mid-test.
+  it("allows only one active restore job", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const first = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "first",
+      total: 2,
+      now: T0,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("first restore job did not start");
+
+    const second = await index.beginRestoreJob({
+      backupKey: "backup:2026-01-02",
+      snapshotCreatedAt: "2026-01-02T00:00:00.000Z",
+      snapshotFingerprint: "second",
+      total: 1,
+      now: T0 + 1_000,
+    });
+    expect(second).toMatchObject({
+      ok: false,
+      reason: "active",
+      job: { jobId: first.job.jobId },
+    });
+  });
+
+  it("rejects a concurrent restore page claim while one is in flight", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "claim",
+      total: 4,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+
+    const claims = await Promise.all([
+      index.claimRestorePage({ tokenHash, limit: 2, now: T0 + 1_000 }),
+      index.claimRestorePage({ tokenHash, limit: 2, now: T0 + 1_000 }),
+    ]);
+
+    expect(claims.filter((claim) => claim.ok)).toHaveLength(1);
+    expect(claims.find((claim) => !claim.ok)).toMatchObject({ ok: false, reason: "in-flight" });
+  });
+
+  it("allows an expired restore page claim to be retried", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "retry",
+      total: 4,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+
+    const firstClaim = await index.claimRestorePage({ tokenHash, limit: 2, now: T0 + 1_000 });
+    expect(firstClaim).toMatchObject({ ok: true, start: 0, end: 2, final: false });
+
+    const retry = await index.claimRestorePage({
+      tokenHash,
+      limit: 2,
+      now: T0 + 1_000 + 5 * 60 * 1_000 + 1,
+    });
+    expect(retry).toMatchObject({ ok: true, start: 0, end: 2, final: false });
+  });
+
+  it("atomically promotes the final restore page while preserving concurrent packs", async () => {
+    const preserved = makePack("w1-restore-preserved");
+    const restored = makePack("w1-restore-final");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [preserved] });
+    const T0 = Date.now();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "final",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim).toMatchObject({ ok: true, start: 0, end: 1, final: true });
+    if (!claim.ok) throw new Error("restore page was not claimed");
+
+    const completed = await index.completeRestorePage({
+      tokenHash,
+      claimId: claim.claimId,
+      end: claim.end,
+      finalReplacement: { packs: [restored], restoredIds: [restored.id] },
+      now: T0 + 2_000,
+    });
+
+    expect(completed).toMatchObject({ ok: true, job: { status: "done", nextCursor: 1 } });
+    const active = await runInDurableObject(index, async (_instance, state) => state.storage.get("restore:active"));
+    expect(active).toBeUndefined();
+    expect((await index.getIndex()).packs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: preserved.id }),
+        expect.objectContaining({ id: restored.id }),
+      ]),
+    );
+  });
+
+  it("removes expired restore jobs from alarm cleanup", async () => {
+    const index = packIndex();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "expired",
+      total: 2,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+
+    // Age the job in place, then schedule the alarm in the near future so
+    // runDurableObjectAlarm (not an auto-fired past-dated alarm) runs cleanup.
+    await runInDurableObject(index, async (_instance, state) => {
+      const key = `restore:job:${started.job.jobId}`;
+      const job = await state.storage.get<Record<string, unknown>>(key);
+      expect(job).toBeTruthy();
+      await state.storage.put(key, { ...(job ?? {}), expiresAt: Date.now() - 1 });
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    const remaining = await runInDurableObject(index, async (_instance, state) => ({
+      active: await state.storage.get("restore:active"),
+      jobCount: (await state.storage.list({ prefix: "restore:job:" })).size,
+    }));
+    expect(remaining.active).toBeUndefined();
+    expect(remaining.jobCount).toBe(0);
+  });
+
+  it("filters deleted authors while writing backups", async () => {
+    const kept = makePack("w1-backup-kept", { author_id: "backup-kept-author" });
+    const doomed = makePack("w1-backup-deleted", { author_id: "backup-deleted-author" });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [kept, doomed] });
+    await index.removePacksByAuthor(doomed.author_id);
+
+    const keptVote: VoteRecord = {
+      packId: kept.id,
+      userId: "backup-voter",
+      votedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const droppedVoter: VoteRecord = {
+      packId: kept.id,
+      userId: doomed.author_id,
+      votedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const droppedPackVote: VoteRecord = {
+      packId: doomed.id,
+      userId: "backup-voter",
+      votedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const incoming: BackupForTest = {
+      packs: [kept, doomed],
+      created_at: "2026-01-03T00:00:00.000Z",
+      packBodies: { [kept.id]: kept, [doomed.id]: doomed },
+      votes: {
+        [`${kept.id}:backup-voter`]: keptVote,
+        [`${kept.id}:${doomed.author_id}`]: droppedVoter,
+        [`${doomed.id}:backup-voter`]: droppedPackVote,
+      },
+    };
+
+    await index.writeBackup("backup:2026-01-03", incoming);
+
+    const latest = await e.ESO_PACKS.get<BackupForTest>("backup:latest", "json");
+    const dated = await e.ESO_PACKS.get<BackupForTest>("backup:2026-01-03", "json");
+    for (const snapshot of [latest, dated]) {
+      expect(snapshot!.packs.map((pack) => pack.id)).toEqual([kept.id]);
+      expect(Object.keys(snapshot!.packBodies)).toEqual([kept.id]);
+      expect(Object.keys(snapshot!.votes)).toEqual([`${kept.id}:backup-voter`]);
+    }
+  });
+
+  it("filters a stale backup snapshot after an author deletion", async () => {
+    const kept = makePack("w1-stale-backup-kept", { author_id: "stale-kept-author" });
+    const doomed = makePack("w1-stale-backup-deleted", { author_id: "stale-deleted-author" });
+    const stale: BackupForTest = {
+      packs: [kept, doomed],
+      created_at: "2026-01-03T00:00:00.000Z",
+      packBodies: { [kept.id]: kept, [doomed.id]: doomed },
+      votes: {},
+    };
+    const index = packIndex();
+    await index.replaceIndex({ packs: [kept, doomed] });
+    await index.writeBackup("backup:2026-01-03", stale);
+    expect((await e.ESO_PACKS.get<BackupForTest>("backup:latest", "json"))!.packs.map((pack) => pack.id).sort())
+      .toEqual([doomed.id, kept.id].sort());
+
+    await index.removePacksByAuthor(doomed.author_id);
+    await index.writeBackup("backup:2026-01-04", stale);
+
+    const latest = await e.ESO_PACKS.get<BackupForTest>("backup:latest", "json");
+    const dated = await e.ESO_PACKS.get<BackupForTest>("backup:2026-01-04", "json");
+    expect(latest!.packs.map((pack) => pack.id)).toEqual([kept.id]);
+    expect(dated!.packs.map((pack) => pack.id)).toEqual([kept.id]);
+  });
+
+  it("expires deleted-author markers from alarm cleanup", async () => {
+    const index = packIndex();
+    await index.removePacksByAuthor("old-author");
+    await runInDurableObject(index, async (_instance, state) => {
+      const marker = await state.storage.get<Record<string, unknown>>("deleted-author:old-author");
+      expect(marker).toBeTruthy();
+      await state.storage.put("deleted-author:old-author", { ...(marker ?? {}), expiresAt: 1 });
+      // Near-future alarm: a past-dated one auto-fires before
+      // runDurableObjectAlarm gets to run it, making the assertion racy.
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    const marker = await runInDurableObject(index, async (_instance, state) =>
+      state.storage.get("deleted-author:old-author"),
+    );
+    expect(marker).toBeUndefined();
+  });
+
   it("backfills repeatedly, keeps DO mutations, and flips only after parity", async () => {
     const index = packIndex();
     const first = makePack("w1-shadow-first");
@@ -603,3 +865,4 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await e.ESO_PACKS.get(`vote:${newPack.id}:same-voter`)).not.toBeNull();
   });
 });
+

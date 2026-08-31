@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import { createExecutionContext, createScheduledController, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import worker, {
   invalidatePackListCache,
@@ -10,7 +10,7 @@ import worker, {
 } from "../src/index";
 import { putPack, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
-import type { Env, PackIndex } from "../src/types";
+import type { Env, Pack, PackIndex, VoteRecord } from "../src/types";
 import {
   TEST_USER,
   OTHER_USER,
@@ -62,6 +62,7 @@ beforeEach(async () => {
   globalThis.fetch = fetchSpy as typeof fetch;
   // These cases resolve the same memoized token to different identities.
   resetTokenCache();
+  await packIndexForTest().cancelActiveRestoreJob();
   await putPackIndex(e, { packs: [] });
   await invalidatePackListCache(new URL(BASE));
 });
@@ -1265,7 +1266,7 @@ describe("POST /admin/restore", () => {
     );
   });
 
-  it("refuses a cursor issued against a different snapshot", async () => {
+  it("resumes from the staged snapshot when backup:latest changes mid-restore", async () => {
     // The daily cron overwrites backup:latest at midnight UTC, so a paged
     // restore straddling midnight silently changes snapshots mid-run. Applying
     // the old offset to the new work list skips every record before it — and
@@ -1310,13 +1311,17 @@ describe("POST /admin/restore", () => {
         body: JSON.stringify({ limit: 2, cursor, token }),
       })
     );
-    expect(resumed.status).toBe(409);
+    expect(resumed.status).toBe(200);
+    const resumedBody = await resumed.json<{ done: boolean }>();
+    expect(resumedBody.done).toBe(true);
 
-    // Nothing from the replacement snapshot was written, and the index was not
-    // republished — a refused resume must leave the corpus exactly as it was.
+    // Nothing from the replacement snapshot was written; the restore kept using
+    // its staged snapshot.
     expect(await e.ESO_PACKS.get(`pack:${replacement[0]!.id}`)).toBeNull();
     const index = await getCanonicalIndex(e);
-    expect(index?.packs ?? []).toHaveLength(0);
+    expect((index?.packs ?? []).map((p) => p.id).sort()).toEqual(
+      packs.map((p) => p.id).sort(),
+    );
   });
 
   it("does not rate-limit an authenticated admin restore across many pages", async () => {
@@ -1433,6 +1438,7 @@ describe("POST /admin/restore", () => {
     // And the 409 must not hand back a token that would make the retry work.
     const body = await skipped.json<Record<string, unknown>>();
     expect(body.expected_token).toBeUndefined();
+    expect(body.expected_cursor).toBe(2);
 
     // Records 2..3 were never written and the index was never published.
     expect(await e.ESO_PACKS.get(`pack:${packs[3]!.id}`)).toBeNull();
@@ -1539,10 +1545,7 @@ describe("POST /admin/restore", () => {
     expect(body.done ? Infinity : body.cursor, "cursor did not advance").toBeGreaterThan(0);
   });
 
-  it("refuses a cursor equal to the total, which writes nothing but republishes", async () => {
-    // `total` and `cursor` sit next to each other in the response, and copying
-    // the wrong one produced an empty page that fell straight into the
-    // final-page branch — replacing the index for records it never wrote.
+  it("refuses a cursor equal to the total so forged completion cannot skip remaining writes", async () => {
     const packs = Array.from({ length: 3 }, (_, i) => makePack(`at-total-${i}`));
     await e.ESO_PACKS.put(
       "backup:latest",
@@ -1562,35 +1565,41 @@ describe("POST /admin/restore", () => {
         body: JSON.stringify({ limit: 1 }),
       })
     );
-    const { total, token } = await first.json<{ total: number; token: string }>();
+    const { cursor, total, token } = await first.json<{ cursor: number; total: number; token: string; done: boolean }>();
+    expect(cursor).toBe(1);
     expect(total).toBe(3);
-
-    // Mint the token this cursor WOULD have been issued with. Sending the
-    // page-1 token alongside `cursor: total` is refused by the token check
-    // first, so the range check below it never ran — deleting that check broke
-    // no test. The token is plaintext `key|created_at|total|cursor`, so an
-    // operator hitting the deliberately uninformative 409 can do this edit by
-    // hand; the range check is the only thing standing behind it.
-    const fields = token.split("|");
-    fields[fields.length - 1] = String(total);
-    const matchingToken = fields.join("|");
 
     const res = await call(
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
-        body: JSON.stringify({ cursor: total, token: matchingToken }),
+        body: JSON.stringify({ cursor: total, token, limit: 1 }),
       })
     );
     expect(res.status).toBe(409);
-    // Assert on the distinguishing text, so a 409 from the token branch can
-    // never again be mistaken for one from the range branch.
-    const body = await res.json<{ error: string }>();
-    expect(body.error).toMatch(/is not inside this snapshot/);
+    const body = await res.json<{ error: string; expected_cursor?: number; expected_token?: string }>();
+    expect(body.error).toMatch(/server-owned job cursor/);
+    expect(body.expected_cursor).toBe(1);
+    expect(body.expected_token).toBeUndefined();
 
-    // Only the single record page 1 wrote is present, and the index is untouched.
     expect(await e.ESO_PACKS.get(`pack:${packs[2]!.id}`)).toBeNull();
     const index = await getCanonicalIndex(e);
     expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it("rejects legacy plaintext restore continuation tokens", async () => {
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({
+          cursor: 1,
+          token: "backup:latest|2026-03-01T00:00:00.000Z|1|1",
+        }),
+      })
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json<{ error: string }>();
+    expect(body.error).toMatch(/invalid/);
   });
 
   it("keeps the page cap under the Worker subrequest ceiling", async () => {
@@ -1677,50 +1686,132 @@ describe("POST /admin/restore", () => {
   });
 
   it("refuses a cursor past the end instead of publishing an unwritten index", async () => {
-    // Clamping an out-of-range cursor to the end made start === end: the call
-    // wrote nothing, then took the final-page branch and replaced the index
-    // with the whole snapshot anyway.
-    const pack = makePack("past-end");
-    const created = new Date().toISOString();
+    const packs = [makePack("past-end-0"), makePack("past-end-1")];
     await e.ESO_PACKS.put(
       "backup:latest",
       JSON.stringify({
-        created_at: created,
-        packs: [pack],
-        packBodies: { [pack.id]: pack },
+        created_at: new Date().toISOString(),
+        packs,
+        packBodies: Object.fromEntries(packs.map((pack) => [pack.id, pack])),
         votes: {},
       })
     );
-    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    for (const pack of packs) await e.ESO_PACKS.delete(`pack:${pack.id}`);
     await putPackIndex(e, { packs: [] });
 
-    // Mint the token this cursor WOULD have been issued with, exactly as the
-    // equal-to-total case does. `token: "anything"` was answered by the
-    // cursor/token mismatch branch above the range check, so the range guard was
-    // never reached and deleting it broke nothing. The dangerous input is a
-    // MATCHING token for an out-of-range cursor — a one-character edit on a
-    // plaintext token, and the natural move for an operator who hit the
-    // deliberately uninformative 409.
-    // Built by hand, NOT from a real continuation. Calling the endpoint first to
-    // obtain a token would restore this one-record snapshot outright and publish
-    // the index, destroying the very thing the assertions below check. The token
-    // is plaintext `backupKey|created_at|total|cursor`, which is the whole point
-    // — an operator can produce this with a text editor.
-    const forged = `backup:latest|${created}|1|9999`;
+    const first = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 1 }),
+      })
+    );
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<{ cursor: number; token: string; done: boolean }>();
+    expect(firstBody.cursor).toBe(1);
+    expect(firstBody.done).toBe(false);
 
     const res = await call(
       apiKeyRequest(`${BASE}/admin/restore`, {
         method: "POST",
-        body: JSON.stringify({ cursor: 9999, token: forged }),
+        body: JSON.stringify({ cursor: 9999, token: firstBody.token, limit: 1 }),
       })
     );
     expect(res.status).toBe(409);
-    // The distinguishing text, so a 409 from the token branch can never be
-    // mistaken for one from the range branch again.
-    const body = await res.json<{ error: string }>();
-    expect(body.error).toMatch(/is not inside this snapshot/);
+    const body = await res.json<{ error: string; expected_cursor?: number }>();
+    expect(body.error).toMatch(/server-owned job cursor/);
+    expect(body.expected_cursor).toBe(1);
+    expect(await e.ESO_PACKS.get(`pack:${packs[1]!.id}`)).toBeNull();
     const index = await getCanonicalIndex(e);
     expect(index?.packs ?? []).toHaveLength(0);
+  });
+
+  it.each([
+    { label: "latest", backupKey: "backup:latest", restoreBody: {} },
+    { label: "dated", backupKey: "backup:2026-04-18", restoreBody: { date: "2026-04-18" } },
+  ])("filters GDPR tombstones while restoring a $label backup", async ({ label, backupKey, restoreBody }) => {
+    await ensureD1MirrorTables();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags").run();
+    await e.ROSTER_HUB_DB!.prepare("DELETE FROM packs").run();
+
+    const deletedAuthorId = `restore-${label}-deleted-author`;
+    const deletedVoterId = `restore-${label}-deleted-voter`;
+    const keptUserId = `restore-${label}-kept-user`;
+    const deletedPack = makePack(`restore-${label}-deleted-pack`, {
+      author_id: deletedAuthorId,
+      author_name: "Deleted Author",
+    });
+    const keptPack = makePack(`restore-${label}-kept-pack`, {
+      author_id: keptUserId,
+      author_name: "Kept Author",
+    });
+    const keptVote: VoteRecord = {
+      packId: keptPack.id,
+      userId: keptUserId,
+      votedAt: "2026-04-18T00:00:00.000Z",
+    };
+    const voteOnDeletedPack: VoteRecord = {
+      packId: deletedPack.id,
+      userId: keptUserId,
+      votedAt: "2026-04-18T00:00:00.000Z",
+    };
+    const voteByDeletedUser: VoteRecord = {
+      packId: keptPack.id,
+      userId: deletedVoterId,
+      votedAt: "2026-04-18T00:00:00.000Z",
+    };
+    const backup: { packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> } = {
+      packs: [deletedPack, keptPack],
+      packBodies: {
+        [deletedPack.id]: deletedPack,
+        [keptPack.id]: keptPack,
+      },
+      votes: {
+        [`${deletedPack.id}:${keptUserId}`]: voteOnDeletedPack,
+        [`${keptPack.id}:${deletedVoterId}`]: voteByDeletedUser,
+        [`${keptPack.id}:${keptUserId}`]: keptVote,
+      },
+    };
+
+    await e.ESO_PACKS.put(`deleted:${deletedAuthorId}`, "2026-04-18T00:00:00.000Z", {
+      expirationTtl: 97 * 24 * 60 * 60,
+    });
+    await e.ESO_PACKS.put(`deleted:${deletedVoterId}`, "2026-04-18T00:00:00.000Z", {
+      expirationTtl: 97 * 24 * 60 * 60,
+    });
+    await e.ESO_PACKS.put(backupKey, JSON.stringify(backup));
+    await e.ESO_PACKS.delete(`pack:${deletedPack.id}`);
+    await e.ESO_PACKS.delete(`pack:${keptPack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 100, ...restoreBody }),
+      })
+    );
+    expect(res.status).toBe(200);
+    const result = await res.json<{ done: boolean; restored_packs: number; restored_votes: number }>();
+    expect(result.done).toBe(true);
+    expect(result.restored_packs).toBe(1);
+    expect(result.restored_votes).toBe(1);
+
+    expect(await e.ESO_PACKS.get(`pack:${deletedPack.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${keptPack.id}`, "json")).toMatchObject({ id: keptPack.id });
+    expect(await e.ESO_PACKS.get(`vote:${deletedPack.id}:${keptUserId}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`user-votes:${keptUserId}:${deletedPack.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`vote:${keptPack.id}:${deletedVoterId}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`user-votes:${deletedVoterId}:${keptPack.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get<VoteRecord>(`vote:${keptPack.id}:${keptUserId}`, "json")).toMatchObject({
+      packId: keptPack.id,
+      userId: keptUserId,
+    });
+
+    const index = await getCanonicalIndex(e);
+    expect((index?.packs ?? []).map((pack) => pack.id)).toEqual([keptPack.id]);
+    const d1Rows = await e.ROSTER_HUB_DB!.prepare("SELECT id FROM packs WHERE id IN (?, ?) ORDER BY id")
+      .bind(deletedPack.id, keptPack.id)
+      .all<{ id: string }>();
+    expect((d1Rows.results ?? []).map((row) => row.id)).toEqual([keptPack.id]);
   });
 
   it("ignores a nonsense cursor rather than skipping records", async () => {
@@ -1763,8 +1854,10 @@ describe("DELETE /account", () => {
     await putPackIndex(e, { packs: [mine] });
     const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
     let releaseTombstone: (() => void) | undefined;
+    let tombstoneOptions: unknown;
     const put = vi.spyOn(e.ESO_PACKS, "put").mockImplementation(async (key, value, options) => {
       if (key === `deleted:${TEST_USER.id}`) {
+        tombstoneOptions = options;
         await new Promise<void>((resolve) => { releaseTombstone = resolve; });
       }
       return originalPut(key, value, options);
@@ -1772,6 +1865,7 @@ describe("DELETE /account", () => {
 
     const deleting = call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
     await vi.waitFor(() => expect(releaseTombstone).toBeTypeOf("function"));
+    expect(tombstoneOptions).toMatchObject({ expirationTtl: 97 * 24 * 60 * 60 });
     expect((await getCanonicalIndex(e)).packs.map(({ id }) => id)).toContain(mine.id);
     releaseTombstone!();
     expect((await deleting).status).toBe(200);
@@ -1832,6 +1926,88 @@ describe("DELETE /account", () => {
     expect(snapshot!.votes[theirVoteKey]).toBeUndefined();
     expect(await e.ESO_PACKS.get(`vote:${mine.id}:${OTHER_USER.id}`)).toBeNull();
     expect(await e.ESO_PACKS.get(`user-votes:${OTHER_USER.id}:${mine.id}`)).toBeNull();
+  });
+
+
+  it("includes new packs from a returning deleted author in backups and restores", async () => {
+    await ensureD1MirrorTables();
+    const oldPackId = "returning-author-old-pack";
+    const newPackId = "returning-author-new-pack";
+    const todayKey = `backup:${new Date().toISOString().slice(0, 10)}`;
+
+    await e.ESO_PACKS.delete(todayKey);
+    await e.ESO_PACKS.delete("backup:latest");
+    await e.ESO_PACKS.delete("backup:meta");
+    await e.ESO_PACKS.delete(`deleted:${TEST_USER.id}`);
+    await e.ESO_PACKS.delete(`pack:${oldPackId}`);
+    await e.ESO_PACKS.delete(`pack:${newPackId}`);
+
+    const oldPack = makePack(oldPackId, { status: "published" });
+    await putPack(e, oldPack);
+    await putPackIndex(e, { packs: [oldPack] });
+
+    const deleted = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+    expect(deleted.status).toBe(200);
+    expect(await e.ESO_PACKS.get(`deleted:${TEST_USER.id}`)).toBeTruthy();
+
+    // The filters compare record timestamps against deletedAt with <=, so the
+    // new pack must land strictly after the deletion instant.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const created = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(
+          validPackBody({
+            id: newPackId,
+            title: "Returning Author Pack",
+            status: "published",
+          }),
+        ),
+      }),
+    );
+    expect(created.status).toBe(201);
+    const createdBody = await created.json<{ pack: Pack }>();
+    // The tombstone deliberately SURVIVES reactivation: it is scoped by
+    // timestamp, so the new pack passes every filter while the pre-deletion
+    // corpus stays excluded — deleting it would let an admin restore of an
+    // old dated backup republish what the user asked to erase.
+    expect(await e.ESO_PACKS.get(`deleted:${TEST_USER.id}`)).toBeTruthy();
+
+    const scheduledCtx = createExecutionContext();
+    const scheduledController = createScheduledController({
+      scheduledTime: Date.now(),
+      cron: "0 0 * * *",
+    });
+    await worker.scheduled(scheduledController, e, scheduledCtx);
+    await waitOnExecutionContext(scheduledCtx);
+
+    const backup = await e.ESO_PACKS.get<{
+      packs: Pack[];
+      packBodies: Record<string, Pack>;
+    }>("backup:latest", "json");
+    expect(backup?.packs.map((pack) => pack.id)).toContain(newPackId);
+    expect(backup?.packs.map((pack) => pack.id)).not.toContain(oldPackId);
+    expect(backup?.packBodies[createdBody.pack.id]).toMatchObject({ author_id: String(TEST_USER.id) });
+
+    await e.ESO_PACKS.delete(`pack:${newPackId}`);
+    await putPackIndex(e, { packs: [] });
+
+    const restored = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 100 }),
+      }),
+    );
+    expect(restored.status).toBe(200);
+    const restoredBody = await restored.json<{ done: boolean; restored_packs: number }>();
+    expect(restoredBody.done).toBe(true);
+    expect(restoredBody.restored_packs).toBe(1);
+    expect(await e.ESO_PACKS.get(`pack:${newPackId}`, "json")).toMatchObject({
+      id: newPackId,
+      author_id: String(TEST_USER.id),
+    });
+    expect((await getCanonicalIndex(e)).packs.map((pack) => pack.id)).toContain(newPackId);
   });
 
   it("leaves backup:latest untouched when the user has nothing in it", async () => {
