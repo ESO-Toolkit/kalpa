@@ -2724,7 +2724,7 @@ fn batch_extract_and_record(
     })
 }
 
-// ── Protected Edits: Conflict scanning & file browser ───────���─────────
+// ── Protected Edits: Conflict scanning & file browser ───────────────────
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -13,7 +13,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [features]
 # Installs a heap-tracking global allocator (see src/bench_alloc.rs) so the
 # uploader perf benchmark can report a peak-heap high-water mark. OFF by default;
-# enable only for `cargo test --features bench-alloc â€¦ --ignored`. No effect on
+# enable only for `cargo test --features bench-alloc … --ignored`. No effect on
 # the app/release builds.
 bench-alloc = []
 
@@ -67,11 +67,11 @@ winreg = "0.56"
 keyring = { version = "3", features = ["windows-native"] }
 # WebView2 COM interop for MemoryUsageTargetLevel (trim webview RAM when Kalpa is
 # backgrounded to the tray). Caret ranges MUST unify with the copies tauri/wry
-# pull transitively (currently webview2-com 0.38.2 / windows 0.61.x) â€” a
+# pull transitively (currently webview2-com 0.38.2 / windows 0.61.x) — a
 # duplicate windows-core would make `.controller()`/`.cast()` type-mismatch. If a
 # tauri/wry bump moves webview2-com to a new minor, bump these two in lockstep.
 # Verified 2026-07 (dependabot #246/#247): bumping to windows 0.62 /
-# webview2-com 0.39 ahead of tauri/wry fails compile with E0599 in lib.rs â€”
+# webview2-com 0.39 ahead of tauri/wry fails compile with E0599 in lib.rs —
 # no import fix helps, the ICoreWebView2 from `webview.controller()` stays a
 # 0.38/windows-core-0.61 type. Dependabot minors for these two crates are
 # ignored in .github/dependabot.yml; drop those rules when tauri/wry move.
@@ -84,7 +84,7 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Secret Service (GNOME Keyring / KWallet over D-Bus) for token storage.
-# `linux-native` (kernel keyutils) is intentionally NOT used â€” keyutils does not
+# `linux-native` (kernel keyutils) is intentionally NOT used — keyutils does not
 # persist across reboots, which would silently log users out on every boot.
 # `crypto-rust` picks the pure-Rust crypto backend so we avoid an openssl-sys
 # build dependency. Without a running Secret Service daemon, operations fail
@@ -92,7 +92,7 @@ keyring = { version = "3", features = ["apple-native"] }
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [profile.dev]
-# Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/â€¦)
+# Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/…)
 # generates a debug PDB large enough to hit the MSVC linker's section limit
 # (LNK1318 "Unexpected PDB error; LIMIT") and balloon `target/` disk use.
 # Line-tables-only keeps backtraces/line numbers (enough for debugging) while
