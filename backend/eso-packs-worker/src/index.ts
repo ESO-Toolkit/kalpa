@@ -1020,10 +1020,14 @@ async function handleScheduled(env: Env): Promise<void> {
  * KV/D1/DO binding call against the same per-request subrequest ceiling as
  * `fetch`, so this is what actually bounds a page:
  *
- * - a published pack: tombstone check + `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
- *   tag batch) = 4
+ * - a published pack: `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
+ *   tag batch) = 3
  * - a draft pack: `putPack` + one D1 batch = 2
- * - a vote: tombstone checks for the author/voter + `restoreVote` writes both `vote:` and the user index = 4
+ * - a vote: `restoreVote` writes both `vote:` and the user index = 2
+ *
+ * Tombstone checks are synchronous Map lookups against one per-request
+ * enumeration and cost nothing here. Keeping the constant at 4 deliberately
+ * over-reserves per record; the slack absorbs cost growth without retuning.
  *
  * Derive the caps from this rather than picking a round number: a page cap of
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
@@ -1032,9 +1036,22 @@ async function handleScheduled(env: Env): Promise<void> {
 export const SUBREQUESTS_PER_RECORD = 4;
 /** Per-request subrequest ceiling on Workers Paid. */
 export const SUBREQUEST_CEILING = 1000;
-/** Held back for the backup read, the fresh index read, the DO index swap and
- *  the cache purge — everything a page does outside the record loop. */
+/** Held back for the backup read, the fresh index read, the DO index swap, the
+ *  cache purge, the tombstone list pages plus the capped legacy-value gets
+ *  (~60 worst case), and the capped final-page exclusion pass — everything a
+ *  page does outside the record loop. */
 export const SUBREQUEST_RESERVE = 100;
+/**
+ * Budget for the final page's exclusion pass — deleting records that were
+ * tombstoned AFTER the job began (begin-time tombstones were already filtered
+ * out of the staged snapshot, so this set is normally empty). Bounded because
+ * an author deleting a large corpus mid-restore could otherwise push the final
+ * page past the subrequest ceiling and wedge it in a deterministic retry loop.
+ * Skipping the remainder is safe: the DO index replacement is what stops
+ * excluded packs being served, writeBackup filters votes to live packs, and
+ * the nightly D1 reconcile sweeps orphan rows.
+ */
+const EXCLUSION_SUBREQUEST_BUDGET = 60;
 
 export const RESTORE_MAX_PAGE_SIZE = Math.floor(
   (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
@@ -1430,19 +1447,42 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
       (vote) => !keptVoteKeys.has(`${vote.packId}:${vote.userId}`),
     );
 
-    await runBounded(
-      [
-        ...excludedPackIds.map((id) => async () => {
-          await env.ESO_PACKS.delete(`pack:${id}`);
-          await deleteVotesForPack(env, id);
-          await d1DeletePack(env, id);
-        }),
-        ...excludedVotes.map((vote) => async () => {
-          await deleteVote(env, vote.packId, vote.userId);
-        }),
-      ],
-      RESTORE_CONCURRENCY,
-    );
+    // Cap this tidiness pass so a mid-restore account deletion of a large
+    // corpus cannot push the final page past the subrequest ceiling (see
+    // EXCLUSION_SUBREQUEST_BUDGET for why skipping the tail is safe).
+    const exclusionTasks: (() => Promise<void>)[] = [];
+    let exclusionCost = 0;
+    let exclusionsSkipped = 0;
+    for (const id of excludedPackIds) {
+      // KV delete + vote list + ~2 vote deletes + D1 batch.
+      if (exclusionCost + 5 > EXCLUSION_SUBREQUEST_BUDGET) {
+        exclusionsSkipped++;
+        continue;
+      }
+      exclusionCost += 5;
+      exclusionTasks.push(async () => {
+        await env.ESO_PACKS.delete(`pack:${id}`);
+        await deleteVotesForPack(env, id);
+        await d1DeletePack(env, id);
+      });
+    }
+    for (const vote of excludedVotes) {
+      if (exclusionCost + 2 > EXCLUSION_SUBREQUEST_BUDGET) {
+        exclusionsSkipped++;
+        continue;
+      }
+      exclusionCost += 2;
+      exclusionTasks.push(async () => {
+        await deleteVote(env, vote.packId, vote.userId);
+      });
+    }
+    if (exclusionsSkipped > 0) {
+      console.warn(
+        `Restore final page skipped ${exclusionsSkipped} exclusion deletion(s) over budget; ` +
+          "orphans are unserved and swept by reconcile.",
+      );
+    }
+    await runBounded(exclusionTasks, RESTORE_CONCURRENCY);
 
     finalReplacement = { packs: finalPlan.packs, restoredIds: plan.packIds };
   }
