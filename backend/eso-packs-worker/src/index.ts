@@ -1048,7 +1048,10 @@ export const SUBREQUEST_RESERVE = 100;
  * page past the subrequest ceiling and wedge it in a deterministic retry loop.
  * Skipping the remainder is safe: the DO index replacement is what stops
  * excluded packs being served, writeBackup filters votes to live packs, and
- * the nightly D1 reconcile sweeps orphan rows.
+ * the nightly D1 reconcile sweeps orphan rows. The one residual reconcile
+ * does NOT sweep is a skipped vote's orphan `vote:` KEY in KV — if that exact
+ * slug is later recycled, the stale record makes a previous voter's first
+ * vote toggle off; self-corrects on their second vote.
  */
 const EXCLUSION_SUBREQUEST_BUDGET = 60;
 
