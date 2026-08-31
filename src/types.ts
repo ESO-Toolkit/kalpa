@@ -237,6 +237,8 @@ export interface ActivateProfileResult {
 
 /** Read-only preview of what activating a profile would change. */
 export interface ProfilePlan {
+  /** SHA-256 digest of the canonical preview lists. */
+  digest: string;
   toEnable: string[];
   toDisable: string[];
   keptDependencies: string[];
@@ -245,6 +247,10 @@ export interface ProfilePlan {
    * folders exist on disk. */
   blocked: string[];
 }
+
+export type ActivateProfileOutcome =
+  | { status: "applied"; result: ActivateProfileResult }
+  | { status: "planChanged"; plan: ProfilePlan };
 
 export interface CopyAddonsResult {
   copied: string[];
