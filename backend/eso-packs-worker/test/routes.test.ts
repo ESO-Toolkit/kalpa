@@ -1950,6 +1950,10 @@ describe("DELETE /account", () => {
     expect(deleted.status).toBe(200);
     expect(await e.ESO_PACKS.get(`deleted:${TEST_USER.id}`)).toBeTruthy();
 
+    // The filters compare record timestamps against deletedAt with <=, so the
+    // new pack must land strictly after the deletion instant.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
     const created = await call(
       authedRequest(`${BASE}/packs`, {
         method: "POST",
@@ -1964,7 +1968,11 @@ describe("DELETE /account", () => {
     );
     expect(created.status).toBe(201);
     const createdBody = await created.json<{ pack: Pack }>();
-    expect(await e.ESO_PACKS.get(`deleted:${TEST_USER.id}`)).toBeNull();
+    // The tombstone deliberately SURVIVES reactivation: it is scoped by
+    // timestamp, so the new pack passes every filter while the pre-deletion
+    // corpus stays excluded — deleting it would let an admin restore of an
+    // old dated backup republish what the user asked to erase.
+    expect(await e.ESO_PACKS.get(`deleted:${TEST_USER.id}`)).toBeTruthy();
 
     const scheduledCtx = createExecutionContext();
     const scheduledController = createScheduledController({

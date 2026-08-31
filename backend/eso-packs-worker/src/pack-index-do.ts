@@ -237,9 +237,11 @@ export class PackIndexDO extends DurableObject<Env> {
       }
 
       const operation = this.createOperation("create", pack, pack.author_id);
+      // The author's deleted-author marker is deliberately NOT cleared here:
+      // filtering is scoped to the deletion timestamp, so this new pack passes
+      // while the author's pre-deletion corpus stays out of backups/restores.
       await this.ctx.storage.transaction(async (txn) => {
         await txn.delete(this.tombstoneKey(pack.id));
-        await txn.delete(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`);
         await txn.put(this.packKey(pack.id), pack);
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
         await txn.put(this.operationKey(operation.id), operation);
@@ -564,7 +566,12 @@ export class PackIndexDO extends DurableObject<Env> {
   async cancelActiveRestoreJob(tokenHash?: string, now = Date.now()): Promise<boolean> {
     return this.ctx.blockConcurrencyWhile(async () => {
       let found: { key: string; job: RestoreJobRecord } | null = null;
-      if (tokenHash) found = await this.findRestoreJobByHash(tokenHash);
+      if (tokenHash) {
+        // A supplied hash must match: falling back to "whatever is active"
+        // would let a caller with a stale token cancel someone else's job.
+        found = await this.findRestoreJobByHash(tokenHash);
+        if (!found) return false;
+      }
       if (!found) {
         const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
         if (!active) return false;
@@ -632,6 +639,15 @@ export class PackIndexDO extends DurableObject<Env> {
             await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
             removed += 1;
             continue;
+          }
+          // An abandoned claim must be cleared here, not just tolerated: its
+          // past expiresAt would otherwise feed scheduleAlarmAt below and the
+          // alarm would refire immediately, every time, until the job's own
+          // 24h TTL — a hot loop on the DO that serializes all pack mutations.
+          if (job.inFlight && job.inFlight.expiresAt <= now) {
+            delete job.inFlight;
+            job.updatedAt = now;
+            await this.ctx.storage.put(key, job);
           }
           nextExpiry = Math.min(nextExpiry ?? job.expiresAt, job.expiresAt);
           if (job.inFlight) {
@@ -758,16 +774,20 @@ export class PackIndexDO extends DurableObject<Env> {
     incoming: BackupSnapshot,
   ): Promise<BackupMeta> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const deletedAuthors = await this.getDeletedAuthorIds();
+      const deletedAuthors = await this.getDeletedAuthorMarkers();
       const incomingIds = new Set(incoming.packs.map(({ id }) => id));
       const packs = (await this.loadPacks()).filter(
-        (pack) => incomingIds.has(pack.id) && !deletedAuthors.has(String(pack.author_id)),
+        (pack) => incomingIds.has(pack.id) && !this.packPredatesDeletion(deletedAuthors, pack),
       );
       const liveIds = new Set(packs.map(({ id }) => id));
       const votes = Object.fromEntries(
-        Object.entries(incoming.votes).filter(([, vote]) =>
-          liveIds.has(vote.packId) && !deletedAuthors.has(String(vote.userId)),
-        ),
+        Object.entries(incoming.votes).filter(([, vote]) => {
+          if (!liveIds.has(vote.packId)) return false;
+          const deletedAt = deletedAuthors.get(String(vote.userId));
+          if (deletedAt === undefined) return true;
+          const stamp = Date.parse(vote.votedAt ?? "");
+          return (Number.isFinite(stamp) ? stamp : 0) > deletedAt;
+        }),
       );
       const snapshot: BackupSnapshot = {
         created_at: incoming.created_at,
@@ -1149,8 +1169,16 @@ export class PackIndexDO extends DurableObject<Env> {
     return Number.POSITIVE_INFINITY;
   }
 
-  private async getDeletedAuthorIds(now = Date.now()): Promise<Set<string>> {
-    const deleted = new Set<string>();
+  /**
+   * Active deletion markers, keyed by author id, valued by the deletion time
+   * in ms. Consumers scope their filtering to records that PREDATE the
+   * deletion, so a user who deletes their account and later returns publishes
+   * normally while everything they asked to erase stays erased. Markers whose
+   * deletion time cannot be recovered (legacy string form carries the ISO
+   * timestamp as its value) collapse to +Infinity — filter everything.
+   */
+  private async getDeletedAuthorMarkers(now = Date.now()): Promise<Map<string, number>> {
+    const deleted = new Map<string, number>();
     let startAfter: string | undefined;
     while (true) {
       const entries = await this.ctx.storage.list<DeletedAuthorStored>({
@@ -1164,20 +1192,32 @@ export class PackIndexDO extends DurableObject<Env> {
           await this.ctx.storage.delete(key);
           continue;
         }
+        const isRecord = typeof marker === "object" && marker !== null;
         const userId =
-          typeof marker === "object" &&
-          marker !== null &&
-          "userId" in marker &&
-          typeof marker.userId === "string"
+          isRecord && "userId" in marker && typeof marker.userId === "string"
             ? marker.userId
             : key.slice(DELETED_AUTHOR_PREFIX.length);
-        deleted.add(userId);
+        const deletedAtIso = isRecord
+          ? marker.deletedAt
+          : typeof marker === "string"
+            ? marker
+            : undefined;
+        const deletedAt = deletedAtIso ? Date.parse(deletedAtIso) : Number.NaN;
+        deleted.set(userId, Number.isFinite(deletedAt) ? deletedAt : Number.POSITIVE_INFINITY);
         if (Number.isFinite(expiresAt)) await this.scheduleAlarmAt(expiresAt);
       }
       if (entries.size < 1000) break;
       startAfter = [...entries.keys()].at(-1);
     }
     return deleted;
+  }
+
+  /** True when `pack` belongs to a deleted author AND predates the deletion. */
+  private packPredatesDeletion(markers: Map<string, number>, pack: Pack): boolean {
+    const deletedAt = markers.get(String(pack.author_id));
+    if (deletedAt === undefined) return false;
+    const stamp = Date.parse(pack.updated_at ?? pack.created_at ?? "");
+    return (Number.isFinite(stamp) ? stamp : 0) <= deletedAt;
   }
 
   private async scheduleAlarmAt(timestamp: number): Promise<void> {
@@ -1188,11 +1228,11 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
     const current = await this.getStoredPacks();
-    const deletedAuthors = await this.getDeletedAuthorIds();
+    const deletedAuthors = await this.getDeletedAuthorMarkers();
     const accepted: Pack[] = [];
     for (const pack of packs) {
       const pending = await this.getPending(pack.id);
-      if (pending?.kind !== "delete" && !deletedAuthors.has(String(pack.author_id))) {
+      if (pending?.kind !== "delete" && !this.packPredatesDeletion(deletedAuthors, pack)) {
         accepted.push(pack);
       }
     }

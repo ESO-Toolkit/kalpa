@@ -394,7 +394,12 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     );
   }
 
-  await env.ESO_PACKS.delete(deletedUserKey(userId));
+  // Deliberately NOT clearing the deletion tombstone here: it is scoped by
+  // timestamp, so this brand-new pack (created after deletedAt) passes every
+  // filter while the user's pre-deletion records stay excluded from backups
+  // and restores for the full retention window. Deleting the tombstone would
+  // let an admin restore of a pre-deletion dated backup republish the corpus
+  // the user asked to erase.
   await invalidatePackListCache(url);
   return json(request, { pack: added.pack }, 201);
 }
@@ -818,49 +823,108 @@ type DeletedUserFilterSnapshot = {
   votes: Record<string, VoteRecord>;
 };
 
-async function dropDeletedUsers<T extends DeletedUserFilterSnapshot>(
-  env: Env,
-  snapshot: T,
-): Promise<T> {
-  const userIds = new Set<string>();
-  for (const pack of snapshot.packs) if (pack.author_id) userIds.add(String(pack.author_id));
-  for (const pack of Object.values(snapshot.packBodies)) {
-    if (pack?.author_id) userIds.add(String(pack.author_id));
-  }
-  for (const vote of Object.values(snapshot.votes)) {
-    if (vote?.userId) userIds.add(String(vote.userId));
-  }
-  if (userIds.size === 0) return snapshot;
+/**
+ * Enumerate every deletion tombstone in one KV list pass — one subrequest per
+ * 1000 tombstones, regardless of corpus size. The previous shape (one get per
+ * DISTINCT corpus user) still scaled with the snapshot and could exceed the
+ * per-invocation subrequest ceiling on the restore begin/final requests, which
+ * then failed deterministically on every retry.
+ *
+ * The map value is the deletion time in ms. Tombstones written before the
+ * metadata was introduced fall back to their stored value via a bounded number
+ * of gets, and to +Infinity when unreadable — which filters every record of
+ * that user, the pre-timestamp behavior.
+ */
+async function loadDeletedUserTombstones(env: Env): Promise<Map<string, number>> {
+  const deleted = new Map<string, number>();
+  const missingMetadata: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.ESO_PACKS.list<{ deletedAt?: string }>({
+      prefix: "deleted:",
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const key of page.keys) {
+      const userId = key.name.slice("deleted:".length);
+      if (!userId) continue;
+      const at = key.metadata?.deletedAt ? Date.parse(key.metadata.deletedAt) : Number.NaN;
+      if (Number.isFinite(at)) {
+        deleted.set(userId, at);
+      } else {
+        deleted.set(userId, Number.POSITIVE_INFINITY);
+        missingMetadata.push(userId);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
 
-  // One get per DISTINCT user in the corpus, not per record. Every KV call
-  // counts against the same per-invocation subrequest ceiling that already
-  // forced this cron to stop fanning out per record.
-  const ids = [...userIds];
-  const present = await Promise.all(ids.map((id) => env.ESO_PACKS.get(deletedUserKey(id))));
-  const deleted = new Set(ids.filter((_, i) => present[i] !== null));
+  // Legacy tombstones store the ISO timestamp as the VALUE only. Resolve them
+  // so a returning legacy-deleted user isn't filtered forever; cap the gets so
+  // this path can never become the unbounded fan-out again.
+  for (const userId of missingMetadata.slice(0, 50)) {
+    const value = await env.ESO_PACKS.get(deletedUserKey(userId));
+    const at = value ? Date.parse(value) : Number.NaN;
+    if (Number.isFinite(at)) deleted.set(userId, at);
+  }
+  return deleted;
+}
+
+/** Record timestamp in ms; unparseable/missing collapses to 0, which a
+ * tombstoned author's filter treats as pre-deletion (conservative drop). */
+function recordTimeMs(iso: string | null | undefined): number {
+  const at = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isFinite(at) ? at : 0;
+}
+
+function packPredatesDeletion(deleted: Map<string, number>, pack: Pack | undefined): boolean {
+  if (!pack) return false;
+  const deletedAt = deleted.get(String(pack.author_id));
+  if (deletedAt === undefined) return false;
+  return recordTimeMs(pack.updated_at ?? pack.created_at) <= deletedAt;
+}
+
+function votePredatesDeletion(
+  deleted: Map<string, number>,
+  vote: VoteRecord | undefined,
+): boolean {
+  if (!vote) return false;
+  const deletedAt = deleted.get(String(vote.userId));
+  if (deletedAt === undefined) return false;
+  return recordTimeMs(vote.votedAt) <= deletedAt;
+}
+
+function dropDeletedUsers<T extends DeletedUserFilterSnapshot>(
+  deleted: Map<string, number>,
+  snapshot: T,
+): T {
   if (deleted.size === 0) return snapshot;
 
   const deletedPackIds = new Set(
-    snapshot.packs
-      .filter((pack) => deleted.has(String(pack.author_id)))
-      .map((pack) => pack.id),
+    snapshot.packs.filter((pack) => packPredatesDeletion(deleted, pack)).map((pack) => pack.id),
   );
   for (const [id, pack] of Object.entries(snapshot.packBodies)) {
-    if (deleted.has(String(pack?.author_id))) deletedPackIds.add(id);
+    if (packPredatesDeletion(deleted, pack)) deletedPackIds.add(id);
   }
 
-  console.log(`Backup excluding ${deleted.size} deleted user(s)`);
+  const droppedVotes = new Set(
+    Object.keys(snapshot.votes).filter((key) => {
+      const vote = snapshot.votes[key];
+      return votePredatesDeletion(deleted, vote) || deletedPackIds.has(String(vote?.packId));
+    }),
+  );
+  if (deletedPackIds.size === 0 && droppedVotes.size === 0) return snapshot;
+
+  console.log(
+    `Backup excluding ${deletedPackIds.size} pack(s) / ${droppedVotes.size} vote(s) of deleted user(s)`,
+  );
   return {
     ...snapshot,
-    packs: snapshot.packs.filter((p) => !deleted.has(String(p.author_id))),
+    packs: snapshot.packs.filter((p) => !deletedPackIds.has(p.id)),
     packBodies: Object.fromEntries(
-      Object.entries(snapshot.packBodies).filter(([, p]) => !deleted.has(String(p?.author_id))),
+      Object.entries(snapshot.packBodies).filter(([id]) => !deletedPackIds.has(id)),
     ),
     votes: Object.fromEntries(
-      Object.entries(snapshot.votes).filter(([, vote]) =>
-        !deleted.has(String(vote?.userId)) &&
-        !deletedPackIds.has(String(vote?.packId)),
-      ),
+      Object.entries(snapshot.votes).filter(([key]) => !droppedVotes.has(key)),
     ),
   };
 }
@@ -912,11 +976,14 @@ async function handleScheduled(env: Env): Promise<void> {
   // Filtering here rather than relying on having read after the delete is what
   // makes the ordering irrelevant: the tombstone outlives the read, so a stale
   // snapshot still cannot publish a deleted user.
-  const { packs, packBodies: keptBodies, votes: keptVotes } = await dropDeletedUsers(env, {
-    packs: index.packs,
-    packBodies,
-    votes,
-  });
+  const { packs, packBodies: keptBodies, votes: keptVotes } = dropDeletedUsers(
+    await loadDeletedUserTombstones(env),
+    {
+      packs: index.packs,
+      packBodies,
+      votes,
+    },
+  );
 
   const snapshot: PackBackupSnapshot = {
     created_at: new Date().toISOString(),
@@ -1077,12 +1144,6 @@ async function fingerprintRestorePlan(plan: RestorePlan): Promise<string> {
   return sha256Base64Url(JSON.stringify({ packs: plan.packs, votes: plan.votes }));
 }
 
-async function findDeletedUsers(env: Env, ids: Iterable<string>): Promise<Set<string>> {
-  const unique = [...new Set([...ids].map(String).filter(Boolean))];
-  const present = await Promise.all(unique.map((id) => env.ESO_PACKS.get(deletedUserKey(id))));
-  return new Set(unique.filter((_, i) => present[i] !== null));
-}
-
 /** Run `tasks` with at most `concurrency` in flight, preserving fail-fast. */
 async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): Promise<void> {
   let next = 0;
@@ -1124,6 +1185,10 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   const index = getPackIndexDO(env);
   const limit = clampLimit(limitInput);
   const requestedCursor = readCursor(cursorInput);
+  // One tombstone enumeration per request, shared by the begin filter, the
+  // per-page write filter, and the final replacement filter — a bounded number
+  // of list subrequests instead of a corpus-sized fan-out of gets.
+  const deletionTombstones = await loadDeletedUserTombstones(env);
   let snapshot: PackBackupSnapshot;
   let job: RestoreJobState;
   let token: string;
@@ -1215,7 +1280,7 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
       return json(request, { error: `Backup "${backupKey}" is corrupt` }, 500);
     }
 
-    const filtered = await dropDeletedUsers(env, snapshot);
+    const filtered = dropDeletedUsers(deletionTombstones, snapshot);
     snapshot = normalizeBackupSnapshot({
       created_at: snapshot.created_at,
       packs: filtered.packs,
@@ -1310,38 +1375,31 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   }
 
   type RestoreWorkItem = { kind: "pack"; pack: Pack } | { kind: "vote"; vote: VoteRecord };
-  const packAuthorById = new Map(plan.packs.map((pack): [string, string] => [pack.id, String(pack.author_id)]));
+  const packById = new Map(plan.packs.map((pack): [string, Pack] => [pack.id, pack]));
   const work: RestoreWorkItem[] = [
     ...plan.packs.map((pack): RestoreWorkItem => ({ kind: "pack", pack })),
     ...plan.votes.map((vote): RestoreWorkItem => ({ kind: "vote", vote })),
   ];
   const page = work.slice(claim.start, claim.end);
-  const pageUserIds = new Set<string>();
-  for (const item of page) {
-    if (item.kind === "pack") {
-      pageUserIds.add(String(item.pack.author_id));
-    } else {
-      pageUserIds.add(String(item.vote.userId));
-      const authorId = packAuthorById.get(item.vote.packId);
-      if (authorId) pageUserIds.add(authorId);
-    }
-  }
-  const deletedUsers = await findDeletedUsers(env, pageUserIds);
 
   let restoredPacks = 0;
   let restoredVotes = 0;
   await runBounded(
     page.map((item) => async () => {
       if (item.kind === "pack") {
-        if (deletedUsers.has(String(item.pack.author_id))) return;
+        if (packPredatesDeletion(deletionTombstones, item.pack)) return;
         await putPack(env, item.pack);
         await d1UpsertPack(env, item.pack);
         restoredPacks++;
         return;
       }
 
-      const authorId = packAuthorById.get(item.vote.packId);
-      if (!authorId || deletedUsers.has(authorId) || deletedUsers.has(String(item.vote.userId))) {
+      const pack = packById.get(item.vote.packId);
+      if (
+        !pack ||
+        packPredatesDeletion(deletionTombstones, pack) ||
+        votePredatesDeletion(deletionTombstones, item.vote)
+      ) {
         return;
       }
       await restoreVote(env, item.vote.packId, item.vote.userId, item.vote);
@@ -1352,7 +1410,7 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
 
   let finalReplacement: { packs: Pack[]; restoredIds: string[] } | undefined;
   if (claim.final) {
-    const filtered = await dropDeletedUsers(env, {
+    const filtered = dropDeletedUsers(deletionTombstones, {
       created_at: snapshot.created_at,
       packs: plan.packs,
       packBodies: plan.packBodies,
@@ -1520,8 +1578,14 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   // may already hold stale pack/vote reads; filtering at write time sees this
   // marker regardless of whether account cleanup or backup serialization wins
   // the race.
-  await env.ESO_PACKS.put(deletedUserKey(userId), new Date().toISOString(), {
+  // The timestamp rides in list metadata so the tombstone enumeration can
+  // scope filtering to records that predate the deletion — a returning user's
+  // NEW packs pass, while every pre-deletion record stays filtered for the
+  // full backup-retention window even if the user comes back.
+  const deletedAt = new Date().toISOString();
+  await env.ESO_PACKS.put(deletedUserKey(userId), deletedAt, {
     expirationTtl: DELETED_USER_TTL_SECONDS,
+    metadata: { deletedAt },
   });
 
   // 1. Find and delete all user's packs.
