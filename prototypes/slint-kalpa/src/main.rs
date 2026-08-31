@@ -9937,6 +9937,10 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let snapshot_ui = ui.as_weak();
+    // The digest of the dry-run plan the user is looking at; execute must carry
+    // it so a plan that changed since the preview refuses instead of applying.
+    let reviewed_plan_digest = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let snapshot_plan_digest = reviewed_plan_digest.clone();
     ui.on_migration_create_snapshot(move |include_addons| {
         let Some(ui) = snapshot_ui.upgrade() else {
             return;
@@ -9954,6 +9958,7 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
         // With the AddOns toggle on, this zips the whole AddOns tree plus
         // SavedVariables — routinely gigabytes, i.e. minutes of work.
         ui.set_migration_status("Creating restore point...".into());
+        let completion_plan_digest = snapshot_plan_digest.clone();
         spawn_maintenance_job(
             ui.as_weak(),
             move || {
@@ -9970,7 +9975,7 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
                 );
                 Ok((summary, safe_migration::dry_run_migration(&addons_root)))
             },
-            |ui, result| match result {
+            move |ui, result| match result {
                 // The restore point exists even when the preview fails, so report
                 // it either way rather than losing it with the preview error.
                 Ok((summary, dry_run)) => {
@@ -9978,6 +9983,8 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
                     apply_safety_center_model(ui);
                     match dry_run {
                         Ok(dry_run) => {
+                            *completion_plan_digest.lock().unwrap() =
+                                Some(dry_run.plan_digest.clone());
                             apply_migration_dry_run(ui, dry_run);
                             ui.set_migration_phase(2);
                         }
@@ -9993,6 +10000,7 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
 
     let execute_ui = ui.as_weak();
     let execute_models = models.clone();
+    let execute_plan_digest = reviewed_plan_digest.clone();
     ui.on_migration_execute(move || {
         let Some(ui) = execute_ui.upgrade() else {
             return;
@@ -10003,8 +10011,13 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
             );
             return;
         };
-        match safe_migration::execute_migration(&addons_root) {
-            Ok(result) => {
+        let expected_digest = execute_plan_digest.lock().unwrap().clone();
+        let Some(expected_digest) = expected_digest else {
+            ui.set_status_error_message("Run the migration preview before importing.".into());
+            return;
+        };
+        match safe_migration::execute_migration(&addons_root, Some(&expected_digest)) {
+            Ok(safe_migration::MigrationExecuteOutcome::Applied { result }) => {
                 ui.set_migration_result_summary(
                     format!(
                         "Imported {} addon{}, {} already tracked, {} missing on disk.",
@@ -10019,6 +10032,14 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
                 ui.set_status_error_message("Minion metadata import complete.".into());
                 let _ = reload_real_addon_models(&ui, &execute_models);
                 apply_safety_center_model(&ui);
+            }
+            Ok(safe_migration::MigrationExecuteOutcome::PlanChanged { fresh_plan, .. }) => {
+                *execute_plan_digest.lock().unwrap() = Some(fresh_plan.plan_digest.clone());
+                apply_migration_dry_run(&ui, fresh_plan);
+                ui.set_migration_phase(2);
+                ui.set_status_error_message(
+                    "Migration plan changed. Review the updated preview and import again.".into(),
+                );
             }
             Err(error) => {
                 ui.set_status_error_message(format!("Migration import failed: {error}").into())

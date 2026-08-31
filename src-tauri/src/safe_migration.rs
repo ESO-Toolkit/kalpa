@@ -809,8 +809,16 @@ pub struct MigrationResult {
     pub addon_count: u32,
 }
 
+// `rename_all` camelCases only the variant tags; `rename_all_fields` is what
+// camelCases the struct-variant FIELDS (`fresh_plan` → `freshPlan`). Without it
+// the wizard reads undefined and the fresh plan never renders — same trap as
+// uploader::watcher::LiveEvent.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum MigrationExecuteOutcome {
     Applied {
         result: MigrationResult,
@@ -1253,6 +1261,29 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].version, "2.0");
+    }
+
+    #[test]
+    fn migration_execute_outcome_serializes_camel_case_fields() {
+        let outcome = MigrationExecuteOutcome::PlanChanged {
+            expected_digest: "aa".to_string(),
+            actual_digest: "bb".to_string(),
+            fresh_plan: DryRunResult {
+                plan_digest: "bb".to_string(),
+                will_track: vec![],
+                already_tracked: vec![],
+                missing_on_disk: vec![],
+                unmanaged_on_disk: vec![],
+            },
+        };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["status"], "planChanged");
+        // The TS contract (MigrationExecuteOutcome in src/types.ts) reads these
+        // exact keys; snake_case here renders the fresh plan as undefined.
+        assert!(value.get("expectedDigest").is_some());
+        assert!(value.get("actualDigest").is_some());
+        assert!(value["freshPlan"].get("planDigest").is_some());
     }
 
     #[test]

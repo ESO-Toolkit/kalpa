@@ -6835,8 +6835,15 @@ pub struct ProfilePlan {
     pub blocked: Vec<String>,
 }
 
+// `rename_all_fields` for the struct-variant fields; the current field names
+// are single lowercase words so it is inert today, but a future snake_case
+// field must not silently break the TS contract (see uploader::watcher).
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ActivateProfileOutcome {
     Applied { result: ActivateProfileResult },
     PlanChanged { plan: ProfilePlan },
