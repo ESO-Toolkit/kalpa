@@ -6,7 +6,6 @@ import {
   getVotedPackIds,
   getVote,
   deleteVote,
-  deleteVotesForPack,
   restoreVote,
   listAllVotes,
 } from "./kv";
@@ -1450,19 +1449,23 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     // Cap this tidiness pass so a mid-restore account deletion of a large
     // corpus cannot push the final page past the subrequest ceiling (see
     // EXCLUSION_SUBREQUEST_BUDGET for why skipping the tail is safe).
+    // Costs here are EXACT, not estimates: a pack is one KV delete + one D1
+    // batch (2); a vote is deleteVote's two key deletes (2). Deliberately NOT
+    // deleteVotesForPack — its cost is 1 list + 2 per live vote, unknowable in
+    // advance and unbounded for a vote-heavy pack. The excluded pack's
+    // snapshot votes are already in excludedVotes below; any live votes
+    // outside the snapshot are unserved orphans like the skipped tail.
     const exclusionTasks: (() => Promise<void>)[] = [];
     let exclusionCost = 0;
     let exclusionsSkipped = 0;
     for (const id of excludedPackIds) {
-      // KV delete + vote list + ~2 vote deletes + D1 batch.
-      if (exclusionCost + 5 > EXCLUSION_SUBREQUEST_BUDGET) {
+      if (exclusionCost + 2 > EXCLUSION_SUBREQUEST_BUDGET) {
         exclusionsSkipped++;
         continue;
       }
-      exclusionCost += 5;
+      exclusionCost += 2;
       exclusionTasks.push(async () => {
         await env.ESO_PACKS.delete(`pack:${id}`);
-        await deleteVotesForPack(env, id);
         await d1DeletePack(env, id);
       });
     }
