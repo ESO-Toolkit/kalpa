@@ -52,6 +52,22 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
+      - name: Capture pre-deploy worker version
+        id: pre_deploy
+        run: |
+          VERSION_ID=$(npx wrangler deployments list --json | jq -er '
+            sort_by(.created_on)
+            | last
+            | .versions
+            | map(select(.percentage == 100))
+            | first
+            | .version_id
+          ')
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Deploy to Cloudflare
         run: npx wrangler deploy
         env:
@@ -61,12 +77,18 @@ jobs:
       - name: Post-deploy health check
         run: |
           sleep 5
-          HEALTH=$(curl -sf https://kalpa-pack-hub.eso-toolkit.workers.dev/health)
+          HEALTH=$(curl -sf https://kalpa-pack-hub.eso-toolkit.workers.dev/health || true)
           echo "$HEALTH"
-          STATUS=$(echo "$HEALTH" | jq -r '.status')
-          KV=$(echo "$HEALTH" | jq -r '.kv')
+          STATUS=$(echo "$HEALTH" | jq -r '.status // empty' 2>/dev/null || true)
+          KV=$(echo "$HEALTH" | jq -r '.kv // empty' 2>/dev/null || true)
           if [ "$STATUS" != "ok" ] || [ "$KV" != "true" ]; then
             echo "::error::Health check failed! status=$STATUS kv=$KV"
+            if ! npx wrangler rollback "${{ steps.pre_deploy.outputs.version_id }}" --yes --message "Automatic rollback after failed health check"; then
+              echo "::error::Rollback failed; manual intervention is required."
+            fi
             exit 1
           fi
           echo "Health check passed."
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
