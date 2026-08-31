@@ -8,7 +8,7 @@
 //! target arbitrary files or trigger outbound UNC/SMB connections.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -260,21 +260,10 @@ impl super::native::live::OrphanSink for OneShotOrphanSink {
 /// attempt SMB name resolution *before* the containment check can reject it, so
 /// it must be blocked here at the prefix.
 ///
-/// `VerbatimDisk` (`\\?\C:\…`) is deliberately *allowed*: it is a harmless
-/// drive-rooted form and is exactly what `std::fs::canonicalize` emits on
-/// Windows. We canonicalize with `dunce` below so confined paths stay in
-/// drive-letter form, but a stray verbatim-disk prefix arriving from the
-/// frontend must not be rejected — that was the bug that broke every log
-/// selection.
-fn has_unc_or_verbatim_prefix(p: &Path) -> bool {
-    matches!(p.components().next(), Some(Component::Prefix(prefix)) if {
-        use std::path::Prefix::*;
-        matches!(
-            prefix.kind(),
-            Verbatim(_) | VerbatimUNC(_, _) | UNC(_, _) | DeviceNS(_)
-        )
-    })
-}
+/// Shared with `commands.rs::validate_addons_path` — the same guard protects the
+/// AddOns root of trust that this module's `logs_root` derives from. `VerbatimDisk`
+/// (`\\?\C:\…`) is deliberately allowed there for the same reason it is here.
+use crate::platform::has_unc_or_verbatim_prefix;
 
 /// Resolve the ESO `Logs` directory (the sibling of the approved AddOns dir).
 fn logs_root(allowed: &State<'_, AllowedAddonsPath>) -> Result<PathBuf, String> {

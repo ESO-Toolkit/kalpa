@@ -27,6 +27,14 @@ use tempfile::NamedTempFile;
 /// Prevents a compromised webview from targeting arbitrary filesystem locations.
 fn validate_addons_path(addons_path: &str) -> Result<(PathBuf, PathBuf), String> {
     let path = PathBuf::from(addons_path);
+    // Reject UNC/device-namespace prefixes BEFORE is_dir/canonicalize: those
+    // calls perform SMB name resolution on a `\\server\share` root and leak a
+    // NetNTLM handshake to an attacker-named host. This is the root of trust
+    // that feeds the uploader's own confinement, so the guard must live here
+    // too, not only on the uploader's per-call paths.
+    if crate::platform::has_unc_or_verbatim_prefix(&path) {
+        return Err("AddOns folder path uses an unsupported network or device prefix.".to_string());
+    }
     if !path.is_dir() {
         return Err(format!("AddOns folder not found: {addons_path}"));
     }
@@ -7442,6 +7450,12 @@ pub async fn copy_addons_to_instance(
 
     tokio::task::spawn_blocking(move || {
         let target = PathBuf::from(&target_addons_path);
+        // Same class as validate_addons_path: a UNC/device target makes the
+        // canonicalize below resolve over SMB before the detected-instance
+        // check can reject it. A real game instance is never one of these.
+        if crate::platform::has_unc_or_verbatim_prefix(&target) {
+            return Err("Target folder uses an unsupported network or device prefix.".to_string());
+        }
         let target_canonical = target
             .canonicalize()
             .map_err(|e| format!("Target AddOns folder is not accessible: {e}"))?;
