@@ -15905,13 +15905,23 @@ fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
     // section but before it publishes cancellation.
     NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
     let authority = webview_authority().lock().unwrap();
+    let (commit_reached_tx, commit_reached_rx) = std::sync::mpsc::channel();
     let (commit_tx, commit_rx) = std::sync::mpsc::channel();
     let commit = std::thread::spawn(move || {
+        assert!(matches!(
+            webview_authority().try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        commit_reached_tx.send(()).unwrap();
         commit_tx
             .send(commit_native_handoff_authority_release())
             .unwrap();
     });
-    assert!(commit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    commit_reached_rx.recv().unwrap();
+    assert!(matches!(
+        commit_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
     NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
     drop(authority);
     assert!(commit_rx.recv().unwrap().is_err());
@@ -15939,11 +15949,21 @@ fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
     // an activation that has entered cancellation.
     NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
     let authority = webview_authority().lock().unwrap();
+    let (exit_reached_tx, exit_reached_rx) = std::sync::mpsc::channel();
     let (exit_tx, exit_rx) = std::sync::mpsc::channel();
     let exit = std::thread::spawn(move || {
+        assert!(matches!(
+            webview_authority().try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        exit_reached_tx.send(()).unwrap();
         exit_tx.send(finish_native_handoff_exit()).unwrap();
     });
-    assert!(exit_rx.recv_timeout(Duration::from_millis(50)).is_err());
+    exit_reached_rx.recv().unwrap();
+    assert!(matches!(
+        exit_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
     NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
     drop(authority);
     assert!(exit_rx.recv().unwrap());
