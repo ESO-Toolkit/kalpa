@@ -14,6 +14,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: deploy-worker
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: backend/eso-packs-worker
