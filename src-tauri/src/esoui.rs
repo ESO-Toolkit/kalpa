@@ -3,6 +3,7 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Seek};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -1094,7 +1095,162 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
     Ok(BrowsePopularPage { results, has_more })
 }
 
+/// Cancellation + progress hooks for [`download_addon_with`], mirroring
+/// [`crate::installer::ExtractHooks`] on the extraction side. Both default to
+/// `None` (see [`DownloadHooks::NONE`]) so the common callers stay trivial.
+#[derive(Clone, Copy)]
+pub struct DownloadHooks<'a> {
+    /// Polled between body chunks; when it reads `true` the download aborts with
+    /// [`crate::installer::CANCELLED`] — deliberately the same sentinel the
+    /// extract loop returns, so `cancel_update` callers keep matching one string
+    /// whichever phase the Stop lands in.
+    pub cancel: Option<&'a AtomicBool>,
+    /// Invoked as `(bytes_done, total)` while the body streams in, so the UI can
+    /// render "Downloading 4.2 / 19.1 MB". `total` is the server's
+    /// `Content-Length`; `None` on the rare response without one, which the UI
+    /// renders as an indeterminate bar. Callers are expected to throttle their
+    /// own emissions — this fires once per chunk.
+    pub progress: Option<&'a dyn Fn(u64, Option<u64>)>,
+}
+
+impl DownloadHooks<'_> {
+    /// No cancellation, no progress — the default for callers that need neither.
+    pub const NONE: DownloadHooks<'static> = DownloadHooks {
+        cancel: None,
+        progress: None,
+    };
+}
+
+/// Body chunk size for the streaming download. Large enough that a 19 MB
+/// library costs a few hundred reads rather than thousands, small enough that a
+/// Stop request is observed promptly (the cancel flag is polled per chunk).
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+fn report_download_progress(hooks: &DownloadHooks, done: u64, total: Option<u64>) {
+    if let Some(cb) = hooks.progress {
+        cb(done, total);
+    }
+}
+
+fn download_is_cancelled(hooks: &DownloadHooks) -> bool {
+    hooks
+        .cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// Map an I/O failure raised while READING the response body — the network side.
+///
+/// A timeout here is the network giving up mid-body, not a disk problem —
+/// "Failed to write download to temp file" sent users looking at their drive
+/// instead of their connection. Every other read failure is the network too: a
+/// socket reset mid-body is the CDN dropping us, and naming the temp file
+/// misdirects in exactly the way the timeout wording exists to prevent. The old
+/// single `io::copy` could not tell the two sides apart, so every failure
+/// inherited the disk wording; streaming the body ourselves is what makes the
+/// split possible.
+fn map_download_read_error(e: &io::Error) -> String {
+    if matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        "Download stalled — the connection stopped sending data. Check your internet connection and try again.".to_string()
+    } else {
+        format!(
+            "Download failed while receiving data: {e}. Check your internet connection and try again."
+        )
+    }
+}
+
+/// Map an I/O failure raised while WRITING the body to the temp file — the disk
+/// side, the one place the "check your drive" reading is actually correct (a
+/// full disk, a denied temp directory).
+fn map_download_write_error(e: &io::Error) -> String {
+    format!("Failed to write download to temp file: {e}")
+}
+
+/// Stream `reader` into `writer` in one pass, folding the MD5 verification into
+/// the same loop instead of re-reading the finished file from disk, and
+/// reporting `(bytes_done, total)` as it goes.
+///
+/// Returns the number of bytes written. The checksum is compared here, inside
+/// the single pass, so a corrupt body is rejected with the same message the
+/// old seek-and-re-read block produced. Generic over `Read`/`Write` so the
+/// progress accounting, cancellation and hashing are testable without a
+/// network response.
+fn stream_download_body<R: io::Read, W: io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    total: Option<u64>,
+    expected_md5: Option<&str>,
+    hooks: DownloadHooks,
+) -> Result<u64, String> {
+    use md5::{Digest, Md5};
+
+    // An empty checksum means ESOUI published none for this artifact; skip the
+    // hashing work entirely rather than compare against "".
+    let expected = expected_md5
+        .map(|s| s.to_lowercase())
+        .filter(|s| !s.is_empty());
+    // md-5 0.11 (digest 0.11) dropped the `io::Write` impl on the hasher, so it
+    // is fed in chunks via `update` rather than through `io::copy`.
+    let mut hasher = expected.as_ref().map(|_| Md5::new());
+
+    let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+    let mut written: u64 = 0;
+    // Report zero up front so the UI can swap to a determinate bar (and show the
+    // total size) before the first chunk lands, rather than after it.
+    report_download_progress(&hooks, 0, total);
+
+    loop {
+        if download_is_cancelled(&hooks) {
+            return Err(crate::installer::CANCELLED.to_string());
+        }
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| map_download_read_error(&e))?;
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| map_download_write_error(&e))?;
+        if let Some(h) = hasher.as_mut() {
+            h.update(&buf[..n]);
+        }
+        written += n as u64;
+        report_download_progress(&hooks, written, total);
+    }
+    writer.flush().map_err(|e| map_download_write_error(&e))?;
+
+    if let (Some(expected), Some(hasher)) = (expected, hasher) {
+        // digest 0.11 output no longer implements `LowerHex`; hex-encode by hand.
+        let digest = hasher.finalize();
+        let mut actual = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(actual, "{byte:02x}");
+        }
+        if actual != expected {
+            return Err(
+                "Download checksum mismatch — the file may be corrupt. Try again.".to_string(),
+            );
+        }
+    }
+
+    Ok(written)
+}
+
 pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTempFile, String> {
+    download_addon_with(url, expected_md5, DownloadHooks::NONE)
+}
+
+/// Like [`download_addon`] but with cancellation/progress hooks.
+pub fn download_addon_with(
+    url: &str,
+    expected_md5: Option<&str>,
+    hooks: DownloadHooks,
+) -> Result<NamedTempFile, String> {
     if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
@@ -1145,63 +1301,18 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
 
     let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
+    // One pass: body → temp file, MD5 folded in, progress reported per chunk.
+    // The file is never re-read to hash it, which is what made a 19 MB /
+    // 5,642-file library pay for its own bytes twice.
     let mut response = response;
-    let written = io::copy(&mut response, &mut tmp).map_err(|e| {
-        // A timeout here is the network giving up mid-body, not a disk problem —
-        // "Failed to write download to temp file" sent users looking at their
-        // drive instead of their connection.
-        if matches!(
-            e.kind(),
-            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-        ) {
-            "Download stalled — the connection stopped sending data. Check your internet connection and try again.".to_string()
-        } else {
-            format!("Failed to write download to temp file: {e}")
-        }
-    })?;
+    let written =
+        stream_download_body(&mut response, &mut tmp, expected_size, expected_md5, hooks)?;
 
     if let Some(expected) = expected_size {
         if written != expected {
             return Err(format!(
                 "Download incomplete: received {written} bytes, expected {expected}. Try again."
             ));
-        }
-    }
-
-    // Verify MD5 checksum if provided by ESOUI API
-    if let Some(expected) = expected_md5 {
-        if !expected.is_empty() {
-            use md5::{Digest, Md5};
-            use std::io::Read;
-            tmp.as_file()
-                .seek(io::SeekFrom::Start(0))
-                .map_err(|e| format!("Failed to seek: {e}"))?;
-            let mut hasher = Md5::new();
-            // md-5 0.11 (digest 0.11) dropped the `io::Write` impl on the hasher,
-            // so feed it in chunks via `update` instead of `io::copy`.
-            let mut file = tmp.as_file();
-            let mut buf = [0u8; 8192];
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Failed to hash download: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-            // digest 0.11 output no longer implements `LowerHex`; hex-encode by hand.
-            let digest = hasher.finalize();
-            let mut actual = String::with_capacity(digest.len() * 2);
-            for byte in digest {
-                use std::fmt::Write as _;
-                let _ = write!(actual, "{byte:02x}");
-            }
-            if actual != expected.to_lowercase() {
-                return Err(
-                    "Download checksum mismatch — the file may be corrupt. Try again.".to_string(),
-                );
-            }
         }
     }
 
@@ -1800,6 +1911,160 @@ mod tests {
     fn download_addon_rejects_http_esoui() {
         let result = download_addon("http://cdn.esoui.com/addon.zip", None);
         assert!(result.is_err());
+    }
+
+    /// MD5 of `b"kalpa"`, computed outside this crate so the streaming-hash
+    /// tests assert against an independent value rather than the code's own
+    /// output.
+    const KALPA_MD5: &str = "cb0fa609383235d6bdb40d38ae0a31c2";
+
+    fn kalpa_body() -> Vec<u8> {
+        b"kalpa".to_vec()
+    }
+
+    #[test]
+    fn stream_download_body_hashes_in_the_same_pass() {
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        let written = stream_download_body(
+            &mut src,
+            &mut out,
+            Some(5),
+            Some(KALPA_MD5),
+            DownloadHooks::NONE,
+        )
+        .expect("matching checksum must verify");
+        assert_eq!(written, 5);
+        assert_eq!(out, b"kalpa");
+    }
+
+    #[test]
+    fn stream_download_body_rejects_a_mismatched_checksum() {
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut src,
+            &mut out,
+            Some(5),
+            Some("00000000000000000000000000000000"),
+            DownloadHooks::NONE,
+        )
+        .expect_err("a wrong checksum must fail the download");
+        assert!(err.contains("checksum mismatch"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn stream_download_body_accepts_uppercase_and_skips_empty_checksums() {
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        assert!(stream_download_body(
+            &mut src,
+            &mut out,
+            None,
+            Some(&KALPA_MD5.to_uppercase()),
+            DownloadHooks::NONE,
+        )
+        .is_ok());
+
+        // ESOUI publishes no checksum for some artifacts; an empty string must
+        // skip verification rather than compare the digest against "".
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        assert!(
+            stream_download_body(&mut src, &mut out, None, Some(""), DownloadHooks::NONE).is_ok()
+        );
+    }
+
+    #[test]
+    fn stream_download_body_reports_monotonic_byte_progress() {
+        // Two-and-a-bit chunks, so progress is reported more than once.
+        let body = vec![7u8; DOWNLOAD_CHUNK_BYTES * 2 + 17];
+        let total = body.len() as u64;
+        let ticks = std::sync::Mutex::new(Vec::<(u64, Option<u64>)>::new());
+        let record = |done: u64, all: Option<u64>| ticks.lock().unwrap().push((done, all));
+        let mut src = io::Cursor::new(body);
+        let mut out: Vec<u8> = Vec::new();
+        let written = stream_download_body(
+            &mut src,
+            &mut out,
+            Some(total),
+            None,
+            DownloadHooks {
+                cancel: None,
+                progress: Some(&record),
+            },
+        )
+        .expect("stream must succeed");
+
+        let ticks = ticks.into_inner().unwrap();
+        assert_eq!(written, total);
+        // Opens at zero so the UI can render a determinate bar immediately,
+        // ends exactly at the total, and never goes backwards in between.
+        assert_eq!(ticks.first().copied(), Some((0, Some(total))));
+        assert_eq!(ticks.last().copied(), Some((total, Some(total))));
+        assert!(ticks.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert!(ticks.iter().all(|(_, t)| *t == Some(total)));
+        assert!(ticks.len() >= 4, "expected a tick per chunk: {ticks:?}");
+    }
+
+    #[test]
+    fn stream_download_body_aborts_mid_body_when_cancelled() {
+        // A reader that trips the cancel flag after handing over the first
+        // chunk, so the abort happens mid-body rather than before the first
+        // read — the case a user hits when they Stop a large download.
+        struct CancelAfterFirstChunk<'a> {
+            flag: &'a AtomicBool,
+            reads: usize,
+        }
+        impl io::Read for CancelAfterFirstChunk<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                self.flag.store(true, Ordering::Relaxed);
+                let n = buf.len().min(1024);
+                buf[..n].fill(1);
+                Ok(n)
+            }
+        }
+
+        let flag = AtomicBool::new(false);
+        let mut src = CancelAfterFirstChunk {
+            flag: &flag,
+            reads: 0,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut src,
+            &mut out,
+            None,
+            None,
+            DownloadHooks {
+                cancel: Some(&flag),
+                progress: None,
+            },
+        )
+        .expect_err("a cancelled download must not report success");
+        // The same sentinel the extract loop returns, so the frontend's single
+        // "Update cancelled" check covers both phases.
+        assert_eq!(err, crate::installer::CANCELLED);
+        assert_eq!(src.reads, 1, "must stop reading once the flag is set");
+        assert_eq!(out.len(), 1024);
+    }
+
+    #[test]
+    fn stream_download_body_maps_a_stalled_body_to_the_connection_message() {
+        struct Stalled;
+        impl io::Read for Stalled {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"))
+            }
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(&mut Stalled, &mut out, None, None, DownloadHooks::NONE)
+            .expect_err("a timed-out body must fail");
+        // Deliberately not the "Failed to write download to temp file" wording:
+        // a mid-body timeout is the network, not the user's drive.
+        assert!(err.contains("Download stalled"), "unexpected error: {err}");
     }
 
     #[test]

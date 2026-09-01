@@ -9,8 +9,14 @@ import type {
   InstallResult,
   ConflictReport,
   FileDecision,
+  InstallProgressEvent,
 } from "../types";
 import { PRESET_TAGS } from "../types";
+import {
+  formatInstallProgress,
+  installProgressFromEvent,
+  type InstallProgress,
+} from "@/lib/install-progress";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -121,55 +127,53 @@ function AddonDetailBase({
   const [esouiTabOpened, setEsouiTabOpened] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [dismissedConflictSessionId, setDismissedConflictSessionId] = useState<string | null>(null);
-  // Per-file extraction progress for THIS addon's in-flight update, correlated
-  // by operation id. Drives the "Extracting N of M" label and the Stop button.
-  const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
-    null
-  );
+  // Progress for THIS addon's in-flight update, correlated by operation id.
+  // Drives the phase label ("Downloading 4.2 / 19.1 MB", "Extracting N of M")
+  // and the Stop button.
+  const [updateProgress, setUpdateProgress] = useState<InstallProgress | null>(null);
   const [canStopUpdate, setCanStopUpdate] = useState(false);
   // The operation id lives in this component instance. App.tsx mounts AddonDetail
   // with key={folderName}, so selecting a different addon mid-update remounts and
   // drops this ref: the backend update keeps running (it's detached in
   // spawn_blocking) but its Stop control and progress are lost for the rest of
-  // that update. Accepted known limitation — like the batch-flow and
-  // download-phase Stop gaps — kept small here because the hashing fix shrinks the
-  // motivating multi-minute window to seconds; lifting operation tracking into
-  // App.tsx would be the fix if it becomes a real annoyance.
+  // that update. Accepted known limitation — like the batch-flow Stop gap —
+  // kept small here because the hashing fix shrinks the motivating multi-minute
+  // window to seconds; lifting operation tracking into App.tsx would be the fix
+  // if it becomes a real annoyance. (The download phase is no longer part of
+  // that list: it reports bytes and polls the same cancellation flag.)
   const operationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    // Extraction events can burst far faster than the label can usefully
-    // change. Coalesce to at most one setState per animation frame: keep only
-    // the latest payload and flush it from a single scheduled rAF, so a large
-    // addon's event flood can't queue up hundreds of renders. The flush
+    // Download and extraction events can burst far faster than the label can
+    // usefully change. Coalesce to at most one setState per animation frame:
+    // keep only the latest payload and flush it from a single scheduled rAF, so
+    // a large addon's event flood can't queue up hundreds of renders. The flush
     // re-checks the operation id: a rAF can fire after `endOperation` already
     // reset the UI (completion resolving in the same frame, or the rAF frozen
     // while the window was hidden) and must not resurrect stale progress.
-    let pendingProgress: { done: number; total: number; opId: string } | null = null;
+    let pendingProgress: { progress: InstallProgress; opId: string } | null = null;
     let rafId: number | null = null;
     const flush = () => {
       rafId = null;
       if (pendingProgress !== null && pendingProgress.opId === operationIdRef.current) {
+        // Stop is offered as soon as any phase reports: the download polls the
+        // same cancellation flag the extraction does.
         setCanStopUpdate(true);
-        setExtractProgress({ done: pendingProgress.done, total: pendingProgress.total });
+        setUpdateProgress(pendingProgress.progress);
       }
       pendingProgress = null;
     };
-    void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
-      "update-progress",
-      (event) => {
-        if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
-          pendingProgress = {
-            done: event.payload.fileIndex,
-            total: event.payload.fileTotal,
-            opId: event.payload.operationId,
-          };
-          rafId ??= requestAnimationFrame(flush);
-        }
+    void listen<InstallProgressEvent>("update-progress", (event) => {
+      if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
+        pendingProgress = {
+          progress: installProgressFromEvent(event.payload),
+          opId: event.payload.operationId,
+        };
+        rafId ??= requestAnimationFrame(flush);
       }
-    )
+    })
       .then((un) => {
         if (disposed) un();
         else unlisten = un;
@@ -189,13 +193,13 @@ function AddonDetailBase({
     const id = crypto.randomUUID();
     operationIdRef.current = id;
     setCanStopUpdate(false);
-    setExtractProgress(null);
+    setUpdateProgress(null);
     return id;
   };
   const endOperation = () => {
     operationIdRef.current = null;
     setCanStopUpdate(false);
-    setExtractProgress(null);
+    setUpdateProgress(null);
   };
   const handleStopUpdate = () => {
     const id = operationIdRef.current;
@@ -417,6 +421,9 @@ function AddonDetailBase({
       const result = await invokeOrThrow<InstallResult>("install_dependency", {
         addonsPath,
         depName,
+        // Same operation id the update flow uses, so this pane's progress
+        // listener picks up the library's download and its own dependencies.
+        operationId: beginOperation(),
       });
       const depCount = result.installedDeps.length;
       if (depCount > 0) {
@@ -433,6 +440,7 @@ function AddonDetailBase({
       toast.error(`Failed to install ${depName}: ${getTauriErrorMessage(e)}`);
     } finally {
       setInstallingDep(null);
+      endOperation();
     }
   };
 
@@ -502,9 +510,7 @@ function AddonDetailBase({
           {updating ? (
             <div className="flex items-center gap-2">
               <span className="text-xs tabular-nums text-muted-foreground">
-                {extractProgress && extractProgress.total > 0
-                  ? `Extracting ${extractProgress.done.toLocaleString()} / ${extractProgress.total.toLocaleString()}`
-                  : "Updating…"}
+                {updateProgress ? formatInstallProgress(updateProgress) : "Updating…"}
               </span>
               <Button
                 onClick={handleStopUpdate}
@@ -517,6 +523,16 @@ function AddonDetailBase({
             </div>
           ) : (
             <div className="flex items-center gap-2">
+              {installingDep && (
+                // A dependency install is not an update of THIS addon, so it
+                // keeps the normal action buttons — it just narrates itself
+                // rather than leaving a bare spinner on a tiny icon button.
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {updateProgress
+                    ? formatInstallProgress(updateProgress)
+                    : `Installing ${installingDep}…`}
+                </span>
+              )}
               {addon.esouiId && (
                 <SimpleTooltip
                   content={isOffline ? "Changelogs require an internet connection" : ""}

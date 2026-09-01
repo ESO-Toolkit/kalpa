@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import type { EsouiSearchResult, InstallResult } from "../types";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
+import { ProgressBar } from "@/components/ui/progress-bar";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
 import { reportDependencyFailures } from "@/lib/dependency-failure";
@@ -14,6 +15,8 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { DiscoverDetailSkeleton } from "@/components/ui/skeletons";
 import { useEsouiDetail } from "@/hooks/use-esoui-detail";
+import { useInstallProgress } from "@/hooks/use-install-progress";
+import { formatInstallProgress } from "@/lib/install-progress";
 import { Download, ExternalLink, Check, Trash2, Search } from "lucide-react";
 
 interface DiscoverDetailProps {
@@ -38,6 +41,7 @@ function DiscoverDetailBase({
   const { detail, loading, error } = useEsouiDetail(result?.id, true);
   const [installingId, setInstallingId] = useState<number | null>(null);
   const [installSuccess, setInstallSuccess] = useState<InstallResult | null>(null);
+  const { progress, beginOperation, endOperation } = useInstallProgress();
 
   // Per-selection state resets when a different search result is opened.
   useEffect(() => {
@@ -97,6 +101,8 @@ function DiscoverDetailBase({
         esouiTitle: title,
         esouiVersion: version,
         dependencyPolicy: await getDependencyPolicy(),
+        // Correlates the `update-progress` stream with this pane's bar.
+        operationId: beginOperation(),
       });
       setInstallSuccess(res);
       toast.success(`Installed ${res.installedFolders.join(", ")}`);
@@ -110,6 +116,7 @@ function DiscoverDetailBase({
       toast.error(getTauriErrorMessage(e));
     } finally {
       setInstallingId(null);
+      endOperation();
     }
   };
 
@@ -204,6 +211,20 @@ function DiscoverDetailBase({
                 </Button>
               </SimpleTooltip>
             </div>
+            {installingId !== null && (
+              <div className="w-[220px] space-y-1">
+                <ProgressBar
+                  value={progress?.done ?? 0}
+                  max={progress?.determinate ? progress.total : 100}
+                  indeterminate={!progress?.determinate}
+                  label={progress ? formatInstallProgress(progress) : "Preparing…"}
+                  className="h-1.5"
+                />
+                <div className="text-right text-[11px] tabular-nums text-muted-foreground">
+                  {progress ? formatInstallProgress(progress) : "Preparing…"}
+                </div>
+              </div>
+            )}
             <button
               onClick={() => openUrl(`https://www.esoui.com/downloads/info${detail.id}.html`)}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1 cursor-pointer"

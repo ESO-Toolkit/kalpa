@@ -12,6 +12,7 @@ import type {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
+import { ProgressBar } from "@/components/ui/progress-bar";
 import {
   Select,
   SelectContent,
@@ -37,6 +38,8 @@ import {
   WifiOff,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
+import { useInstallProgress } from "@/hooks/use-install-progress";
+import { formatInstallProgress, type InstallProgress } from "@/lib/install-progress";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
 import { motion, AnimatePresence } from "motion/react";
@@ -59,6 +62,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
   const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
   const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
+  const { progress, beginOperation, endOperation } = useInstallProgress();
 
   // Merge persisted (from metadata) with session-installed IDs
   const installedIds = useMemo(() => {
@@ -85,6 +89,9 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           esouiTitle: info.title,
           esouiVersion: info.version,
           dependencyPolicy: await getDependencyPolicy(),
+          // Correlates the download/extract/dependency events streamed back on
+          // `update-progress` with this row.
+          operationId: beginOperation(),
         });
         setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
@@ -96,18 +103,27 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         toast.error(getTauriErrorMessage(e));
       } finally {
         setInstallingId(null);
+        endOperation();
       }
     },
-    [addonsPath, onInstalled, ensureEsoNotBlocking, resolvePendingDeps]
+    [
+      addonsPath,
+      onInstalled,
+      ensureEsoNotBlocking,
+      resolvePendingDeps,
+      beginOperation,
+      endOperation,
+    ]
   );
 
-  return { installingId, installedIds, install };
+  return { installingId, installProgress: progress, installedIds, install };
 }
 
 const DiscoverResultRow = memo(function DiscoverResultRow({
   result,
   selected,
   isInstalling,
+  progress,
   anyInstalling,
   installed,
   onSelect,
@@ -118,6 +134,8 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   result: EsouiSearchResult;
   selected: boolean;
   isInstalling: boolean;
+  /** Live phase/counts for THIS row's install; null until the first event. */
+  progress: InstallProgress | null;
   anyInstalling: boolean;
   installed: boolean;
   onSelect: (result: EsouiSearchResult) => void;
@@ -126,6 +144,9 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   rank?: number;
 }) {
   const isInstalled = installed;
+  // Until the first event lands the backend is still resolving the addon, so
+  // there is genuinely nothing to measure — say so rather than show 0%.
+  const progressLabel = progress ? formatInstallProgress(progress) : "Preparing…";
 
   return (
     <div
@@ -178,6 +199,18 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
           )}
         </Button>
       </div>
+      {isInstalling && (
+        <div className="mt-2 space-y-1">
+          <ProgressBar
+            value={progress?.done ?? 0}
+            max={progress?.determinate ? progress.total : 100}
+            indeterminate={!progress?.determinate}
+            label={`${result.title}: ${progressLabel}`}
+            className="h-1.5"
+          />
+          <div className="text-[11px] tabular-nums text-muted-foreground">{progressLabel}</div>
+        </div>
+      )}
       <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {result.author && <span className="truncate">by {result.author}</span>}
         {result.category && <InfoPill color="muted">{result.category}</InfoPill>}
@@ -212,6 +245,7 @@ function VirtualResultRows({
   results,
   selectedResultId,
   installingId,
+  installProgress,
   installedIds,
   onSelectResult,
   onInstall,
@@ -221,6 +255,7 @@ function VirtualResultRows({
   results: EsouiSearchResult[];
   selectedResultId: number | null;
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   onInstall: (id: number) => void;
@@ -255,6 +290,7 @@ function VirtualResultRows({
               result={r}
               selected={selectedResultId === r.id}
               isInstalling={installingId === r.id}
+              progress={installingId === r.id ? installProgress : null}
               anyInstalling={installingId !== null}
               installed={installedIds.has(r.id)}
               onSelect={onSelectResult}
@@ -288,6 +324,7 @@ export function DiscoverPanel({
 }: DiscoverPanelProps) {
   const {
     installingId,
+    installProgress,
     installedIds,
     install: handleInstall,
   } = useAddonInstall(addonsPath, onInstalled, installedEsouiIds);
@@ -363,6 +400,7 @@ export function DiscoverPanel({
           >
             <SearchContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -381,6 +419,7 @@ export function DiscoverPanel({
           >
             <PopularContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -399,6 +438,7 @@ export function DiscoverPanel({
           >
             <CategoryContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -431,12 +471,14 @@ export function DiscoverPanel({
 
 function SearchContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -560,6 +602,7 @@ function SearchContent({
             results={results}
             selectedResultId={selectedResultId}
             installingId={installingId}
+            installProgress={installProgress}
             installedIds={installedIds}
             onSelectResult={onSelectResult}
             onInstall={onInstall}
@@ -576,12 +619,14 @@ type PopularSort = "downloads" | "newest";
 
 function PopularContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -693,6 +738,7 @@ function PopularContent({
               results={results}
               selectedResultId={selectedResultId}
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onSelectResult={onSelectResult}
               onInstall={onInstall}
@@ -711,12 +757,14 @@ function PopularContent({
 
 function CategoryContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -899,6 +947,7 @@ function CategoryContent({
               results={filteredResults}
               selectedResultId={selectedResultId}
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onSelectResult={onSelectResult}
               onInstall={onInstall}
@@ -932,6 +981,7 @@ function UrlContent({
   const [addonInfo, setAddonInfo] = useState<EsouiAddonInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<InstallResult | null>(null);
+  const { progress, beginOperation, endOperation } = useInstallProgress();
 
   const handleResolve = async () => {
     if (!input.trim()) return;
@@ -965,6 +1015,7 @@ function UrlContent({
         esouiTitle: addonInfo.title,
         esouiVersion: addonInfo.version,
         dependencyPolicy: await getDependencyPolicy(),
+        operationId: beginOperation(),
       });
       setResult(installResult);
       setState("installed");
@@ -976,6 +1027,8 @@ function UrlContent({
     } catch (e) {
       setError(getTauriErrorMessage(e));
       setState("error");
+    } finally {
+      endOperation();
     }
   };
 
@@ -1067,10 +1120,22 @@ function UrlContent({
       )}
 
       {state === "installing" && (
-        <Button disabled className="w-full" size="sm">
-          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
-          Installing...
-        </Button>
+        <div className="space-y-2">
+          <Button disabled className="w-full" size="sm">
+            <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
+            Installing...
+          </Button>
+          <ProgressBar
+            value={progress?.done ?? 0}
+            max={progress?.determinate ? progress.total : 100}
+            indeterminate={!progress?.determinate}
+            label={progress ? formatInstallProgress(progress) : "Preparing…"}
+            className="h-1.5"
+          />
+          <div className="text-[11px] tabular-nums text-muted-foreground text-center">
+            {progress ? formatInstallProgress(progress) : "Preparing…"}
+          </div>
+        </div>
       )}
 
       {state === "installed" && result && (

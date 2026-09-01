@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
@@ -571,8 +571,23 @@ fn resolve_deps_with_policy(
     store: &mut metadata::MetadataStore,
     policy: DependencyPolicy,
 ) -> ResolvedDeps {
+    resolve_deps_with_policy_reporting(addons_dir, installed_folders, store, policy, None)
+}
+
+/// Like [`resolve_deps_with_policy`] but reports each dependency as it starts.
+/// Only the `Auto` branch can report anything: `Ask` installs nothing here and
+/// `Skip` does no work at all.
+fn resolve_deps_with_policy_reporting(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    policy: DependencyPolicy,
+    on_dep: DepInstallReporter,
+) -> ResolvedDeps {
     match policy {
-        DependencyPolicy::Auto => resolve_transitive_deps(addons_dir, installed_folders, store),
+        DependencyPolicy::Auto => {
+            resolve_transitive_deps_reporting(addons_dir, installed_folders, store, on_dep)
+        }
         DependencyPolicy::Ask => ResolvedDeps {
             // Nothing is installed here. Whatever the user accepts comes back
             // through `install_selected_dependencies`, which installs
@@ -597,12 +612,22 @@ fn resolve_deps_with_policy(
     }
 }
 
-fn resolve_transitive_deps(
+/// Resolve and install the full required-dependency chain, naming each
+/// dependency to the UI as it starts (see [`DepInstallReporter`]; pass `None`
+/// for the silent behaviour every caller had before progress existed).
+fn resolve_transitive_deps_reporting(
     addons_dir: &Path,
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
+    on_dep: DepInstallReporter,
 ) -> ResolvedDeps {
-    resolve_transitive_deps_with(addons_dir, installed_folders, store, try_install_dep)
+    resolve_transitive_deps_with(
+        addons_dir,
+        installed_folders,
+        store,
+        try_install_dep,
+        on_dep,
+    )
 }
 
 fn resolve_transitive_deps_with<F>(
@@ -610,6 +635,7 @@ fn resolve_transitive_deps_with<F>(
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
     mut install_dep: F,
+    on_dep: DepInstallReporter,
 ) -> ResolvedDeps
 where
     F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
@@ -640,10 +666,19 @@ where
         }
 
         let mut newly_installed_folders: Vec<String> = Vec::new();
+        let round_total = missing_deps.len();
         for (i, dep_name) in missing_deps.iter().enumerate() {
             // Throttle between ESOUI requests to avoid hammering the server
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(200));
+            }
+            // Named before the work starts: a library download is the longest
+            // silent stretch of an install, and until now the UI showed nothing
+            // at all while it ran. Reported per round — the resolver discovers
+            // the next round's dependencies only after this one is installed,
+            // so no honest total over the whole chain exists here.
+            if let Some(report) = on_dep {
+                report(dep_name, i + 1, round_total);
             }
             match install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
@@ -783,8 +818,15 @@ where
     // transitively rather than prompting again. Guarded so a fully-failed
     // selection skips the whole-folder disk walk.
     if !installed_folders.is_empty() {
-        let resolved =
-            resolve_transitive_deps_with(addons_dir, &installed_folders, store, &mut install_dep);
+        // The picker flow reports nothing per dependency: the user is already
+        // looking at the list they accepted.
+        let resolved = resolve_transitive_deps_with(
+            addons_dir,
+            &installed_folders,
+            store,
+            &mut install_dep,
+            None,
+        );
         installed_deps.extend(resolved.installed_deps);
         failed_deps.extend(resolved.failed_deps);
         skipped_deps.extend(resolved.skipped_deps);
@@ -1646,6 +1688,7 @@ pub async fn search_esoui_addons(query: String) -> Result<Vec<EsouiSearchResult>
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_addon(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
@@ -1655,6 +1698,10 @@ pub async fn install_addon(
     esoui_version: String,
     // Option so existing callers (and tests) keep the historic "auto" behaviour.
     dependency_policy: Option<String>,
+    // Correlates `update-progress` events with the UI row that started this
+    // install. Option so a caller that renders no progress can omit it; an empty
+    // id simply matches no listener.
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
@@ -1665,15 +1712,47 @@ pub async fn install_addon(
     }
 
     let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
+    let operation_id = operation_id.unwrap_or_default();
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Re-derive the checksum for this artifact. This was the only one of the
+        // six `download_addon` call sites that verified nothing, so a corrupt but
+        // structurally valid ZIP installed silently here while every other path
+        // rejected it. The frontend does hold a checksum from `resolve_esoui_addon`,
+        // but taking it as a parameter would let a caller pass one that doesn't
+        // describe the bytes we fetch; deriving it from the ID we're installing
+        // costs one small JSON request against the multi-MB download that follows.
+        //
+        // Verification is best-effort by design: it only applies when filedetails
+        // still points at the same URL the caller asked for (an archived-version
+        // install legitimately differs), and a failed lookup falls back to the
+        // previous no-checksum behaviour rather than blocking the install.
+        let expected_md5 = esoui::fetch_addon_info(esoui_id)
+            .ok()
+            .filter(|info| info.download_url == download_url)
+            .map(|info| info.checksum);
+
         // Download outside the lock — network I/O doesn't touch kalpa.json
-        let tmp_file = esoui::download_addon(&download_url, None)?;
+        let download_progress =
+            make_download_progress_emitter(app.clone(), operation_id.clone(), esoui_title.clone());
+        let tmp_file = esoui::download_addon_with(
+            &download_url,
+            expected_md5.as_deref(),
+            esoui::DownloadHooks {
+                // No Stop control on the Discover install button, so nothing to
+                // poll — the cancel hook stays wired to the update path.
+                cancel: None,
+                progress: Some(&download_progress),
+            },
+        )?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        let extract_progress =
+            make_progress_emitter(app.clone(), operation_id.clone(), esoui_title.clone());
+        let dep_progress = make_dependency_progress_emitter(app, operation_id);
         install_addon_blocking(
             &addons_dir,
             tmp_file,
@@ -1682,6 +1761,11 @@ pub async fn install_addon(
             &esoui_title,
             &esoui_version,
             dep_policy,
+            installer::ExtractHooks {
+                cancel: None,
+                progress: Some(&extract_progress),
+            },
+            Some(&dep_progress),
         )
     })
     .await
@@ -1697,13 +1781,15 @@ fn install_addon_blocking(
     esoui_title: &str,
     esoui_version: &str,
     dep_policy: DependencyPolicy,
+    hooks: installer::ExtractHooks,
+    on_dep: DepInstallReporter,
 ) -> Result<InstallResult, String> {
     let installed_folders = installer::install_addon_zip_with_hashes(
         tmp_file.path(),
         addons_dir,
         esoui_id,
         esoui_version,
-        installer::ExtractHooks::NONE,
+        hooks,
     )?;
 
     let mut store = metadata::load_metadata(addons_dir);
@@ -1721,7 +1807,13 @@ fn install_addon_blocking(
         0, // esoui_last_update will be populated during next update check
     );
 
-    let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
+    let resolved = resolve_deps_with_policy_reporting(
+        addons_dir,
+        &installed_folders,
+        &mut store,
+        dep_policy,
+        on_dep,
+    );
 
     metadata::save_metadata(addons_dir, &store)?;
 
@@ -1799,14 +1891,24 @@ pub fn enable_addon(
 
 #[tauri::command]
 pub async fn install_dependency(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     dep_name: String,
+    // Same opt-in correlation id as `install_addon`; omitted by callers that
+    // render no progress for this button.
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let operation_id = operation_id.unwrap_or_default();
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // One event naming the library before any of the slow work starts, so
+        // this path is no longer silent between click and toast.
+        let dep_progress = make_dependency_progress_emitter(app.clone(), operation_id.clone());
+        dep_progress(&dep_name, 1, 1);
+
         // Network I/O outside the lock: search ESOUI, fetch info, download ZIP
         let dep_id = {
             let store = metadata::load_metadata(&addons_dir);
@@ -1822,14 +1924,30 @@ pub async fn install_dependency(
         };
         let dep_info = esoui::fetch_addon_info(dep_id)
             .map_err(|_| format!("Failed to install {dep_name}: fetch_failed"))?;
-        let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
-            .map_err(|_| format!("Failed to install {dep_name}: download_failed"))?;
+        let download_progress =
+            make_download_progress_emitter(app.clone(), operation_id.clone(), dep_name.clone());
+        let dep_tmp = esoui::download_addon_with(
+            &dep_info.download_url,
+            Some(&dep_info.checksum),
+            esoui::DownloadHooks {
+                cancel: None,
+                progress: Some(&download_progress),
+            },
+        )
+        .map_err(|_| format!("Failed to install {dep_name}: download_failed"))?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        install_dependency_blocking(&addons_dir, &dep_name, dep_id, dep_info, dep_tmp)
+        install_dependency_blocking(
+            &addons_dir,
+            &dep_name,
+            dep_id,
+            dep_info,
+            dep_tmp,
+            Some(&dep_progress),
+        )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -1841,6 +1959,7 @@ fn install_dependency_blocking(
     dep_id: u32,
     dep_info: EsouiAddonInfo,
     dep_tmp: NamedTempFile,
+    on_dep: DepInstallReporter,
 ) -> Result<InstallResult, String> {
     // Surface the real extraction error (installer already explains the common
     // Controlled Folder Access / permission case with fix steps) rather than a
@@ -1874,8 +1993,9 @@ fn install_dependency_blocking(
 
     // Hard-wired to "auto": the user explicitly asked for THIS library, and its
     // own libraries are an implementation detail — prompting again here would be
-    // a second modal for something they already accepted.
-    let resolved = resolve_transitive_deps(addons_dir, &dep_folders, &mut store);
+    // a second modal for something they already accepted. They are still named
+    // as they install, so the wait is attributable.
+    let resolved = resolve_transitive_deps_reporting(addons_dir, &dep_folders, &mut store, on_dep);
     metadata::save_metadata(addons_dir, &store)?;
     Ok(InstallResult {
         installed_folders: dep_folders,
@@ -1931,7 +2051,7 @@ pub async fn install_selected_dependencies(
     tokio::task::spawn_blocking(move || {
         // Hold the lock across the whole install: `try_install_dep` mutates the
         // store in memory and one save at the end persists every dependency,
-        // matching how `resolve_transitive_deps` is driven elsewhere.
+        // matching how `resolve_transitive_deps_reporting` is driven elsewhere.
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
@@ -2216,18 +2336,81 @@ fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
 
 // ── Update cancellation + progress ──────────────────────────────────────
 
-/// Per-file progress for a single addon update, emitted on the `update-progress`
-/// event. The frontend correlates events by `operation_id` and renders the phase
-/// plus "Extracting N of M".
+/// Progress for a single addon install or update, emitted on the
+/// `update-progress` event. The frontend correlates events by `operation_id` and
+/// renders the phase plus "Downloading 4.2 / 19.1 MB" or "Extracting N of M".
+///
+/// One event shape carries every phase rather than a second parallel event, so
+/// a listener that already handles `update-progress` keeps working: the
+/// pre-existing fields never changed meaning, and the byte fields are omitted
+/// from the payload entirely on the file-bound phases.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProgressEvent {
     pub operation_id: String,
+    /// The addon this event is about. For [`PHASE_DEPENDENCIES`] it is the
+    /// dependency's name, not the addon that pulled it in — the point of those
+    /// events is to name the library the user is waiting on.
     pub folder_name: String,
-    /// Currently always "extracting" — the slow, file-count-bound phase.
+    /// One of [`PHASE_DOWNLOADING`], [`PHASE_EXTRACTING`] or
+    /// [`PHASE_DEPENDENCIES`]. It used to be always "extracting"; anything that
+    /// assumed that is now wrong.
     pub phase: String,
+    /// Files extracted so far, or the dependency's 1-based position in the
+    /// round. Zero during [`PHASE_DOWNLOADING`], where bytes are the unit.
     pub file_index: usize,
     pub file_total: usize,
+    /// Bytes received so far. Only present during [`PHASE_DOWNLOADING`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_done: Option<u64>,
+    /// Total bytes from the server's `Content-Length`. Absent (so the UI falls
+    /// back to an indeterminate bar) on the rare response without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+}
+
+/// Bytes are arriving for the addon's archive.
+pub const PHASE_DOWNLOADING: &str = "downloading";
+/// The archive is being written into the AddOns folder, file by file.
+pub const PHASE_EXTRACTING: &str = "extracting";
+/// A required library is being fetched and installed on the addon's behalf.
+/// Deliberately one event per dependency — not per file inside it — so a
+/// library chain reads as "Installing LibCustomIcons…" rather than a second
+/// nested progress bar.
+pub const PHASE_DEPENDENCIES: &str = "dependencies";
+
+impl UpdateProgressEvent {
+    /// A file-counted event (extraction, or one-of-N dependencies).
+    fn files(
+        operation_id: &str,
+        folder_name: &str,
+        phase: &str,
+        index: usize,
+        total: usize,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.to_string(),
+            folder_name: folder_name.to_string(),
+            phase: phase.to_string(),
+            file_index: index,
+            file_total: total,
+            bytes_done: None,
+            bytes_total: None,
+        }
+    }
+
+    /// A byte-counted download event.
+    fn bytes(operation_id: &str, folder_name: &str, done: u64, total: Option<u64>) -> Self {
+        Self {
+            operation_id: operation_id.to_string(),
+            folder_name: folder_name.to_string(),
+            phase: PHASE_DOWNLOADING.to_string(),
+            file_index: 0,
+            file_total: 0,
+            bytes_done: Some(done),
+            bytes_total: total,
+        }
+    }
 }
 
 /// RAII registration of a cancellation flag in [`crate::UpdateCancels`]. Inserted
@@ -2307,21 +2490,82 @@ fn make_progress_emitter(
         last.store(done, Ordering::Relaxed);
         let _ = app.emit(
             "update-progress",
-            UpdateProgressEvent {
-                operation_id: operation_id.clone(),
-                folder_name: folder_name.clone(),
-                phase: "extracting".to_string(),
-                file_index: done,
-                file_total: total,
-            },
+            UpdateProgressEvent::files(&operation_id, &folder_name, PHASE_EXTRACTING, done, total),
+        );
+    }
+}
+
+/// How many bytes must arrive since the last emitted download event before the
+/// next one is sent. The download hook fires once per 64 KiB chunk, which on a
+/// fast connection is hundreds of events a second for a 19 MB library — far
+/// more than a progress label can usefully render.
+const BYTE_PROGRESS_EMIT_STRIDE: u64 = 256 * 1024;
+
+/// Throttle decision for the download-progress emitter, the byte-denominated
+/// twin of [`should_emit_progress`] and factored out as a pure function for the
+/// same reason.
+///
+/// `prev` is the `done` value at the last emitted event, or `u64::MAX` if none
+/// has been emitted yet. Emits when: this is the first event, OR the body is
+/// complete, OR at least [`BYTE_PROGRESS_EMIT_STRIDE`] bytes have arrived since
+/// the last emit. The first-event branch is stride-independent so the frontend
+/// learns the total size (and can switch to a determinate bar) before any bytes
+/// land, even on a small archive that never reaches one stride.
+fn should_emit_byte_progress(prev: u64, done: u64, total: Option<u64>) -> bool {
+    prev == u64::MAX
+        || total.is_some_and(|t| done >= t)
+        || done.saturating_sub(prev) >= BYTE_PROGRESS_EMIT_STRIDE
+}
+
+/// Build a throttled download-progress callback that emits `update-progress`
+/// events on the first chunk, every [`BYTE_PROGRESS_EMIT_STRIDE`] bytes, and at
+/// completion.
+fn make_download_progress_emitter(
+    app: tauri::AppHandle,
+    operation_id: String,
+    folder_name: String,
+) -> impl Fn(u64, Option<u64>) {
+    let last = AtomicU64::new(u64::MAX);
+    move |done: u64, total: Option<u64>| {
+        let prev = last.load(Ordering::Relaxed);
+        if !should_emit_byte_progress(prev, done, total) {
+            return;
+        }
+        last.store(done, Ordering::Relaxed);
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressEvent::bytes(&operation_id, &folder_name, done, total),
+        );
+    }
+}
+
+/// Reports one event per dependency, immediately before Kalpa starts installing
+/// it, as `(dep_name, index, total)` with a 1-based index. Threaded into the
+/// dependency resolver so a library pulled in behind the user's back ("install
+/// this 50 KB addon" → 19 MB of LibCustomIcons) has a name attached to the wait.
+type DepInstallReporter<'a> = Option<&'a dyn Fn(&str, usize, usize)>;
+
+/// Build the [`DepInstallReporter`] callback for an operation, emitting
+/// `update-progress` events in the [`PHASE_DEPENDENCIES`] phase. Not throttled:
+/// each dependency costs at least a search, a fetch and a download, so the
+/// events are inherently seconds apart.
+fn make_dependency_progress_emitter(
+    app: tauri::AppHandle,
+    operation_id: String,
+) -> impl Fn(&str, usize, usize) {
+    move |dep_name: &str, index: usize, total: usize| {
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressEvent::files(&operation_id, dep_name, PHASE_DEPENDENCIES, index, total),
         );
     }
 }
 
 /// Signal an in-flight update (identified by `operation_id`) to stop. Returns
 /// `true` if a matching in-flight operation was found and flagged, `false` if it
-/// had already finished or never existed. The extraction loop polls the flag
-/// between files and aborts cleanly, rolling back any partially-written folder.
+/// had already finished or never existed. The download loop polls the flag
+/// between body chunks and the extraction loop polls it between files; both
+/// abort cleanly, rolling back any partially-written folder.
 #[tauri::command]
 pub async fn cancel_update(
     cancels: tauri::State<'_, crate::UpdateCancels>,
@@ -2363,7 +2607,20 @@ pub async fn update_addon(
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url, Some(&info.checksum))?;
+        // The download is byte-bound, so it reports bytes and polls the same
+        // cancellation flag between chunks: Stop pressed while a large library
+        // is still arriving now aborts there instead of waiting for extraction
+        // to start.
+        let download_progress =
+            make_download_progress_emitter(app.clone(), operation_id.clone(), info.title.clone());
+        let tmp_file = esoui::download_addon_with(
+            &info.download_url,
+            Some(&info.checksum),
+            esoui::DownloadHooks {
+                cancel: Some(cancel.flag()),
+                progress: Some(&download_progress),
+            },
+        )?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
@@ -12404,6 +12661,46 @@ mod tests {
     }
 
     #[test]
+    fn should_emit_byte_progress_first_stride_and_completion() {
+        let total = Some(19_000_000u64);
+
+        // First event always fires, so the UI learns the total size (and can
+        // draw a determinate bar) before any bytes land.
+        assert!(should_emit_byte_progress(u64::MAX, 0, total));
+        assert!(should_emit_byte_progress(u64::MAX, 0, None));
+
+        // Within a stride of the last emit: nothing until 256 KiB has arrived.
+        assert!(!should_emit_byte_progress(0, 1, total));
+        assert!(!should_emit_byte_progress(
+            0,
+            BYTE_PROGRESS_EMIT_STRIDE - 1,
+            total
+        ));
+        assert!(should_emit_byte_progress(
+            0,
+            BYTE_PROGRESS_EMIT_STRIDE,
+            total
+        ));
+
+        // A 64 KiB chunk loop over a 19 MB body must not emit per chunk: four
+        // chunks in, still nothing.
+        assert!(!should_emit_byte_progress(0, 64 * 1024 * 3, total));
+
+        // Completion always fires so the final "19.1 / 19.1 MB" lands, even
+        // though only a few KiB arrived since the last emit.
+        assert!(should_emit_byte_progress(18_999_000, 19_000_000, total));
+
+        // Without a Content-Length there is no completion to detect, so the
+        // stride is the only gate — the UI shows an indeterminate bar anyway.
+        assert!(!should_emit_byte_progress(0, 1, None));
+        assert!(should_emit_byte_progress(
+            0,
+            BYTE_PROGRESS_EMIT_STRIDE,
+            None
+        ));
+    }
+
+    #[test]
     fn download_thread_count_scales_and_clamps() {
         // A single-addon batch must still get at least one thread. (The
         // streaming consumer runs on its own thread, so num_threads(1) is safe,
@@ -14258,6 +14555,7 @@ mod tests {
             &["AddonA".to_string()],
             &mut store,
             |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+            None,
         );
 
         assert_eq!(result.failed_deps.len(), 1);

@@ -20,8 +20,7 @@ import { CountingNumber } from "@/components/animate-ui/primitives/texts/countin
 import { Slide } from "@/components/animate-ui/primitives/effects/slide";
 import { AutoHeight } from "@/components/animate-ui/primitives/effects/auto-height";
 import { cn } from "@/lib/utils";
-
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+import type { AddonPhase } from "@/types";
 
 /** A single available update, enriched with a display title for the chooser. */
 export interface BannerUpdate {
