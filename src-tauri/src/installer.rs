@@ -728,10 +728,32 @@ fn extract_addon_zip_inner(
                     "Failed to extract {out_path:?}: archive declared {declared_size} bytes but produced {bytes_written}; the archive may be corrupt."
                 ));
             }
-            outfile
-                .sync_all()
-                .map_err(|e| describe_write_error(&out_path, &e))?;
-
+            // Deliberately NO `sync_all()` here. An fsync per entry made a
+            // many-file addon pathologically slow: extracting 5,642 small files
+            // (LibCustomIcons' shape) measured 39.3s with a per-file fsync vs
+            // 3.3s without — a 12x penalty paid on every install and update.
+            //
+            // Nothing is traded away that matters. Crash *atomicity* comes from
+            // the transaction, not from these syncs: entries land in an isolated
+            // staging dir and only become live via the commit renames in
+            // `install_txn`, so a crash mid-extract leaves the previous version
+            // untouched and the staging tree is discarded on recovery. Recovery
+            // itself never reads payload bytes — `recover_staging_locked` decides
+            // purely from the journal phase and path presence, i.e. from rename
+            // metadata, which NTFS journals.
+            //
+            // An application crash is therefore harmless outright: the page cache
+            // outlives the process and the OS flushes it. The only window a
+            // per-entry fsync closed is an OS crash or power loss inside the
+            // lazy-writer window right after commit. Worst case there is an addon
+            // with zeroed files — ESOUI bytes we do not own and can always fetch
+            // again. Note the remedy is a manual REINSTALL, not an automatic
+            // re-download: `kalpa.json` is written durably, so the app still
+            // believes this version is installed and will not re-offer it.
+            //
+            // The fsyncs that guard data we CANNOT refetch stay exactly where
+            // they are: `copy_residual_files` (the user's own files, carried
+            // across an update) and the transaction journal / hash manifests.
             total_extracted += bytes_written;
 
             // Double-check actual bytes written against budget
