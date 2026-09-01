@@ -630,6 +630,16 @@ fn extract_addon_zip_inner(
     wrap_name: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let mut created_folders: HashSet<String> = HashSet::new();
+    // Parent directories already materialised by this extraction. A media addon
+    // is thousands of files spread over a few dozen folders — LibCustomIcons is
+    // 5,642 entries across 31 directories — so calling `create_dir_all` per file
+    // spent ~0.66s re-confirming directories that existed after the first few
+    // entries. Remembering them turns 5,642 syscalls into 31.
+    //
+    // Scoped to this call, never global: the staging tree is new every time, so
+    // a cache outliving the extraction would skip creating a directory that a
+    // later run genuinely needs.
+    let mut ensured_dirs: HashSet<std::path::PathBuf> = HashSet::new();
     let mut total_extracted: u64 = 0;
     let total = archive.len();
 
@@ -699,7 +709,9 @@ fn extract_addon_zip_inner(
         }
 
         if entry.is_dir() {
-            fs::create_dir_all(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
+            if ensured_dirs.insert(out_path.clone()) {
+                fs::create_dir_all(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
+            }
         } else {
             // Check declared size against remaining budget before extracting
             let declared_size = entry.size();
@@ -710,9 +722,11 @@ fn extract_addon_zip_inner(
                 ));
             }
 
-            // Ensure parent directory exists
+            // Ensure parent directory exists (once per directory, not per file)
             if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
+                if ensured_dirs.insert(parent.to_path_buf()) {
+                    fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
+                }
             }
 
             let mut outfile =
