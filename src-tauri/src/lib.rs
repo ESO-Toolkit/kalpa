@@ -915,6 +915,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_addons_path,
+            commands::reveal_allowed_path,
             commands::set_text_zoom,
             commands::check_addons_write_access,
             commands::open_ransomware_protection_settings,

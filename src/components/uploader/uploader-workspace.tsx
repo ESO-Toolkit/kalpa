@@ -701,10 +701,7 @@ export function UploaderWorkspace({
   const handleOpenLogsFolder = useCallback(async () => {
     if (!logsDir) return;
     try {
-      // revealItemInDir is the opener API already used for split output; pointing
-      // it at the directory opens the folder in the OS file manager.
-      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-      await revealItemInDir(logsDir);
+      await invokeOrThrow("reveal_allowed_path", { path: logsDir });
     } catch {
       toast.error("Couldn't open the Logs folder.");
     }
@@ -713,8 +710,7 @@ export function UploaderWorkspace({
   // Reveal a single log file in the OS file manager.
   const handleRevealLog = useCallback(async (path: string) => {
     try {
-      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-      await revealItemInDir(path);
+      await invokeOrThrow("reveal_allowed_path", { path });
     } catch {
       toast.error("Couldn't reveal that file.");
     }

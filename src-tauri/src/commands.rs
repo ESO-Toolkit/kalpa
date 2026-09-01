@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -63,6 +65,60 @@ fn require_allowed_path(
         return Err("Addons path does not match the configured path.".to_string());
     }
     Ok(allowed_path.configured.clone())
+}
+
+fn resolve_allowed_reveal_path(
+    addons_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let addons_root = dunce::canonicalize(addons_root)
+        .map_err(|e| format!("Could not resolve the configured AddOns folder: {e}"))?;
+    let requested = Path::new(requested_path);
+    if crate::platform::has_unc_or_verbatim_prefix(requested) {
+        return Err("Network and special paths are not allowed.".to_string());
+    }
+
+    let canonical = dunce::canonicalize(requested)
+        .map_err(|e| format!("Could not resolve the item to reveal: {e}"))?;
+    if canonical.starts_with(&addons_root) {
+        return Ok(canonical);
+    }
+
+    let eso_root = addons_root
+        .parent()
+        .ok_or_else(|| "Could not resolve the ESO directory.".to_string())?;
+    for sibling in ["Logs", "kalpa-backups"] {
+        let allowed_root = eso_root.join(sibling);
+        let allowed_root = dunce::canonicalize(&allowed_root).unwrap_or(allowed_root);
+        if canonical.starts_with(allowed_root) {
+            return Ok(canonical);
+        }
+    }
+
+    Err("The item is outside the configured ESO folders.".to_string())
+}
+
+/// Reveal an item only after native code confines it to the configured ESO
+/// AddOns directory or its sibling Logs and kalpa-backups directories. The webview intentionally
+/// has no direct reveal permission because valid ESO locations are runtime
+/// state and cannot be represented safely by static capability globs.
+#[tauri::command]
+pub fn reveal_allowed_path(
+    app: AppHandle,
+    state: tauri::State<'_, AllowedAddonsPath>,
+    path: String,
+) -> Result<(), String> {
+    let addons_root = {
+        let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+        guard
+            .as_ref()
+            .map(|allowed| allowed.canonical.clone())
+            .ok_or_else(|| "Addons path has not been initialized.".to_string())?
+    };
+    let path = resolve_allowed_reveal_path(&addons_root, &path)?;
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|e| format!("Could not reveal the item: {e}"))
 }
 
 /// Called by the frontend to register the approved addons directory.
@@ -9637,10 +9693,16 @@ pub struct EsoPackData {
     pub addons: Vec<PackAddonEntry>,
 }
 
-#[tauri::command]
-pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
-    let file_path = PathBuf::from(&path);
+fn pack_export_file_name(title: &str) -> String {
+    let safe_name: String = title
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "-_ ".contains(*character))
+        .collect();
+    let safe_name = safe_name.split_whitespace().collect::<Vec<_>>().join("-");
+    format!("{safe_name}.esopack")
+}
 
+fn export_pack_to_path(pack: EsoPackFile, file_path: &Path) -> Result<(), String> {
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Export path must have .esopack extension.".to_string());
     }
@@ -9669,9 +9731,25 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
-    let file_path = PathBuf::from(&path);
+pub async fn export_pack_file(app: AppHandle, pack: EsoPackFile) -> Result<bool, String> {
+    let file_name = pack_export_file_name(&pack.pack.title);
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .add_filter("ESO Pack", &["esopack"])
+        .set_file_name(file_name)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let file_path = selected_path
+        .into_path()
+        .map_err(|_| "The save dialog did not return a local file path.".to_string())?;
+    export_pack_to_path(pack, &file_path)?;
+    Ok(true)
+}
 
+fn import_pack_from_path(file_path: &Path) -> Result<EsoPackFile, String> {
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Only .esopack files can be imported.".to_string());
     }
@@ -9704,6 +9782,22 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     }
 
     Ok(pack)
+}
+
+#[tauri::command]
+pub async fn import_pack_file(app: AppHandle) -> Result<Option<EsoPackFile>, String> {
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .add_filter("ESO Pack", &["esopack"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let file_path = selected_path
+        .into_path()
+        .map_err(|_| "The open dialog did not return a local file path.".to_string())?;
+    import_pack_from_path(&file_path).map(Some)
 }
 
 /// Export the SavedVariables settings block for a list of addon folder names.
@@ -12190,6 +12284,62 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn reveal_paths_are_confined_to_the_approved_eso_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let addons = live.join("AddOns");
+        let addon = addons.join("ExampleAddon");
+        let logs = live.join("Logs");
+        let log = logs.join("Encounter.log");
+        let backups = live.join("kalpa-backups");
+        let backup = backups.join("manual");
+        let outside = temp.path().join("outside.txt");
+        fs::create_dir_all(&addon).unwrap();
+        fs::create_dir_all(&logs).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(&log, b"log").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+
+        let addons = fs::canonicalize(addons).unwrap();
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &addon.to_string_lossy()).unwrap(),
+            dunce::canonicalize(addon).unwrap()
+        );
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &log.to_string_lossy()).unwrap(),
+            dunce::canonicalize(log).unwrap()
+        );
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &backup.to_string_lossy()).unwrap(),
+            dunce::canonicalize(backup).unwrap()
+        );
+        assert!(resolve_allowed_reveal_path(&addons, &outside.to_string_lossy()).is_err());
+        assert!(resolve_allowed_reveal_path(
+            &addons,
+            &temp.path().join("missing.log").to_string_lossy()
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_paths_reject_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let addons = temp.path().join("live").join("AddOns");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&addons).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, addons.join("escape")).unwrap();
+
+        let addons = dunce::canonicalize(addons).unwrap();
+        assert!(
+            resolve_allowed_reveal_path(&addons, &addons.join("escape").to_string_lossy()).is_err()
+        );
+    }
 
     #[test]
     // Names the DETECTOR, not the import, because that is all it exercises.
@@ -15110,8 +15260,8 @@ mod tests {
             shared_by: String::new(),
             settings: HashMap::new(),
         };
-        assert!(export_pack_file(pack.clone(), "C:\\test.json".to_string()).is_err());
-        assert!(export_pack_file(pack, "C:\\test.exe".to_string()).is_err());
+        assert!(export_pack_to_path(pack.clone(), Path::new("C:\\test.json")).is_err());
+        assert!(export_pack_to_path(pack, Path::new("C:\\test.exe")).is_err());
     }
 
     #[test]
@@ -15138,7 +15288,7 @@ mod tests {
             shared_by: String::new(),
             settings: HashMap::new(),
         };
-        export_pack_file(pack, dest.to_string_lossy().to_string()).unwrap();
+        export_pack_to_path(pack, &dest).unwrap();
 
         let written = fs::read_to_string(&dest).unwrap();
         assert!(written.contains("Replacement"));
@@ -15173,7 +15323,7 @@ mod tests {
                         settings: HashMap::new(),
                     };
                     start.wait();
-                    export_pack_file(pack, destination.to_string_lossy().to_string()).unwrap();
+                    export_pack_to_path(pack, &destination).unwrap();
                 })
             })
             .collect();
