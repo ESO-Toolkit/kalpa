@@ -385,16 +385,34 @@ function AppHeaderBase({
                 </div>
               )}
             </div>
-            <SimpleTooltip content="Remove selected addons" side="bottom">
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={onBatchRemove}
-                aria-label="Remove selected addons"
+            <SimpleTooltip
+              content={
+                updatingAll
+                  ? "Wait for the current update batch to finish before removing addons."
+                  : "Remove selected addons"
+              }
+              side="bottom"
+            >
+              <span
+                className="inline-flex"
+                tabIndex={updatingAll ? 0 : undefined}
+                aria-label={
+                  updatingAll
+                    ? "Remove selected addons unavailable. Wait for the current update batch to finish before removing addons."
+                    : undefined
+                }
               >
-                <Trash2Icon className="size-3.5" />
-                <span className="hidden min-[960px]:inline">Remove</span>
-              </Button>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={updatingAll}
+                  onClick={onBatchRemove}
+                  aria-label="Remove selected addons"
+                >
+                  <Trash2Icon className="size-3.5" />
+                  <span className="hidden min-[960px]:inline">Remove</span>
+                </Button>
+              </span>
             </SimpleTooltip>
             {/* Cancel keeps its word at every width: an icon here would read as
                 a duplicate of the window close button sitting right beside it. */}
