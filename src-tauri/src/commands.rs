@@ -1772,6 +1772,51 @@ pub async fn install_addon(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Debug-only stopwatch that prints the elapsed time of each install phase to
+/// the `tauri dev` console. Release builds get a zero-sized no-op: the fields
+/// and the printing are both behind `debug_assertions`, so nothing is measured
+/// or logged in a shipped binary.
+struct PhaseTimer {
+    #[cfg(debug_assertions)]
+    label: &'static str,
+    #[cfg(debug_assertions)]
+    started: std::time::Instant,
+    #[cfg(debug_assertions)]
+    last: std::cell::Cell<std::time::Instant>,
+}
+
+impl PhaseTimer {
+    #[cfg(debug_assertions)]
+    fn start(label: &'static str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            label,
+            started: now,
+            last: std::cell::Cell::new(now),
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn start(_label: &'static str) -> Self {
+        Self {}
+    }
+
+    fn mark(&self, _phase: &str) {
+        #[cfg(debug_assertions)]
+        {
+            let now = std::time::Instant::now();
+            let step = now.duration_since(self.last.get());
+            self.last.set(now);
+            eprintln!(
+                "[{}] {_phase}: {:.2}s (total {:.2}s)",
+                self.label,
+                step.as_secs_f64(),
+                now.duration_since(self.started).as_secs_f64()
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_addon_blocking(
     addons_dir: &Path,
@@ -1784,6 +1829,10 @@ fn install_addon_blocking(
     hooks: installer::ExtractHooks,
     on_dep: DepInstallReporter,
 ) -> Result<InstallResult, String> {
+    // Debug-only phase timing. Compiled out of release builds; exists so a slow
+    // install can be attributed to a phase instead of guessed at.
+    let phase = PhaseTimer::start("install");
+
     let installed_folders = installer::install_addon_zip_with_hashes(
         tmp_file.path(),
         addons_dir,
@@ -1791,8 +1840,10 @@ fn install_addon_blocking(
         esoui_version,
         hooks,
     )?;
+    phase.mark("extract + hash baseline");
 
     let mut store = metadata::load_metadata(addons_dir);
+    phase.mark("load metadata");
 
     // Only the primary folder gets the esoui_id so that check_for_updates
     // compares versions correctly. Secondary folders get esoui_id 0.
@@ -1807,6 +1858,8 @@ fn install_addon_blocking(
         0, // esoui_last_update will be populated during next update check
     );
 
+    phase.mark("record folders");
+
     let resolved = resolve_deps_with_policy_reporting(
         addons_dir,
         &installed_folders,
@@ -1814,8 +1867,10 @@ fn install_addon_blocking(
         dep_policy,
         on_dep,
     );
+    phase.mark("resolve dependencies");
 
     metadata::save_metadata(addons_dir, &store)?;
+    phase.mark("save metadata");
 
     Ok(InstallResult {
         installed_folders,
