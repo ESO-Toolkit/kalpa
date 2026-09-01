@@ -41,8 +41,49 @@ struct ApiImage {
     image_url: String,
 }
 
-/// Fetch addon details from the ESOUI filedetails JSON API.
+/// How long a `filedetails` response stays reusable.
+///
+/// Sized to collapse the resolve-then-install pair — the Discover flow calls
+/// `resolve_esoui_addon` and then `install_addon` seconds apart, and both need
+/// the same detail record, so without this an install costs two identical
+/// uncached round trips. Short enough that nothing has to invalidate it: the
+/// only consumers are download URLs and checksums for an install happening right
+/// now, while update DETECTION reads the separate filelist cache, which keeps
+/// its own invalidation. A minute-old detail record cannot mislead either.
+const DETAIL_TTL: Duration = Duration::from_secs(60);
+
+static DETAIL_CACHE: OnceLock<Mutex<HashMap<u32, (Instant, ApiFileDetail)>>> = OnceLock::new();
+
+fn detail_cache() -> &'static Mutex<HashMap<u32, (Instant, ApiFileDetail)>> {
+    DETAIL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A still-fresh cached record, or `None`. A poisoned lock reads as a miss so a
+/// caller always degrades to a live fetch rather than to an error.
+fn cached_file_detail(id: u32) -> Option<ApiFileDetail> {
+    let cache = detail_cache().lock().ok()?;
+    let (fetched_at, detail) = cache.get(&id)?;
+    (fetched_at.elapsed() < DETAIL_TTL).then(|| detail.clone())
+}
+
+/// Store a successful lookup, dropping expired entries on the way in so the map
+/// stays bounded by "addons fetched in the last minute" rather than growing for
+/// the life of the process as a user browses.
+fn store_file_detail(id: u32, detail: &ApiFileDetail) {
+    let Ok(mut cache) = detail_cache().lock() else {
+        return;
+    };
+    cache.retain(|_, (fetched_at, _)| fetched_at.elapsed() < DETAIL_TTL);
+    cache.insert(id, (Instant::now(), detail.clone()));
+}
+
+/// Fetch addon details from the ESOUI filedetails JSON API, reusing a recent
+/// response when one is available. Only successes are cached — an error must
+/// stay retryable immediately.
 fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiFileDetail, String> {
+    if let Some(hit) = cached_file_detail(id) {
+        return Ok(hit);
+    }
     let url = format!("https://api.mmoui.com/v4/game/ESO/filedetails/{id}.json");
     let response = fetch_with_retry(client, &url).map_err(|e| {
         if e.contains("HTTP 404") {
@@ -58,9 +99,11 @@ fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiF
         .json()
         .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))?;
 
-    entries.into_iter().next().ok_or_else(|| {
+    let detail = entries.into_iter().next().ok_or_else(|| {
         format!("ESOUI API returned empty response for addon {id}. It may have been removed.")
-    })
+    })?;
+    store_file_detail(id, &detail);
+    Ok(detail)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,23 +182,50 @@ fn user_agent() -> String {
 /// sustained ~27 Mbit/s just to finish in time, making those addons
 /// uninstallable on slow links. This client therefore sets no total deadline.
 ///
-/// reqwest's blocking builder has no idle-read timeout, so a dropped connection
-/// is caught by TCP keepalive probes instead: after 30s of silence, probes every
-/// 10s, connection failed after 4 unanswered (~70s) rather than hanging forever.
+/// It DOES set an idle-read timeout, which is a different thing: it bounds the
+/// gap between bytes, not the length of the transfer, so a healthy slow download
+/// is untouched. [`DOWNLOAD_READ_TIMEOUT`] on its own aborts nothing —
+/// [`stream_download_body`] treats an elapsed read as "no data this tick", which
+/// is what lets a Stop land mid-body instead of waiting on TCP keepalive.
+///
+/// reqwest 0.13's BLOCKING builder does not expose `read_timeout`, but its async
+/// builder does, and `blocking::ClientBuilder` is constructible `From` an async
+/// one — so the settings that exist only on the async side are applied first and
+/// the builder is then converted.
 fn download_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
+        let async_builder = reqwest::Client::builder()
             .user_agent(user_agent())
             .connect_timeout(Duration::from_secs(30))
+            .read_timeout(DOWNLOAD_READ_TIMEOUT)
             .tcp_keepalive(Duration::from_secs(30))
             .tcp_keepalive_interval(Duration::from_secs(10))
             .tcp_keepalive_retries(4u32)
-            .redirect(reqwest::redirect::Policy::limited(10))
+            .redirect(reqwest::redirect::Policy::limited(10));
+        reqwest::blocking::ClientBuilder::from(async_builder)
             .build()
             .expect("failed to build download HTTP client")
     })
 }
+
+/// How long a download may go without producing a single byte before
+/// [`stream_download_body`] wakes up to look around.
+///
+/// This is deliberately short, and it is safe to make it short precisely because
+/// an elapsed read is NOT an error: the loop checks the cancel flag and goes back
+/// to reading. The value therefore buys Stop latency and nothing else — a stalled
+/// download is abandoned only once [`DOWNLOAD_IDLE_BUDGET`] of *consecutive*
+/// silence has accumulated.
+const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How much CONSECUTIVE silence means the connection is dead rather than slow.
+///
+/// Consecutive is the whole point: the counter resets on every byte received, so
+/// a download crawling along at a few hundred bytes a second never accrues
+/// toward it. Measuring cumulative idle time instead would fail exactly the slow
+/// links that the "no total deadline" decision above exists to protect.
+const DOWNLOAD_IDLE_BUDGET: Duration = Duration::from_secs(60);
 
 fn fetch_page(
     client: &reqwest::blocking::Client,
@@ -1126,6 +1196,10 @@ impl DownloadHooks<'_> {
 /// Stop request is observed promptly (the cancel flag is polled per chunk).
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
+/// How many consecutive elapsed reads add up to [`DOWNLOAD_IDLE_BUDGET`].
+const MAX_CONSECUTIVE_IDLE_TICKS: u32 =
+    (DOWNLOAD_IDLE_BUDGET.as_secs() / DOWNLOAD_READ_TIMEOUT.as_secs()) as u32;
+
 fn report_download_progress(hooks: &DownloadHooks, done: u64, total: Option<u64>) {
     if let Some(cb) = hooks.progress {
         cb(done, total);
@@ -1202,16 +1276,43 @@ fn stream_download_body<R: io::Read, W: io::Write>(
     // total size) before the first chunk lands, rather than after it.
     report_download_progress(&hooks, 0, total);
 
+    // Consecutive idle ticks — reset by any byte that arrives. Counted in ticks
+    // rather than wall clock because the client's `read_timeout` is what bounds
+    // each one, which also keeps the budget deterministic under test.
+    let mut idle_ticks: u32 = 0;
+
     loop {
         if download_is_cancelled(&hooks) {
             return Err(crate::installer::CANCELLED.to_string());
         }
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| map_download_read_error(&e))?;
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            // The read timeout elapsed: no data this tick. That is not by itself
+            // a failure — the connection may simply be slow — so loop back and
+            // re-check the cancel flag, which is what lets Stop land mid-body
+            // instead of waiting on TCP keepalive. Only sustained silence is
+            // fatal.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                idle_ticks += 1;
+                if idle_ticks >= MAX_CONSECUTIVE_IDLE_TICKS {
+                    return Err(map_download_read_error(&e));
+                }
+                continue;
+            }
+            Err(e) => return Err(map_download_read_error(&e)),
+        };
         if n == 0 {
             break;
         }
+        // Bytes arrived, so whatever silence preceded them was slowness, not a
+        // stall. Resetting here (rather than accumulating) is what keeps a
+        // genuinely slow download alive indefinitely.
+        idle_ticks = 0;
         writer
             .write_all(&buf[..n])
             .map_err(|e| map_download_write_error(&e))?;
@@ -2065,6 +2166,116 @@ mod tests {
         // Deliberately not the "Failed to write download to temp file" wording:
         // a mid-body timeout is the network, not the user's drive.
         assert!(err.contains("Download stalled"), "unexpected error: {err}");
+    }
+
+    /// A slow connection produces idle ticks between real chunks. Those must not
+    /// accumulate toward the stall budget, or downloads on exactly the slow links
+    /// the no-total-deadline decision protects would start failing.
+    #[test]
+    fn stream_download_body_survives_idle_ticks_between_chunks() {
+        struct Stuttering {
+            reads: usize,
+        }
+        impl io::Read for Stuttering {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                // Far more idle ticks in total than the budget, but never that
+                // many in a row: two stalls, a byte, two stalls, a byte, ...
+                match self.reads % 3 {
+                    0 => {
+                        buf[0] = 42;
+                        Ok(1)
+                    }
+                    _ if self.reads > MAX_CONSECUTIVE_IDLE_TICKS as usize * 3 => Ok(0),
+                    _ => Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out")),
+                }
+            }
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let written = stream_download_body(
+            &mut Stuttering { reads: 0 },
+            &mut out,
+            None,
+            None,
+            DownloadHooks::NONE,
+        )
+        .expect("a stuttering but progressing body must complete");
+        assert_eq!(written as usize, out.len());
+        assert!(written > 0, "expected the delivered bytes to be written");
+    }
+
+    /// Stop must land during a stall, rather than waiting out the whole budget.
+    #[test]
+    fn stream_download_body_cancels_during_a_stall() {
+        struct Stalled<'a> {
+            flag: &'a AtomicBool,
+        }
+        impl io::Read for Stalled<'_> {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                // Trip cancellation the way a user's Stop click would: while the
+                // body is silent, before the idle budget is anywhere near spent.
+                self.flag.store(true, Ordering::Relaxed);
+                Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"))
+            }
+        }
+
+        let flag = AtomicBool::new(false);
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut Stalled { flag: &flag },
+            &mut out,
+            None,
+            None,
+            DownloadHooks {
+                cancel: Some(&flag),
+                progress: None,
+            },
+        )
+        .expect_err("a cancelled download must fail");
+        assert_eq!(err, crate::installer::CANCELLED);
+    }
+
+    #[test]
+    fn detail_cache_serves_a_fresh_entry_and_expires_a_stale_one() {
+        let detail = ApiFileDetail {
+            id: 4161,
+            title: "LibCustomIcons".to_string(),
+            version: "2026-08-31".to_string(),
+            author: "m00nyONE".to_string(),
+            description: String::new(),
+            last_update: 0,
+            checksum: "abc".to_string(),
+            download_uri: "https://cdn.esoui.com/x.zip".to_string(),
+            downloads: 0,
+            downloads_monthly: 0,
+            favorites: 0,
+            change_log: String::new(),
+            images: Vec::new(),
+        };
+
+        store_file_detail(4161, &detail);
+        let hit = cached_file_detail(4161).expect("a just-stored entry must be a hit");
+        assert_eq!(hit.checksum, "abc");
+
+        // Backdate past the TTL: the entry must read as a miss, and the next
+        // store must evict it rather than let the map grow.
+        {
+            let mut cache = detail_cache().lock().unwrap();
+            let entry = cache.get_mut(&4161).unwrap();
+            entry.0 = Instant::now() - DETAIL_TTL - Duration::from_secs(1);
+        }
+        assert!(
+            cached_file_detail(4161).is_none(),
+            "an entry past the TTL must not be served"
+        );
+
+        store_file_detail(999_999, &detail);
+        assert!(
+            !detail_cache().lock().unwrap().contains_key(&4161),
+            "storing must evict expired entries"
+        );
+        detail_cache().lock().unwrap().clear();
     }
 
     #[test]
