@@ -62,17 +62,6 @@
         }
       ]
     },
-    {
-      "identifier": "opener:allow-reveal-item-in-dir",
-      "allow": [
-        {
-          "path": "$DOCUMENT/Elder Scrolls Online/**"
-        },
-        {
-          "path": "$HOME/**/Elder Scrolls Online/**"
-        }
-      ]
-    },
     "notification:default",
     "core:app:allow-version",
     "core:app:allow-tauri-version",

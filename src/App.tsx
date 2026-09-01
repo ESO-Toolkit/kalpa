@@ -982,9 +982,10 @@ function App() {
   const handleOpenFolder = useCallback(
     async (folderName: string) => {
       try {
-        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
         const { join } = await import("@tauri-apps/api/path");
-        await revealItemInDir(await join(addonsPath, folderName));
+        await invokeOrThrow("reveal_allowed_path", {
+          path: await join(addonsPath, folderName),
+        });
       } catch (e) {
         toast.error(`Could not open folder: ${getTauriErrorMessage(e)}`);
       }

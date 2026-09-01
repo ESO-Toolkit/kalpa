@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -64,6 +65,60 @@ fn require_allowed_path(
         return Err("Addons path does not match the configured path.".to_string());
     }
     Ok(allowed_path.configured.clone())
+}
+
+fn resolve_allowed_reveal_path(
+    addons_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let addons_root = dunce::canonicalize(addons_root)
+        .map_err(|e| format!("Could not resolve the configured AddOns folder: {e}"))?;
+    let requested = Path::new(requested_path);
+    if crate::platform::has_unc_or_verbatim_prefix(requested) {
+        return Err("Network and special paths are not allowed.".to_string());
+    }
+
+    let canonical = dunce::canonicalize(requested)
+        .map_err(|e| format!("Could not resolve the item to reveal: {e}"))?;
+    if canonical.starts_with(&addons_root) {
+        return Ok(canonical);
+    }
+
+    let eso_root = addons_root
+        .parent()
+        .ok_or_else(|| "Could not resolve the ESO directory.".to_string())?;
+    for sibling in ["Logs", "kalpa-backups"] {
+        let allowed_root = eso_root.join(sibling);
+        let allowed_root = dunce::canonicalize(&allowed_root).unwrap_or(allowed_root);
+        if canonical.starts_with(allowed_root) {
+            return Ok(canonical);
+        }
+    }
+
+    Err("The item is outside the configured ESO folders.".to_string())
+}
+
+/// Reveal an item only after native code confines it to the configured ESO
+/// AddOns directory or its sibling Logs and kalpa-backups directories. The webview intentionally
+/// has no direct reveal permission because valid ESO locations are runtime
+/// state and cannot be represented safely by static capability globs.
+#[tauri::command]
+pub fn reveal_allowed_path(
+    app: AppHandle,
+    state: tauri::State<'_, AllowedAddonsPath>,
+    path: String,
+) -> Result<(), String> {
+    let addons_root = {
+        let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+        guard
+            .as_ref()
+            .map(|allowed| allowed.canonical.clone())
+            .ok_or_else(|| "Addons path has not been initialized.".to_string())?
+    };
+    let path = resolve_allowed_reveal_path(&addons_root, &path)?;
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|e| format!("Could not reveal the item: {e}"))
 }
 
 /// Called by the frontend to register the approved addons directory.
@@ -12229,6 +12284,62 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn reveal_paths_are_confined_to_the_approved_eso_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let addons = live.join("AddOns");
+        let addon = addons.join("ExampleAddon");
+        let logs = live.join("Logs");
+        let log = logs.join("Encounter.log");
+        let backups = live.join("kalpa-backups");
+        let backup = backups.join("manual");
+        let outside = temp.path().join("outside.txt");
+        fs::create_dir_all(&addon).unwrap();
+        fs::create_dir_all(&logs).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(&log, b"log").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+
+        let addons = fs::canonicalize(addons).unwrap();
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &addon.to_string_lossy()).unwrap(),
+            dunce::canonicalize(addon).unwrap()
+        );
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &log.to_string_lossy()).unwrap(),
+            dunce::canonicalize(log).unwrap()
+        );
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &backup.to_string_lossy()).unwrap(),
+            dunce::canonicalize(backup).unwrap()
+        );
+        assert!(resolve_allowed_reveal_path(&addons, &outside.to_string_lossy()).is_err());
+        assert!(resolve_allowed_reveal_path(
+            &addons,
+            &temp.path().join("missing.log").to_string_lossy()
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_paths_reject_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let addons = temp.path().join("live").join("AddOns");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&addons).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, addons.join("escape")).unwrap();
+
+        let addons = dunce::canonicalize(addons).unwrap();
+        assert!(
+            resolve_allowed_reveal_path(&addons, &addons.join("escape").to_string_lossy()).is_err()
+        );
+    }
 
     #[test]
     // Names the DETECTOR, not the import, because that is all it exercises.

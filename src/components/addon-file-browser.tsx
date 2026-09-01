@@ -200,9 +200,10 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
 
   const handleOpenFolder = async () => {
     try {
-      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
       const { join } = await import("@tauri-apps/api/path");
-      await revealItemInDir(await join(addonsPath, folderName));
+      await invokeOrThrow("reveal_allowed_path", {
+        path: await join(addonsPath, folderName),
+      });
     } catch {
       // best-effort
     }
