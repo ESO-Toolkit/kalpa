@@ -358,8 +358,28 @@ pub const FIELDS: &[FieldSpec] = &[
 
 /// Look up a field by key, case-insensitively — ReShade does not preserve case.
 pub fn field_for(key: &str) -> Option<&'static FieldSpec> {
-    let _ = key;
-    todo!("field_for")
+    FIELDS.iter().find(|f| f.key.eq_ignore_ascii_case(key))
+}
+
+/// Split a raw line (as produced by `str::split_inclusive('\n')`) into its
+/// content and its original terminator (`"\r\n"`, `"\n"`, or `""` for a final
+/// line with none).
+fn split_terminator(raw: &str) -> (&str, &str) {
+    if let Some(stripped) = raw.strip_suffix("\r\n") {
+        (stripped, "\r\n")
+    } else if let Some(stripped) = raw.strip_suffix('\n') {
+        (stripped, "\n")
+    } else {
+        (raw, "")
+    }
+}
+
+/// Is this trimmed line a `[Section]` header, and if so, its name (trimmed)?
+fn section_header(trimmed: &str) -> Option<&str> {
+    trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .map(|name| name.trim())
 }
 
 /// Build the panel's data from the text of `ReShade.ini`.
@@ -367,8 +387,89 @@ pub fn field_for(key: &str) -> Option<&'static FieldSpec> {
 /// Values are reported exactly as they appear. Nothing is normalised, defaulted
 /// or clamped: a value Kalpa does not understand still belongs to the user.
 pub fn read_form(reshade_ini: &str, client_dir: &str) -> TuningForm {
-    let _ = (reshade_ini, client_dir);
-    todo!("read_form")
+    let mut section_present = false;
+    let mut in_section = false;
+    // Last occurrence of a key wins, as it would when ReShade itself reads the
+    // file; order of first appearance is kept for the `unknown` list.
+    let mut found: Vec<(String, String)> = Vec::new();
+
+    for raw in reshade_ini.split_inclusive('\n') {
+        let (content, _) = split_terminator(raw);
+        let trimmed = content.trim();
+        if let Some(name) = section_header(trimmed) {
+            in_section = name.eq_ignore_ascii_case(TUNING_SECTION);
+            if in_section {
+                section_present = true;
+            }
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_string();
+        let value = value.trim().to_string();
+        if let Some(existing) = found.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+            existing.1 = value;
+        } else {
+            found.push((key, value));
+        }
+    }
+
+    let fields = FIELDS
+        .iter()
+        .map(|spec| {
+            let current = found
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(spec.key))
+                .map(|(_, v)| v.clone());
+            let (slider_min, slider_max) = if spec.control == TuningControl::Float {
+                let parsed = current
+                    .as_deref()
+                    .and_then(|s| s.trim().parse::<f64>().ok());
+                let (min, max) = slider_range(parsed);
+                (Some(min), Some(max))
+            } else {
+                (None, None)
+            };
+            TuningField {
+                key: spec.key.to_string(),
+                label: spec.label.to_string(),
+                control: spec.control,
+                group: spec.group,
+                choices: spec
+                    .choices
+                    .iter()
+                    .map(|(value, label)| ChoiceOption {
+                        value: *value,
+                        label: label.to_string(),
+                    })
+                    .collect(),
+                decimals: spec.decimals,
+                help: spec.help.to_string(),
+                current,
+                slider_min,
+                slider_max,
+            }
+        })
+        .collect();
+
+    let unknown = found
+        .into_iter()
+        .filter(|(key, _)| field_for(key).is_none())
+        .collect();
+
+    TuningForm {
+        client_dir: client_dir.to_string(),
+        section_present,
+        fields,
+        unknown,
+    }
 }
 
 /// The display range for a float slider, derived so it contains `current`.
@@ -378,8 +479,15 @@ pub fn read_form(reshade_ini: &str, client_dir: &str) -> TuningForm {
 /// at the next whole 0.5 step above `current` when that is larger. Deterministic
 /// so the slider does not jump around between reads of the same file.
 pub fn slider_range(current: Option<f64>) -> (f64, f64) {
-    let _ = current;
-    todo!("slider_range")
+    let min = match current {
+        Some(v) if v < 0.0 => v.floor(),
+        _ => 0.0,
+    };
+    let max = match current {
+        Some(v) if v > 1.0 => (((v / 0.5).floor()) + 1.0) * 0.5,
+        _ => 1.0,
+    };
+    (min, max)
 }
 
 /// Check one edit against its field before anything is written.
@@ -388,8 +496,57 @@ pub fn slider_range(current: Option<f64>) -> (f64, f64) {
 /// value not among the field's own options; a float or key code that does not
 /// parse. A refusal names the key and the reason.
 pub fn validate_edit(edit: &TuningEdit) -> Result<(), String> {
-    let _ = edit;
-    todo!("validate_edit")
+    let spec = field_for(&edit.key)
+        .ok_or_else(|| format!("{} is not a known RenoDX DLSS 5 setting.", edit.key))?;
+    match spec.control {
+        TuningControl::Toggle => {
+            if edit.value != "0" && edit.value != "1" {
+                return Err(format!("{} must be 0 or 1.", spec.key));
+            }
+        }
+        TuningControl::Choice => {
+            let parsed: i64 = edit
+                .value
+                .trim()
+                .parse()
+                .map_err(|_| format!("{} must be one of its listed values.", spec.key))?;
+            if !spec.choices.iter().any(|(value, _)| *value == parsed) {
+                return Err(format!("{} must be one of its listed values.", spec.key));
+            }
+        }
+        TuningControl::Float => {
+            edit.value
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| format!("{} must be a number.", spec.key))?;
+        }
+        TuningControl::KeyCode => {
+            edit.value
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| format!("{} must be a key code.", spec.key))?;
+        }
+    }
+    Ok(())
+}
+
+/// One physical line of the file, kept as content plus its original
+/// terminator so the file can be reassembled byte for byte.
+struct Line {
+    content: String,
+    terminator: String,
+}
+
+/// The line ending most of the file uses, for lines newly appended by
+/// [`apply_edits`]. Falls back to `"\n"` for a file with no terminated lines
+/// at all (a single-line file with no trailing newline).
+fn dominant_line_ending(lines: &[Line]) -> String {
+    lines
+        .iter()
+        .map(|line| line.terminator.as_str())
+        .find(|term| !term.is_empty())
+        .unwrap_or("\n")
+        .to_string()
 }
 
 /// Produce the new text of `ReShade.ini` with `edits` applied to the
@@ -405,8 +562,97 @@ pub fn validate_edit(edit: &TuningEdit) -> Result<(), String> {
 /// Returns `Err` when the section does not exist — writing one from nothing
 /// would be Kalpa inventing configuration for an add-on that has never run.
 pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, String> {
-    let _ = (reshade_ini, edits);
-    todo!("apply_edits")
+    let mut lines: Vec<Line> = reshade_ini
+        .split_inclusive('\n')
+        .map(|raw| {
+            let (content, terminator) = split_terminator(raw);
+            Line {
+                content: content.to_string(),
+                terminator: terminator.to_string(),
+            }
+        })
+        .collect();
+
+    let headers: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| section_header(line.content.trim()).is_some())
+        .map(|(i, _)| i)
+        .collect();
+    let section_start = *headers
+        .iter()
+        .find(|&&i| {
+            section_header(lines[i].content.trim())
+                .is_some_and(|name| name.eq_ignore_ascii_case(TUNING_SECTION))
+        })
+        .ok_or_else(|| format!("The [{TUNING_SECTION}] section was not found in {TUNING_FILE}."))?;
+    // The section runs to the next header of any kind. Derived from the header
+    // list rather than tracked in one pass so that a file with the section
+    // written twice — which ReShade will not produce but a hand-edited file
+    // can — still yields an end that is after the start, instead of a reversed
+    // range that would append the edit above the section it belongs to.
+    let section_end = headers
+        .iter()
+        .copied()
+        .find(|&i| i > section_start)
+        .unwrap_or(lines.len());
+
+    let mut remaining: Vec<&TuningEdit> = edits.iter().collect();
+
+    for line in lines.iter_mut().take(section_end).skip(section_start + 1) {
+        let trimmed = line.content.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(eq_pos) = line.content.find('=') else {
+            continue;
+        };
+        let key_trimmed = line.content[..eq_pos].trim();
+        if let Some(pos) = remaining
+            .iter()
+            .position(|edit| edit.key.eq_ignore_ascii_case(key_trimmed))
+        {
+            let edit = remaining.remove(pos);
+            let key_part = &line.content[..eq_pos];
+            line.content = format!("{key_part}={}", edit.value);
+        }
+    }
+
+    if !remaining.is_empty() {
+        // Every remaining edit was already validated against `FIELDS`, so this
+        // key must resolve — `apply_client_tuning` never reaches this function
+        // with an unvalidated edit.
+        let mut appended = Vec::new();
+        for edit in &remaining {
+            let key = field_for(&edit.key)
+                .map(|spec| spec.key)
+                .unwrap_or(&edit.key);
+            appended.push(format!("{key}={}", edit.value));
+        }
+
+        // A key appended right at end-of-file needs the preceding line to end
+        // with a newline first, or it would land on the same physical line.
+        if section_end > 0 && lines[section_end - 1].terminator.is_empty() {
+            lines[section_end - 1].terminator = dominant_line_ending(&lines);
+        }
+        let terminator = dominant_line_ending(&lines);
+        for (offset, content) in appended.into_iter().enumerate() {
+            lines.insert(
+                section_end + offset,
+                Line {
+                    content,
+                    terminator: terminator.clone(),
+                },
+            );
+        }
+    }
+
+    let mut out = String::new();
+    for line in &lines {
+        out.push_str(&line.content);
+        out.push_str(&line.terminator);
+    }
+    Ok(out)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────
@@ -414,8 +660,10 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
 /// Read-only: the current tuning values.
 #[tauri::command]
 pub fn read_client_tuning(client_dir: String) -> Result<TuningForm, String> {
-    let _ = client_dir;
-    todo!("read_client_tuning")
+    let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
+    let ini_path = tuning_file_path(&location.client_dir);
+    let contents = std::fs::read_to_string(&ini_path).unwrap_or_default();
+    Ok(read_form(&contents, &location.client_dir.to_string_lossy()))
 }
 
 /// Apply a draft: one validated, backed-up, atomic write of `ReShade.ini`.
@@ -429,11 +677,367 @@ pub async fn apply_client_tuning(
     client_dir: String,
     edits: Vec<TuningEdit>,
 ) -> Result<TuningApplyOutcome, String> {
-    let _ = (app, state, client_dir, edits);
-    todo!("apply_client_tuning")
+    for edit in &edits {
+        validate_edit(edit)?;
+    }
+
+    let root = crate::client_write::begin_write(&state, &client_dir).await?;
+
+    tokio::task::spawn_blocking(move || {
+        let ini_path = tuning_file_path(root.path());
+        let contents = std::fs::read_to_string(&ini_path)
+            .map_err(|e| format!("Could not read {TUNING_FILE}: {e}"))?;
+        let updated = apply_edits(&contents, &edits)?;
+        let outcome = crate::client_backup::edit_managed_file(
+            &app,
+            &root,
+            TUNING_FILE,
+            crate::client_write::ManagedKind::ReShadeConfig,
+            updated.as_bytes(),
+        )?;
+        Ok(TuningApplyOutcome {
+            changed: edits.into_iter().map(|edit| edit.key).collect(),
+            backup_id: outcome.backup_id,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Where `ReShade.ini` is, for a validated client directory.
 pub fn tuning_file_path(client_dir: &Path) -> std::path::PathBuf {
     client_dir.join(TUNING_FILE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── field_for ───────────────────────────────────────────────────────
+
+    #[test]
+    fn field_for_is_case_insensitive() {
+        let spec = field_for("neuraluplift").expect("should match NeuralUplift");
+        assert_eq!(spec.key, "NeuralUplift");
+    }
+
+    #[test]
+    fn field_for_unknown_key_is_none() {
+        assert!(field_for("NotARealKey").is_none());
+    }
+
+    // ── slider_range ────────────────────────────────────────────────────
+
+    #[test]
+    fn slider_range_defaults_to_zero_one_with_no_value() {
+        assert_eq!(slider_range(None), (0.0, 1.0));
+    }
+
+    #[test]
+    fn slider_range_floors_a_negative_value_for_the_minimum() {
+        let (min, max) = slider_range(Some(-0.3));
+        assert_eq!(min, -1.0);
+        assert_eq!(max, 1.0);
+    }
+
+    /// `NRLocalStructure=1.4` is a value pulled from a real user's install
+    /// (see the module doc). The slider range must contain it.
+    #[test]
+    fn slider_range_contains_a_real_world_value_above_one() {
+        let (min, max) = slider_range(Some(1.4));
+        assert!(
+            min <= 1.4 && 1.4 <= max,
+            "range [{min}, {max}] must contain 1.4"
+        );
+        // Also pinned exactly: next whole 0.5 step above 1.4 is 1.5.
+        assert_eq!((min, max), (0.0, 1.5));
+    }
+
+    #[test]
+    fn slider_range_keeps_default_max_for_values_within_zero_one() {
+        assert_eq!(slider_range(Some(0.5)), (0.0, 1.0));
+    }
+
+    // ── read_form ───────────────────────────────────────────────────────
+
+    #[test]
+    fn read_form_reports_values_verbatim_and_never_defaults() {
+        let ini = "[RenoDX.DLSS5]\nNeuralUplift=1\nNRLocalStructure=1.4\nUnknownFutureKey=42\n";
+        let form = read_form(ini, "C:/client");
+
+        assert!(form.section_present);
+
+        let uplift = form
+            .fields
+            .iter()
+            .find(|f| f.key == "NeuralUplift")
+            .expect("field present");
+        assert_eq!(uplift.current.as_deref(), Some("1"));
+
+        let structure = form
+            .fields
+            .iter()
+            .find(|f| f.key == "NRLocalStructure")
+            .expect("field present");
+        assert_eq!(structure.current.as_deref(), Some("1.4"));
+        let (min, max) = (
+            structure.slider_min.expect("float has a slider range"),
+            structure.slider_max.expect("float has a slider range"),
+        );
+        assert!(min <= 1.4 && 1.4 <= max);
+
+        let intensity = form
+            .fields
+            .iter()
+            .find(|f| f.key == "NRIntensity")
+            .expect("field present");
+        assert_eq!(intensity.current, None, "an absent key must read as None");
+
+        assert_eq!(
+            form.unknown,
+            vec![("UnknownFutureKey".to_string(), "42".to_string())]
+        );
+    }
+
+    #[test]
+    fn read_form_reports_section_absent_without_inventing_anything() {
+        let form = read_form("[GENERAL]\nFoo=1\n", "C:/client");
+        assert!(!form.section_present);
+        assert!(form.fields.iter().all(|f| f.current.is_none()));
+        assert!(form.unknown.is_empty());
+    }
+
+    // ── validate_edit ───────────────────────────────────────────────────
+
+    #[test]
+    fn validate_edit_refuses_an_unknown_key() {
+        let err = validate_edit(&TuningEdit {
+            key: "NotARealKey".to_string(),
+            value: "1".to_string(),
+        })
+        .expect_err("must refuse");
+        assert!(err.contains("NotARealKey"));
+    }
+
+    #[test]
+    fn validate_edit_refuses_a_toggle_that_is_not_zero_or_one() {
+        let err = validate_edit(&TuningEdit {
+            key: "NeuralUplift".to_string(),
+            value: "2".to_string(),
+        })
+        .expect_err("must refuse");
+        assert!(err.contains("NeuralUplift"));
+    }
+
+    #[test]
+    fn validate_edit_accepts_a_valid_toggle() {
+        validate_edit(&TuningEdit {
+            key: "NeuralUplift".to_string(),
+            value: "1".to_string(),
+        })
+        .expect("must accept");
+    }
+
+    #[test]
+    fn validate_edit_refuses_a_choice_value_outside_its_own_options() {
+        let err = validate_edit(&TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "5".to_string(),
+        })
+        .expect_err("must refuse");
+        assert!(err.contains("NRStyle"));
+    }
+
+    #[test]
+    fn validate_edit_refuses_a_non_numeric_choice() {
+        validate_edit(&TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "abc".to_string(),
+        })
+        .expect_err("must refuse");
+    }
+
+    #[test]
+    fn validate_edit_accepts_a_valid_choice() {
+        validate_edit(&TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "1".to_string(),
+        })
+        .expect("must accept");
+    }
+
+    #[test]
+    fn validate_edit_refuses_an_unparseable_float() {
+        let err = validate_edit(&TuningEdit {
+            key: "NRIntensity".to_string(),
+            value: "abc".to_string(),
+        })
+        .expect_err("must refuse");
+        assert!(err.contains("NRIntensity"));
+    }
+
+    #[test]
+    fn validate_edit_accepts_a_valid_float() {
+        validate_edit(&TuningEdit {
+            key: "NRIntensity".to_string(),
+            value: "0.5".to_string(),
+        })
+        .expect("must accept");
+    }
+
+    #[test]
+    fn validate_edit_refuses_an_unparseable_key_code() {
+        let err = validate_edit(&TuningEdit {
+            key: "NRToggleKey".to_string(),
+            value: "12.5".to_string(),
+        })
+        .expect_err("must refuse");
+        assert!(err.contains("NRToggleKey"));
+    }
+
+    #[test]
+    fn validate_edit_accepts_a_valid_key_code() {
+        validate_edit(&TuningEdit {
+            key: "NRToggleKey".to_string(),
+            value: "65".to_string(),
+        })
+        .expect("must accept");
+    }
+
+    // ── apply_edits ─────────────────────────────────────────────────────
+
+    /// A fixture shaped like a real `ReShade.ini`: CRLF terminators, a giant
+    /// ImGui docking value containing `=` and commas, a comment, a blank
+    /// line, the target section with an already-unknown key, and another
+    /// section after it. Only the one edited value may change.
+    fn crlf_fixture() -> String {
+        concat!(
+            "[GENERAL]\r\n",
+            "DockingData=Layout=A,B=2,C=3\r\n",
+            "; a comment\r\n",
+            "\r\n",
+            "[RenoDX.DLSS5]\r\n",
+            "NeuralUplift=1\r\n",
+            "UnknownFutureKey=42\r\n",
+            "[OtherSection]\r\n",
+            "Foo=bar\r\n",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn apply_edits_touches_only_the_edited_value_and_keeps_crlf() {
+        let original = crlf_fixture();
+        let edits = vec![
+            TuningEdit {
+                key: "NeuralUplift".to_string(),
+                value: "0".to_string(),
+            },
+            TuningEdit {
+                key: "NRIntensity".to_string(),
+                value: "0.75".to_string(),
+            },
+        ];
+
+        let updated = apply_edits(&original, &edits).expect("section exists");
+
+        let expected = concat!(
+            "[GENERAL]\r\n",
+            "DockingData=Layout=A,B=2,C=3\r\n",
+            "; a comment\r\n",
+            "\r\n",
+            "[RenoDX.DLSS5]\r\n",
+            "NeuralUplift=0\r\n",
+            "UnknownFutureKey=42\r\n",
+            "NRIntensity=0.75\r\n",
+            "[OtherSection]\r\n",
+            "Foo=bar\r\n",
+        );
+        assert_eq!(updated, expected);
+        assert!(!updated.contains("\r\r"), "must not double up terminators");
+
+        // Every line must still be CRLF-terminated.
+        for line in updated.split_inclusive('\n') {
+            assert!(line.ends_with("\r\n"), "line {line:?} lost its CRLF");
+        }
+    }
+
+    #[test]
+    fn apply_edits_appends_missing_keys_with_canonical_spelling() {
+        let original = "[RenoDX.DLSS5]\nneuraluplift=1\n";
+        let edits = vec![TuningEdit {
+            key: "EnableHooks".to_string(),
+            value: "1".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(updated, "[RenoDX.DLSS5]\nneuraluplift=1\nEnableHooks=1\n");
+    }
+
+    #[test]
+    fn apply_edits_edits_an_existing_key_in_place_preserving_its_own_spelling() {
+        let original = "[RenoDX.DLSS5]\nneuraluplift=1\n";
+        let edits = vec![TuningEdit {
+            key: "NeuralUplift".to_string(),
+            value: "0".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nneuraluplift=0\n",
+            "the on-disk key spelling must survive, only the value changes"
+        );
+    }
+
+    #[test]
+    fn apply_edits_adds_a_missing_trailing_newline_before_appending() {
+        // No trailing newline on the last line of the file.
+        let original = "[RenoDX.DLSS5]\nNeuralUplift=1";
+        let edits = vec![TuningEdit {
+            key: "EnableHooks".to_string(),
+            value: "1".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(updated, "[RenoDX.DLSS5]\nNeuralUplift=1\nEnableHooks=1\n");
+    }
+
+    #[test]
+    fn apply_edits_refuses_when_the_section_is_absent() {
+        let err =
+            apply_edits("[GENERAL]\nFoo=1\n", &[]).expect_err("must refuse an absent section");
+        assert!(err.contains(TUNING_SECTION));
+    }
+
+    #[test]
+    fn apply_edits_section_lookup_is_case_insensitive() {
+        let original = "[renodx.dlss5]\nNeuralUplift=1\n";
+        let edits = vec![TuningEdit {
+            key: "NeuralUplift".to_string(),
+            value: "0".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(updated, "[renodx.dlss5]\nNeuralUplift=0\n");
+    }
+
+    /// A hand-edited file can name the section twice. The edit has to land
+    /// inside a section, not above one.
+    #[test]
+    fn apply_edits_survives_the_section_appearing_twice() {
+        let original =
+            "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n[RenoDX.DLSS5]\nNRPreset=2\n";
+        let edits = vec![TuningEdit {
+            key: "NRIntensity".to_string(),
+            value: "0.50".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated,
+            "[RenoDX.DLSS5]\nNRStyle=0\n\nNRIntensity=0.50\n[GENERAL]\nFoo=1\n\n\
+             [RenoDX.DLSS5]\nNRPreset=2\n",
+            "the appended key must sit inside a [RenoDX.DLSS5] block"
+        );
+    }
 }
