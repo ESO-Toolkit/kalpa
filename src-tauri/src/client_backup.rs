@@ -1342,6 +1342,110 @@ fn apply_parked_flags(
     Ok(())
 }
 
+// ── Editing a file that is already there ─────────────────────────────────
+
+/// The result of one in-place edit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EditOutcome {
+    pub relative_path: String,
+    /// Backup folder id holding the bytes that were there before.
+    pub backup_id: Option<String>,
+    /// True when the manifest already knew about this file and its hash was
+    /// refreshed. False means Kalpa edited a file it does not manage — which
+    /// is allowed, and deliberately does not create a record.
+    pub manifest_updated: bool,
+}
+
+/// Rewrite a file that is **already** in the client directory, preserving how
+/// it got there.
+///
+/// This is neither a placement nor a revert. A placement brings new bytes in
+/// and records them as [`FileOrigin::Placed`], which is exactly wrong for
+/// `ReShade.ini`: that file is the user's, adoption recorded it as
+/// [`FileOrigin::Adopted`], and re-recording it as placed would tell uninstall
+/// it may delete it. So the entry's `origin`, `displaced_backup` and
+/// `displaced_in_place` are carried through untouched and only the hash moves.
+///
+/// If the manifest has no entry for this path, none is created. Editing a file
+/// is not a claim to have installed it, and inventing a `Placed` row for a file
+/// Kalpa found would hand uninstall permission it was never given.
+///
+/// The previous contents are always copied into a fresh backup folder first,
+/// whatever the manifest says. No hash gate: ReShade rewrites `ReShade.ini`
+/// itself on every run, so "the bytes differ from what Kalpa last saw" is the
+/// normal case here rather than evidence of tampering — the backup is what
+/// makes the edit reversible instead.
+///
+/// That backup folder is *unreferenced*, so [`prune_unreferenced_backups`]
+/// will eventually reclaim it. For a small config file rewritten repeatedly
+/// that is the right trade; nothing irreplaceable is stored this way.
+pub fn edit_managed_file(
+    app: &tauri::AppHandle,
+    root: &ApprovedRoot,
+    relative_path: &str,
+    kind: ManagedKind,
+    contents: &[u8],
+) -> Result<EditOutcome, String> {
+    let manifest = manifest_path(app)?;
+    let backups = backup_root(app)?;
+    edit_managed_file_in(&manifest, &backups, root, relative_path, kind, contents)
+}
+
+/// Inner form of [`edit_managed_file`], testable without an `AppHandle`.
+pub fn edit_managed_file_in(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    relative_path: &str,
+    kind: ManagedKind,
+    contents: &[u8],
+) -> Result<EditOutcome, String> {
+    let _guard = lock_manifest();
+
+    // Gate 4 inside the lock, before anything moves. ReShade rewrites this file
+    // on exit, so editing it under a live client is a straight race.
+    root.reassert_idle()?;
+    let client_root = root.path();
+
+    crate::client_write::validate_placement(kind, relative_path)?;
+    let target = crate::client_write::safe_relative_join(client_root, relative_path)?;
+    if !target.is_file() {
+        return Err(format!(
+            "{relative_path} is not in the client folder, so there is nothing to edit."
+        ));
+    }
+    crate::client_write::assert_contained(client_root, &target)?;
+
+    let backup_id = backup_existing_in(backup_root, client_root, relative_path)?;
+    crate::atomic_file::atomic_write(&target, contents)
+        .map_err(|e| format!("Failed to write {relative_path}: {e}"))?;
+
+    let mut manifest = load_manifest_at(manifest_path);
+    let mut manifest_updated = false;
+    if let Some(entry) = manifest
+        .installs
+        .get_mut(&install_key(client_root))
+        .and_then(|bucket| {
+            bucket
+                .iter_mut()
+                .find(|file| file.relative_path == relative_path)
+        })
+    {
+        entry.sha256 = hash_file(&target)?;
+        entry.placed_at = rfc3339_now();
+        manifest_updated = true;
+    }
+    if manifest_updated {
+        save_manifest_at(manifest_path, &manifest)?;
+    }
+
+    Ok(EditOutcome {
+        relative_path: relative_path.to_string(),
+        backup_id,
+        manifest_updated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2580,5 +2684,178 @@ mod tests {
             .collect();
         out.sort();
         out
+    }
+
+    // ── In-place edits ───────────────────────────────────────────────────
+
+    struct EditHarness {
+        _temp: tempfile::TempDir,
+        manifest: PathBuf,
+        backups: PathBuf,
+        client: PathBuf,
+    }
+
+    impl EditHarness {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let manifest = temp.path().join("client-managed.json");
+            let backups = temp.path().join("backups");
+            let client = temp.path().join("client");
+            std::fs::create_dir_all(&backups).expect("mkdir backups");
+            std::fs::create_dir_all(&client).expect("mkdir client");
+            std::fs::write(client.join("ReShade.ini"), "[GENERAL]\nOld=1\n").expect("fixture");
+            Self {
+                _temp: temp,
+                manifest,
+                backups,
+                client,
+            }
+        }
+
+        fn adopt_reshade_ini(&self) {
+            record_adopted(
+                &self.manifest,
+                &self.client,
+                vec![ManagedFile {
+                    relative_path: "ReShade.ini".to_string(),
+                    kind: ManagedKind::ReShadeConfig,
+                    sha256: hash_file(&self.client.join("ReShade.ini")).expect("hash"),
+                    placed_at: "2026-01-01T00:00:00Z".to_string(),
+                    displaced_backup: None,
+                    origin: FileOrigin::Adopted,
+                    displaced_in_place: None,
+                    parked: false,
+                }],
+            )
+            .expect("record");
+        }
+
+        fn edit(&self, contents: &str) -> Result<EditOutcome, String> {
+            edit_managed_file_in(
+                &self.manifest,
+                &self.backups,
+                &ApprovedRoot::for_tests_idle(self.client.clone()),
+                "ReShade.ini",
+                ManagedKind::ReShadeConfig,
+                contents.as_bytes(),
+            )
+        }
+
+        fn entry(&self) -> Option<ManagedFile> {
+            load_manifest_at(&self.manifest)
+                .installs
+                .get(&install_key(&self.client))
+                .into_iter()
+                .flatten()
+                .find(|file| file.relative_path == "ReShade.ini")
+                .cloned()
+        }
+    }
+
+    /// The reason this exists instead of a placement: an adopted file must not
+    /// become a placed one, or uninstall gains permission to delete the user's
+    /// own config.
+    #[test]
+    fn an_edit_keeps_how_the_file_got_there_and_refreshes_only_the_hash() {
+        let h = EditHarness::new();
+        h.adopt_reshade_ini();
+        let before = h.entry().expect("entry");
+
+        h.edit("[GENERAL]\nOld=2\n").expect("edit should succeed");
+
+        let after = h.entry().expect("entry");
+        assert_eq!(after.origin, FileOrigin::Adopted);
+        assert_ne!(after.sha256, before.sha256);
+        assert_eq!(
+            after.sha256,
+            hash_file(&h.client.join("ReShade.ini")).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_edit_backs_up_the_previous_contents_first() {
+        let h = EditHarness::new();
+        let outcome = h.edit("[GENERAL]\nOld=2\n").expect("edit");
+
+        let id = outcome.backup_id.expect("the previous bytes must be kept");
+        let kept = backup_file_path(&h.backups, &id, "ReShade.ini").expect("backup path");
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "[GENERAL]\nOld=1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.client.join("ReShade.ini")).unwrap(),
+            "[GENERAL]\nOld=2\n"
+        );
+    }
+
+    /// Editing a file is not a claim to have installed it.
+    #[test]
+    fn editing_an_unmanaged_file_creates_no_manifest_entry() {
+        let h = EditHarness::new();
+        let outcome = h.edit("[GENERAL]\nOld=2\n").expect("edit");
+
+        assert!(!outcome.manifest_updated);
+        assert!(
+            h.entry().is_none(),
+            "no row may appear for a file Kalpa did not place"
+        );
+    }
+
+    #[test]
+    fn an_edit_refuses_while_the_client_is_running() {
+        let h = EditHarness::new();
+        let error = edit_managed_file_in(
+            &h.manifest,
+            &h.backups,
+            &ApprovedRoot::for_tests(h.client.clone(), std::sync::Arc::new(|| Ok(true))),
+            "ReShade.ini",
+            ManagedKind::ReShadeConfig,
+            b"[GENERAL]\nOld=2\n",
+        )
+        .expect_err("must refuse");
+
+        assert!(error.contains("running"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(h.client.join("ReShade.ini")).unwrap(),
+            "[GENERAL]\nOld=1\n"
+        );
+    }
+
+    #[test]
+    fn an_edit_obeys_the_filename_policy_and_containment() {
+        let h = EditHarness::new();
+        std::fs::write(h.client.join("eso64.exe"), "game").unwrap();
+
+        for (kind, path) in [
+            (ManagedKind::ReShadeConfig, "eso64.exe"),
+            (ManagedKind::ReShadeConfig, "../ReShade.ini"),
+            (ManagedKind::ReShadeCore, "ReShade.ini"),
+        ] {
+            assert!(
+                edit_managed_file_in(
+                    &h.manifest,
+                    &h.backups,
+                    &ApprovedRoot::for_tests_idle(h.client.clone()),
+                    path,
+                    kind,
+                    b"x",
+                )
+                .is_err(),
+                "{kind:?} {path} should be refused"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(h.client.join("eso64.exe")).unwrap(),
+            "game"
+        );
+    }
+
+    #[test]
+    fn an_edit_refuses_a_file_that_is_not_there() {
+        let h = EditHarness::new();
+        std::fs::remove_file(h.client.join("ReShade.ini")).unwrap();
+        let error = h.edit("x").expect_err("must refuse");
+        assert!(error.contains("nothing to edit"), "{error}");
     }
 }
