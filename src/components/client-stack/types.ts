@@ -206,3 +206,155 @@ export interface EmergencyRemoval {
   file_name: string;
   quarantine_path: string;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — switching the stack off and on                            */
+/* -------------------------------------------------------------------------- */
+/* Mirrors `src-tauri/src/client_toggle.rs`. Disable puts ESO back to stock:   */
+/* the injector is parked, the two files the game loads itself get the user's  */
+/* own originals put live, and everything else is left where it is.            */
+
+export type ToggleAction = "disable" | "enable";
+
+export type ToggleOpKind =
+  "park" | "restore_original" | "unpark" | "remove_restored" | "leave_in_place";
+
+export interface PlannedOp {
+  kind: ToggleOpKind;
+  file_name: string;
+  summary: string;
+  detail: string;
+  /** The other file a two-file step involves. */
+  partner: string | null;
+}
+
+export interface TogglePlan {
+  client_dir: string;
+  action: ToggleAction;
+  is_disabled: boolean;
+  /** In the order they will run. This list is the confirmation. */
+  operations: PlannedOp[];
+  /** Non-empty means the confirm button stays disabled. Shown verbatim. */
+  blockers: string[];
+}
+
+export interface FileOpOutcome {
+  applied: string[];
+  skipped: string[];
+  preserved: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — tuning                                                    */
+/* -------------------------------------------------------------------------- */
+/* Mirrors `src-tauri/src/client_tuning.rs`. Every label and enum value comes  */
+/* from the add-on's own binary; none of it is invented, and the float ranges  */
+/* are display hints rather than limits, because the real limits are unknown.  */
+
+export type TuningControl = "toggle" | "choice" | "float" | "key_code";
+
+export type TuningGroup = "neural_rendering" | "detail" | "color" | "keys" | "advanced";
+
+export interface ChoiceOption {
+  value: number;
+  label: string;
+}
+
+export interface TuningField {
+  key: string;
+  label: string;
+  control: TuningControl;
+  group: TuningGroup;
+  choices: ChoiceOption[];
+  decimals: number;
+  help: string;
+  /** Verbatim from the file. Null when the key is absent. Never clamped. */
+  current: string | null;
+  /** Display range only — the numeric box beside the slider is authoritative. */
+  slider_min: number | null;
+  slider_max: number | null;
+}
+
+export interface TuningForm {
+  client_dir: string;
+  section_present: boolean;
+  fields: TuningField[];
+  /** `[key, value]` pairs Kalpa does not recognise. Read-only. */
+  unknown: [string, string][];
+}
+
+export interface TuningEdit {
+  key: string;
+  value: string;
+}
+
+export interface TuningApplyOutcome {
+  changed: string[];
+  backup_id: string | null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — runtime drift                                             */
+/* -------------------------------------------------------------------------- */
+/* Mirrors `src-tauri/src/client_runtime.rs`. Kalpa downloads nothing: the     */
+/* user's own kept copy is the only thing a re-apply can restore from.         */
+
+export type DriftState =
+  "unchanged" | "drifted_recoverable" | "drifted_unrecoverable" | "missing" | "parked";
+
+export interface RuntimeStatus {
+  relative_path: string;
+  role: StackRole;
+  state: DriftState;
+  current_version: string | null;
+  kept_version: string | null;
+  kept_backup_id: string | null;
+  size_bytes: number;
+  displaced_in_place: string | null;
+}
+
+export interface RuntimeReport {
+  client_dir: string;
+  runtimes: RuntimeStatus[];
+  recoverable: string[];
+  unrecoverable: string[];
+}
+
+export interface ReapplyOutcome {
+  restored: string[];
+  skipped: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — presets                                                   */
+/* -------------------------------------------------------------------------- */
+/* Mirrors `src-tauri/src/client_preset.rs`.                                   */
+
+export interface PresetChoice {
+  relative_path: string;
+  preset_path: string;
+  is_active: boolean;
+  technique_count: number;
+}
+
+export interface OrderFix {
+  provider_technique: string;
+  feed_technique: string;
+  before: string;
+  after: string;
+  summary: string;
+}
+
+export interface PresetOptions {
+  client_dir: string;
+  active: string | null;
+  choices: PresetChoice[];
+  /** Null when the order is right, or when reordering could not fix it. */
+  fix: OrderFix | null;
+}
+
+export interface PresetChangeOutcome {
+  relative_path: string;
+  backup_id: string | null;
+  summary: string;
+}
