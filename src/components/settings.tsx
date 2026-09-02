@@ -989,7 +989,7 @@ export function Settings({
                   <ToolItem
                     icon={Stethoscope}
                     label="Client Health"
-                    description="Read-only checks on the ESO game client and any injected DLLs"
+                    description="Check the ESO game client and injected DLLs, and remove what Kalpa placed"
                     onClick={onShowClientHealth}
                   />
                 </motion.div>
