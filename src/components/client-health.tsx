@@ -704,6 +704,20 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     void detect();
   }, [open, detect]);
 
+  // Write approval is session-scoped state in the Rust layer, so without this
+  // it would outlive the window that asked for it: close the panel and the
+  // client folder stays writable for the rest of the app's run. Revoking on
+  // close keeps the approved window as narrow as the user's actual intent.
+  useEffect(() => {
+    if (!open) return;
+    return () => {
+      void invokeOrThrow("clear_game_install_path").catch(() => {
+        // Nothing useful to do or say — the panel is already gone, and the
+        // approval expires with the process regardless.
+      });
+    };
+  }, [open]);
+
   const handleSelect = useCallback(
     (clientDir: string) => {
       if (clientDir === selectedDir) return;
@@ -746,12 +760,26 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     }
   }, [loadInstall, resetInstallUiState]);
 
+  /** Register `clientDir` as approved for writes, for this session.
+   *
+   *  `client_write::begin_write` refuses to touch a folder the user has not
+   *  explicitly approved, and detecting or inspecting an install is not
+   *  approval — the whole point of the gate is that reading a folder must not
+   *  grant permission to write to it. So approval is minted here, inside the
+   *  handlers that only run when the user has clicked a specific action on a
+   *  specific folder, and nowhere else. Approval is revoked when the panel
+   *  closes. */
+  const approveForWrite = useCallback(async (clientDir: string) => {
+    await invokeOrThrow<EsoClientLocation>("set_game_install_path", { path: clientDir });
+  }, []);
+
   const handleAdopt = useCallback(async () => {
     if (!selectedDir) return;
     const token = runToken.current;
     setAdopting(true);
     setAdoptError(null);
     try {
+      await approveForWrite(selectedDir);
       const outcome = await invokeOrThrow<AdoptionOutcome>("adopt_stack", {
         clientDir: selectedDir,
         keepCopies,
@@ -766,7 +794,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     } finally {
       if (runToken.current === token) setAdopting(false);
     }
-  }, [keepCopies, loadManaged, loadPlan, selectedDir]);
+  }, [approveForWrite, keepCopies, loadManaged, loadPlan, selectedDir]);
 
   const handleDismissAdoption = useCallback(() => {
     setAdoptionDismissed(true);
@@ -834,6 +862,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       setRemoving(true);
       setRemoveError(null);
       try {
+        await approveForWrite(selectedDir);
         const outcome = await invokeOrThrow<UninstallOutcome>("uninstall_managed_client_files", {
           clientDir: selectedDir,
           relativePaths: paths,
@@ -850,7 +879,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         if (runToken.current === token) setRemoving(false);
       }
     },
-    [loadManaged, selectedDir]
+    [approveForWrite, loadManaged, selectedDir]
   );
 
   const handleEmergencyRemove = useCallback(
@@ -860,6 +889,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       setEmergencyBusy(true);
       setEmergencyError(null);
       try {
+        await approveForWrite(selectedDir);
         const result = await invokeOrThrow<EmergencyRemoval>("emergency_remove_injector", {
           clientDir: selectedDir,
           fileName,
@@ -877,7 +907,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         if (runToken.current === token) setEmergencyBusy(false);
       }
     },
-    [emergencyConfirmInput, loadManaged, selectedDir]
+    [approveForWrite, emergencyConfirmInput, loadManaged, selectedDir]
   );
 
   const effectiveSelection = useMemo(
