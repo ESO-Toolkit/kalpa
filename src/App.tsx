@@ -106,6 +106,7 @@ type ActiveDialog =
   | "support"
   | "shortcuts"
   | "log-upload"
+  | "client-health"
   | null;
 
 interface PendingDeepLinkPayload {

@@ -53,6 +53,7 @@ import {
   MessageSquareText,
   Bug,
   MessageCircle,
+  Stethoscope,
 } from "lucide-react";
 import { AccountSettings } from "./account-settings";
 import { AppearanceSettings } from "./appearance-settings";
@@ -76,6 +77,7 @@ interface SettingsProps {
   onShowCharacters: () => void;
   onShowMigrationWizard: () => void;
   onShowSafetyCenter: () => void;
+  onShowClientHealth: () => void;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
 }
@@ -103,6 +105,7 @@ export function Settings({
   onShowCharacters,
   onShowMigrationWizard,
   onShowSafetyCenter,
+  onShowClientHealth,
   onShowShortcuts,
   onCheckForAppUpdate,
 }: SettingsProps) {
@@ -982,6 +985,12 @@ export function Settings({
                     label="Safety Center"
                     description="Snapshots, integrity checks, and operation log"
                     onClick={onShowSafetyCenter}
+                  />
+                  <ToolItem
+                    icon={Stethoscope}
+                    label="Client Health"
+                    description="Read-only checks on the ESO game client and any injected DLLs"
+                    onClick={onShowClientHealth}
                   />
                 </motion.div>
               )}

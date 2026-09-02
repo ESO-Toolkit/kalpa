@@ -4,6 +4,8 @@ mod auth;
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
 /// so normal builds are unaffected.
 pub mod bench_alloc;
+mod client_health;
+mod client_install;
 mod commands;
 mod edit_backups;
 mod esoui;
@@ -914,6 +916,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            client_health::detect_eso_clients,
+            client_health::validate_eso_client,
+            client_health::inspect_eso_client,
             commands::set_addons_path,
             commands::reveal_allowed_path,
             commands::set_text_zoom,
