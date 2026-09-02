@@ -1391,6 +1391,54 @@ pub fn edit_managed_file(
     edit_managed_file_in(&manifest, &backups, root, relative_path, kind, contents)
 }
 
+/// [`edit_managed_file`] taking the new contents from a file rather than a
+/// buffer.
+///
+/// Same semantics in every other respect. It exists because the runtimes are
+/// large — the Neural Rendering DLL is around 165 MB — and re-applying one
+/// after a game update should not mean holding it in memory.
+pub fn edit_managed_file_from(
+    app: &tauri::AppHandle,
+    root: &ApprovedRoot,
+    relative_path: &str,
+    kind: ManagedKind,
+    source: &Path,
+) -> Result<EditOutcome, String> {
+    let manifest = manifest_path(app)?;
+    let backups = backup_root(app)?;
+    edit_managed_file_from_in(&manifest, &backups, root, relative_path, kind, source)
+}
+
+/// Inner form of [`edit_managed_file_from`], testable without an `AppHandle`.
+pub fn edit_managed_file_from_in(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    relative_path: &str,
+    kind: ManagedKind,
+    source: &Path,
+) -> Result<EditOutcome, String> {
+    let source = source.to_path_buf();
+    edit_managed_file_with(
+        manifest_path,
+        backup_root,
+        root,
+        relative_path,
+        kind,
+        move |target| {
+            let mut reader = fs::File::open(&source)
+                .map_err(|e| format!("Failed to open {}: {e}", source.display()))?;
+            let mut writer = crate::atomic_file::AtomicFile::create(target)
+                .map_err(|e| format!("Failed to stage {}: {e}", target.display()))?;
+            std::io::copy(&mut reader, &mut writer)
+                .map_err(|e| format!("Failed to copy into {}: {e}", target.display()))?;
+            writer
+                .commit()
+                .map_err(|e| format!("Failed to publish {}: {e}", target.display()))
+        },
+    )
+}
+
 /// Inner form of [`edit_managed_file`], testable without an `AppHandle`.
 pub fn edit_managed_file_in(
     manifest_path: &Path,
@@ -1399,6 +1447,29 @@ pub fn edit_managed_file_in(
     relative_path: &str,
     kind: ManagedKind,
     contents: &[u8],
+) -> Result<EditOutcome, String> {
+    edit_managed_file_with(
+        manifest_path,
+        backup_root,
+        root,
+        relative_path,
+        kind,
+        |target| {
+            crate::atomic_file::atomic_write(target, contents)
+                .map_err(|e| format!("Failed to write {}: {e}", target.display()))
+        },
+    )
+}
+
+/// Shared body of the two edit forms: every gate, the backup and the manifest
+/// refresh, with only the act of producing the new bytes left to the caller.
+fn edit_managed_file_with(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    relative_path: &str,
+    kind: ManagedKind,
+    write: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<EditOutcome, String> {
     let _guard = lock_manifest();
 
@@ -1417,8 +1488,7 @@ pub fn edit_managed_file_in(
     crate::client_write::assert_contained(client_root, &target)?;
 
     let backup_id = backup_existing_in(backup_root, client_root, relative_path)?;
-    crate::atomic_file::atomic_write(&target, contents)
-        .map_err(|e| format!("Failed to write {relative_path}: {e}"))?;
+    write(&target)?;
 
     let mut manifest = load_manifest_at(manifest_path);
     let mut manifest_updated = false;
@@ -2848,6 +2918,38 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(h.client.join("eso64.exe")).unwrap(),
             "game"
+        );
+    }
+
+    /// The re-apply path for a drifted runtime: the kept copy is streamed in
+    /// rather than read into memory, and the entry stays adopted.
+    #[test]
+    fn an_edit_can_take_its_contents_from_a_file() {
+        let h = EditHarness::new();
+        h.adopt_reshade_ini();
+        let source = h.client.parent().unwrap().join("kept.bin");
+        std::fs::write(&source, "the kept bytes").unwrap();
+
+        edit_managed_file_from_in(
+            &h.manifest,
+            &h.backups,
+            &ApprovedRoot::for_tests_idle(h.client.clone()),
+            "ReShade.ini",
+            ManagedKind::ReShadeConfig,
+            &source,
+        )
+        .expect("edit from file");
+
+        assert_eq!(
+            std::fs::read_to_string(h.client.join("ReShade.ini")).unwrap(),
+            "the kept bytes"
+        );
+        assert!(source.is_file(), "the kept copy must not be consumed");
+        let entry = h.entry().expect("entry");
+        assert_eq!(entry.origin, FileOrigin::Adopted);
+        assert_eq!(
+            entry.sha256,
+            hash_file(&h.client.join("ReShade.ini")).unwrap()
         );
     }
 
