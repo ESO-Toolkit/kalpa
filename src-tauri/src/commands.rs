@@ -10674,6 +10674,11 @@ pub async fn is_eso_or_launcher_running() -> Result<bool, String> {
 
 /// True if `name` is `eso64.exe` or `eso.exe`, compared case-insensitively.
 /// `name` may be mixed-case; this lowercases before matching.
+///
+/// Only the Windows process walk matches on executable *names*; the other
+/// platforms go through `pgrep`, so outside Windows this exists purely for the
+/// unit tests below and would otherwise trip `-D dead_code`.
+#[cfg(any(target_os = "windows", test))]
 fn is_eso_client_process_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower == "eso64.exe" || lower == "eso.exe"
@@ -10683,6 +10688,9 @@ fn is_eso_client_process_name(name: &str) -> bool {
 /// case-insensitively. The launcher names are kept in sync with
 /// `PROTECTED_NAMES` in `client_write.rs`, which refuses to let Kalpa write
 /// over these same executables.
+///
+/// Same non-Windows caveat as [`is_eso_client_process_name`].
+#[cfg(any(target_os = "windows", test))]
 fn is_eso_or_launcher_process_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     is_eso_client_process_name(&lower)
