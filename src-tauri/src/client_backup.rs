@@ -117,6 +117,16 @@ fn lock_manifest() -> std::sync::MutexGuard<'static, ()> {
 const MANIFEST_FILE: &str = "client-managed.json";
 /// Directory name holding the timestamped backup folders.
 const BACKUP_DIR: &str = "client-backups";
+
+/// Where emergency removal parks a foreign injector DLL.
+///
+/// Deliberately a sibling of [`BACKUP_DIR`] rather than a folder inside it:
+/// [`prune_unreferenced_backups`] deletes any folder under the backup root
+/// that no manifest entry points at, and a quarantined file is by definition
+/// not in the manifest — that is why it needed emergency removal. Parking it
+/// under the backup root would put the user's only copy of their DLL on a
+/// countdown to deletion by the next install.
+const QUARANTINE_DIR: &str = "client-quarantine";
 /// How many *unreferenced* backup folders to keep before pruning the oldest.
 ///
 /// Referenced folders (ones the manifest still points at) are never pruned:
@@ -160,6 +170,14 @@ pub fn backup_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Root of the quarantine folders, inside the app data directory and outside
+/// [`backup_root`] so pruning can never reach it. See [`QUARANTINE_DIR`].
+pub fn quarantine_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app_data_dir(app)?.join(QUARANTINE_DIR);
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create quarantine directory: {e}"))?;
+    Ok(dir)
+}
+
 // ── Manifest ─────────────────────────────────────────────────────────────
 
 /// Load the manifest, returning an empty one when absent or unreadable.
@@ -181,7 +199,7 @@ pub fn save_manifest(app: &tauri::AppHandle, manifest: &ManagedManifest) -> Resu
 }
 
 /// Inner form of [`load_manifest`], testable without an `AppHandle`.
-fn load_manifest_at(path: &Path) -> ManagedManifest {
+pub fn load_manifest_at(path: &Path) -> ManagedManifest {
     let Ok(bytes) = fs::read(path) else {
         return ManagedManifest::default();
     };
@@ -232,7 +250,7 @@ fn rfc3339_now() -> String {
 /// `format_timestamp` has one-second resolution, so a per-process counter is
 /// appended: two placements inside the same second must not share a folder, or
 /// the second would silently overwrite the first backup.
-fn new_backup_id() -> String {
+pub fn new_backup_id() -> String {
     let stamp = crate::metadata::format_timestamp(now_secs()).replace(':', "-");
     let seq = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -242,7 +260,7 @@ fn new_backup_id() -> String {
     format!("{stamp}-{seq:06}-{nanos:09}")
 }
 
-fn hash_file(path: &Path) -> Result<String, String> {
+pub fn hash_file(path: &Path) -> Result<String, String> {
     crate::file_hashes::hash_file(path)
 }
 
@@ -797,7 +815,7 @@ pub fn revert_placements(
 /// [`apply_placements_in_with`] does: without it, a revert racing an apply
 /// (or another revert) on the same manifest can read a bucket that is about
 /// to be overwritten and lose the other call's changes when it saves.
-fn revert_placements_in(
+pub fn revert_placements_in(
     manifest_path: &Path,
     backup_root: &Path,
     root: &ApprovedRoot,

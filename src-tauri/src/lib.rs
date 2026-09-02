@@ -9,6 +9,7 @@ pub mod client_download;
 mod client_health;
 mod client_install;
 pub mod client_signature;
+pub mod client_uninstall;
 pub mod client_write;
 mod commands;
 mod edit_backups;
@@ -927,6 +928,9 @@ pub fn run() {
             commands::is_eso_or_launcher_running,
             client_write::set_game_install_path,
             client_write::clear_game_install_path,
+            client_uninstall::list_managed_client_files,
+            client_uninstall::uninstall_managed_client_files,
+            client_uninstall::emergency_remove_injector,
             commands::set_addons_path,
             commands::reveal_allowed_path,
             commands::set_text_zoom,

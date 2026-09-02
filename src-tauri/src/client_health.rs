@@ -206,6 +206,148 @@ pub fn file_version(path: &Path) -> Option<String> {
     None
 }
 
+/// Read one `StringFileInfo` field (`ProductName`, `CompanyName`, ...) from a
+/// PE file's version resource.
+///
+/// [`file_version`] reads the *fixed* file info, which is four numbers and
+/// says nothing about what the DLL is. Identifying a proxy DLL as ReShade
+/// needs the string block instead, which is why this exists alongside rather
+/// than inside it.
+///
+/// The string block is keyed by a language/code-page pair, and there is no
+/// single correct one: a binary declares its translations in `VarFileInfo`.
+/// This tries every declared translation in order and returns the first hit,
+/// then falls back to the two pairs almost everything English-language uses
+/// (`040904B0` Unicode, `040904E4` Windows-1252) for binaries that ship a
+/// string block without declaring it.
+///
+/// Returns `None` on non-Windows targets, and whenever the resource, the
+/// translation table or the field is absent or malformed. A `None` here must
+/// never be read as "not ReShade" in a permissive direction — callers gate
+/// destructive actions on a *positive* match only.
+#[cfg(target_os = "windows")]
+pub fn version_string(path: &Path, field: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+
+    /// One entry of the `\VarFileInfo\Translation` array.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct LangAndCodePage {
+        language: u16,
+        code_page: u16,
+    }
+
+    // Same interior-NUL guard as `file_version`: a truncated path would read
+    // some *other* file's resource and answer a question nobody asked.
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return None;
+    }
+    wide.push(0);
+
+    // A field name with an interior NUL, or one carrying separators, would
+    // let a caller address a different sub-block than the one it named.
+    if field.is_empty() || field.contains(['\0', '\\']) {
+        return None;
+    }
+
+    unsafe {
+        let name = PCWSTR(wide.as_ptr());
+        let mut handle: u32 = 0;
+        let size = GetFileVersionInfoSizeW(name, Some(&mut handle));
+        if size == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; size as usize];
+        GetFileVersionInfoW(name, None, size, buffer.as_mut_ptr().cast()).ok()?;
+
+        let mut translations: Vec<LangAndCodePage> = Vec::new();
+
+        let var_block = to_wide_z("\\VarFileInfo\\Translation");
+        let mut value: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut value_len: u32 = 0;
+        let ok = VerQueryValueW(
+            buffer.as_ptr().cast(),
+            PCWSTR(var_block.as_ptr()),
+            &mut value,
+            &mut value_len,
+        );
+        if ok.as_bool() && !value.is_null() {
+            let entry_size = std::mem::size_of::<LangAndCodePage>();
+            let count = (value_len as usize) / entry_size;
+            for index in 0..count {
+                // Read unaligned: the block's alignment is the OS's promise,
+                // not something a malformed resource has to honour.
+                let entry: LangAndCodePage =
+                    std::ptr::read_unaligned(value.cast::<u8>().add(index * entry_size).cast());
+                translations.push(entry);
+            }
+        }
+
+        // Undeclared but near-universal English pairs, tried last.
+        translations.push(LangAndCodePage {
+            language: 0x0409,
+            code_page: 0x04B0,
+        });
+        translations.push(LangAndCodePage {
+            language: 0x0409,
+            code_page: 0x04E4,
+        });
+
+        for translation in translations {
+            let sub_block = to_wide_z(&format!(
+                "\\StringFileInfo\\{:04x}{:04x}\\{field}",
+                translation.language, translation.code_page
+            ));
+            let mut text: *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut text_len: u32 = 0;
+            let found = VerQueryValueW(
+                buffer.as_ptr().cast(),
+                PCWSTR(sub_block.as_ptr()),
+                &mut text,
+                &mut text_len,
+            );
+            if !found.as_bool() || text.is_null() || text_len == 0 {
+                continue;
+            }
+
+            // `text_len` counts characters including a trailing NUL when the
+            // resource is well-formed. Copy the whole run and trim at the
+            // first NUL rather than trusting the count to be exact.
+            let mut chars: Vec<u16> = Vec::with_capacity(text_len as usize);
+            for index in 0..text_len as usize {
+                chars.push(std::ptr::read_unaligned(
+                    text.cast::<u8>().add(index * 2).cast::<u16>(),
+                ));
+            }
+            let end = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
+            let decoded = String::from_utf16_lossy(&chars[..end]).trim().to_string();
+            if !decoded.is_empty() {
+                return Some(decoded);
+            }
+        }
+    }
+
+    None
+}
+
+/// NUL-terminated UTF-16 for a `VerQueryValueW` sub-block name.
+#[cfg(target_os = "windows")]
+fn to_wide_z(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Non-Windows counterpart: there is no version resource to read.
+#[cfg(not(target_os = "windows"))]
+pub fn version_string(path: &Path, field: &str) -> Option<String> {
+    let _ = (path, field);
+    None
+}
+
 /// Format the two packed DWORDs of a `VS_FIXEDFILEINFO` as `a.b.c.d`.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn format_version(ms: u32, ls: u32) -> String {
@@ -939,6 +1081,48 @@ mod tests {
             "every part numeric, got {version}"
         );
         assert!(major_version(&version).is_some());
+    }
+
+    /// Positive coverage for the `StringFileInfo` walk, which is a different
+    /// resource block from the fixed info above and has its own failure mode
+    /// (the language/code-page key). `kernel32.dll`'s `ProductName` is a
+    /// Microsoft Windows string in every shipped build.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn version_string_reads_a_real_product_name() {
+        let system_dll = Path::new(r"C:\Windows\System32\kernel32.dll");
+        if !system_dll.is_file() {
+            return; // non-standard Windows layout; nothing to assert against
+        }
+        let product =
+            version_string(system_dll, "ProductName").expect("kernel32 declares a ProductName");
+        assert!(
+            product.to_ascii_lowercase().contains("windows"),
+            "unexpected ProductName: {product}"
+        );
+        // A field nothing declares must come back absent rather than as some
+        // other field's value.
+        assert_eq!(version_string(system_dll, "KalpaNotAField"), None);
+    }
+
+    /// The guards that keep a malformed request from addressing a resource the
+    /// caller did not name. These hold on every platform: off Windows the
+    /// function is a `None` stub, which satisfies the same assertions.
+    #[test]
+    fn version_string_refuses_malformed_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.dll");
+        std::fs::write(&path, b"not a PE file").unwrap();
+
+        assert_eq!(version_string(&path, ""), None);
+        assert_eq!(version_string(&path, "Product\\Name"), None);
+        assert_eq!(version_string(&path, "Product\0Name"), None);
+        // A file with no version resource at all.
+        assert_eq!(version_string(&path, "ProductName"), None);
+        assert_eq!(
+            version_string(&tmp.path().join("missing.dll"), "ProductName"),
+            None
+        );
     }
 
     #[test]
