@@ -10,8 +10,36 @@
 //! Installing ReShade is not one file. It is a proxy DLL, a config, and a
 //! shader tree — and a partial install is worse than no install, because a
 //! proxy DLL with no shaders still loads into the game and can still stop it
-//! launching. So placements are applied as a unit: any failure rolls back
-//! every file already placed in that batch and restores every displaced file.
+//! launching. So placements are applied as a unit: any failure attempts to roll
+//! back every file already placed in that batch and restore every displaced
+//! file.
+//!
+//! # What rollback actually guarantees
+//!
+//! Rollback is an attempt, not a promise. It is filesystem work, and the same
+//! conditions that failed the placement (a locked DLL, a full disk, antivirus,
+//! Controlled Folder Access) can fail the undo. So the guarantees are stated in
+//! two tiers:
+//!
+//! * **Rollback succeeds** — the batch is fully undone. No file it placed
+//!   survives, every displaced file is byte-identical to before, directories
+//!   the batch created are gone, and *nothing* is recorded in the manifest.
+//! * **Rollback is incomplete** — the client directory is left in a **mixed
+//!   state**, and Kalpa says so. The files it could not restore keep Kalpa's
+//!   bytes on disk, and the user's displaced originals stay in the backup
+//!   folder. Those files are then recorded in the manifest exactly as if the
+//!   placement had succeeded. That is not bookkeeping vanity: an entry is the
+//!   only thing that marks a backup folder as *referenced*, and
+//!   [`prune_unreferenced_backups`] deletes unreferenced folders. An
+//!   unrecorded backup is a backup on a countdown to permanent deletion, and
+//!   the file at stake can be the user's own `dxgi.dll` or `nvngx_dlss.dll`.
+//!   The returned error names the affected files and says where the originals
+//!   are; `revert_placements` is the way back.
+//!
+//! Restore is done by copying the backup *over* the placed file rather than
+//! deleting and then copying. A half-failed overwrite leaves wrong bytes; a
+//! failed copy after a successful delete leaves no file at all. Wrong is
+//! recoverable and visible, missing is a silent behaviour change.
 //!
 //! # Why hashes matter
 //!
@@ -242,6 +270,7 @@ fn prune_unreferenced_backups(backup_root: &Path, manifest: &ManagedManifest) {
 /// Bookkeeping for one file this batch already wrote, so it can be undone.
 struct PlacedRecord {
     relative_path: String,
+    kind: ManagedKind,
     resolved: PathBuf,
     displaced_backup: Option<String>,
 }
@@ -337,33 +366,166 @@ fn remove_created_dirs(mut created: Vec<PathBuf>) {
 }
 
 /// Undo every file this batch placed and put back everything it displaced.
-fn roll_back(backup_root: &Path, placed: &[PlacedRecord], created_dirs: Vec<PathBuf>) {
-    for record in placed.iter().rev() {
-        let _ = fs::remove_file(&record.resolved);
-        if let Some(id) = &record.displaced_backup {
-            if let Ok(backup) = backup_file_path(backup_root, id, &record.relative_path) {
-                if backup.is_file() {
-                    if let Some(parent) = record.resolved.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    if let Err(error) = fs::copy(&backup, &record.resolved) {
-                        eprintln!(
-                            "Warning: could not restore displaced file {}: {error}",
-                            record.relative_path
-                        );
-                    }
+///
+/// Returns the indices into `placed` of the records it could **not** undo. An
+/// empty result is the clean-rollback guarantee; anything else means the client
+/// directory is in a mixed state and the caller must record those entries (see
+/// [`record_incomplete_rollback`]) rather than silently dropping them.
+///
+/// Takes the restore-copy operation so a failing restore is reachable from
+/// tests; callers in production pass `fs::copy`.
+///
+/// Injected for the same reason [`move_into_place_with`] injects `rename`: the
+/// interesting branch is the one that only happens when the filesystem refuses,
+/// and inside a tempdir a copy always succeeds. Rollback failure is precisely
+/// the path where the user's original can be lost, so it has to be testable.
+fn roll_back_with(
+    backup_root: &Path,
+    placed: &[PlacedRecord],
+    created_dirs: Vec<PathBuf>,
+    restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
+) -> Vec<usize> {
+    let mut failed: Vec<usize> = Vec::new();
+
+    for (index, record) in placed.iter().enumerate().rev() {
+        let Some(id) = &record.displaced_backup else {
+            // Nothing was displaced, so deleting Kalpa's file *is* the restore.
+            if let Err(error) = fs::remove_file(&record.resolved) {
+                if record.resolved.exists() {
+                    eprintln!(
+                        "Warning: could not remove placed file {}: {error}",
+                        record.relative_path
+                    );
+                    failed.push(index);
                 }
             }
+            continue;
+        };
+
+        let backup = match backup_file_path(backup_root, id, &record.relative_path) {
+            Ok(path) if path.is_file() => path,
+            _ => {
+                // A displaced original with no readable backup: deleting the
+                // placed file here would leave nothing at all where the user's
+                // file used to be. Keep the bytes and report it.
+                eprintln!(
+                    "Warning: the backup of displaced file {} is missing; leaving Kalpa's copy in place.",
+                    record.relative_path
+                );
+                failed.push(index);
+                continue;
+            }
+        };
+
+        if let Some(parent) = record.resolved.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        // Overwrite, never delete-then-copy. A copy that dies halfway leaves
+        // wrong bytes; a copy that dies after a successful delete leaves no
+        // file. For a proxy DLL, missing is a silent behaviour change and wrong
+        // at least still loads or visibly fails.
+        if let Err(error) = restore(&backup, &record.resolved) {
+            eprintln!(
+                "Warning: could not restore displaced file {}: {error}",
+                record.relative_path
+            );
+            failed.push(index);
         }
     }
+
+    failed.sort_unstable();
+    // `remove_dir` refuses a non-empty directory, so anything still holding a
+    // file Kalpa could not undo survives on its own.
     remove_created_dirs(created_dirs);
+    failed
+}
+
+/// Persist manifest entries for the placements a rollback could not undo, and
+/// build the error explaining the mixed state.
+///
+/// **Persisting is the point.** [`prune_unreferenced_backups`] only ever
+/// deletes backup folders that no manifest entry points at. A rollback that
+/// leaves Kalpa's file on disk and the user's original in an *unreferenced*
+/// backup folder has therefore started a countdown: after
+/// [`MAX_UNREFERENCED_BACKUPS`] more backups that original is deleted, and a
+/// later install of the same path backs up Kalpa's own DLL as though it were
+/// "the user's original". Writing the entry is what stops both. The returned
+/// error still carries the original failure as its primary cause; the rollback
+/// status is appended, not substituted.
+fn record_incomplete_rollback(
+    manifest_path: &Path,
+    client_root: &Path,
+    placed: &[PlacedRecord],
+    failed: &[usize],
+    cause: String,
+) -> String {
+    let records: Vec<&PlacedRecord> = failed
+        .iter()
+        .filter_map(|&index| placed.get(index))
+        .collect();
+
+    let entries: Vec<ManagedFile> = records
+        .iter()
+        .map(|record| ManagedFile {
+            relative_path: record.relative_path.clone(),
+            kind: record.kind,
+            // Hash whatever is actually on disk now, so a later revert can
+            // recognise it. If even hashing fails the entry is still written
+            // with an empty hash: it can never match, so revert refuses to
+            // delete the file — but the backup stays referenced, which is what
+            // this entry exists for.
+            sha256: hash_file(&record.resolved).unwrap_or_default(),
+            placed_at: rfc3339_now(),
+            displaced_backup: record.displaced_backup.clone(),
+        })
+        .collect();
+
+    let names: Vec<String> = records
+        .iter()
+        .map(|record| record.relative_path.clone())
+        .collect();
+    let names = names.join(", ");
+
+    let mut manifest = load_manifest_at(manifest_path);
+    let bucket = manifest
+        .installs
+        .entry(install_key(client_root))
+        .or_default();
+    for entry in &entries {
+        bucket.retain(|existing| existing.relative_path != entry.relative_path);
+        bucket.push(entry.clone());
+    }
+    bucket.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    let save = save_manifest_at(manifest_path, &manifest);
+
+    let mut message = format!(
+        "{cause}\n\nRollback was incomplete, so the client folder is in a mixed state. \
+         Affected file(s): {names}. Kalpa's copy of each is still on disk and the original \
+         it displaced is preserved in Kalpa's backup folder, recorded in the manifest so it \
+         will not be pruned. Use Revert on the affected file(s) to put the originals back."
+    );
+    if let Err(error) = save {
+        message.push_str(&format!(
+            "\n\nWarning: the manifest could not be updated ({error}). The displaced \
+             original(s) are still in Kalpa's backup folder, but are not referenced by the \
+             manifest and could eventually be pruned — copy them out before continuing."
+        ));
+    }
+    message
 }
 
 /// Apply a batch of placements as a unit, backing up anything displaced.
 ///
-/// On any failure every file placed by this call is removed and every
-/// displaced file restored, then the original error is returned. On success
-/// the manifest is updated and the new entries returned.
+/// On success the manifest is updated and the new entries returned.
+///
+/// On failure the call attempts to remove every file it placed and restore
+/// every file it displaced. If that rollback fully succeeds, the original error
+/// is returned and nothing is recorded. If it does not, the files it could not
+/// undo are recorded in the manifest — keeping their backups referenced and
+/// safe from pruning — and the returned error carries the original failure plus
+/// a plain statement that the folder is in a mixed state, which files are
+/// affected, and that the originals are preserved in the backup folder.
 pub fn apply_placements(
     app: &tauri::AppHandle,
     client_root: &Path,
@@ -381,6 +543,24 @@ fn apply_placements_in(
     client_root: &Path,
     placements: Vec<Placement>,
 ) -> Result<Vec<ManagedFile>, String> {
+    apply_placements_in_with(
+        manifest_path,
+        backup_root,
+        client_root,
+        placements,
+        |from: &Path, to: &Path| fs::copy(from, to),
+    )
+}
+
+/// Inner form of [`apply_placements_in`] taking the restore-copy used during
+/// rollback, so tests can drive the mixed-state path.
+fn apply_placements_in_with(
+    manifest_path: &Path,
+    backup_root: &Path,
+    client_root: &Path,
+    placements: Vec<Placement>,
+    restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
+) -> Result<Vec<ManagedFile>, String> {
     let mut placed: Vec<PlacedRecord> = Vec::new();
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut entries: Vec<ManagedFile> = Vec::new();
@@ -395,8 +575,17 @@ fn apply_placements_in(
         ) {
             Ok(entry) => entries.push(entry),
             Err(error) => {
-                roll_back(backup_root, &placed, created_dirs);
-                return Err(error);
+                let failed = roll_back_with(backup_root, &placed, created_dirs, &restore);
+                if failed.is_empty() {
+                    return Err(error);
+                }
+                return Err(record_incomplete_rollback(
+                    manifest_path,
+                    client_root,
+                    &placed,
+                    &failed,
+                    error,
+                ));
             }
         }
     }
@@ -413,8 +602,17 @@ fn apply_placements_in(
     if let Err(error) = save_manifest_at(manifest_path, &manifest) {
         // A placement Kalpa cannot record is a placement Kalpa cannot undo,
         // which is precisely the state this module exists to prevent.
-        roll_back(backup_root, &placed, created_dirs);
-        return Err(error);
+        let failed = roll_back_with(backup_root, &placed, created_dirs, &restore);
+        if failed.is_empty() {
+            return Err(error);
+        }
+        return Err(record_incomplete_rollback(
+            manifest_path,
+            client_root,
+            &placed,
+            &failed,
+            error,
+        ));
     }
 
     prune_unreferenced_backups(backup_root, &manifest);
@@ -451,6 +649,7 @@ fn place_one(
     // Recorded the instant the bytes exist, so every later failure undoes it.
     placed.push(PlacedRecord {
         relative_path: placement.relative_path.clone(),
+        kind: placement.kind,
         resolved: resolved.clone(),
         displaced_backup: displaced_backup.clone(),
     });
@@ -686,6 +885,22 @@ mod tests {
 
         fn apply(&self, placements: Vec<Placement>) -> Result<Vec<ManagedFile>, String> {
             apply_placements_in(&self.manifest, &self.backups, &self.client, placements)
+        }
+
+        /// Apply with an injected rollback restore-copy, so the mixed-state
+        /// path is reachable without a real filesystem failure.
+        fn apply_with_restore(
+            &self,
+            placements: Vec<Placement>,
+            restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
+        ) -> Result<Vec<ManagedFile>, String> {
+            apply_placements_in_with(
+                &self.manifest,
+                &self.backups,
+                &self.client,
+                placements,
+                restore,
+            )
         }
 
         fn revert(&self, paths: &[String]) -> Result<Vec<String>, String> {
@@ -1064,5 +1279,173 @@ mod tests {
             .filter(|entry| entry.path().is_dir())
             .count();
         assert_eq!(remaining, MAX_UNREFERENCED_BACKUPS + 1);
+    }
+
+    /// Stands in for the real reasons a restore copy fails on a game directory:
+    /// antivirus, Controlled Folder Access, a DLL held open by a running game.
+    fn restore_always_fails(_: &Path, _: &Path) -> std::io::Result<u64> {
+        Err(std::io::Error::other(
+            "the process cannot access the file because it is being used by another process",
+        ))
+    }
+
+    #[test]
+    fn a_failed_rollback_keeps_the_users_original_referenced_and_unprunable() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-original-dll").expect("seed");
+
+        let error = h
+            .apply_with_restore(
+                vec![
+                    h.placement("dxgi.dll", "kalpas-new-dll"),
+                    // Rejected mid-batch, forcing the rollback.
+                    h.placement("../evil.dll", "pwned"),
+                ],
+                restore_always_fails,
+            )
+            .expect_err("the batch must fail");
+
+        let entries = h.entries();
+        assert_eq!(
+            entries.len(),
+            1,
+            "the un-rolled-back placement must be recorded: {entries:?}"
+        );
+        let id = entries[0]
+            .displaced_backup
+            .clone()
+            .expect("the entry must still point at the backup holding the original");
+        let backup = backup_file_path(&h.backups, &id, "dxgi.dll").expect("backup path");
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read backup"),
+            "the-users-original-dll"
+        );
+
+        // Now flood the backup root with unreferenced folders and prune. The
+        // whole point of writing that manifest entry is that this cannot reach
+        // the user's original.
+        for index in 0..MAX_UNREFERENCED_BACKUPS + 5 {
+            let dir = h.backups.join(format!("2020-01-01T00-00-00Z-{index:06}-0"));
+            fs::create_dir_all(&dir).expect("mkdir");
+            fs::write(dir.join("stale.bin"), "stale").expect("write");
+        }
+        prune_unreferenced_backups(&h.backups, &h.manifest());
+
+        assert!(
+            h.backups.join(&id).is_dir(),
+            "the backup holding the user's original must survive pruning"
+        );
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read backup after prune"),
+            "the-users-original-dll",
+            "the user's original must still be recoverable byte-for-byte"
+        );
+        assert!(
+            error.contains("dxgi.dll"),
+            "error must name the file: {error}"
+        );
+    }
+
+    #[test]
+    fn a_failed_rollback_reports_a_mixed_state_without_losing_the_original_cause() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-original-dll").expect("seed");
+
+        let error = h
+            .apply_with_restore(
+                vec![
+                    h.placement("dxgi.dll", "kalpas-new-dll"),
+                    h.placement("../evil.dll", "pwned"),
+                ],
+                restore_always_fails,
+            )
+            .expect_err("the batch must fail");
+
+        assert!(
+            error.contains("'..'"),
+            "the original failure must remain the primary cause: {error}"
+        );
+        assert!(
+            error.contains("mixed state"),
+            "the error must say the folder is in a mixed state: {error}"
+        );
+        assert!(
+            error.contains("dxgi.dll"),
+            "the error must name the affected file: {error}"
+        );
+        assert!(
+            error.contains("backup folder"),
+            "the error must say where the original is preserved: {error}"
+        );
+        assert_eq!(
+            h.read("dxgi.dll"),
+            "kalpas-new-dll",
+            "a file that could not be restored keeps Kalpa's bytes, never nothing"
+        );
+    }
+
+    #[test]
+    fn a_successful_rollback_records_nothing_and_restores_byte_identically() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-original-dll").expect("seed");
+
+        let error = h
+            .apply_with_restore(
+                vec![
+                    h.placement("dxgi.dll", "kalpas-new-dll"),
+                    h.placement("reshade-shaders/Shaders/Bloom.fx", "// bloom"),
+                    h.placement("../evil.dll", "pwned"),
+                ],
+                |from: &Path, to: &Path| fs::copy(from, to),
+            )
+            .expect_err("the batch must fail");
+
+        assert!(error.contains("'..'"), "unexpected error: {error}");
+        assert!(
+            !error.contains("mixed state"),
+            "a clean rollback must not claim a mixed state: {error}"
+        );
+        assert_eq!(
+            h.read("dxgi.dll"),
+            "the-users-original-dll",
+            "restore-by-overwrite must put back byte-identical content"
+        );
+        assert!(
+            !h.client.join("reshade-shaders/Shaders/Bloom.fx").exists(),
+            "no file placed by the batch may survive a clean rollback"
+        );
+        assert!(
+            !h.client.join("reshade-shaders").exists(),
+            "directories the batch created must be removed too"
+        );
+        assert!(
+            h.entries().is_empty(),
+            "a cleanly rolled-back batch must record nothing"
+        );
+    }
+
+    #[test]
+    fn a_recorded_mixed_state_can_be_reverted_afterwards() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-original-dll").expect("seed");
+
+        h.apply_with_restore(
+            vec![
+                h.placement("dxgi.dll", "kalpas-new-dll"),
+                h.placement("../evil.dll", "pwned"),
+            ],
+            restore_always_fails,
+        )
+        .expect_err("the batch must fail");
+
+        let skipped = h.revert(&["dxgi.dll".to_string()]).expect("revert");
+
+        assert!(skipped.is_empty(), "nothing had drifted: {skipped:?}");
+        assert_eq!(
+            h.read("dxgi.dll"),
+            "the-users-original-dll",
+            "the recorded entry is what makes the original recoverable"
+        );
+        assert!(h.entries().is_empty());
     }
 }

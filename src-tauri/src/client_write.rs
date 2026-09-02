@@ -13,30 +13,47 @@
 //! worse: a bad write here does not corrupt an addon, it stops the game
 //! launching.
 //!
-//! # The four gates
-//!
-//! Every write goes through [`begin_write`], which refuses unless all hold:
+//! # The gates
 //!
 //! 1. **Registered root.** The target directory must equal the client path the
-//!    user explicitly approved via [`set_game_install_path`], which in turn only
-//!    accepts a directory containing an ESO executable.
+//!    user explicitly approved via [`set_game_install_path`]. Approval requires
+//!    a file named `eso64.exe` or `eso.exe` to be present. That is a mis-click
+//!    guard, not an authenticity check — a zero-byte file of that name passes.
 //! 2. **Containment.** Every placed path is resolved through
 //!    [`safe_relative_join`], which rejects absolute paths, `..`, drive-relative
 //!    forms and reserved device names, then re-checks the result is still under
-//!    the root.
-//! 3. **Game not running.** Swapping a proxy DLL under a live `eso64.exe` is how
-//!    you corrupt an install. Checked immediately before the write, not at the
-//!    start of a long download.
-//! 4. **Not sandboxed.** Under the e2e sandbox (`KALPA_ADDONS_DIR`, debug-only)
+//!    the root via [`assert_contained`] *after* parent directories exist, so a
+//!    symlinked subdirectory cannot redirect a lexically-clean path.
+//! 3. **Filename policy.** Containment alone only proves a path is *inside* the
+//!    client folder — `eso64.exe` is inside it too. [`validate_placement`]
+//!    additionally requires the filename to match the [`ManagedKind`] being
+//!    placed, and refuses ZOS-owned names outright regardless of kind.
+//! 4. **Game not running.** Swapping a proxy DLL under a live client is how you
+//!    corrupt an install.
+//! 5. **Not sandboxed.** Under the e2e sandbox (`KALPA_ADDONS_DIR`, debug-only)
 //!    client writes are refused outright, mirroring `copy_addons_to_instance`.
+//!
+//! ## What gate 4 does and does not promise
+//!
+//! [`begin_write`] checks all of the above and hands back a plain path, so the
+//! running check happens *when the caller calls it*. A caller that calls
+//! `begin_write`, downloads for five minutes, and then places files has checked
+//! nothing useful. Callers must re-check immediately before placing. This is
+//! currently a convention rather than something the types enforce; making
+//! placement require a token that only `begin_write` can mint is the obvious
+//! hardening and is not yet done.
 //!
 //! # Reversibility
 //!
 //! Nothing is overwritten without first being copied into a timestamped backup
 //! outside the game directory, and every file Kalpa places is recorded in a
-//! manifest with its hash. That is what makes uninstall exact rather than
-//! best-effort: Kalpa removes what it placed and restores what it displaced,
-//! and leaves anything it did not put there alone.
+//! manifest with its hash, so uninstall can distinguish "Kalpa put this here
+//! and nobody touched it" from "someone edited this" and skip the latter.
+//!
+//! This is *not* an unconditional guarantee. Rollback after a failed placement
+//! is best-effort: see `client_backup`'s module doc for exactly what survives a
+//! rollback that itself fails. Nothing here should be read as promising the
+//! client folder can always be returned to its prior state.
 
 use crate::client_install::{validate_client_dir, EsoClientLocation};
 use serde::{Deserialize, Serialize};
@@ -192,6 +209,86 @@ fn validate_path_segment(segment: &str) -> Result<(), String> {
         return Err(format!("Reserved device name in path: {segment}"));
     }
     Ok(())
+}
+
+/// Files owned by ZeniMax that Kalpa must never place, back up, or overwrite,
+/// whatever [`ManagedKind`] a caller claims.
+///
+/// Containment is not enough on its own: `eso64.exe` is inside the client
+/// folder, so `safe_relative_join` returns it happily. Overwriting the game
+/// binary with a proxy DLL would be recorded in the manifest as a tidy,
+/// reversible placement right up until the user tried to launch the game.
+const PROTECTED_NAMES: [&str; 6] = [
+    "eso64.exe",
+    "eso.exe",
+    "eso64.pdb",
+    "bethesda.net_launcher.exe",
+    "esolauncher.exe",
+    "uninstall.exe",
+];
+
+/// Extensions belonging to the game's own data, never to a mod.
+const PROTECTED_EXTENSIONS: [&str; 4] = ["mnf", "dat", "sig", "manifest"];
+
+/// Require that `relative_path` is a plausible destination for `kind`.
+///
+/// Each kind may only write filenames that kind is actually about. This is what
+/// stops a caller — or a malformed upstream archive listing — from parking
+/// arbitrary bytes anywhere inside the client folder under a tidy-looking
+/// `ManagedKind`. The type and the path have to agree.
+pub fn validate_placement(kind: ManagedKind, relative_path: &str) -> Result<(), String> {
+    let normalized = relative_path.replace('\\', "/");
+    let file_name = normalized
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized)
+        .to_ascii_lowercase();
+    let extension = file_name.rsplit('.').next().unwrap_or_default().to_string();
+    let in_shader_tree = normalized
+        .to_ascii_lowercase()
+        .starts_with("reshade-shaders/");
+    let at_root = !normalized.trim_matches('/').contains('/');
+
+    if PROTECTED_NAMES.contains(&file_name.as_str()) {
+        return Err(format!(
+            "Refusing to write {file_name}: that file belongs to the game, not to Kalpa."
+        ));
+    }
+    if PROTECTED_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(format!(
+            "Refusing to write {file_name}: .{extension} files belong to the game client."
+        ));
+    }
+
+    let ok = match kind {
+        // The proxy DLL is the injector, and only these two names are ever
+        // loaded by the game's DLL search order.
+        ManagedKind::ReShadeCore => {
+            at_root && matches!(file_name.as_str(), "dxgi.dll" | "d3d11.dll")
+        }
+        ManagedKind::ReShadeConfig => at_root && matches!(extension.as_str(), "ini" | "log"),
+        ManagedKind::Shader => {
+            in_shader_tree && matches!(extension.as_str(), "fx" | "fxh" | "png" | "jpg" | "txt")
+        }
+        ManagedKind::Preset => extension == "ini",
+        ManagedKind::Addon => {
+            at_root && matches!(extension.as_str(), "addon64" | "addon32" | "addon")
+        }
+        // Kalpa never downloads these; they are user-supplied and signature
+        // checked. The name still has to look like an NGX runtime.
+        ManagedKind::NvidiaRuntime => {
+            at_root && file_name.starts_with("nvngx_") && extension == "dll"
+        }
+        ManagedKind::ShaderCompiler => at_root && file_name == "d3dcompiler_47.dll",
+    };
+
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "Refusing to write {relative_path}: it is not a valid destination for {kind:?}."
+        ))
+    }
 }
 
 /// Confirm `candidate` really sits under `root` after both are canonicalized.
@@ -381,6 +478,87 @@ mod tests {
     fn allows_current_dir_segments() {
         let joined = safe_relative_join(&root(), "./ReShade.ini").expect("should join");
         assert!(joined.ends_with("ReShade.ini"));
+    }
+
+    #[test]
+    fn the_game_binary_is_never_a_valid_destination() {
+        // Containment allows this path — it really is inside the client folder.
+        assert!(safe_relative_join(&root(), "eso64.exe").is_ok());
+        // The filename policy is what actually refuses it, under every kind.
+        for kind in [
+            ManagedKind::ReShadeCore,
+            ManagedKind::ReShadeConfig,
+            ManagedKind::Shader,
+            ManagedKind::Preset,
+            ManagedKind::Addon,
+            ManagedKind::NvidiaRuntime,
+            ManagedKind::ShaderCompiler,
+        ] {
+            let err = validate_placement(kind, "eso64.exe")
+                .expect_err("the game binary must never be writable");
+            assert!(err.contains("belongs to the game"), "{kind:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn game_data_extensions_are_protected() {
+        for name in ["game.mnf", "eso.dat", "client.sig", "install.manifest"] {
+            assert!(
+                validate_placement(ManagedKind::Shader, name).is_err(),
+                "{name} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn each_kind_accepts_only_its_own_shape() {
+        assert!(validate_placement(ManagedKind::ReShadeCore, "dxgi.dll").is_ok());
+        assert!(validate_placement(ManagedKind::ReShadeCore, "d3d11.dll").is_ok());
+        // A core DLL under any other name is not an injector the game will load.
+        assert!(validate_placement(ManagedKind::ReShadeCore, "d3d9.dll").is_err());
+        assert!(validate_placement(ManagedKind::ReShadeCore, "sub/dxgi.dll").is_err());
+
+        assert!(
+            validate_placement(ManagedKind::Shader, "reshade-shaders/Shaders/Bloom.fx").is_ok()
+        );
+        // A shader must live in the shader tree, not next to the executable.
+        assert!(validate_placement(ManagedKind::Shader, "Bloom.fx").is_err());
+        // …and a DLL is not a shader however it is labelled.
+        assert!(validate_placement(ManagedKind::Shader, "reshade-shaders/evil.dll").is_err());
+
+        assert!(validate_placement(ManagedKind::Addon, "dlss5-feed.addon64").is_ok());
+        assert!(validate_placement(ManagedKind::Addon, "dlss5-feed.dll").is_err());
+
+        assert!(validate_placement(ManagedKind::NvidiaRuntime, "nvngx_dlss.dll").is_ok());
+        assert!(validate_placement(ManagedKind::NvidiaRuntime, "nvngx_dlssnr.dll").is_ok());
+        // Not every DLL is an NGX runtime.
+        assert!(validate_placement(ManagedKind::NvidiaRuntime, "dxgi.dll").is_err());
+
+        assert!(validate_placement(ManagedKind::ShaderCompiler, "d3dcompiler_47.dll").is_ok());
+        assert!(validate_placement(ManagedKind::ShaderCompiler, "d3dcompiler_43.dll").is_err());
+    }
+
+    #[test]
+    fn a_config_log_must_still_sit_at_the_root() {
+        assert!(validate_placement(ManagedKind::ReShadeConfig, "ReShade.ini").is_ok());
+        assert!(validate_placement(ManagedKind::ReShadeConfig, "ReShade.log").is_ok());
+        // Guards a precedence mistake: `at_root && ini || log` would let this pass.
+        assert!(validate_placement(ManagedKind::ReShadeConfig, "nested/deep/ReShade.log").is_err());
+    }
+
+    #[test]
+    fn the_policy_is_case_insensitive() {
+        assert!(validate_placement(ManagedKind::ReShadeCore, "DXGI.DLL").is_ok());
+        assert!(validate_placement(ManagedKind::Shader, "ESO64.EXE").is_err());
+        assert!(validate_placement(ManagedKind::Shader, "RESHADE-SHADERS/A.FX").is_ok());
+    }
+
+    #[test]
+    fn backslash_separators_are_normalised_before_matching() {
+        // An upstream archive listing may use Windows separators; the policy
+        // must see the same shape either way.
+        assert!(validate_placement(ManagedKind::Shader, "reshade-shaders\\Shaders\\A.fx").is_ok());
+        assert!(validate_placement(ManagedKind::ReShadeCore, "sub\\dxgi.dll").is_err());
     }
 
     #[test]
