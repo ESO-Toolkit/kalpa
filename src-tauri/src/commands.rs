@@ -1067,28 +1067,54 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
 /// I/O.
 fn find_manifest_in(dir: &std::path::Path, base_name: &str) -> Option<PathBuf> {
     let txt = dir.join(format!("{base_name}.txt"));
-    if txt.exists() {
-        return Some(txt);
-    }
     let addon = dir.join(format!("{base_name}.addon"));
-    if addon.exists() {
-        return Some(addon);
+    match (txt.exists(), addon.exists()) {
+        (true, true) => return Some(pick_current_manifest(base_name, txt, addon)),
+        (true, false) => return Some(txt),
+        (false, true) => return Some(addon),
+        (false, false) => {}
     }
 
     let lower = base_name.to_lowercase();
     let wanted_txt = format!("{lower}.txt");
     let wanted_addon = format!("{lower}.addon");
+    let mut txt_match: Option<PathBuf> = None;
     let mut addon_match: Option<PathBuf> = None;
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        if name == wanted_txt {
-            return Some(entry.path());
+        if name == wanted_txt && txt_match.is_none() {
+            txt_match = Some(entry.path());
         }
         if name == wanted_addon && addon_match.is_none() {
             addon_match = Some(entry.path());
         }
     }
-    addon_match
+    match (txt_match, addon_match) {
+        (Some(txt), Some(addon)) => Some(pick_current_manifest(base_name, txt, addon)),
+        (txt, addon) => txt.or(addon),
+    }
+}
+
+/// Resolve a folder that carries BOTH `<name>.txt` and `<name>.addon`.
+///
+/// One of the two is a leftover: when an author renames their manifest across
+/// releases (LibSetDetection 4 shipped a `.txt`, 5 ships a `.addon`) the old
+/// file used to survive the update as a "residual" — and a blind `.txt`-first
+/// preference then reads the STALE manifest forever, misreporting the
+/// installed version and raising phantom outdated-dependency badges that
+/// Update All can never clear. Real installs carry leftovers in both rename
+/// directions, so neither extension can win by fiat: prefer the manifest with
+/// the higher `## AddOnVersion`; ties, or two manifests without one, keep the
+/// historical `.txt` preference. A manifest that fails to parse loses to one
+/// that parses with a version.
+fn pick_current_manifest(base_name: &str, txt: PathBuf, addon: PathBuf) -> PathBuf {
+    let version =
+        |path: &PathBuf| manifest::parse_manifest(base_name, path).and_then(|m| m.addon_version);
+    match (version(&txt), version(&addon)) {
+        (Some(t), Some(a)) if a > t => addon,
+        (None, Some(_)) => addon,
+        _ => txt,
+    }
 }
 
 pub(crate) fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
@@ -13709,6 +13735,43 @@ mod tests {
             found.file_name().unwrap().to_string_lossy().to_lowercase(),
             "myaddon.txt"
         );
+    }
+
+    /// Regression: a leftover manifest from before an author renamed theirs
+    /// (`.txt` ↔ `.addon`) used to win on extension preference alone, so Kalpa
+    /// read a stale `## AddOnVersion` forever. With both present, the higher
+    /// version must win regardless of extension.
+    #[test]
+    fn find_manifest_in_prefers_the_higher_addon_version_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("LibSetDetection");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("LibSetDetection.txt"), b"## AddOnVersion: 4").unwrap();
+        fs::write(dir.join("LibSetDetection.addon"), b"## AddOnVersion: 5").unwrap();
+
+        let found = find_manifest_in(&dir, "LibSetDetection").unwrap();
+        assert!(found.to_string_lossy().ends_with(".addon"));
+
+        // The reverse leftover direction: the .txt is the current one.
+        let dir = tmp.path().join("SuperStar");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SuperStar.txt"), b"## AddOnVersion: 80000").unwrap();
+        fs::write(dir.join("SuperStar.addon"), b"## AddOnVersion: 70200").unwrap();
+
+        let found = find_manifest_in(&dir, "SuperStar").unwrap();
+        assert!(found.to_string_lossy().ends_with(".txt"));
+    }
+
+    #[test]
+    fn find_manifest_in_keeps_the_txt_preference_when_versions_tie_or_are_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("MapPins");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("MapPins.txt"), b"## Version: 1.100.22").unwrap();
+        fs::write(dir.join("MapPins.addon"), b"## Version: 1.99.4").unwrap();
+
+        let found = find_manifest_in(&dir, "MapPins").unwrap();
+        assert!(found.to_string_lossy().ends_with(".txt"));
     }
 
     #[test]
