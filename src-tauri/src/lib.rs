@@ -9,6 +9,8 @@ pub mod client_backup;
 pub mod client_download;
 mod client_health;
 mod client_install;
+pub mod client_preset;
+pub mod client_runtime;
 pub mod client_signature;
 pub mod client_stack;
 pub mod client_toggle;
@@ -940,6 +942,11 @@ pub fn run() {
             client_toggle::apply_client_toggle,
             client_tuning::read_client_tuning,
             client_tuning::apply_client_tuning,
+            client_runtime::inspect_client_runtimes,
+            client_runtime::reapply_client_runtimes,
+            client_preset::list_client_presets,
+            client_preset::set_client_preset,
+            client_preset::fix_client_technique_order,
             client_uninstall::list_managed_client_files,
             client_uninstall::uninstall_managed_client_files,
             client_uninstall::emergency_remove_injector,
