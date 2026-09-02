@@ -543,13 +543,20 @@ fn read_preset(
     if relative.is_empty() {
         return None;
     }
-    // Presets are written relative to the client dir as `.\Name.ini`.
-    let path = client_dir.join(relative.trim_start_matches(r".\").trim_start_matches("./"));
-    let exists = path.is_file();
-    let contents = if exists {
-        std::fs::read_to_string(&path).unwrap_or_default()
-    } else {
-        String::new()
+    // Presets are written relative to the client dir as `.\Name.ini`. The value
+    // is text out of someone else's config file, so it goes through the
+    // containment check rather than a bare `join`: `..\..\elsewhere.ini` and
+    // `C:elsewhere.ini` both escape a plain join, and this module would then
+    // read and report a file outside the game folder as if it were the preset.
+    let path = crate::client_write::safe_relative_join(
+        client_dir,
+        relative.trim_start_matches(r".\").trim_start_matches("./"),
+    )
+    .ok();
+    let exists = path.as_ref().is_some_and(|p| p.is_file());
+    let contents = match &path {
+        Some(path) if exists => std::fs::read_to_string(path).unwrap_or_default(),
+        _ => String::new(),
     };
     let preset_ini = parse_ini(&contents);
 
@@ -1336,6 +1343,40 @@ DEBUG_VIEW=1
             .find(|o| o.file_name == "nvngx_dlssg.dll.bak")
             .expect("backup should be listed");
         assert_eq!(orphan.backs_up, None);
+    }
+
+    /// `PresetPath` is text out of a config file Kalpa does not own. A value
+    /// pointing outside the client folder must read as "no preset there",
+    /// never as a preset whose contents get reported — and later edited.
+    #[test]
+    fn a_preset_path_pointing_outside_the_client_folder_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = tmp.path().join("client");
+        std::fs::create_dir_all(&client).unwrap();
+        healthy_stack(&client);
+        std::fs::write(
+            tmp.path().join("outside.ini"),
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx\n",
+        )
+        .unwrap();
+
+        for escape in ["..\\outside.ini", "../outside.ini", "C:outside.ini"] {
+            write(
+                &client,
+                "ReShade.ini",
+                &REAL_RESHADE_INI.replace(
+                    "PresetPath=.\\ReShadePreset.ini",
+                    &format!("PresetPath={escape}"),
+                ),
+            );
+            let stack = inspect_stack(&client);
+            let preset = stack.preset.expect("the key is still reported");
+            assert!(
+                !preset.exists,
+                "{escape} must not resolve to a file outside the client folder"
+            );
+            assert!(preset.techniques.is_empty(), "{escape}");
+        }
     }
 
     #[test]
