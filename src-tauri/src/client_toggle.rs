@@ -40,8 +40,8 @@
 //! re-assertion of the client-not-running gate, and the rollback.
 
 use crate::client_backup::FileOp;
-use crate::client_stack::{ClientStack, StackRole};
-use crate::client_write::{AllowedGameInstallPath, ManagedFile};
+use crate::client_stack::{ClientStack, StackRole, PARKED_SUFFIX};
+use crate::client_write::{AllowedGameInstallPath, ManagedFile, ManagedKind};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -82,6 +82,16 @@ pub struct PlannedOp {
     pub summary: String,
     /// Why this step exists, in the user's terms.
     pub detail: String,
+    /// The other file this step involves, for the two steps that take two: the
+    /// live name a [`ToggleOpKind::RestoreOriginal`] copies *to*, and the live
+    /// name a [`ToggleOpKind::RemoveRestored`] frees.
+    ///
+    /// Carried explicitly rather than inferred from the neighbouring step.
+    /// Pairing by adjacency reads fine and fails silently: a `Park` whose
+    /// `RestoreOriginal` was dropped leaves ESO with no file at all under a
+    /// name it loads itself, which is the worst outcome this module can
+    /// produce. [`to_file_ops`] refuses a plan with a missing partner instead.
+    pub partner: Option<String>,
 }
 
 /// Everything the confirmation needs, computed from the folder as it is now.
@@ -136,8 +146,250 @@ pub struct TogglePlan {
 ///   file under that name at all. Name the file.
 /// * Enable where a parked file is no longer in the folder. Name it.
 pub fn plan_toggle(stack: &ClientStack, managed: &[ManagedFile], client_dir: &str) -> TogglePlan {
-    let _ = (stack, managed, client_dir);
-    todo!("plan_toggle")
+    let action = if stack.is_disabled {
+        ToggleAction::Enable
+    } else {
+        ToggleAction::Disable
+    };
+
+    let mut operations = Vec::new();
+    let mut blockers = Vec::new();
+
+    if managed.is_empty() {
+        blockers.push(
+            "This install has nothing managed yet, so there is nothing for Kalpa to switch off."
+                .to_string(),
+        );
+    } else {
+        match action {
+            ToggleAction::Disable => plan_disable(stack, managed, &mut operations, &mut blockers),
+            ToggleAction::Enable => plan_enable(stack, managed, &mut operations, &mut blockers),
+        }
+    }
+
+    // A plan with nothing to do and nothing to say would render as an empty
+    // confirmation with a live button, and applying it would report success
+    // having changed nothing. The commonest way to get here is a stack whose
+    // `.kalpa-off` files are on disk but whose manifest was lost, so the entries
+    // that would have been unparked are simply not there to find.
+    if operations
+        .iter()
+        .all(|op| op.kind == ToggleOpKind::LeaveInPlace)
+        && blockers.is_empty()
+    {
+        blockers.push(match action {
+            ToggleAction::Disable => "There is nothing here for Kalpa to switch off.".to_string(),
+            ToggleAction::Enable => "This stack has files parked as switched off, but Kalpa has \
+                                     no record of parking them, so it cannot say what putting \
+                                     them back would mean."
+                .to_string(),
+        });
+    }
+
+    TogglePlan {
+        client_dir: client_dir.to_string(),
+        action,
+        is_disabled: stack.is_disabled,
+        operations,
+        blockers,
+    }
+}
+
+/// Build the disable half of [`plan_toggle`].
+///
+/// Runs over `managed` in its existing (relative-path-sorted) order, which is
+/// what `client_backup` always keeps it in, so the plan is deterministic
+/// without this module imposing its own sort.
+fn plan_disable(
+    stack: &ClientStack,
+    managed: &[ManagedFile],
+    operations: &mut Vec<PlannedOp>,
+    blockers: &mut Vec<String>,
+) {
+    // The injector has to be both managed and actually loaded by the game
+    // right now — a manifest entry alone does not prove a live dxgi.dll is
+    // still sitting in the folder to park.
+    let injector = managed.iter().find(|entry| {
+        !entry.parked
+            && entry.kind == ManagedKind::ReShadeCore
+            && role_of(stack, &entry.relative_path) == Some(StackRole::Injector)
+    });
+    if injector.is_none() {
+        blockers.push(
+            "No injector (dxgi.dll or d3d11.dll) is present in the folder to switch off."
+                .to_string(),
+        );
+    }
+
+    for entry in managed {
+        // Already off, or is the injector itself — the injector gets its own
+        // step below, parked last.
+        if entry.parked || entry.kind == ManagedKind::ReShadeCore {
+            continue;
+        }
+
+        let must_go_stock = role_of(stack, &entry.relative_path).is_some_and(game_loads_itself);
+        if !must_go_stock {
+            operations.push(PlannedOp {
+                kind: ToggleOpKind::LeaveInPlace,
+                file_name: entry.relative_path.clone(),
+                partner: None,
+                summary: format!("Leave {} in place", entry.relative_path),
+                detail: "Nothing loads this file once the injector is parked, so it can stay \
+                         in the folder, switched off along with the rest of the stack."
+                    .to_string(),
+            });
+            continue;
+        }
+
+        match &entry.displaced_in_place {
+            Some(original)
+                if stack
+                    .preserved_originals
+                    .iter()
+                    .any(|preserved| preserved.file_name.eq_ignore_ascii_case(original)) =>
+            {
+                operations.push(PlannedOp {
+                    kind: ToggleOpKind::Park,
+                    file_name: entry.relative_path.clone(),
+                    partner: None,
+                    summary: format!(
+                        "Park {} as {}{PARKED_SUFFIX}",
+                        entry.relative_path, entry.relative_path
+                    ),
+                    detail: format!(
+                        "ESO loads {} itself, so it has to be moved aside before your own \
+                         preserved original can go live under that name.",
+                        entry.relative_path
+                    ),
+                });
+                operations.push(PlannedOp {
+                    kind: ToggleOpKind::RestoreOriginal,
+                    file_name: original.clone(),
+                    partner: Some(entry.relative_path.clone()),
+                    summary: format!("Copy your own {original} back to {}", entry.relative_path),
+                    detail: format!(
+                        "{original} is the copy you kept before Kalpa managed this install; \
+                         putting it back is what makes {} the file ESO actually loads.",
+                        entry.relative_path
+                    ),
+                });
+            }
+            Some(original) => {
+                blockers.push(format!(
+                    "{} replaces a file ESO loads itself, but the preserved original {original} \
+                     is no longer in the folder.",
+                    entry.relative_path
+                ));
+            }
+            None => {
+                blockers.push(format!(
+                    "{} replaces a file ESO loads itself, but Kalpa has no preserved original \
+                     for it, so switching off would leave the game with no file under that name.",
+                    entry.relative_path
+                ));
+            }
+        }
+    }
+
+    // Parked last: a failure part-way through this batch leaves the folder
+    // still loading the stack, rather than a half-stock mix.
+    if let Some(injector) = injector {
+        operations.push(PlannedOp {
+            kind: ToggleOpKind::Park,
+            file_name: injector.relative_path.clone(),
+            partner: None,
+            summary: format!(
+                "Park {} as {}{PARKED_SUFFIX}",
+                injector.relative_path, injector.relative_path
+            ),
+            detail: "Parking the injector last means a failure earlier in this batch leaves \
+                     the folder still loading the stack, rather than a half-stock mix."
+                .to_string(),
+        });
+    }
+}
+
+/// Build the enable half of [`plan_toggle`]: the exact reverse of disable.
+fn plan_enable(
+    stack: &ClientStack,
+    managed: &[ManagedFile],
+    operations: &mut Vec<PlannedOp>,
+    blockers: &mut Vec<String>,
+) {
+    let parked_present = |relative_path: &str| {
+        stack
+            .parked
+            .iter()
+            .any(|file| file.restores.eq_ignore_ascii_case(relative_path))
+    };
+
+    let parked: Vec<&ManagedFile> = managed.iter().filter(|entry| entry.parked).collect();
+
+    // The injector first, so ReShade can start loading the rest of the stack
+    // again before anything else moves.
+    if let Some(injector) = parked
+        .iter()
+        .find(|entry| entry.kind == ManagedKind::ReShadeCore)
+    {
+        if parked_present(&injector.relative_path) {
+            operations.push(PlannedOp {
+                kind: ToggleOpKind::Unpark,
+                file_name: injector.relative_path.clone(),
+                partner: None,
+                summary: format!(
+                    "Put {} back from {}{PARKED_SUFFIX}",
+                    injector.relative_path, injector.relative_path
+                ),
+                detail: "Unparking the injector first means ReShade can start loading the rest \
+                         of the stack again."
+                    .to_string(),
+            });
+        } else {
+            blockers.push(format!(
+                "{} is marked as switched off, but its parked copy is no longer in the folder.",
+                injector.relative_path
+            ));
+        }
+    }
+
+    for entry in parked
+        .iter()
+        .filter(|entry| entry.kind != ManagedKind::ReShadeCore)
+    {
+        if !parked_present(&entry.relative_path) {
+            blockers.push(format!(
+                "{} is marked as switched off, but its parked copy is no longer in the folder.",
+                entry.relative_path
+            ));
+            continue;
+        }
+
+        if let Some(original) = &entry.displaced_in_place {
+            operations.push(PlannedOp {
+                kind: ToggleOpKind::RemoveRestored,
+                file_name: original.clone(),
+                partner: Some(entry.relative_path.clone()),
+                summary: format!("Remove the stock {}", entry.relative_path),
+                detail: format!(
+                    "Disable put ESO's own {} live under this name; it has to come out before \
+                     your own copy can go back.",
+                    entry.relative_path
+                ),
+            });
+        }
+
+        operations.push(PlannedOp {
+            kind: ToggleOpKind::Unpark,
+            file_name: entry.relative_path.clone(),
+            partner: None,
+            summary: format!(
+                "Put {} back from {}{PARKED_SUFFIX}",
+                entry.relative_path, entry.relative_path
+            ),
+            detail: "Putting your own file back where the modded one was.".to_string(),
+        });
+    }
 }
 
 /// The role of a managed entry, resolved from the stack inventory.
@@ -147,8 +399,11 @@ pub fn plan_toggle(stack: &ClientStack, managed: &[ManagedFile], client_dir: &st
 /// simply be parked or has to have an original put back in its place, so it is
 /// read from the live inventory.
 pub fn role_of(stack: &ClientStack, relative_path: &str) -> Option<StackRole> {
-    let _ = (stack, relative_path);
-    todo!("role_of")
+    stack
+        .items
+        .iter()
+        .find(|item| item.file_name.eq_ignore_ascii_case(relative_path))
+        .map(|item| item.role)
 }
 
 /// True for roles the **game itself** loads, which therefore cannot be left
@@ -157,15 +412,52 @@ pub fn role_of(stack: &ClientStack, relative_path: &str) -> Option<StackRole> {
 /// `nvngx_dlssnr.dll` is deliberately absent: ESO does not ship or load it, so
 /// with the injector parked it is simply inert.
 pub fn game_loads_itself(role: StackRole) -> bool {
-    let _ = role;
-    todo!("game_loads_itself")
+    matches!(
+        role,
+        StackRole::SuperSampling | StackRole::ShaderCompiler | StackRole::FrameGeneration
+    )
 }
 
 /// Translate the plan into the batch [`crate::client_backup::run_file_ops`]
 /// will execute. [`ToggleOpKind::LeaveInPlace`] steps produce nothing.
-pub fn to_file_ops(plan: &TogglePlan) -> Vec<FileOp> {
-    let _ = plan;
-    todo!("to_file_ops")
+pub fn to_file_ops(plan: &TogglePlan) -> Result<Vec<FileOp>, String> {
+    // Note which side of each two-file step the names sit on. A backup name
+    // (`.disabled-bak`, `.eso-orig-bak`, …) may only ever appear as a
+    // `RestoreInPlace` source or a `RemoveRestored::must_match` — never as
+    // something Kalpa parks, unparks or removes. Those files are the user's
+    // originals, and they are the reason disable can be undone at all.
+    let mut file_ops = Vec::with_capacity(plan.operations.len());
+
+    for op in &plan.operations {
+        let partner = || {
+            op.partner.clone().ok_or_else(|| {
+                format!(
+                    "Internal error: the planned step for {} is missing the file it pairs with, \
+                     so Kalpa is refusing to run this batch.",
+                    op.file_name
+                )
+            })
+        };
+        match op.kind {
+            ToggleOpKind::Park => file_ops.push(FileOp::Park {
+                relative_path: op.file_name.clone(),
+            }),
+            ToggleOpKind::Unpark => file_ops.push(FileOp::Unpark {
+                relative_path: op.file_name.clone(),
+            }),
+            ToggleOpKind::RestoreOriginal => file_ops.push(FileOp::RestoreInPlace {
+                source: op.file_name.clone(),
+                destination: partner()?,
+            }),
+            ToggleOpKind::RemoveRestored => file_ops.push(FileOp::RemoveRestored {
+                relative_path: partner()?,
+                must_match: op.file_name.clone(),
+            }),
+            ToggleOpKind::LeaveInPlace => {}
+        }
+    }
+
+    Ok(file_ops)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────
@@ -173,8 +465,12 @@ pub fn to_file_ops(plan: &TogglePlan) -> Vec<FileOp> {
 /// Read-only: what switching this stack would do.
 #[tauri::command]
 pub fn plan_client_toggle(app: tauri::AppHandle, client_dir: String) -> Result<TogglePlan, String> {
-    let _ = (app, client_dir);
-    todo!("plan_client_toggle")
+    let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
+    let stack = crate::client_stack::inspect_stack(&location.client_dir);
+    let manifest_path = crate::client_backup::manifest_path(&app)?;
+    let managed = managed_entries(&manifest_path, &location.client_dir);
+    let dir = stack.client_dir.clone();
+    Ok(plan_toggle(&stack, &managed, &dir))
 }
 
 /// Switch the stack off, or back on.
@@ -193,8 +489,41 @@ pub async fn apply_client_toggle(
     client_dir: String,
     expected: ToggleAction,
 ) -> Result<crate::client_backup::FileOpOutcome, String> {
-    let _ = (app, state, client_dir, expected);
-    todo!("apply_client_toggle")
+    let root = crate::client_write::begin_write(&state, &client_dir).await?;
+    let manifest_path = crate::client_backup::manifest_path(&app)?;
+    let backup_root = crate::client_backup::backup_root(&app)?;
+
+    tokio::task::spawn_blocking(move || {
+        let stack = crate::client_stack::inspect_stack(root.path());
+        let managed = managed_entries(&manifest_path, root.path());
+        let dir = stack.client_dir.clone();
+        let plan = plan_toggle(&stack, &managed, &dir);
+
+        let action_word = |action: ToggleAction| match action {
+            ToggleAction::Disable => "disable",
+            ToggleAction::Enable => "enable",
+        };
+
+        if !plan.blockers.is_empty() {
+            return Err(format!(
+                "Cannot {} this stack: {}",
+                action_word(expected),
+                plan.blockers.join(" ")
+            ));
+        }
+        if plan.action != expected {
+            return Err(format!(
+                "The client folder has changed since this was planned, so Kalpa is refusing to \
+                 {} it. Re-open the confirmation to see the current plan.",
+                action_word(expected)
+            ));
+        }
+
+        let ops = to_file_ops(&plan)?;
+        crate::client_backup::run_file_ops_in(&manifest_path, &backup_root, &root, &ops)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// This install's manifest bucket.
@@ -205,4 +534,539 @@ pub fn managed_entries(manifest_path: &Path, client_root: &Path) -> Vec<ManagedF
         .get(&crate::client_backup::install_key(client_root))
         .cloned()
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client_stack::inspect_stack;
+    use crate::client_write::{ApprovedRoot, FileOrigin};
+
+    fn write(dir: &Path, name: &str, contents: &str) {
+        std::fs::write(dir.join(name), contents).expect("write fixture");
+    }
+
+    /// The install shape from the module doc: an injector, both ESO-shipped
+    /// files with the user's own preserved originals beside them, the inert
+    /// Neural Rendering runtime, an addon, and ReShade's own config.
+    fn real_install(dir: &Path) {
+        write(dir, "eso64.exe", "game");
+        write(dir, "dxgi.dll", "reshade");
+        write(dir, "nvngx_dlssnr.dll", "neural rendering runtime");
+        write(dir, "nvngx_dlss.dll", "the modded dlss");
+        write(dir, "nvngx_dlss.dll.disabled-bak", "the stock dlss");
+        write(dir, "d3dcompiler_47.dll", "the modded compiler");
+        write(dir, "d3dcompiler_47.dll.eso-orig-bak", "the stock compiler");
+        write(dir, "renodx-dlss5.addon64", "addon");
+        write(dir, "ReShade.ini", "[GENERAL]\n");
+    }
+
+    fn managed_file(
+        relative_path: &str,
+        kind: ManagedKind,
+        displaced_in_place: Option<&str>,
+        parked: bool,
+    ) -> ManagedFile {
+        ManagedFile {
+            relative_path: relative_path.to_string(),
+            kind,
+            sha256: "a".repeat(64),
+            placed_at: "2026-01-01T00:00:00Z".to_string(),
+            displaced_backup: None,
+            origin: FileOrigin::Adopted,
+            displaced_in_place: displaced_in_place.map(str::to_string),
+            parked,
+        }
+    }
+
+    /// The manifest bucket for a fully-adopted real install, not yet disabled.
+    fn managed_stack() -> Vec<ManagedFile> {
+        vec![
+            managed_file("dxgi.dll", ManagedKind::ReShadeCore, None, false),
+            managed_file(
+                "nvngx_dlss.dll",
+                ManagedKind::NvidiaRuntime,
+                Some("nvngx_dlss.dll.disabled-bak"),
+                false,
+            ),
+            managed_file("nvngx_dlssnr.dll", ManagedKind::NvidiaRuntime, None, false),
+            managed_file(
+                "d3dcompiler_47.dll",
+                ManagedKind::ShaderCompiler,
+                Some("d3dcompiler_47.dll.eso-orig-bak"),
+                false,
+            ),
+            managed_file("renodx-dlss5.addon64", ManagedKind::Addon, None, false),
+        ]
+    }
+
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().to_string(),
+                    std::fs::read(entry.path()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A step that takes two files must carry both. Dropping the copy that
+    /// puts the game's own DLL back would leave ESO with no file under a name
+    /// it loads itself, so the batch is refused rather than run short.
+    #[test]
+    fn to_file_ops_refuses_a_step_that_lost_its_partner() {
+        let plan = TogglePlan {
+            client_dir: "client".to_string(),
+            action: ToggleAction::Disable,
+            is_disabled: false,
+            blockers: Vec::new(),
+            operations: vec![
+                PlannedOp {
+                    kind: ToggleOpKind::Park,
+                    file_name: "nvngx_dlss.dll".to_string(),
+                    partner: None,
+                    summary: String::new(),
+                    detail: String::new(),
+                },
+                PlannedOp {
+                    kind: ToggleOpKind::RestoreOriginal,
+                    file_name: "nvngx_dlss.dll.disabled-bak".to_string(),
+                    partner: None,
+                    summary: String::new(),
+                    detail: String::new(),
+                },
+            ],
+        };
+
+        let error = to_file_ops(&plan).expect_err("a half-described step must not run");
+        assert!(error.contains("nvngx_dlss.dll.disabled-bak"), "{error}");
+    }
+
+    /// `.kalpa-off` files on disk with no manifest rows to explain them. The
+    /// plan has nothing to do, and must say so rather than render an empty
+    /// confirmation whose button reports success having changed nothing.
+    #[test]
+    fn a_parked_stack_kalpa_has_no_record_of_blocks_rather_than_doing_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        std::fs::rename(
+            tmp.path().join("dxgi.dll"),
+            tmp.path().join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+        let stack = inspect_stack(tmp.path());
+        assert!(stack.is_disabled);
+
+        // Managed, but nothing recorded as parked — the manifest was lost and
+        // rebuilt, or the files were moved by hand.
+        let managed = vec![managed_file(
+            "dxgi.dll",
+            ManagedKind::ReShadeCore,
+            None,
+            false,
+        )];
+        let plan = plan_toggle(&stack, &managed, "client");
+
+        assert_eq!(plan.action, ToggleAction::Enable);
+        assert!(plan.operations.is_empty());
+        assert!(
+            !plan.blockers.is_empty(),
+            "an empty plan must explain itself"
+        );
+    }
+
+    #[test]
+    fn role_of_reads_the_live_inventory() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(role_of(&stack, "dxgi.dll"), Some(StackRole::Injector));
+        assert_eq!(role_of(&stack, "DXGI.DLL"), Some(StackRole::Injector));
+        assert_eq!(
+            role_of(&stack, "nvngx_dlss.dll"),
+            Some(StackRole::SuperSampling)
+        );
+        assert_eq!(role_of(&stack, "does-not-exist.dll"), None);
+    }
+
+    #[test]
+    fn game_loads_itself_excludes_neural_rendering_addons_and_the_injector() {
+        assert!(game_loads_itself(StackRole::SuperSampling));
+        assert!(game_loads_itself(StackRole::ShaderCompiler));
+        assert!(game_loads_itself(StackRole::FrameGeneration));
+        assert!(!game_loads_itself(StackRole::NeuralRendering));
+        assert!(!game_loads_itself(StackRole::Injector));
+        assert!(!game_loads_itself(StackRole::Addon));
+        assert!(!game_loads_itself(StackRole::Companion));
+    }
+
+    #[test]
+    fn disable_parks_the_injector_and_restores_both_eso_shipped_runtimes() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+        let managed = managed_stack();
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        assert_eq!(plan.action, ToggleAction::Disable);
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+
+        let dlss_pos = plan
+            .operations
+            .iter()
+            .position(|op| op.kind == ToggleOpKind::Park && op.file_name == "nvngx_dlss.dll")
+            .expect("park of nvngx_dlss.dll");
+        assert_eq!(
+            plan.operations[dlss_pos + 1].kind,
+            ToggleOpKind::RestoreOriginal
+        );
+        assert_eq!(
+            plan.operations[dlss_pos + 1].file_name,
+            "nvngx_dlss.dll.disabled-bak"
+        );
+
+        let compiler_pos = plan
+            .operations
+            .iter()
+            .position(|op| op.kind == ToggleOpKind::Park && op.file_name == "d3dcompiler_47.dll")
+            .expect("park of d3dcompiler_47.dll");
+        assert_eq!(
+            plan.operations[compiler_pos + 1].kind,
+            ToggleOpKind::RestoreOriginal
+        );
+        assert_eq!(
+            plan.operations[compiler_pos + 1].file_name,
+            "d3dcompiler_47.dll.eso-orig-bak"
+        );
+
+        // The injector's Park is the last non-LeaveInPlace operation.
+        let last_non_leave = plan
+            .operations
+            .iter()
+            .rev()
+            .find(|op| op.kind != ToggleOpKind::LeaveInPlace)
+            .expect("some operation");
+        assert_eq!(last_non_leave.kind, ToggleOpKind::Park);
+        assert_eq!(last_non_leave.file_name, "dxgi.dll");
+    }
+
+    #[test]
+    fn inert_files_are_left_in_place_not_parked() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+        let managed = managed_stack();
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        for name in ["nvngx_dlssnr.dll", "renodx-dlss5.addon64"] {
+            let op = plan
+                .operations
+                .iter()
+                .find(|op| op.file_name == name)
+                .unwrap_or_else(|| panic!("no operation for {name}"));
+            assert_eq!(op.kind, ToggleOpKind::LeaveInPlace, "{name}");
+        }
+    }
+
+    #[test]
+    fn to_file_ops_matches_the_disable_batch_and_never_names_a_backup_as_a_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+        let managed = managed_stack();
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        let ops = to_file_ops(&plan).expect("every planned step must carry its partner");
+
+        assert_eq!(
+            ops,
+            vec![
+                FileOp::Park {
+                    relative_path: "nvngx_dlss.dll".to_string(),
+                },
+                FileOp::RestoreInPlace {
+                    source: "nvngx_dlss.dll.disabled-bak".to_string(),
+                    destination: "nvngx_dlss.dll".to_string(),
+                },
+                FileOp::Park {
+                    relative_path: "d3dcompiler_47.dll".to_string(),
+                },
+                FileOp::RestoreInPlace {
+                    source: "d3dcompiler_47.dll.eso-orig-bak".to_string(),
+                    destination: "d3dcompiler_47.dll".to_string(),
+                },
+                FileOp::Park {
+                    relative_path: "dxgi.dll".to_string(),
+                },
+            ]
+        );
+
+        let is_backup = |name: &str| {
+            name.ends_with(".disabled-bak")
+                || name.ends_with(".eso-orig-bak")
+                || name.ends_with(".bak")
+                || name.ends_with(".orig")
+        };
+        for op in &ops {
+            match op {
+                FileOp::Park { relative_path } | FileOp::Unpark { relative_path } => {
+                    assert!(!is_backup(relative_path), "{op:?}");
+                }
+                FileOp::RestoreInPlace { destination, .. } => {
+                    assert!(!is_backup(destination), "{op:?}");
+                }
+                FileOp::RemoveRestored { relative_path, .. } => {
+                    assert!(!is_backup(relative_path), "{op:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enable_unparks_the_injector_first_then_removes_stock_before_unparking_each_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        std::fs::rename(
+            tmp.path().join("dxgi.dll"),
+            tmp.path().join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+        std::fs::rename(
+            tmp.path().join("nvngx_dlss.dll"),
+            tmp.path().join("nvngx_dlss.dll.kalpa-off"),
+        )
+        .unwrap();
+        std::fs::copy(
+            tmp.path().join("nvngx_dlss.dll.disabled-bak"),
+            tmp.path().join("nvngx_dlss.dll"),
+        )
+        .unwrap();
+        std::fs::rename(
+            tmp.path().join("d3dcompiler_47.dll"),
+            tmp.path().join("d3dcompiler_47.dll.kalpa-off"),
+        )
+        .unwrap();
+        std::fs::copy(
+            tmp.path().join("d3dcompiler_47.dll.eso-orig-bak"),
+            tmp.path().join("d3dcompiler_47.dll"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(tmp.path());
+        assert!(stack.is_disabled);
+
+        let managed = vec![
+            managed_file("dxgi.dll", ManagedKind::ReShadeCore, None, true),
+            managed_file(
+                "nvngx_dlss.dll",
+                ManagedKind::NvidiaRuntime,
+                Some("nvngx_dlss.dll.disabled-bak"),
+                true,
+            ),
+            managed_file("nvngx_dlssnr.dll", ManagedKind::NvidiaRuntime, None, false),
+            managed_file(
+                "d3dcompiler_47.dll",
+                ManagedKind::ShaderCompiler,
+                Some("d3dcompiler_47.dll.eso-orig-bak"),
+                true,
+            ),
+            managed_file("renodx-dlss5.addon64", ManagedKind::Addon, None, false),
+        ];
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+        assert_eq!(plan.action, ToggleAction::Enable);
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+
+        assert_eq!(plan.operations[0].kind, ToggleOpKind::Unpark);
+        assert_eq!(plan.operations[0].file_name, "dxgi.dll");
+
+        let ops = to_file_ops(&plan).expect("every planned step must carry its partner");
+        assert_eq!(
+            ops,
+            vec![
+                FileOp::Unpark {
+                    relative_path: "dxgi.dll".to_string(),
+                },
+                FileOp::RemoveRestored {
+                    relative_path: "nvngx_dlss.dll".to_string(),
+                    must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
+                },
+                FileOp::Unpark {
+                    relative_path: "nvngx_dlss.dll".to_string(),
+                },
+                FileOp::RemoveRestored {
+                    relative_path: "d3dcompiler_47.dll".to_string(),
+                    must_match: "d3dcompiler_47.dll.eso-orig-bak".to_string(),
+                },
+                FileOp::Unpark {
+                    relative_path: "d3dcompiler_47.dll".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// Disable, then enable, driven through the real batch runner. The
+    /// directory must end up byte-identical to how it started.
+    #[test]
+    fn round_trip_disable_then_enable_restores_the_folder_exactly() {
+        let root = tempfile::tempdir().unwrap();
+        let client = root.path().join("client");
+        let manifest = root.path().join("client-managed.json");
+        let backups = root.path().join("client-backups");
+        std::fs::create_dir_all(&client).unwrap();
+        std::fs::create_dir_all(&backups).unwrap();
+        real_install(&client);
+
+        crate::client_backup::record_adopted(&manifest, &client, managed_stack())
+            .expect("record adoption");
+
+        let before = snapshot(&client);
+        let approved = ApprovedRoot::for_tests_idle(client.clone());
+
+        // Disable.
+        let stack = inspect_stack(&client);
+        let managed = managed_entries(&manifest, &client);
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+        assert_eq!(plan.action, ToggleAction::Disable);
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        let ops = to_file_ops(&plan).expect("every planned step must carry its partner");
+        crate::client_backup::run_file_ops_in(&manifest, &backups, &approved, &ops)
+            .expect("disable batch should apply");
+
+        let stack = inspect_stack(&client);
+        assert!(stack.is_disabled);
+
+        // Enable.
+        let managed = managed_entries(&manifest, &client);
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+        assert_eq!(plan.action, ToggleAction::Enable);
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        let ops = to_file_ops(&plan).expect("every planned step must carry its partner");
+        crate::client_backup::run_file_ops_in(&manifest, &backups, &approved, &ops)
+            .expect("enable batch should apply");
+
+        assert_eq!(
+            before,
+            snapshot(&client),
+            "the folder must be byte-identical after a full round trip"
+        );
+    }
+
+    #[test]
+    fn disable_blocks_when_there_is_no_injector() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "eso64.exe", "game");
+        write(tmp.path(), "nvngx_dlss.dll", "modded");
+        write(tmp.path(), "nvngx_dlss.dll.disabled-bak", "stock");
+        let stack = inspect_stack(tmp.path());
+        let managed = vec![managed_file(
+            "nvngx_dlss.dll",
+            ManagedKind::NvidiaRuntime,
+            Some("nvngx_dlss.dll.disabled-bak"),
+            false,
+        )];
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        assert_eq!(plan.action, ToggleAction::Disable);
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.to_lowercase().contains("injector")),
+            "{:?}",
+            plan.blockers
+        );
+    }
+
+    #[test]
+    fn disable_blocks_when_a_runtime_has_no_preserved_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "eso64.exe", "game");
+        write(tmp.path(), "dxgi.dll", "reshade");
+        write(tmp.path(), "nvngx_dlss.dll", "modded, no backup anywhere");
+        let stack = inspect_stack(tmp.path());
+        let managed = vec![
+            managed_file("dxgi.dll", ManagedKind::ReShadeCore, None, false),
+            managed_file("nvngx_dlss.dll", ManagedKind::NvidiaRuntime, None, false),
+        ];
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("nvngx_dlss.dll")),
+            "{:?}",
+            plan.blockers
+        );
+    }
+
+    #[test]
+    fn disable_blocks_when_nothing_is_managed() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+
+        let plan = plan_toggle(&stack, &[], &stack.client_dir);
+
+        assert_eq!(plan.action, ToggleAction::Disable);
+        assert!(!plan.blockers.is_empty());
+        assert!(plan.operations.is_empty());
+    }
+
+    #[test]
+    fn enable_blocks_when_a_parked_file_has_been_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        std::fs::rename(
+            tmp.path().join("dxgi.dll"),
+            tmp.path().join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+        std::fs::rename(
+            tmp.path().join("nvngx_dlss.dll"),
+            tmp.path().join("nvngx_dlss.dll.kalpa-off"),
+        )
+        .unwrap();
+        std::fs::copy(
+            tmp.path().join("nvngx_dlss.dll.disabled-bak"),
+            tmp.path().join("nvngx_dlss.dll"),
+        )
+        .unwrap();
+        // The parked copy then vanishes out from under Kalpa.
+        std::fs::remove_file(tmp.path().join("nvngx_dlss.dll.kalpa-off")).unwrap();
+
+        let stack = inspect_stack(tmp.path());
+        assert!(stack.is_disabled);
+
+        let managed = vec![
+            managed_file("dxgi.dll", ManagedKind::ReShadeCore, None, true),
+            managed_file(
+                "nvngx_dlss.dll",
+                ManagedKind::NvidiaRuntime,
+                Some("nvngx_dlss.dll.disabled-bak"),
+                true,
+            ),
+        ];
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        assert_eq!(plan.action, ToggleAction::Enable);
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("nvngx_dlss.dll")),
+            "{:?}",
+            plan.blockers
+        );
+    }
 }
