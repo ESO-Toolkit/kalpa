@@ -182,50 +182,34 @@ fn user_agent() -> String {
 /// sustained ~27 Mbit/s just to finish in time, making those addons
 /// uninstallable on slow links. This client therefore sets no total deadline.
 ///
-/// It DOES set an idle-read timeout, which is a different thing: it bounds the
-/// gap between bytes, not the length of the transfer, so a healthy slow download
-/// is untouched. [`DOWNLOAD_READ_TIMEOUT`] on its own aborts nothing —
-/// [`stream_download_body`] treats an elapsed read as "no data this tick", which
-/// is what lets a Stop land mid-body instead of waiting on TCP keepalive.
+/// reqwest's blocking builder has no idle-read timeout, so a dropped connection
+/// is caught by TCP keepalive probes instead: after 30s of silence, probes every
+/// 10s, connection failed after 4 unanswered (~70s) rather than hanging forever.
 ///
-/// reqwest 0.13's BLOCKING builder does not expose `read_timeout`, but its async
-/// builder does, and `blocking::ClientBuilder` is constructible `From` an async
-/// one — so the settings that exist only on the async side are applied first and
-/// the builder is then converted.
+/// Do NOT try to add `read_timeout` here. It exists on reqwest's ASYNC builder
+/// and a `blocking::ClientBuilder` can be built `From` an async one, so wiring it
+/// up compiles cleanly — and then panics at runtime on the first response body:
+/// `ReadTimeoutBody::poll_frame` calls `tokio::time::sleep`, and the blocking
+/// client polls bodies on the caller's thread, where there is no reactor
+/// ("there is no reactor running, must be called from the context of a Tokio 1.x
+/// runtime"). The omission from the blocking builder is a guard rail, not an
+/// oversight. This was shipped once and broke every download; the tests missed it
+/// because they drive `stream_download_body` with in-memory readers and never
+/// make a real request.
 fn download_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        let async_builder = reqwest::Client::builder()
+        reqwest::blocking::Client::builder()
             .user_agent(user_agent())
             .connect_timeout(Duration::from_secs(30))
-            .read_timeout(DOWNLOAD_READ_TIMEOUT)
             .tcp_keepalive(Duration::from_secs(30))
             .tcp_keepalive_interval(Duration::from_secs(10))
             .tcp_keepalive_retries(4u32)
-            .redirect(reqwest::redirect::Policy::limited(10));
-        reqwest::blocking::ClientBuilder::from(async_builder)
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("failed to build download HTTP client")
     })
 }
-
-/// How long a download may go without producing a single byte before
-/// [`stream_download_body`] wakes up to look around.
-///
-/// This is deliberately short, and it is safe to make it short precisely because
-/// an elapsed read is NOT an error: the loop checks the cancel flag and goes back
-/// to reading. The value therefore buys Stop latency and nothing else — a stalled
-/// download is abandoned only once [`DOWNLOAD_IDLE_BUDGET`] of *consecutive*
-/// silence has accumulated.
-const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How much CONSECUTIVE silence means the connection is dead rather than slow.
-///
-/// Consecutive is the whole point: the counter resets on every byte received, so
-/// a download crawling along at a few hundred bytes a second never accrues
-/// toward it. Measuring cumulative idle time instead would fail exactly the slow
-/// links that the "no total deadline" decision above exists to protect.
-const DOWNLOAD_IDLE_BUDGET: Duration = Duration::from_secs(60);
 
 fn fetch_page(
     client: &reqwest::blocking::Client,
@@ -1196,10 +1180,6 @@ impl DownloadHooks<'_> {
 /// Stop request is observed promptly (the cancel flag is polled per chunk).
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
-/// How many consecutive elapsed reads add up to [`DOWNLOAD_IDLE_BUDGET`].
-const MAX_CONSECUTIVE_IDLE_TICKS: u32 =
-    (DOWNLOAD_IDLE_BUDGET.as_secs() / DOWNLOAD_READ_TIMEOUT.as_secs()) as u32;
-
 fn report_download_progress(hooks: &DownloadHooks, done: u64, total: Option<u64>) {
     if let Some(cb) = hooks.progress {
         cb(done, total);
@@ -1276,43 +1256,20 @@ fn stream_download_body<R: io::Read, W: io::Write>(
     // total size) before the first chunk lands, rather than after it.
     report_download_progress(&hooks, 0, total);
 
-    // Consecutive idle ticks — reset by any byte that arrives. Counted in ticks
-    // rather than wall clock because the client's `read_timeout` is what bounds
-    // each one, which also keeps the budget deterministic under test.
-    let mut idle_ticks: u32 = 0;
-
     loop {
         if download_is_cancelled(&hooks) {
             return Err(crate::installer::CANCELLED.to_string());
         }
-        let n = match reader.read(&mut buf) {
-            Ok(n) => n,
-            // The read timeout elapsed: no data this tick. That is not by itself
-            // a failure — the connection may simply be slow — so loop back and
-            // re-check the cancel flag, which is what lets Stop land mid-body
-            // instead of waiting on TCP keepalive. Only sustained silence is
-            // fatal.
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                idle_ticks += 1;
-                if idle_ticks >= MAX_CONSECUTIVE_IDLE_TICKS {
-                    return Err(map_download_read_error(&e));
-                }
-                continue;
-            }
-            Err(e) => return Err(map_download_read_error(&e)),
-        };
+        // Cancellation is only observed between chunks, so a body that stops
+        // sending entirely is not interrupted here — the read blocks until TCP
+        // keepalive gives up (~70s). See `download_client` for why an idle-read
+        // timeout cannot be used to tighten that with the blocking client.
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| map_download_read_error(&e))?;
         if n == 0 {
             break;
         }
-        // Bytes arrived, so whatever silence preceded them was slowness, not a
-        // stall. Resetting here (rather than accumulating) is what keeps a
-        // genuinely slow download alive indefinitely.
-        idle_ticks = 0;
         writer
             .write_all(&buf[..n])
             .map_err(|e| map_download_write_error(&e))?;
@@ -2166,74 +2123,6 @@ mod tests {
         // Deliberately not the "Failed to write download to temp file" wording:
         // a mid-body timeout is the network, not the user's drive.
         assert!(err.contains("Download stalled"), "unexpected error: {err}");
-    }
-
-    /// A slow connection produces idle ticks between real chunks. Those must not
-    /// accumulate toward the stall budget, or downloads on exactly the slow links
-    /// the no-total-deadline decision protects would start failing.
-    #[test]
-    fn stream_download_body_survives_idle_ticks_between_chunks() {
-        struct Stuttering {
-            reads: usize,
-        }
-        impl io::Read for Stuttering {
-            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                self.reads += 1;
-                // Far more idle ticks in total than the budget, but never that
-                // many in a row: two stalls, a byte, two stalls, a byte, ...
-                match self.reads % 3 {
-                    0 => {
-                        buf[0] = 42;
-                        Ok(1)
-                    }
-                    _ if self.reads > MAX_CONSECUTIVE_IDLE_TICKS as usize * 3 => Ok(0),
-                    _ => Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out")),
-                }
-            }
-        }
-
-        let mut out: Vec<u8> = Vec::new();
-        let written = stream_download_body(
-            &mut Stuttering { reads: 0 },
-            &mut out,
-            None,
-            None,
-            DownloadHooks::NONE,
-        )
-        .expect("a stuttering but progressing body must complete");
-        assert_eq!(written as usize, out.len());
-        assert!(written > 0, "expected the delivered bytes to be written");
-    }
-
-    /// Stop must land during a stall, rather than waiting out the whole budget.
-    #[test]
-    fn stream_download_body_cancels_during_a_stall() {
-        struct Stalled<'a> {
-            flag: &'a AtomicBool,
-        }
-        impl io::Read for Stalled<'_> {
-            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-                // Trip cancellation the way a user's Stop click would: while the
-                // body is silent, before the idle budget is anywhere near spent.
-                self.flag.store(true, Ordering::Relaxed);
-                Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"))
-            }
-        }
-
-        let flag = AtomicBool::new(false);
-        let mut out: Vec<u8> = Vec::new();
-        let err = stream_download_body(
-            &mut Stalled { flag: &flag },
-            &mut out,
-            None,
-            None,
-            DownloadHooks {
-                cancel: Some(&flag),
-                progress: None,
-            },
-        )
-        .expect_err("a cancelled download must fail");
-        assert_eq!(err, crate::installer::CANCELLED);
     }
 
     #[test]
