@@ -36,6 +36,22 @@
 //!   The returned error names the affected files and says where the originals
 //!   are; `revert_placements` is the way back.
 //!
+//! # Why placement takes a token
+//!
+//! [`apply_placements`] and [`revert_placements`] name their target with a
+//! [`ApprovedRoot`](crate::client_write::ApprovedRoot), not a `&Path`. That is
+//! not decoration: this module is the only code in Kalpa that writes into a
+//! game install, and a `&Path` parameter would let any caller point it
+//! anywhere simply by not asking permission first. The token can only come
+//! from `client_write::begin_write`, so every gate in that module is on the
+//! path to here by construction.
+//!
+//! Both functions also call
+//! [`reassert_idle`](crate::client_write::ApprovedRoot::reassert_idle) as their
+//! first act inside `MANIFEST_LOCK`, before a single byte moves. The token
+//! proves the client was idle when it was minted; a download can easily put
+//! minutes between that and the write.
+//!
 //! Restore is done by copying the backup *over* the placed file rather than
 //! deleting and then copying. A half-failed overwrite leaves wrong bytes; a
 //! failed copy after a successful delete leaves no file at all. Wrong is
@@ -48,7 +64,7 @@
 //! ReShade itself, or another tool) modified it, and Kalpa leaves it alone and
 //! says so rather than silently discarding someone's work.
 
-use crate::client_write::{ManagedFile, ManagedKind, ManagedManifest};
+use crate::client_write::{ApprovedRoot, ManagedFile, ManagedKind, ManagedManifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -577,25 +593,25 @@ fn record_incomplete_rollback_locked(
 /// affected, and that the originals are preserved in the backup folder.
 pub fn apply_placements(
     app: &tauri::AppHandle,
-    client_root: &Path,
+    root: &ApprovedRoot,
     placements: Vec<Placement>,
 ) -> Result<Vec<ManagedFile>, String> {
     let manifest = manifest_path(app)?;
     let backups = backup_root(app)?;
-    apply_placements_in(&manifest, &backups, client_root, placements)
+    apply_placements_in(&manifest, &backups, root, placements)
 }
 
 /// Inner form of [`apply_placements`], testable without an `AppHandle`.
 fn apply_placements_in(
     manifest_path: &Path,
     backup_root: &Path,
-    client_root: &Path,
+    root: &ApprovedRoot,
     placements: Vec<Placement>,
 ) -> Result<Vec<ManagedFile>, String> {
     apply_placements_in_with(
         manifest_path,
         backup_root,
-        client_root,
+        root,
         placements,
         |from: &Path, to: &Path| fs::copy(from, to),
     )
@@ -628,12 +644,12 @@ fn apply_placements_in(
 fn apply_placements_in_with(
     manifest_path: &Path,
     backup_root: &Path,
-    client_root: &Path,
+    root: &ApprovedRoot,
     placements: Vec<Placement>,
     restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
 ) -> Result<Vec<ManagedFile>, String> {
     let _guard = lock_manifest();
-    apply_placements_in_with_locked(manifest_path, backup_root, client_root, placements, restore)
+    apply_placements_in_with_locked(manifest_path, backup_root, root, placements, restore)
 }
 
 /// Body of [`apply_placements_in_with`]; assumes [`MANIFEST_LOCK`] is already
@@ -642,10 +658,18 @@ fn apply_placements_in_with(
 fn apply_placements_in_with_locked(
     manifest_path: &Path,
     backup_root: &Path,
-    client_root: &Path,
+    root: &ApprovedRoot,
     placements: Vec<Placement>,
     restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
 ) -> Result<Vec<ManagedFile>, String> {
+    // Gate 4, re-asserted. `begin_write` proved the client was idle when the
+    // token was minted, which may have been a multi-minute download ago. This
+    // is the last point before any byte is written, and it is inside
+    // MANIFEST_LOCK, so no concurrent batch can slip a write in between the
+    // check and the placement.
+    root.reassert_idle()?;
+    let client_root = root.path();
+
     let mut placed: Vec<PlacedRecord> = Vec::new();
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut entries: Vec<ManagedFile> = Vec::new();
@@ -757,12 +781,12 @@ fn place_one(
 /// reported in the returned list of skipped paths, never deleted.
 pub fn revert_placements(
     app: &tauri::AppHandle,
-    client_root: &Path,
+    root: &ApprovedRoot,
     relative_paths: &[String],
 ) -> Result<Vec<String>, String> {
     let manifest = manifest_path(app)?;
     let backups = backup_root(app)?;
-    revert_placements_in(&manifest, &backups, client_root, relative_paths)
+    revert_placements_in(&manifest, &backups, root, relative_paths)
 }
 
 /// Inner form of [`revert_placements`], testable without an `AppHandle`.
@@ -776,11 +800,11 @@ pub fn revert_placements(
 fn revert_placements_in(
     manifest_path: &Path,
     backup_root: &Path,
-    client_root: &Path,
+    root: &ApprovedRoot,
     relative_paths: &[String],
 ) -> Result<Vec<String>, String> {
     let _guard = lock_manifest();
-    revert_placements_in_locked(manifest_path, backup_root, client_root, relative_paths)
+    revert_placements_in_locked(manifest_path, backup_root, root, relative_paths)
 }
 
 /// Body of [`revert_placements_in`]; assumes [`MANIFEST_LOCK`] is already
@@ -788,9 +812,16 @@ fn revert_placements_in(
 fn revert_placements_in_locked(
     manifest_path: &Path,
     backup_root: &Path,
-    client_root: &Path,
+    root: &ApprovedRoot,
     relative_paths: &[String],
 ) -> Result<Vec<String>, String> {
+    // Gate 4 again. Removing a proxy DLL the running client has loaded fails
+    // on Windows anyway, but restoring a displaced original under a live
+    // client is the case worth refusing: the game would be reading a file
+    // mid-rewrite.
+    root.reassert_idle()?;
+    let client_root = root.path();
+
     let mut manifest = load_manifest_at(manifest_path);
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get(&key).cloned() else {
@@ -987,8 +1018,31 @@ mod tests {
             }
         }
 
+        /// A write token for this harness's client dir, reporting the client
+        /// idle. Tests about gate 4 build their own with [`root_with`].
+        fn root(&self) -> ApprovedRoot {
+            ApprovedRoot::for_tests_idle(self.client.clone())
+        }
+
+        /// A write token whose running check answers `check`, so a test can
+        /// make the client appear to start part-way through a batch.
+        fn root_with(
+            &self,
+            check: impl Fn() -> Result<bool, String> + Send + Sync + 'static,
+        ) -> ApprovedRoot {
+            ApprovedRoot::for_tests(self.client.clone(), std::sync::Arc::new(check))
+        }
+
         fn apply(&self, placements: Vec<Placement>) -> Result<Vec<ManagedFile>, String> {
-            apply_placements_in(&self.manifest, &self.backups, &self.client, placements)
+            self.apply_as(&self.root(), placements)
+        }
+
+        fn apply_as(
+            &self,
+            root: &ApprovedRoot,
+            placements: Vec<Placement>,
+        ) -> Result<Vec<ManagedFile>, String> {
+            apply_placements_in(&self.manifest, &self.backups, root, placements)
         }
 
         /// Apply with an injected rollback restore-copy, so the mixed-state
@@ -1001,14 +1055,18 @@ mod tests {
             apply_placements_in_with(
                 &self.manifest,
                 &self.backups,
-                &self.client,
+                &self.root(),
                 placements,
                 restore,
             )
         }
 
         fn revert(&self, paths: &[String]) -> Result<Vec<String>, String> {
-            revert_placements_in(&self.manifest, &self.backups, &self.client, paths)
+            self.revert_as(&self.root(), paths)
+        }
+
+        fn revert_as(&self, root: &ApprovedRoot, paths: &[String]) -> Result<Vec<String>, String> {
+            revert_placements_in(&self.manifest, &self.backups, root, paths)
         }
 
         fn read(&self, relative: &str) -> String {
@@ -1641,6 +1699,84 @@ mod tests {
                 !h.client.join("existing.ini").exists(),
                 "a removed file must not still be reachable through the manifest"
             );
+        }
+    }
+
+    /// Gate 4 is re-asserted inside the placement, not just when the token is
+    /// minted. `begin_write` can succeed and then the user launches the game
+    /// while a 40 MB download finishes; these cover that window.
+    mod client_started_mid_batch {
+        use super::*;
+
+        #[test]
+        fn apply_refuses_and_places_nothing() {
+            let h = Harness::new();
+            let root = h.root_with(|| Ok(true));
+
+            let error = h
+                .apply_as(&root, vec![h.placement("dxgi.dll", "reshade")])
+                .expect_err("apply must refuse while the client is active");
+
+            assert!(
+                error.contains("running"),
+                "the refusal should say the client is running: {error}"
+            );
+            assert!(
+                !h.client.join("dxgi.dll").exists(),
+                "a refused batch must not place any file"
+            );
+            assert!(
+                h.entries().is_empty(),
+                "a refused batch must not record anything: {:?}",
+                h.entries()
+            );
+        }
+
+        #[test]
+        fn revert_refuses_and_keeps_the_file_and_its_entry() {
+            let h = Harness::new();
+            h.apply(vec![h.placement("dxgi.dll", "reshade")])
+                .expect("seed placement should succeed");
+
+            let root = h.root_with(|| Ok(true));
+            let error = h
+                .revert_as(&root, &["dxgi.dll".to_string()])
+                .expect_err("revert must refuse while the client is active");
+
+            assert!(
+                error.contains("running"),
+                "the refusal should say the client is running: {error}"
+            );
+            assert!(
+                h.client.join("dxgi.dll").is_file(),
+                "a refused revert must not remove the file"
+            );
+            assert_eq!(
+                h.entries().len(),
+                1,
+                "a refused revert must leave the manifest entry, or the file becomes a ghost"
+            );
+        }
+
+        /// A check that cannot answer is not an idle client. Treating an
+        /// errored process walk as "idle" would turn the one gate that
+        /// protects a live install into a no-op on exactly the machines where
+        /// process enumeration is restricted.
+        #[test]
+        fn an_unanswerable_check_refuses_rather_than_assuming_idle() {
+            let h = Harness::new();
+            let root = h.root_with(|| Err("process snapshot failed".to_string()));
+
+            let error = h
+                .apply_as(&root, vec![h.placement("dxgi.dll", "reshade")])
+                .expect_err("apply must refuse when the check cannot answer");
+
+            assert!(
+                error.contains("process snapshot failed"),
+                "the underlying failure should reach the user: {error}"
+            );
+            assert!(!h.client.join("dxgi.dll").exists());
+            assert!(h.entries().is_empty());
         }
     }
 }

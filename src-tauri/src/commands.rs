@@ -10654,22 +10654,32 @@ pub async fn is_eso_running() -> Result<bool, String> {
 /// write.
 #[tauri::command]
 pub async fn is_eso_or_launcher_running() -> Result<bool, String> {
-    tokio::task::spawn_blocking(|| {
-        #[cfg(target_os = "windows")]
-        {
-            is_eso_running_windows(is_eso_or_launcher_process_name)
-        }
+    tokio::task::spawn_blocking(is_eso_or_launcher_running_blocking)
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            // Same substring-match caveat as `is_eso_running`'s unix branch.
-            Ok(crate::platform::unix_process_running("eso64")
-                || crate::platform::unix_process_running("bethesda.net_launcher")
-                || crate::platform::unix_process_running("esolauncher"))
-        }
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
+/// Blocking core of [`is_eso_or_launcher_running`].
+///
+/// Exposed separately because `client_write::ApprovedRoot` re-asserts the
+/// gate from inside `client_backup`'s placement loop, which is synchronous
+/// filesystem work its callers already run on a blocking thread. Going
+/// through the async command there would mean either blocking a runtime
+/// worker or making the whole transactional placement path async for one
+/// process-list walk.
+pub fn is_eso_or_launcher_running_blocking() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        is_eso_running_windows(is_eso_or_launcher_process_name)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Same substring-match caveat as `is_eso_running`'s unix branch.
+        Ok(crate::platform::unix_process_running("eso64")
+            || crate::platform::unix_process_running("bethesda.net_launcher")
+            || crate::platform::unix_process_running("esolauncher"))
+    }
 }
 
 /// True if `name` is `eso64.exe` or `eso.exe`, compared case-insensitively.

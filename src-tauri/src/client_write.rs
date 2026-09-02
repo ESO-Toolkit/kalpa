@@ -33,15 +33,23 @@
 //! 5. **Not sandboxed.** Under the e2e sandbox (`KALPA_ADDONS_DIR`, debug-only)
 //!    client writes are refused outright, mirroring `copy_addons_to_instance`.
 //!
-//! ## What gate 4 does and does not promise
+//! ## How gate 4 is enforced
 //!
-//! [`begin_write`] checks all of the above and hands back a plain path, so the
-//! running check happens *when the caller calls it*. A caller that calls
-//! `begin_write`, downloads for five minutes, and then places files has checked
-//! nothing useful. Callers must re-check immediately before placing. This is
-//! currently a convention rather than something the types enforce; making
-//! placement require a token that only `begin_write` can mint is the obvious
-//! hardening and is not yet done.
+//! [`begin_write`] checks all of the above and hands back an [`ApprovedRoot`],
+//! not a plain path. `ApprovedRoot` has private fields and exactly one
+//! constructor outside of tests, so a caller cannot fabricate one: the only way
+//! to name a client directory to `client_backup::apply_placements` or
+//! `client_backup::revert_placements` is to have gone through every gate here.
+//!
+//! That alone would still only prove the game was idle *at some point*, which
+//! is the weaker claim — a caller can pass every gate, download for five
+//! minutes, and place files into a directory the client has since opened. So
+//! the token also carries the running check itself, and the placement path
+//! calls [`ApprovedRoot::reassert_idle`] from inside its own critical section,
+//! immediately before it touches the filesystem. The check is an injected
+//! closure rather than a direct call so tests can drive both answers, and so
+//! "the client started mid-batch" is a case with coverage rather than a
+//! comment.
 //!
 //! # Reversibility
 //!
@@ -59,7 +67,7 @@ use crate::client_install::{validate_client_dir, EsoClientLocation};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// A client directory the user has explicitly approved for writes.
 #[derive(Debug, Clone)]
@@ -359,15 +367,102 @@ fn refuse_under_sandbox() -> Result<(), String> {
     Ok(())
 }
 
+/// Answers "is the ESO client or its launcher active right now?".
+///
+/// Injected into [`ApprovedRoot`] rather than called directly so the
+/// client-started-mid-batch path is testable without a running game.
+pub type ClientActiveCheck = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
+
+/// The message shown whenever gate 4 refuses. One constant so the initial
+/// check and every re-assertion say the same thing.
+const CLIENT_ACTIVE_MESSAGE: &str =
+    "The Elder Scrolls Online or its launcher is running. Close both before changing \
+     client files — the launcher's patcher writes to this folder too.";
+
+/// Proof that a client directory passed every gate in this module, and the
+/// means to re-prove the one gate that can go stale.
+///
+/// This is the capability token for client-directory writes. Its fields are
+/// private and [`begin_write`] is its only non-test constructor, so a function
+/// that takes an `&ApprovedRoot` cannot be handed an arbitrary path: possession
+/// of the token *is* the evidence that the sandbox check, the approved-root
+/// check and the running check all ran.
+///
+/// Three of the four gates are stable once checked — the approved root does not
+/// move, containment and filename policy are properties of the paths, and the
+/// sandbox override does not appear mid-session. The running check is the one
+/// that decays, because minting a token and placing files are separated by a
+/// download. So the token keeps the check rather than the answer, and the
+/// placement re-runs it via [`reassert_idle`](Self::reassert_idle).
+///
+/// Cloning is deliberately allowed: a clone re-checks like the original, so it
+/// carries no stale authority.
+#[derive(Clone)]
+pub struct ApprovedRoot {
+    root: PathBuf,
+    is_client_active: ClientActiveCheck,
+}
+
+impl std::fmt::Debug for ApprovedRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApprovedRoot")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ApprovedRoot {
+    /// The approved client directory, in the form supplied by the user (not
+    /// canonicalized), for actual filesystem operations.
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
+    /// Re-run gate 4.
+    ///
+    /// Call this immediately before touching the filesystem, from inside
+    /// whatever lock the write path holds. Returning `Ok` means the client was
+    /// idle at this instant; it is not a lease, and a batch that runs for a
+    /// long time should not assume one check covers all of it.
+    pub fn reassert_idle(&self) -> Result<(), String> {
+        if (self.is_client_active)()? {
+            return Err(CLIENT_ACTIVE_MESSAGE.to_string());
+        }
+        Ok(())
+    }
+
+    /// Mint a token with an arbitrary root and running check.
+    ///
+    /// Test-only, and `#[cfg(test)]` rather than `#[doc(hidden)]` on purpose:
+    /// the entire value of the type is that production code has exactly one
+    /// way to obtain one. `cfg(test)` is crate-wide under `cargo test`, so
+    /// `client_backup`'s tests can call this too.
+    #[cfg(test)]
+    pub fn for_tests(root: PathBuf, is_client_active: ClientActiveCheck) -> Self {
+        Self {
+            root,
+            is_client_active,
+        }
+    }
+
+    /// [`for_tests`](Self::for_tests) with a check that always reports the
+    /// client idle — the usual case for tests that are not about gate 4.
+    #[cfg(test)]
+    pub fn for_tests_idle(root: PathBuf) -> Self {
+        Self::for_tests(root, Arc::new(|| Ok(false)))
+    }
+}
+
 /// All four gates, checked immediately before a write.
 ///
-/// Returns the approved client root. The ESO-running check is deliberately
-/// *here* rather than at the start of a long download, so a user who launches
-/// the game mid-download is still caught.
+/// Returns an [`ApprovedRoot`] rather than a path, so the gates cannot be
+/// bypassed by a caller that simply never asked. The ESO-running check runs
+/// here *and* again inside the placement itself, so a user who launches the
+/// game part-way through a long download is still caught.
 pub async fn begin_write(
     state: &tauri::State<'_, AllowedGameInstallPath>,
     client_dir: &str,
-) -> Result<PathBuf, String> {
+) -> Result<ApprovedRoot, String> {
     refuse_under_sandbox()?;
     let root = require_allowed_client_path(state, client_dir)?;
     // Deliberately the launcher-aware check, not `is_eso_running`. The ZOS
@@ -377,14 +472,18 @@ pub async fn begin_write(
     // stays narrow because the migration preconditions and the ESO-running
     // dialog use it to say "close the game", and an idle launcher should not
     // trip those.
-    if crate::commands::is_eso_or_launcher_running().await? {
-        return Err(
-            "The Elder Scrolls Online or its launcher is running. Close both before changing \
-             client files — the launcher's patcher writes to this folder too."
-                .to_string(),
-        );
-    }
-    Ok(root)
+    let approved = ApprovedRoot {
+        root,
+        is_client_active: Arc::new(crate::commands::is_eso_or_launcher_running_blocking),
+    };
+    // The first assertion goes to the blocking pool because `begin_write` is
+    // called from async command handlers; later re-assertions are synchronous
+    // because they happen inside placement work that is already blocking.
+    let probe = approved.clone();
+    tokio::task::spawn_blocking(move || probe.reassert_idle())
+        .await
+        .map_err(|e| format!("Task failed: {e}"))??;
+    Ok(approved)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────
@@ -580,5 +679,57 @@ mod tests {
         let outside = tmp.path().join("elsewhere").join("dxgi.dll");
         std::fs::create_dir_all(outside.parent().unwrap()).expect("mkdir");
         assert!(assert_contained(&root, &outside).is_err());
+    }
+
+    #[test]
+    fn reassert_idle_passes_only_while_the_client_is_idle() {
+        let idle = ApprovedRoot::for_tests_idle(PathBuf::from("client"));
+        assert!(idle.reassert_idle().is_ok());
+
+        let active = ApprovedRoot::for_tests(PathBuf::from("client"), Arc::new(|| Ok(true)));
+        let error = active
+            .reassert_idle()
+            .expect_err("an active client must refuse");
+        assert!(error.contains("running"), "{error}");
+    }
+
+    /// The check runs on every call rather than being answered once and
+    /// cached. This is the entire point of holding the closure instead of a
+    /// boolean: a token minted before a five-minute download must not still
+    /// be asserting the state of the machine five minutes ago.
+    #[test]
+    fn reassert_idle_re_runs_the_check_each_time() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let root = ApprovedRoot::for_tests(
+            PathBuf::from("client"),
+            Arc::new(move || {
+                // Idle at first, then the user launches the game.
+                Ok(counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0)
+            }),
+        );
+
+        assert!(
+            root.reassert_idle().is_ok(),
+            "first check sees an idle client"
+        );
+        assert!(
+            root.reassert_idle().is_err(),
+            "the second check must see the client that started in between"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A clone must not be a way to keep an answer that has gone stale.
+    #[test]
+    fn a_clone_re_checks_like_the_original() {
+        let root = ApprovedRoot::for_tests(PathBuf::from("client"), Arc::new(|| Ok(true)));
+        assert!(root.clone().reassert_idle().is_err());
+    }
+
+    #[test]
+    fn approved_root_exposes_the_path_it_was_minted_for() {
+        let root = ApprovedRoot::for_tests_idle(PathBuf::from("some/client"));
+        assert_eq!(root.path(), Path::new("some/client"));
     }
 }
