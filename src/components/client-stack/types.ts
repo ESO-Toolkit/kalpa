@@ -152,6 +152,9 @@ export interface AdoptionPlan {
   copy_bytes: number;
   already_managed: boolean;
   is_empty: boolean;
+  /** True when part of the stack is parked. Adoption is refused in that state:
+   *  what is in the folder is the game's own files, not the stack. */
+  stack_switched_off: boolean;
 }
 
 export interface AdoptionOutcome {

@@ -81,6 +81,16 @@ pub struct AdoptionPlan {
     pub already_managed: bool,
     /// True when there is nothing recognisable to adopt.
     pub is_empty: bool,
+    /// True when some of the stack is parked — switched off by Kalpa.
+    ///
+    /// Adoption is refused in that state, and the reason is not tidiness. What
+    /// is in the folder while a stack is switched off is not the stack: the
+    /// live `nvngx_dlss.dll` is the game's own file, and the user's is sitting
+    /// under a `.kalpa-off` name. Recording that would hash the wrong bytes as
+    /// the managed ones and overwrite the `parked` flags that are the only
+    /// record of where the real files went — stranding them in the folder with
+    /// nothing able to put them back.
+    pub stack_switched_off: bool,
 }
 
 /// The result of adopting.
@@ -194,6 +204,7 @@ pub fn plan_adoption_for(stack: &ClientStack, already_managed: bool) -> Adoption
         entries,
         copy_bytes,
         already_managed,
+        stack_switched_off: stack.is_disabled || !stack.parked.is_empty(),
     }
 }
 
@@ -217,6 +228,18 @@ pub fn adopt_in(
     // part-way through rewriting would preserve torn bytes as if they were
     // the user's good copy. The gate costs nothing and rules that out.
     root.reassert_idle()?;
+
+    // See `AdoptionPlan::stack_switched_off`. Recording a switched-off stack
+    // would hash the game's own files as the managed ones and clear the park
+    // flags that are the only record of where the user's files went.
+    if plan.stack_switched_off {
+        return Err(
+            "This stack is switched off, so what is in the folder right now is not the \
+                    stack. Switch it back on before managing it."
+                .to_string(),
+        );
+    }
+
     let client_root = root.path();
 
     let copy_id = crate::client_backup::new_backup_id();
@@ -735,6 +758,62 @@ mod tests {
             h.entry("nvngx_dlss.dll").sha256,
             expected,
             "re-adopting should refresh the hash to what is on disk now"
+        );
+    }
+
+    /// What is in the folder while a stack is switched off is not the stack.
+    /// Recording it would hash the game's own files as the managed ones and
+    /// clear the park flags that are the only record of where the user's files
+    /// went — leaving them in the folder with nothing able to put them back.
+    #[test]
+    fn adopting_a_switched_off_stack_is_refused() {
+        let h = Harness::new();
+        h.adopt(false).expect("adopt while switched on");
+        std::fs::rename(
+            h.client.join("dxgi.dll"),
+            h.client.join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(&h.client);
+        assert!(stack.is_disabled);
+        let plan = plan_adoption_for(&stack, true);
+        assert!(plan.stack_switched_off);
+
+        let error = adopt_in(&h.manifest, &h.backups, &h.root(), &plan, false)
+            .expect_err("must refuse while the stack is switched off");
+        assert!(error.contains("switched off"), "{error}");
+    }
+
+    /// Belt and braces for the same failure: a record that replaces an entry
+    /// must not silently clear its park flag.
+    #[test]
+    fn re_recording_an_entry_keeps_its_park_flag() {
+        let h = Harness::new();
+        h.adopt(false).expect("adopt");
+
+        // Park it the way disable does, which is the only thing that sets the
+        // flag.
+        crate::client_backup::run_file_ops_in(
+            &h.manifest,
+            &h.backups,
+            &h.root(),
+            &[crate::client_backup::FileOp::Park {
+                relative_path: "nvngx_dlss.dll".to_string(),
+            }],
+        )
+        .expect("park");
+        assert!(h.entry("nvngx_dlss.dll").parked);
+
+        let mut refreshed = h.entry("nvngx_dlss.dll");
+        refreshed.parked = false;
+        refreshed.sha256 = "c".repeat(64);
+        crate::client_backup::record_adopted(&h.manifest, &h.client, vec![refreshed])
+            .expect("re-record");
+
+        assert!(
+            h.entry("nvngx_dlss.dll").parked,
+            "the park flag says where the file is; a record must not clear it"
         );
     }
 

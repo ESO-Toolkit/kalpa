@@ -1819,13 +1819,19 @@ function AdoptionCard({
           back after a game update.
         </span>
       </label>
+      {plan.stack_switched_off && (
+        <p className="text-xs text-status-warning" role="status">
+          This stack is switched off, so what is in the folder right now is the game&apos;s own
+          files rather than yours. Switch it back on before managing it.
+        </p>
+      )}
       {adoptError && (
         <p className="text-xs text-status-danger" role="alert">
           {adoptError}
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={adopting} onClick={onAdopt}>
+        <Button size="sm" disabled={adopting || plan.stack_switched_off} onClick={onAdopt}>
           {adopting ? <Spinner className="size-3.5" /> : <PackageCheckIcon />}
           {adopting ? "Managing..." : "Manage this stack"}
         </Button>

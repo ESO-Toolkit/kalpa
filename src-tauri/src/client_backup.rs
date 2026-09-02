@@ -827,7 +827,18 @@ pub fn record_adopted(
         .installs
         .entry(install_key(client_root))
         .or_default();
-    for entry in entries {
+    for mut entry in entries {
+        // `parked` says where the file physically is, which adoption never
+        // changes — it writes records, not bytes. Carrying it across a replace
+        // keeps a stale flag from being the *only* consequence if something
+        // ever does record over a switched-off stack; `client_adopt` refuses
+        // that case outright, and this is the second line.
+        if let Some(previous) = bucket
+            .iter()
+            .find(|existing| existing.relative_path == entry.relative_path)
+        {
+            entry.parked = previous.parked;
+        }
         bucket.retain(|existing| existing.relative_path != entry.relative_path);
         bucket.push(entry);
     }
