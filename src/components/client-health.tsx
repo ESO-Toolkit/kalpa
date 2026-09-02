@@ -7,8 +7,9 @@ import {
   ChevronRightIcon,
   ExternalLinkIcon,
   HardDriveIcon,
-  RefreshCwIcon,
   ScrollTextIcon,
+  PackageCheckIcon,
+  RefreshCwIcon,
   SearchIcon,
   ShieldAlertIcon,
   ShieldCheckIcon,
@@ -32,12 +33,10 @@ import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
 /* -------------------------------------------------------------------------- */
-/* Data contract                                                              */
+/* Data contract — install discovery                                         */
 /* -------------------------------------------------------------------------- */
-/* These mirror the Rust structs behind `detect_eso_clients`,                  */
-/* `validate_eso_client` and `inspect_eso_client`. They are exported so they   */
-/* can be re-homed into `types.ts` during integration without touching the     */
-/* consuming code.                                                            */
+/* These mirror the Rust structs behind `detect_eso_clients` and                */
+/* `validate_eso_client`.                                                      */
 
 export type ClientSource = "steam" | "zos_registry" | "proton" | "manual";
 
@@ -45,11 +44,6 @@ export interface EsoClientLocation {
   client_dir: string;
   exe_path: string;
   source: ClientSource;
-}
-
-export interface DllInfo {
-  name: string;
-  version: string | null;
 }
 
 export type HealthLevel = "ok" | "info" | "warning" | "danger";
@@ -62,33 +56,116 @@ export interface HealthFinding {
   guide_url: string | null;
 }
 
-export interface LogExcerpt {
-  file: string;
-  rule: string;
-  line: string;
-}
-
-export interface ClientHealthReport {
-  location: EsoClientLocation;
-  injector: DllInfo | null;
-  dlss: DllInfo | null;
-  d3dcompiler: DllInfo | null;
-  reshade_preset: string | null;
-  findings: HealthFinding[];
-  log_excerpts: LogExcerpt[];
-}
-
 export interface ClientHealthPanelProps {
   open: boolean;
   onClose: () => void;
 }
 
 /* -------------------------------------------------------------------------- */
-/* Managed-files data contract                                               */
+/* Data contract — the stack                                                 */
 /* -------------------------------------------------------------------------- */
-/* These mirror the Rust structs behind `list_managed_client_files`,           */
-/* `uninstall_managed_client_files` and `emergency_remove_injector` in         */
-/* `src-tauri/src/client_uninstall.rs`.                                        */
+/* These mirror `src-tauri/src/client_stack.rs`. A DLSS 5 Neural Rendering     */
+/* setup is a pipeline of layers, not three DLLs — see that file's module      */
+/* doc for why the cross-layer findings below exist.                          */
+
+export type StackRole =
+  | "injector"
+  | "neural_rendering"
+  | "super_sampling"
+  | "frame_generation"
+  | "shader_compiler"
+  | "addon"
+  | "companion";
+
+export interface StackItem {
+  role: StackRole;
+  file_name: string;
+  display_name: string | null;
+  version: string | null;
+  company: string | null;
+  description: string | null;
+  size_bytes: number;
+}
+
+export interface PreservedOriginal {
+  file_name: string;
+  backs_up: string | null;
+  version: string | null;
+  size_bytes: number;
+}
+
+export interface Technique {
+  name: string;
+  source: string;
+  source_present: boolean;
+}
+
+export interface PresetInfo {
+  path: string;
+  exists: boolean;
+  techniques: Technique[];
+  available: string[];
+}
+
+export interface TuningValue {
+  key: string;
+  value: string;
+}
+
+export interface ShaderTree {
+  present: boolean;
+  effect_count: number;
+  texture_count: number;
+  effect_search_paths: string | null;
+}
+
+export interface ClientStack {
+  client_dir: string;
+  items: StackItem[];
+  preserved_originals: PreservedOriginal[];
+  shaders: ShaderTree;
+  preset: PresetInfo | null;
+  tuning: TuningValue[];
+  disabled_addons: string[];
+  is_empty: boolean;
+  findings: HealthFinding[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — adoption                                                  */
+/* -------------------------------------------------------------------------- */
+/* These mirror `src-tauri/src/client_adopt.rs`.                               */
+
+export interface AdoptionEntry {
+  relative_path: string;
+  kind: ManagedKind;
+  role: StackRole;
+  display_name: string | null;
+  version: string | null;
+  size_bytes: number;
+  displaced_in_place: string | null;
+  copyable: boolean;
+}
+
+export interface AdoptionPlan {
+  client_dir: string;
+  entries: AdoptionEntry[];
+  copy_bytes: number;
+  already_managed: boolean;
+  is_empty: boolean;
+}
+
+export interface AdoptionOutcome {
+  recorded: string[];
+  copied: string[];
+  skipped: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — Kalpa's own records                                       */
+/* -------------------------------------------------------------------------- */
+/* These mirror `list_managed_client_files`, `uninstall_managed_client_files`  */
+/* and `emergency_remove_injector` in `src-tauri/src/client_uninstall.rs`.     */
 
 export type ManagedFileState = "present" | "modified" | "missing";
 
@@ -155,6 +232,7 @@ const LEVEL_META: Record<
     text: string;
     border: string;
     tint: string;
+    line: string;
   }
 > = {
   ok: {
@@ -163,6 +241,7 @@ const LEVEL_META: Record<
     text: "text-status-success",
     border: "border-status-success/20 border-l-status-success",
     tint: "bg-status-success/[0.04]",
+    line: "border-status-success",
   },
   info: {
     label: "Info",
@@ -170,6 +249,7 @@ const LEVEL_META: Record<
     text: "text-status-info",
     border: "border-status-info/20 border-l-status-info",
     tint: "bg-status-info/[0.04]",
+    line: "border-status-info",
   },
   warning: {
     label: "Warning",
@@ -177,6 +257,7 @@ const LEVEL_META: Record<
     text: "text-status-warning",
     border: "border-status-warning/20 border-l-status-warning",
     tint: "bg-status-warning/[0.04]",
+    line: "border-status-warning",
   },
   danger: {
     label: "Problem",
@@ -184,11 +265,16 @@ const LEVEL_META: Record<
     text: "text-status-danger",
     border: "border-status-danger/20 border-l-status-danger",
     tint: "bg-status-danger/[0.04]",
+    line: "border-status-danger",
   },
 };
 
-/** Order findings worst-first so the thing that needs attention is on top. */
+/** Worst-first ordering for picking a representative level across findings. */
 const LEVEL_ORDER: Record<HealthLevel, number> = { danger: 0, warning: 1, info: 2, ok: 3 };
+
+function worstLevel(levels: HealthLevel[]): HealthLevel {
+  return levels.reduce((worst, level) => (LEVEL_ORDER[level] < LEVEL_ORDER[worst] ? level : worst));
+}
 
 const KIND_LABEL: Record<ManagedKind, string> = {
   re_shade_core: "ReShade core",
@@ -226,6 +312,143 @@ const FILE_STATE_META: Record<
   },
 };
 
+/* -------------------------------------------------------------------------- */
+/* The pipeline                                                               */
+/* -------------------------------------------------------------------------- */
+/* Fixed load order — never reorder these by severity, the pipeline shape is   */
+/* the information. Roles that are not their own named layer (companion,       */
+/* frame_generation) fold into the nearest layer they physically ship next to. */
+
+type Stage = "injector" | "nr" | "sr" | "addons" | "shaders" | "compiler" | "preset" | "tuning";
+
+const STAGE_ORDER: Stage[] = [
+  "injector",
+  "nr",
+  "sr",
+  "addons",
+  "shaders",
+  "compiler",
+  "preset",
+  "tuning",
+];
+
+const STAGE_LABEL: Record<Stage, string> = {
+  injector: "Injector",
+  nr: "Neural Rendering runtime",
+  sr: "Super Resolution runtime",
+  addons: "ReShade add-ons",
+  shaders: "Shaders",
+  compiler: "Shader compiler",
+  preset: "Preset",
+  tuning: "Tuning",
+};
+
+const ROLE_TO_STAGE: Record<StackRole, Stage> = {
+  injector: "injector",
+  neural_rendering: "nr",
+  super_sampling: "sr",
+  frame_generation: "sr",
+  shader_compiler: "compiler",
+  addon: "addons",
+  companion: "addons",
+};
+
+const ROLE_LABEL: Record<StackRole, string> = {
+  injector: "Injector",
+  neural_rendering: "Neural Rendering runtime",
+  super_sampling: "Super Resolution runtime",
+  frame_generation: "Frame Generation runtime",
+  shader_compiler: "Shader compiler",
+  addon: "ReShade add-on",
+  companion: "Companion process",
+};
+
+/** Findings internal to one layer, rendered inside that layer's row. */
+const FINDING_STAGE: Record<string, Stage> = {
+  "stack-feed-host-missing": "addons",
+  "stack-addon-disabled": "addons",
+  "stack-preset-missing": "preset",
+  "stack-technique-order": "preset",
+  "stack-feed-technique-off": "preset",
+  "stack-search-path-mismatch": "shaders",
+  "stack-dlss-reverted": "sr",
+};
+
+/** Findings that are a relationship *between* two layers, rendered on the
+ *  connector segment following the given stage. */
+const CONNECTOR_FINDING_AFTER: Record<string, Stage> = {
+  "stack-no-injector": "injector",
+  "stack-nr-runtime-missing": "nr",
+  "stack-technique-source-missing": "shaders",
+};
+
+/** Stages where a real feature (tuning controls, disable/re-enable, runtime
+ *  swap, preset reordering) is deliberately not built yet. */
+const STAGE_COMING_NEXT = new Set<Stage>(["nr", "sr", "addons", "preset", "tuning"]);
+
+function stagePresent(stage: Stage, stack: ClientStack): boolean {
+  switch (stage) {
+    case "shaders":
+      return stack.shaders.present;
+    case "preset":
+      return stack.preset?.exists ?? false;
+    case "tuning":
+      return stack.tuning.length > 0;
+    default:
+      return stack.items.some((item) => ROLE_TO_STAGE[item.role] === stage);
+  }
+}
+
+function stageLevel(stage: Stage, stack: ClientStack): HealthLevel {
+  const findings = stack.findings.filter((f) => FINDING_STAGE[f.id] === stage);
+  if (findings.length > 0) return worstLevel(findings.map((f) => f.level));
+  return stagePresent(stage, stack) ? "ok" : "info";
+}
+
+function firstNonEmptyStage(stack: ClientStack): Stage | null {
+  return STAGE_ORDER.find((stage) => stagePresent(stage, stack)) ?? null;
+}
+
+/** The stage whose row should be auto-selected so its explanation is already
+ *  on screen. Internal findings (which render inside a row) take priority;
+ *  connector-only problems fall back to the stage the dashed segment follows. */
+function firstIssueStage(stack: ClientStack): Stage | null {
+  const internal = new Set(
+    stack.findings.map((f) => FINDING_STAGE[f.id]).filter((s): s is Stage => Boolean(s))
+  );
+  for (const stage of STAGE_ORDER) if (internal.has(stage)) return stage;
+
+  const connector = new Set(
+    stack.findings.map((f) => CONNECTOR_FINDING_AFTER[f.id]).filter((s): s is Stage => Boolean(s))
+  );
+  for (const stage of STAGE_ORDER) if (connector.has(stage)) return stage;
+
+  return null;
+}
+
+/** A line from ReShade.log or dlss5-feed.log that matched a known failure
+ *  signature. These are where a DLSS 5 stack actually announces breakage —
+ *  a shader that would not compile, an unsupported parameter — so they stay
+ *  in the panel even though they are not a layer of the pipeline. */
+interface LogExcerpt {
+  file: string;
+  rule: string;
+  line: string;
+}
+
+type SelectionKey = Stage | "adoption" | "records" | "logs";
+
+function computeDefaultSelection(
+  stack: ClientStack | null,
+  plan: AdoptionPlan | null,
+  adoptionDismissed: boolean
+): SelectionKey | null {
+  if (!stack || stack.is_empty) return null;
+  if (plan && !plan.already_managed && !adoptionDismissed) return "adoption";
+  if (plan?.already_managed) return firstIssueStage(stack) ?? "tuning";
+  return firstNonEmptyStage(stack) ?? "injector";
+}
+
 const Spinner = ({ className }: { className?: string }) => (
   <span
     aria-hidden
@@ -241,6 +464,11 @@ const Divider = () => <div className="border-t border-structure-06" />;
 function shortDirName(dir: string): string {
   const parts = dir.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1]! : dir;
+}
+
+function formatMB(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 100 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
 }
 
 /** Open a guide URL through the Tauri opener plugin — never `window.open` or a
@@ -262,22 +490,43 @@ async function openGuide(url: string): Promise<void> {
 function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   const [clients, setClients] = useState<EsoClientLocation[] | null>(null);
   const [selectedDir, setSelectedDir] = useState<string | null>(null);
-  const [report, setReport] = useState<ClientHealthReport | null>(null);
+
+  const [stack, setStack] = useState<ClientStack | null>(null);
+  const [stackLoading, setStackLoading] = useState(false);
+  const [stackError, setStackError] = useState<string | null>(null);
+
+  const [plan, setPlan] = useState<AdoptionPlan | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
 
   const [detecting, setDetecting] = useState(false);
-  const [inspecting, setInspecting] = useState(false);
   const [browsing, setBrowsing] = useState(false);
 
   const [detectError, setDetectError] = useState<string | null>(null);
-  const [inspectError, setInspectError] = useState<string | null>(null);
   const [browseError, setBrowseError] = useState<string | null>(null);
 
-  const [logsExpanded, setLogsExpanded] = useState(false);
-
-  // Managed-by-Kalpa inventory for the selected install.
+  // Managed-by-Kalpa inventory for the selected install (the pre-existing
+  // model: files Kalpa itself wrote, independent of adoption).
   const [managedInventory, setManagedInventory] = useState<ManagedInventory | null>(null);
   const [managedLoading, setManagedLoading] = useState(false);
   const [managedError, setManagedError] = useState<string | null>(null);
+
+  // Rail navigation. `selection` is the user's explicit override; when null the
+  // default is derived live from stack/plan (see `computeDefaultSelection`) so
+  // there is never a stale setState racing the data it depends on.
+  const [selection, setSelection] = useState<SelectionKey | null>(null);
+  const [railManualExpand, setRailManualExpand] = useState(false);
+  const [adoptionDismissed, setAdoptionDismissed] = useState(false);
+
+  // Adoption flow. Reset per install alongside everything else below.
+  const [keepCopies, setKeepCopies] = useState(true);
+  const [adopting, setAdopting] = useState(false);
+  const [adoptError, setAdoptError] = useState<string | null>(null);
+  const [adoptOutcome, setAdoptOutcome] = useState<AdoptionOutcome | null>(null);
+  const [forgetConfirming, setForgetConfirming] = useState(false);
+  const [forgetting, setForgetting] = useState(false);
+  const [forgetError, setForgetError] = useState<string | null>(null);
+  const [logExcerpts, setLogExcerpts] = useState<LogExcerpt[]>([]);
 
   // Selection + destructive-confirm state for managed uninstall. All of this
   // is per-install: it is reset every time the selected install changes or a
@@ -298,16 +547,28 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   const [emergencyError, setEmergencyError] = useState<string | null>(null);
   const [emergencyResult, setEmergencyResult] = useState<EmergencyRemoval | null>(null);
 
-  // Monotonic token: a slow detect/inspect that resolves after the user has
-  // already refreshed or picked a different install must not overwrite newer
-  // state. Bumped by every load entry point.
+  // Monotonic token: a slow load that resolves after the user has already
+  // refreshed or picked a different install must not overwrite newer state.
+  // Bumped by every load entry point.
   const runToken = useRef(0);
 
-  /** Clears every per-install control latch (selection, confirm state,
-   *  emergency disclosure and its typed input, and the last outcome/error).
-   *  Called at every point the selected install changes or is reloaded, so
-   *  none of it can survive onto a different folder. */
-  const resetManagedUiState = useCallback(() => {
+  /** Clears every per-install control latch: rail selection/expand state,
+   *  adoption dismissal and its checkbox, and the managed-file confirm/
+   *  emergency-removal machinery. Called at every point the selected install
+   *  changes or is reloaded, so none of it can survive onto a different
+   *  folder or a stale content swap. */
+  const resetInstallUiState = useCallback(() => {
+    setSelection(null);
+    setRailManualExpand(false);
+    setAdoptionDismissed(false);
+    setKeepCopies(true);
+    setAdopting(false);
+    setAdoptError(null);
+    setAdoptOutcome(null);
+    setForgetConfirming(false);
+    setForgetting(false);
+    setForgetError(null);
+    setLogExcerpts([]);
     setSelectedPaths(new Set());
     setRemoveMode(null);
     setRemoving(false);
@@ -321,19 +582,19 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setEmergencyResult(null);
   }, []);
 
-  const inspect = useCallback(async (clientDir: string, token: number) => {
-    setInspecting(true);
-    setInspectError(null);
+  const loadPlan = useCallback(async (clientDir: string, token: number) => {
+    setPlanLoading(true);
+    setPlanError(null);
     try {
-      const next = await invokeOrThrow<ClientHealthReport>("inspect_eso_client", { clientDir });
+      const next = await invokeOrThrow<AdoptionPlan>("plan_adoption", { clientDir });
       if (runToken.current !== token) return;
-      setReport(next);
+      setPlan(next);
     } catch (e) {
       if (runToken.current !== token) return;
-      setReport(null);
-      setInspectError(getTauriErrorMessage(e));
+      setPlan(null);
+      setPlanError(getTauriErrorMessage(e));
     } finally {
-      if (runToken.current === token) setInspecting(false);
+      if (runToken.current === token) setPlanLoading(false);
     }
   }, []);
 
@@ -355,16 +616,65 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     }
   }, []);
 
+  /** Inspects the stack, then — only when there is something to manage —
+   *  loads the adoption plan and Kalpa's own records alongside it. A stock
+   *  client never triggers those calls: nothing to plan, nothing recorded. */
+  /** Known-failure lines out of ReShade.log and dlss5-feed.log.
+   *
+   *  A best-effort extra: a log Kalpa cannot read is not worth an error banner
+   *  when the rest of the panel is fine, so this swallows its own failure and
+   *  simply shows nothing. */
+  const loadLogs = useCallback(async (clientDir: string, token: number) => {
+    try {
+      const report = await invokeOrThrow<{ log_excerpts: LogExcerpt[] }>("inspect_eso_client", {
+        clientDir,
+      });
+      if (runToken.current !== token) return;
+      setLogExcerpts(report.log_excerpts ?? []);
+    } catch {
+      if (runToken.current !== token) return;
+      setLogExcerpts([]);
+    }
+  }, []);
+
+  const loadInstall = useCallback(
+    async (clientDir: string, token: number) => {
+      setStackLoading(true);
+      setStackError(null);
+      setPlan(null);
+      setPlanError(null);
+      setManagedInventory(null);
+      setManagedError(null);
+      try {
+        const next = await invokeOrThrow<ClientStack>("inspect_client_stack", { clientDir });
+        if (runToken.current !== token) return;
+        setStack(next);
+        setStackLoading(false);
+        if (!next.is_empty) {
+          await Promise.all([
+            loadPlan(clientDir, token),
+            loadManaged(clientDir, token),
+            loadLogs(clientDir, token),
+          ]);
+        }
+      } catch (e) {
+        if (runToken.current !== token) return;
+        setStack(null);
+        setStackError(getTauriErrorMessage(e));
+        setStackLoading(false);
+      }
+    },
+    [loadLogs, loadManaged, loadPlan]
+  );
+
   const detect = useCallback(async () => {
     const token = ++runToken.current;
     setDetecting(true);
     setDetectError(null);
     setBrowseError(null);
-    setInspectError(null);
-    setReport(null);
-    setManagedInventory(null);
-    setManagedError(null);
-    resetManagedUiState();
+    setStack(null);
+    setStackError(null);
+    resetInstallUiState();
     try {
       const found = await invokeOrThrow<EsoClientLocation[]>("detect_eso_clients");
       if (runToken.current !== token) return;
@@ -372,8 +682,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       const first = found[0];
       setSelectedDir(first ? first.client_dir : null);
       setDetecting(false);
-      if (first)
-        await Promise.all([inspect(first.client_dir, token), loadManaged(first.client_dir, token)]);
+      if (first) await loadInstall(first.client_dir, token);
     } catch (e) {
       if (runToken.current !== token) return;
       setClients([]);
@@ -381,7 +690,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       setDetectError(getTauriErrorMessage(e));
       setDetecting(false);
     }
-  }, [inspect, loadManaged, resetManagedUiState]);
+  }, [loadInstall, resetInstallUiState]);
 
   // On-open fetch only. Project policy forbids background polling, so there is
   // no interval here — the Refresh button is the only other trigger.
@@ -400,14 +709,10 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       if (clientDir === selectedDir) return;
       const token = ++runToken.current;
       setSelectedDir(clientDir);
-      setReport(null);
-      setManagedInventory(null);
-      setManagedError(null);
-      resetManagedUiState();
-      void inspect(clientDir, token);
-      void loadManaged(clientDir, token);
+      resetInstallUiState();
+      void loadInstall(clientDir, token);
     },
-    [inspect, loadManaged, resetManagedUiState, selectedDir]
+    [loadInstall, resetInstallUiState, selectedDir]
   );
 
   const handleBrowse = useCallback(async () => {
@@ -431,37 +736,70 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         return [validated, ...rest];
       });
       setSelectedDir(validated.client_dir);
-      setReport(null);
       setDetectError(null);
-      setManagedInventory(null);
-      setManagedError(null);
-      resetManagedUiState();
-      await Promise.all([
-        inspect(validated.client_dir, token),
-        loadManaged(validated.client_dir, token),
-      ]);
+      resetInstallUiState();
+      await loadInstall(validated.client_dir, token);
     } catch (e) {
       setBrowseError(getTauriErrorMessage(e));
     } finally {
       setBrowsing(false);
     }
-  }, [inspect, loadManaged, resetManagedUiState]);
+  }, [loadInstall, resetInstallUiState]);
 
-  const sortedFindings = useMemo(() => {
-    if (!report) return [];
-    return [...report.findings].sort(
-      (a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || a.title.localeCompare(b.title)
-    );
-  }, [report]);
+  const handleAdopt = useCallback(async () => {
+    if (!selectedDir) return;
+    const token = runToken.current;
+    setAdopting(true);
+    setAdoptError(null);
+    try {
+      const outcome = await invokeOrThrow<AdoptionOutcome>("adopt_stack", {
+        clientDir: selectedDir,
+        keepCopies,
+      });
+      if (runToken.current !== token) return;
+      setAdoptOutcome(outcome);
+      setSelection(null);
+      await Promise.all([loadPlan(selectedDir, token), loadManaged(selectedDir, token)]);
+    } catch (e) {
+      if (runToken.current !== token) return;
+      setAdoptError(getTauriErrorMessage(e));
+    } finally {
+      if (runToken.current === token) setAdopting(false);
+    }
+  }, [keepCopies, loadManaged, loadPlan, selectedDir]);
 
-  const dlls = useMemo(() => {
-    if (!report) return [];
-    return [
-      { role: "Injector", info: report.injector },
-      { role: "DLSS", info: report.dlss },
-      { role: "D3D compiler", info: report.d3dcompiler },
-    ];
-  }, [report]);
+  const handleDismissAdoption = useCallback(() => {
+    setAdoptionDismissed(true);
+    setSelection(null);
+  }, []);
+
+  /** Give up Kalpa's records for this install.
+   *
+   *  This is the exit from "Manage this stack", and it has to exist for that
+   *  button to be a safe click: without it, agreeing to be managed is a
+   *  one-way door. It deletes no file in the game folder — only the records —
+   *  so the stack keeps working exactly as it did. */
+  const handleForget = useCallback(async () => {
+    if (!selectedDir) return;
+    const token = runToken.current;
+    setForgetting(true);
+    setForgetError(null);
+    try {
+      await invokeOrThrow<string[]>("forget_stack", { clientDir: selectedDir });
+      if (runToken.current !== token) return;
+      setForgetConfirming(false);
+      setAdoptOutcome(null);
+      // Re-listing is what flips the panel back to the unmanaged view, so the
+      // adoption card must be offerable again rather than staying dismissed.
+      setAdoptionDismissed(false);
+      await Promise.all([loadPlan(selectedDir, token), loadManaged(selectedDir, token)]);
+    } catch (e) {
+      if (runToken.current !== token) return;
+      setForgetError(getTauriErrorMessage(e));
+    } finally {
+      if (runToken.current === token) setForgetting(false);
+    }
+  }, [loadManaged, loadPlan, selectedDir]);
 
   const handleToggleSelect = useCallback((relativePath: string) => {
     setSelectedPaths((prev) => {
@@ -542,16 +880,36 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [emergencyConfirmInput, loadManaged, selectedDir]
   );
 
-  const busy = detecting || inspecting;
+  const effectiveSelection = useMemo(
+    () => selection ?? computeDefaultSelection(stack, plan, adoptionDismissed),
+    [selection, stack, plan, adoptionDismissed]
+  );
+
+  const isHealthyManaged = useMemo(
+    () => Boolean(stack && !stack.is_empty && plan?.already_managed && stack.findings.length === 0),
+    [stack, plan]
+  );
+
+  const railExpanded = isHealthyManaged ? railManualExpand : true;
+
+  // The injector this stack loads is the one that would otherwise be flagged
+  // as an "unmanaged orphan" — offering to quarantine the ReShade the user
+  // just asked Kalpa to manage was the old panel's worst moment.
+  const hideEmergency = useMemo(
+    () => Boolean(plan?.already_managed && stack?.items.some((item) => item.role === "injector")),
+    [plan, stack]
+  );
+
+  const busy = detecting || stackLoading;
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-xl h-[74vh] flex flex-col">
+      <DialogContent className="sm:max-w-4xl h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Client Health</DialogTitle>
           <DialogDescription>
-            A report on your ESO client folder. Kalpa downloads nothing here — it can only remove
-            files it placed itself, restoring whatever they displaced.
+            The graphics-mod stack in your ESO client folder. Kalpa downloads nothing here — it only
+            records what is already there.
           </DialogDescription>
         </DialogHeader>
 
@@ -609,14 +967,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 
               <Divider />
 
-              {inspecting && (
+              {stackLoading && (
                 <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground">
                   <Spinner />
-                  <span>Inspecting client folder...</span>
+                  <span>Inspecting the client folder...</span>
                 </div>
               )}
 
-              {!inspecting && inspectError && (
+              {!stackLoading && stackError && (
                 <GlassPanel
                   variant="subtle"
                   className="flex items-start gap-2 p-3 text-sm"
@@ -630,53 +988,67 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                     <p className="font-heading text-[13px] font-semibold text-status-danger">
                       Inspection failed
                     </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">{inspectError}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{stackError}</p>
                   </div>
                 </GlassPanel>
               )}
 
-              {!inspecting && !inspectError && report && (
-                <ReportBody
-                  report={report}
-                  dlls={dlls}
-                  findings={sortedFindings}
-                  logsExpanded={logsExpanded}
-                  onToggleLogs={() => setLogsExpanded((v) => !v)}
-                />
-              )}
+              {!stackLoading && !stackError && stack && stack.is_empty && <StockClientCard />}
 
-              {!inspecting && selectedDir && (
-                <>
-                  <Divider />
-                  <ManagedSection
-                    loading={managedLoading}
-                    error={managedError}
-                    inventory={managedInventory}
-                    selectedPaths={selectedPaths}
-                    onToggleSelect={handleToggleSelect}
-                    removeMode={removeMode}
-                    removing={removing}
-                    removeOutcome={removeOutcome}
-                    removeError={removeError}
-                    onRequestRemove={handleRequestRemove}
-                    onCancelRemove={handleCancelRemove}
-                    onConfirmRemove={handleConfirmRemove}
-                    emergencyOpen={emergencyOpen}
-                    onToggleEmergencyOpen={() => setEmergencyOpen((v) => !v)}
-                    emergencyTarget={emergencyTarget}
-                    onSetEmergencyTarget={(name) => {
-                      setEmergencyTarget(name);
-                      setEmergencyConfirmInput("");
-                      setEmergencyError(null);
-                    }}
-                    emergencyConfirmInput={emergencyConfirmInput}
-                    onEmergencyConfirmInputChange={setEmergencyConfirmInput}
-                    emergencyBusy={emergencyBusy}
-                    emergencyError={emergencyError}
-                    emergencyResult={emergencyResult}
-                    onEmergencyRemove={handleEmergencyRemove}
-                  />
-                </>
+              {!stackLoading && !stackError && stack && !stack.is_empty && (
+                <StackBody
+                  stack={stack}
+                  plan={plan}
+                  planLoading={planLoading}
+                  planError={planError}
+                  effectiveSelection={effectiveSelection}
+                  onSelect={(key) => setSelection(key)}
+                  railExpanded={railExpanded}
+                  isHealthyManaged={isHealthyManaged}
+                  onToggleRailExpand={() => setRailManualExpand((v) => !v)}
+                  keepCopies={keepCopies}
+                  onToggleKeepCopies={() => setKeepCopies((v) => !v)}
+                  adopting={adopting}
+                  adoptError={adoptError}
+                  adoptOutcome={adoptOutcome}
+                  onAdopt={() => void handleAdopt()}
+                  onDismissAdoption={handleDismissAdoption}
+                  managedLoading={managedLoading}
+                  managedError={managedError}
+                  managedInventory={managedInventory}
+                  logExcerpts={logExcerpts}
+                  hideEmergency={hideEmergency}
+                  isManaged={Boolean(plan?.already_managed)}
+                  forgetConfirming={forgetConfirming}
+                  forgetting={forgetting}
+                  forgetError={forgetError}
+                  onRequestForget={() => setForgetConfirming(true)}
+                  onCancelForget={() => setForgetConfirming(false)}
+                  onConfirmForget={() => void handleForget()}
+                  selectedPaths={selectedPaths}
+                  onToggleSelect={handleToggleSelect}
+                  removeMode={removeMode}
+                  removing={removing}
+                  removeOutcome={removeOutcome}
+                  removeError={removeError}
+                  onRequestRemove={handleRequestRemove}
+                  onCancelRemove={handleCancelRemove}
+                  onConfirmRemove={handleConfirmRemove}
+                  emergencyOpen={emergencyOpen}
+                  onToggleEmergencyOpen={() => setEmergencyOpen((v) => !v)}
+                  emergencyTarget={emergencyTarget}
+                  onSetEmergencyTarget={(name) => {
+                    setEmergencyTarget(name);
+                    setEmergencyConfirmInput("");
+                    setEmergencyError(null);
+                  }}
+                  emergencyConfirmInput={emergencyConfirmInput}
+                  onEmergencyConfirmInputChange={setEmergencyConfirmInput}
+                  emergencyBusy={emergencyBusy}
+                  emergencyError={emergencyError}
+                  emergencyResult={emergencyResult}
+                  onEmergencyRemove={handleEmergencyRemove}
+                />
               )}
             </>
           )}
@@ -697,7 +1069,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Sub-views                                                                  */
+/* Sub-views — install picker (unchanged shape)                              */
 /* -------------------------------------------------------------------------- */
 
 function EmptyState({
@@ -794,136 +1166,28 @@ function InstallRow({
   );
 }
 
-function ReportBody({
-  report,
-  dlls,
-  findings,
-  logsExpanded,
-  onToggleLogs,
-}: {
-  report: ClientHealthReport;
-  dlls: { role: string; info: DllInfo | null }[];
-  findings: HealthFinding[];
-  logsExpanded: boolean;
-  onToggleLogs: () => void;
-}) {
+/* -------------------------------------------------------------------------- */
+/* Stock client — the common case, kept deliberately quiet                   */
+/* -------------------------------------------------------------------------- */
+
+function StockClientCard() {
   return (
-    <div className="space-y-4">
-      <section aria-labelledby="client-health-dlls">
-        <SectionHeader id="client-health-dlls" className="mb-2">
-          Detected files
-        </SectionHeader>
-        <GlassPanel variant="subtle" className="p-0">
-          {dlls.map(({ role, info }) => (
-            <div
-              key={role}
-              className="flex items-center justify-between gap-3 border-b border-structure-06 px-3 py-2"
-            >
-              <span className="text-xs text-muted-foreground">{role}</span>
-              {info ? (
-                <span className="min-w-0 truncate text-right font-sans text-[13px]">
-                  <span className="font-medium">{info.name}</span>
-                  <span className="text-muted-foreground">
-                    {" "}
-                    &middot; {info.version ?? "unknown version"}
-                  </span>
-                </span>
-              ) : (
-                <span className="text-[13px] text-muted-foreground">Not present</span>
-              )}
-            </div>
-          ))}
-          <div className="flex items-center justify-between gap-3 px-3 py-2">
-            <span className="text-xs text-muted-foreground">ReShade preset</span>
-            <span
-              className="min-w-0 truncate text-right text-[13px]"
-              title={report.reshade_preset ?? undefined}
-            >
-              {report.reshade_preset ?? <span className="text-muted-foreground">Not present</span>}
-            </span>
-          </div>
-        </GlassPanel>
-      </section>
-
-      <section aria-labelledby="client-health-findings">
-        <SectionHeader id="client-health-findings" className="mb-2">
-          Findings ({findings.length})
-        </SectionHeader>
-        {findings.length === 0 ? (
-          <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
-            Nothing to report for this install.
-          </GlassPanel>
-        ) : (
-          <ul className="space-y-2">
-            {findings.map((finding) => (
-              <FindingRow key={finding.id} finding={finding} />
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section aria-labelledby="client-health-logs">
-        <SectionHeader id="client-health-logs" className="mb-2">
-          Log excerpts
-        </SectionHeader>
-        <GlassPanel variant="subtle" className="overflow-hidden p-0">
-          <button
-            type="button"
-            aria-expanded={logsExpanded}
-            aria-controls="client-health-log-list"
-            onClick={onToggleLogs}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors duration-150 hover:bg-structure-04 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20"
-          >
-            {logsExpanded ? (
-              <ChevronDownIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-            ) : (
-              <ChevronRightIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-            )}
-            <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-            <span className="text-[13px]">
-              {report.log_excerpts.length === 0
-                ? "No matching log lines"
-                : `${report.log_excerpts.length} matching log ${
-                    report.log_excerpts.length === 1 ? "line" : "lines"
-                  }`}
-            </span>
-          </button>
-          {logsExpanded && (
-            <div id="client-health-log-list" className="border-t border-structure-06">
-              {report.log_excerpts.length === 0 ? (
-                <p className="px-3 py-2 text-xs text-muted-foreground">
-                  Kalpa found nothing worth quoting in the client logs.
-                </p>
-              ) : (
-                <ul>
-                  {report.log_excerpts.map((excerpt, i) => (
-                    <li
-                      key={`${excerpt.file}-${excerpt.rule}-${i}`}
-                      className="border-b border-structure-06 px-3 py-2 last:border-b-0"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <InfoPill color="muted">{excerpt.rule}</InfoPill>
-                        <span
-                          className="truncate text-xs text-muted-foreground"
-                          title={excerpt.file}
-                        >
-                          {excerpt.file}
-                        </span>
-                      </div>
-                      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
-                        {excerpt.line}
-                      </pre>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-        </GlassPanel>
-      </section>
-    </div>
+    <GlassPanel
+      variant="subtle"
+      className="flex flex-col items-center gap-2 px-4 py-10 text-center"
+    >
+      <HardDriveIcon aria-hidden className="size-6 text-muted-foreground/70" />
+      <p className="font-heading text-sm font-semibold">Stock ESO client</p>
+      <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+        No injector, no runtime swaps. Nothing to manage.
+      </p>
+    </GlassPanel>
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/* Finding row (shared by in-row findings and the connector gutter)          */
+/* -------------------------------------------------------------------------- */
 
 function FindingRow({ finding }: { finding: HealthFinding }) {
   const meta = LEVEL_META[finding.level];
@@ -968,13 +1232,718 @@ function FindingRow({ finding }: { finding: HealthFinding }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Managed by Kalpa                                                          */
+/* Master-detail body                                                        */
+/* -------------------------------------------------------------------------- */
+
+interface StackBodyProps {
+  stack: ClientStack;
+  plan: AdoptionPlan | null;
+  planLoading: boolean;
+  planError: string | null;
+  effectiveSelection: SelectionKey | null;
+  onSelect: (key: SelectionKey) => void;
+  railExpanded: boolean;
+  isHealthyManaged: boolean;
+  onToggleRailExpand: () => void;
+  keepCopies: boolean;
+  onToggleKeepCopies: () => void;
+  adopting: boolean;
+  adoptError: string | null;
+  adoptOutcome: AdoptionOutcome | null;
+  onAdopt: () => void;
+  onDismissAdoption: () => void;
+  managedLoading: boolean;
+  managedError: string | null;
+  managedInventory: ManagedInventory | null;
+  logExcerpts: LogExcerpt[];
+  hideEmergency: boolean;
+  isManaged: boolean;
+  forgetConfirming: boolean;
+  forgetting: boolean;
+  forgetError: string | null;
+  onRequestForget: () => void;
+  onCancelForget: () => void;
+  onConfirmForget: () => void;
+  selectedPaths: Set<string>;
+  onToggleSelect: (relativePath: string) => void;
+  removeMode: "selected" | "all" | null;
+  removing: boolean;
+  removeOutcome: UninstallOutcome | null;
+  removeError: string | null;
+  onRequestRemove: (mode: "selected" | "all") => void;
+  onCancelRemove: () => void;
+  onConfirmRemove: (paths: string[]) => void | Promise<void>;
+  emergencyOpen: boolean;
+  onToggleEmergencyOpen: () => void;
+  emergencyTarget: string | null;
+  onSetEmergencyTarget: (fileName: string | null) => void;
+  emergencyConfirmInput: string;
+  onEmergencyConfirmInputChange: (value: string) => void;
+  emergencyBusy: boolean;
+  emergencyError: string | null;
+  emergencyResult: EmergencyRemoval | null;
+  onEmergencyRemove: (fileName: string) => void | Promise<void>;
+}
+
+function StackBody(props: StackBodyProps) {
+  const { stack, plan, effectiveSelection, onSelect, railExpanded, isHealthyManaged } = props;
+  const railRef = useRef<HTMLDivElement>(null);
+
+  const otherKept = useMemo(() => stack.preserved_originals.filter((o) => !o.backs_up), [stack]);
+
+  const handleRailKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const container = railRef.current;
+    if (!container) return;
+    const items = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'));
+    if (items.length === 0) return;
+    e.preventDefault();
+    const idx = items.indexOf(document.activeElement as HTMLElement);
+    const nextIdx =
+      idx === -1
+        ? 0
+        : e.key === "ArrowDown"
+          ? Math.min(idx + 1, items.length - 1)
+          : Math.max(idx - 1, 0);
+    items[nextIdx]?.focus();
+  }, []);
+
+  return (
+    <div className="flex gap-4">
+      <div
+        ref={railRef}
+        role="listbox"
+        aria-label="Stack layers"
+        onKeyDown={handleRailKeyDown}
+        className="w-[300px] shrink-0 space-y-2"
+      >
+        {plan && !plan.already_managed && (
+          <button
+            type="button"
+            role="option"
+            aria-selected={effectiveSelection === "adoption"}
+            onClick={() => onSelect("adoption")}
+            className={cn(
+              "flex w-full flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
+              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+              effectiveSelection === "adoption"
+                ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+                : "border-structure-06 bg-structure-02 hover:border-structure-10"
+            )}
+          >
+            <InfoPill color="gold" className="self-start">
+              Not managed yet
+            </InfoPill>
+            <span className="text-xs text-muted-foreground">Review and manage this stack</span>
+          </button>
+        )}
+
+        {isHealthyManaged && !railExpanded ? (
+          <GlassPanel variant="subtle" className="flex items-center justify-between gap-2 p-3">
+            <span className="flex min-w-0 items-center gap-2 text-[13px]">
+              <ShieldCheckIcon aria-hidden className="size-4 shrink-0 text-status-success" />
+              <span className="truncate">
+                <span className="text-status-success">●</span> Managed &middot; DLSS 5 Neural
+                Rendering &middot; {STAGE_ORDER.length} layers &middot; all consistent
+              </span>
+            </span>
+            <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
+              Show layers
+              <ChevronDownIcon />
+            </Button>
+          </GlassPanel>
+        ) : (
+          <>
+            {isHealthyManaged && (
+              <div className="flex justify-end">
+                <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
+                  Hide layers
+                  <ChevronRightIcon />
+                </Button>
+              </div>
+            )}
+            {STAGE_ORDER.map((stage, i) => (
+              <div key={stage}>
+                <StageRow
+                  stage={stage}
+                  stack={stack}
+                  selected={effectiveSelection === stage}
+                  onSelect={() => onSelect(stage)}
+                />
+                {i < STAGE_ORDER.length - 1 && (
+                  <Connector
+                    findings={stack.findings.filter((f) => CONNECTOR_FINDING_AFTER[f.id] === stage)}
+                  />
+                )}
+              </div>
+            ))}
+          </>
+        )}
+
+        {otherKept.length > 0 && (
+          <GlassPanel variant="subtle" className="space-y-1 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Other kept files
+            </p>
+            {otherKept.map((o) => (
+              <p key={o.file_name} className="truncate font-mono text-[11px] text-muted-foreground">
+                {o.file_name}
+              </p>
+            ))}
+          </GlassPanel>
+        )}
+
+        <Divider />
+
+        <button
+          type="button"
+          role="option"
+          aria-selected={effectiveSelection === "records"}
+          onClick={() => onSelect("records")}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
+            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+            effectiveSelection === "records"
+              ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+              : "border-structure-06 bg-structure-02 hover:border-structure-10"
+          )}
+        >
+          <HardDriveIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1">
+            <span className="block font-heading text-[13px] font-semibold">
+              Kalpa&apos;s records
+            </span>
+            <span className="block text-xs text-muted-foreground">
+              {props.managedInventory?.files.length ?? 0} tracked file
+              {props.managedInventory?.files.length === 1 ? "" : "s"}
+            </span>
+          </span>
+        </button>
+
+        {props.logExcerpts.length > 0 && (
+          <button
+            type="button"
+            role="option"
+            aria-selected={effectiveSelection === "logs"}
+            onClick={() => onSelect("logs")}
+            className={cn(
+              "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
+              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+              effectiveSelection === "logs"
+                ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+                : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
+            )}
+          >
+            <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-status-warning" />
+            <span className="min-w-0 flex-1">
+              <span className="block font-heading text-[13px] font-semibold">Log signals</span>
+              <span className="block text-xs text-muted-foreground">
+                {props.logExcerpts.length} known problem line
+                {props.logExcerpts.length === 1 ? "" : "s"}
+              </span>
+            </span>
+          </button>
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1 space-y-3">
+        <DetailPane {...props} />
+      </div>
+    </div>
+  );
+}
+
+function StageRow({
+  stage,
+  stack,
+  selected,
+  onSelect,
+}: {
+  stage: Stage;
+  stack: ClientStack;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const level = stageLevel(stage, stack);
+  const meta = LEVEL_META[level];
+  const { Icon } = meta;
+  const items = stack.items.filter((item) => ROLE_TO_STAGE[item.role] === stage);
+
+  let summary: string;
+  let fileName: string | null = null;
+  if (stage === "shaders") {
+    summary = stack.shaders.present
+      ? `${stack.shaders.effect_count} effects, ${stack.shaders.texture_count} textures`
+      : "Not present";
+  } else if (stage === "preset") {
+    summary = stack.preset
+      ? stack.preset.exists
+        ? `${stack.preset.techniques.length} technique${stack.preset.techniques.length === 1 ? "" : "s"} enabled`
+        : "Missing file"
+      : "Not configured";
+  } else if (stage === "tuning") {
+    summary = stack.tuning.length > 0 ? `${stack.tuning.length} values` : "Not present";
+  } else if (items.length === 0) {
+    summary = "Not present";
+  } else if (items.length === 1) {
+    summary = items[0]!.display_name ?? "no product name";
+    fileName = items[0]!.file_name;
+  } else {
+    summary = `${items.length} files`;
+  }
+
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onClick={onSelect}
+      className={cn(
+        "flex w-full flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left transition-colors duration-150",
+        "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+        selected
+          ? "border-primary/30 border-l-primary bg-primary/[0.04]"
+          : cn(meta.border, meta.tint)
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-heading text-[13px] font-semibold">{STAGE_LABEL[stage]}</span>
+        <span className="flex items-center gap-1">
+          <Icon aria-hidden className={cn("size-3.5 shrink-0", meta.text)} />
+          <span className={cn("text-[11px] font-semibold uppercase tracking-wide", meta.text)}>
+            {meta.label}
+          </span>
+        </span>
+      </div>
+      <span className="truncate text-xs text-muted-foreground">{summary}</span>
+      {fileName && (
+        <span className="truncate font-mono text-[11px] text-muted-foreground">{fileName}</span>
+      )}
+    </button>
+  );
+}
+
+function Connector({ findings }: { findings: HealthFinding[] }) {
+  if (findings.length === 0) {
+    return <div aria-hidden className="ml-[13px] h-3 w-px bg-structure-10" />;
+  }
+  const level = worstLevel(findings.map((f) => f.level));
+  return (
+    <div className="flex gap-2 py-1">
+      <div
+        aria-hidden
+        className={cn("ml-[9px] w-0 shrink-0 border-l-2 border-dashed", LEVEL_META[level].line)}
+      />
+      <ul className="flex-1 space-y-2">
+        {findings.map((f) => (
+          <FindingRow key={f.id} finding={f} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Detail pane                                                               */
+/* -------------------------------------------------------------------------- */
+
+function DetailPane(props: StackBodyProps) {
+  const { stack, plan, planLoading, planError, effectiveSelection } = props;
+
+  if (effectiveSelection === "adoption") {
+    if (planLoading) {
+      return (
+        <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground" role="status">
+          <Spinner />
+          <span>Working out what adopting this stack would record...</span>
+        </div>
+      );
+    }
+    if (planError) {
+      return (
+        <GlassPanel variant="subtle" className="flex items-start gap-2 p-3 text-sm" role="alert">
+          <ShieldAlertIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-status-danger" />
+          <div>
+            <p className="font-heading text-[13px] font-semibold text-status-danger">
+              Could not plan adoption
+            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{planError}</p>
+          </div>
+        </GlassPanel>
+      );
+    }
+    if (!plan) return null;
+    return (
+      <AdoptionCard
+        plan={plan}
+        keepCopies={props.keepCopies}
+        onToggleKeepCopies={props.onToggleKeepCopies}
+        adopting={props.adopting}
+        adoptError={props.adoptError}
+        onAdopt={props.onAdopt}
+        onDismiss={props.onDismissAdoption}
+      />
+    );
+  }
+
+  if (effectiveSelection === "logs") {
+    return <LogSignals excerpts={props.logExcerpts} />;
+  }
+
+  if (effectiveSelection === "records") {
+    return (
+      <ManagedSection
+        loading={props.managedLoading}
+        error={props.managedError}
+        inventory={props.managedInventory}
+        hideEmergency={props.hideEmergency}
+        isManaged={props.isManaged}
+        forgetConfirming={props.forgetConfirming}
+        forgetting={props.forgetting}
+        forgetError={props.forgetError}
+        onRequestForget={props.onRequestForget}
+        onCancelForget={props.onCancelForget}
+        onConfirmForget={props.onConfirmForget}
+        selectedPaths={props.selectedPaths}
+        onToggleSelect={props.onToggleSelect}
+        removeMode={props.removeMode}
+        removing={props.removing}
+        removeOutcome={props.removeOutcome}
+        removeError={props.removeError}
+        onRequestRemove={props.onRequestRemove}
+        onCancelRemove={props.onCancelRemove}
+        onConfirmRemove={props.onConfirmRemove}
+        emergencyOpen={props.emergencyOpen}
+        onToggleEmergencyOpen={props.onToggleEmergencyOpen}
+        emergencyTarget={props.emergencyTarget}
+        onSetEmergencyTarget={props.onSetEmergencyTarget}
+        emergencyConfirmInput={props.emergencyConfirmInput}
+        onEmergencyConfirmInputChange={props.onEmergencyConfirmInputChange}
+        emergencyBusy={props.emergencyBusy}
+        emergencyError={props.emergencyError}
+        emergencyResult={props.emergencyResult}
+        onEmergencyRemove={props.onEmergencyRemove}
+      />
+    );
+  }
+
+  if (!effectiveSelection) {
+    return <p className="text-xs text-muted-foreground">Select a layer to see its detail.</p>;
+  }
+
+  const stage = effectiveSelection;
+  if (stage === "shaders") return <ShadersDetail stack={stack} />;
+  if (stage === "preset") return <PresetDetail stack={stack} />;
+  if (stage === "tuning") return <TuningDetail stack={stack} />;
+  return <ItemsStageDetail stage={stage} stack={stack} />;
+}
+
+function ComingNextNote() {
+  return <p className="text-xs text-muted-foreground">Editing this from Kalpa is coming next.</p>;
+}
+
+function StageFindingsList({ stage, stack }: { stage: Stage; stack: ClientStack }) {
+  const findings = stack.findings.filter((f) => FINDING_STAGE[f.id] === stage);
+  if (findings.length === 0) return null;
+  return (
+    <ul className="space-y-2">
+      {findings.map((f) => (
+        <FindingRow key={f.id} finding={f} />
+      ))}
+    </ul>
+  );
+}
+
+function ItemCard({ item, preserved }: { item: StackItem; preserved: PreservedOriginal | null }) {
+  const identifiedByHash =
+    !item.display_name && !item.version && !item.company && !item.description;
+  return (
+    <GlassPanel
+      variant="subtle"
+      className="space-y-1 rounded-xl border-l-[3px] border-l-structure-10 p-3"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <h4 className="font-heading text-[13px] font-semibold">{ROLE_LABEL[item.role]}</h4>
+        {identifiedByHash && <InfoPill color="muted">identified by hash</InfoPill>}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {item.display_name ?? "no product name"} &middot; {item.version ?? "no version info"}
+      </p>
+      <p className="font-mono text-[11px] text-muted-foreground">{item.file_name}</p>
+      {preserved && (
+        <p className="text-xs text-status-info">
+          Original &middot; {preserved.version ?? "no version info"} &middot; kept by you
+        </p>
+      )}
+    </GlassPanel>
+  );
+}
+
+function ItemsStageDetail({ stage, stack }: { stage: Stage; stack: ClientStack }) {
+  const items = stack.items.filter((item) => ROLE_TO_STAGE[item.role] === stage);
+  const findByFileName = (name: string) =>
+    stack.preserved_originals.find((o) => o.backs_up?.toLowerCase() === name.toLowerCase()) ?? null;
+
+  return (
+    <div className="space-y-3">
+      <SectionHeader>{STAGE_LABEL[stage]}</SectionHeader>
+      {items.length === 0 ? (
+        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
+          Not present in this install.
+        </GlassPanel>
+      ) : (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <ItemCard key={item.file_name} item={item} preserved={findByFileName(item.file_name)} />
+          ))}
+        </div>
+      )}
+      <StageFindingsList stage={stage} stack={stack} />
+      {STAGE_COMING_NEXT.has(stage) && <ComingNextNote />}
+    </div>
+  );
+}
+
+function ShadersDetail({ stack }: { stack: ClientStack }) {
+  const shaders = stack.shaders;
+  return (
+    <div className="space-y-3">
+      <SectionHeader>Shaders</SectionHeader>
+      <GlassPanel variant="subtle" className="space-y-1 p-3 text-xs">
+        <p>
+          <span className="text-muted-foreground">Present:</span> {shaders.present ? "Yes" : "No"}
+        </p>
+        <p>
+          <span className="text-muted-foreground">Effects:</span> {shaders.effect_count}
+        </p>
+        <p>
+          <span className="text-muted-foreground">Textures:</span> {shaders.texture_count}
+        </p>
+        <p className="break-words">
+          <span className="text-muted-foreground">Search paths:</span>{" "}
+          <span className="font-mono">{shaders.effect_search_paths ?? "not configured"}</span>
+        </p>
+      </GlassPanel>
+      <StageFindingsList stage="shaders" stack={stack} />
+    </div>
+  );
+}
+
+function PresetDetail({ stack }: { stack: ClientStack }) {
+  const preset = stack.preset;
+  return (
+    <div className="space-y-3">
+      <SectionHeader>Preset</SectionHeader>
+      {!preset ? (
+        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
+          No preset configured.
+        </GlassPanel>
+      ) : (
+        <GlassPanel variant="subtle" className="space-y-2 p-3 text-xs">
+          <p className="break-words">
+            <span className="text-muted-foreground">Path:</span>{" "}
+            <span className="font-mono">{preset.path}</span>
+          </p>
+          <p>
+            <span className="text-muted-foreground">Exists:</span> {preset.exists ? "Yes" : "No"}
+          </p>
+          <div>
+            <p className="mb-1 text-muted-foreground">Enabled techniques, in run order:</p>
+            {preset.techniques.length === 0 ? (
+              <p className="text-muted-foreground">None enabled.</p>
+            ) : (
+              <ol className="list-decimal space-y-1 pl-4">
+                {preset.techniques.map((t) => (
+                  <li key={t.name} className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono">{t.name}</span>
+                    {!t.source_present && <InfoPill color="red">missing {t.source}</InfoPill>}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+          {preset.available.length > 0 && (
+            <p className="break-words">
+              <span className="text-muted-foreground">All known techniques:</span>{" "}
+              <span className="font-mono">{preset.available.join(", ")}</span>
+            </p>
+          )}
+        </GlassPanel>
+      )}
+      <StageFindingsList stage="preset" stack={stack} />
+      <ComingNextNote />
+    </div>
+  );
+}
+
+function TuningDetail({ stack }: { stack: ClientStack }) {
+  return (
+    <div className="space-y-3">
+      <SectionHeader>Tuning</SectionHeader>
+      {stack.tuning.length === 0 ? (
+        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
+          No [RenoDX.DLSS5] tuning block found.
+        </GlassPanel>
+      ) : (
+        <GlassPanel variant="subtle" className="p-0">
+          {stack.tuning.map((t) => (
+            <div
+              key={t.key}
+              className="flex items-center justify-between gap-3 border-b border-structure-06 px-3 py-2 last:border-b-0"
+            >
+              <span className="font-mono text-[12px]">{t.key}</span>
+              <span className="font-mono text-[12px] text-muted-foreground">{t.value}</span>
+            </div>
+          ))}
+        </GlassPanel>
+      )}
+      <StageFindingsList stage="tuning" stack={stack} />
+      <ComingNextNote />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Adoption                                                                   */
+/* -------------------------------------------------------------------------- */
+
+function AdoptionCard({
+  plan,
+  keepCopies,
+  onToggleKeepCopies,
+  adopting,
+  adoptError,
+  onAdopt,
+  onDismiss,
+}: {
+  plan: AdoptionPlan;
+  keepCopies: boolean;
+  onToggleKeepCopies: () => void;
+  adopting: boolean;
+  adoptError: string | null;
+  onAdopt: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <GlassPanel variant="default" className="space-y-3 p-4">
+      <InfoPill color="gold" className="self-start">
+        Not managed yet
+      </InfoPill>
+      <h3 className="font-heading text-base font-semibold">
+        This stack works, and Kalpa didn&apos;t build it.
+      </h3>
+      <p className="text-sm leading-relaxed text-muted-foreground">
+        Managing it only means Kalpa records what is here, so it can tell you if a game update
+        knocks something out of place. Nothing is changed, downloaded, or moved. Your own backups —
+        files ending in <span className="font-mono">.disabled-bak</span> or{" "}
+        <span className="font-mono">.eso-orig-bak</span> — are treated as your originals and left
+        exactly where they are.
+      </p>
+      <details className="text-xs">
+        <summary className="cursor-pointer list-none font-semibold text-foreground [&::-webkit-details-marker]:hidden">
+          ▸ What gets recorded ({plan.entries.length} files)
+        </summary>
+        <ul className="mt-2 space-y-1.5">
+          {plan.entries.map((entry) => (
+            <li key={entry.relative_path} className="flex items-center justify-between gap-2">
+              <span className="min-w-0 flex-1 truncate font-mono">{entry.relative_path}</span>
+              <InfoPill color="muted">{KIND_LABEL[entry.kind]}</InfoPill>
+            </li>
+          ))}
+        </ul>
+      </details>
+      <label className="flex items-start gap-2 text-xs">
+        <Checkbox
+          checked={keepCopies}
+          onCheckedChange={() => onToggleKeepCopies()}
+          className="mt-0.5"
+        />
+        <span>
+          Keep a copy of the swapped runtimes ({formatMB(plan.copy_bytes)}) so Kalpa can put them
+          back after a game update.
+        </span>
+      </label>
+      {adoptError && (
+        <p className="text-xs text-status-danger" role="alert">
+          {adoptError}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={adopting} onClick={onAdopt}>
+          {adopting ? <Spinner className="size-3.5" /> : <PackageCheckIcon />}
+          {adopting ? "Managing..." : "Manage this stack"}
+        </Button>
+        <Button size="sm" variant="outline" disabled={adopting} onClick={onDismiss}>
+          Not now
+        </Button>
+      </div>
+    </GlassPanel>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Log signals                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** Lines ReShade and the DLSS 5 feed wrote that match a known failure
+ *  signature. Deliberately presented as evidence rather than as findings:
+ *  Kalpa matched a string in a log, which is a much weaker claim than the
+ *  cross-layer checks, and a stale line from a problem already fixed will
+ *  still be sitting in the file. */
+function LogSignals({ excerpts }: { excerpts: LogExcerpt[] }) {
+  const byFile = useMemo(() => {
+    const groups = new Map<string, LogExcerpt[]>();
+    for (const excerpt of excerpts) {
+      const list = groups.get(excerpt.file) ?? [];
+      list.push(excerpt);
+      groups.set(excerpt.file, list);
+    }
+    return Array.from(groups.entries());
+  }, [excerpts]);
+
+  return (
+    <section aria-labelledby="client-health-logs" className="space-y-3">
+      <SectionHeader id="client-health-logs">Log signals</SectionHeader>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Lines in your ReShade and DLSS 5 logs that match a known failure. Logs are append-only, so a
+        line here may be from a problem you have already fixed — check the timestamps in the file
+        before chasing it.
+      </p>
+      {byFile.map(([file, lines]) => (
+        <GlassPanel key={file} variant="subtle" className="space-y-2 p-3">
+          <p className="font-mono text-[11px] text-muted-foreground">{file}</p>
+          <ul className="space-y-1.5">
+            {lines.map((excerpt, index) => (
+              <li key={`${excerpt.rule}-${index}`} className="space-y-0.5">
+                <InfoPill color="amber">{excerpt.rule}</InfoPill>
+                <p className="break-words font-mono text-[11px] text-muted-foreground">
+                  {excerpt.line}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </GlassPanel>
+      ))}
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Kalpa's records (formerly "Managed by Kalpa")                             */
 /* -------------------------------------------------------------------------- */
 
 function ManagedSection({
   loading,
   error,
   inventory,
+  hideEmergency,
+  isManaged,
+  forgetConfirming,
+  forgetting,
+  forgetError,
+  onRequestForget,
+  onCancelForget,
+  onConfirmForget,
   selectedPaths,
   onToggleSelect,
   removeMode,
@@ -998,6 +1967,14 @@ function ManagedSection({
   loading: boolean;
   error: string | null;
   inventory: ManagedInventory | null;
+  hideEmergency: boolean;
+  isManaged: boolean;
+  forgetConfirming: boolean;
+  forgetting: boolean;
+  forgetError: string | null;
+  onRequestForget: () => void;
+  onCancelForget: () => void;
+  onConfirmForget: () => void;
   selectedPaths: Set<string>;
   onToggleSelect: (relativePath: string) => void;
   removeMode: "selected" | "all" | null;
@@ -1019,7 +1996,7 @@ function ManagedSection({
   onEmergencyRemove: (fileName: string) => void | Promise<void>;
 }) {
   const files = useMemo(() => inventory?.files ?? [], [inventory]);
-  const orphans = inventory?.orphan_injectors ?? [];
+  const orphans = hideEmergency ? [] : (inventory?.orphan_injectors ?? []);
 
   const pendingPaths = useMemo(() => {
     if (removeMode === "all") return files.map((f) => f.relative_path);
@@ -1030,8 +2007,45 @@ function ManagedSection({
   return (
     <section aria-labelledby="client-health-managed">
       <SectionHeader id="client-health-managed" className="mb-2">
-        Managed by Kalpa
+        Kalpa&apos;s records
       </SectionHeader>
+
+      {isManaged && (
+        <GlassPanel variant="subtle" className="mb-3 space-y-2 p-3">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Kalpa is managing this stack: it has a record of what is here, so it can tell you if a
+            game update changes something. It has not modified any of it.
+          </p>
+          {!forgetConfirming && (
+            <Button variant="outline" size="sm" onClick={onRequestForget}>
+              Stop managing
+            </Button>
+          )}
+          {forgetConfirming && (
+            <div className="space-y-2">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Kalpa will delete its records for this folder and nothing else. Every file stays
+                exactly where it is, your stack keeps working, and you can ask Kalpa to manage it
+                again at any time.
+              </p>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" disabled={forgetting} onClick={onConfirmForget}>
+                  {forgetting ? <Spinner className="size-3.5" /> : null}
+                  {forgetting ? "Forgetting..." : "Stop managing"}
+                </Button>
+                <Button variant="ghost" size="sm" disabled={forgetting} onClick={onCancelForget}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+          {forgetError && (
+            <p className="text-xs text-status-danger" role="alert">
+              {forgetError}
+            </p>
+          )}
+        </GlassPanel>
+      )}
 
       {loading && (
         <div className="flex items-center gap-3 py-6 text-sm text-muted-foreground" role="status">
