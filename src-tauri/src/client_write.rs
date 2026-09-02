@@ -311,7 +311,13 @@ pub fn validate_placement(kind: ManagedKind, relative_path: &str) -> Result<(), 
         ManagedKind::ReShadeCore => {
             at_root && matches!(file_name.as_str(), "dxgi.dll" | "d3d11.dll")
         }
-        ManagedKind::ReShadeConfig => at_root && matches!(extension.as_str(), "ini" | "log"),
+        // `cfg` is here because ReShade addons ship their own configuration
+        // next to the injector -- `dlss5-feed.cfg` is a real example. Without
+        // it, adoption records a companion file under a kind this policy then
+        // refuses to write, so managing the file later fails at the last gate.
+        ManagedKind::ReShadeConfig => {
+            at_root && matches!(extension.as_str(), "ini" | "log" | "cfg")
+        }
         ManagedKind::Shader => {
             in_shader_tree && matches!(extension.as_str(), "fx" | "fxh" | "png" | "jpg" | "txt")
         }

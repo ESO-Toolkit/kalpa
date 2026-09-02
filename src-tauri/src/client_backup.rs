@@ -241,7 +241,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn rfc3339_now() -> String {
+pub fn rfc3339_now() -> String {
     crate::metadata::format_timestamp(now_secs())
 }
 
@@ -304,7 +304,11 @@ fn backup_existing_in(
 ///
 /// The relative shape is preserved so a backup folder reads like a thin slice
 /// of the game directory, and so restore is a pure path substitution.
-fn backup_file_path(backup_root: &Path, id: &str, relative_path: &str) -> Result<PathBuf, String> {
+pub fn backup_file_path(
+    backup_root: &Path,
+    id: &str,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
     let folder = backup_root.join(id);
     crate::client_write::safe_relative_join(&folder, relative_path)
 }
@@ -795,6 +799,69 @@ fn place_one(
         origin: FileOrigin::Placed,
         displaced_in_place: None,
     })
+}
+
+// ── Adoption ─────────────────────────────────────────────────────────────
+
+/// Record entries for files that were already in the client directory.
+///
+/// Lives here rather than in `client_adopt` for one reason: this is a manifest
+/// load-mutate-save, and [`MANIFEST_LOCK`] is what stops a concurrent
+/// `apply_placements` from silently discarding the entries. Exposing the lock
+/// so another module could take it would make forgetting to a possibility;
+/// keeping every read-modify-write behind this module's own functions means
+/// the discipline cannot be skipped by a caller.
+///
+/// Existing entries for the same relative path are replaced, so adopting twice
+/// refreshes hashes instead of duplicating rows.
+pub fn record_adopted(
+    manifest_path: &Path,
+    client_root: &Path,
+    entries: Vec<ManagedFile>,
+) -> Result<(), String> {
+    let _guard = lock_manifest();
+    let mut manifest = load_manifest_at(manifest_path);
+    let bucket = manifest
+        .installs
+        .entry(install_key(client_root))
+        .or_default();
+    for entry in entries {
+        bucket.retain(|existing| existing.relative_path != entry.relative_path);
+        bucket.push(entry);
+    }
+    bucket.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    save_manifest_at(manifest_path, &manifest)
+}
+
+/// Drop every [`FileOrigin::Adopted`] entry for one install, returning the
+/// paths forgotten.
+///
+/// Touches no file in the client directory: forgetting is Kalpa giving up its
+/// records, not undoing anything. Entries Kalpa actually placed are left
+/// alone, because those still describe real writes that uninstall must be able
+/// to reverse.
+pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<Vec<String>, String> {
+    let _guard = lock_manifest();
+    let mut manifest = load_manifest_at(manifest_path);
+    let key = install_key(client_root);
+    let Some(bucket) = manifest.installs.get_mut(&key) else {
+        return Ok(Vec::new());
+    };
+
+    let forgotten: Vec<String> = bucket
+        .iter()
+        .filter(|file| file.origin == FileOrigin::Adopted)
+        .map(|file| file.relative_path.clone())
+        .collect();
+    if forgotten.is_empty() {
+        return Ok(forgotten);
+    }
+    bucket.retain(|file| file.origin != FileOrigin::Adopted);
+    if bucket.is_empty() {
+        manifest.installs.remove(&key);
+    }
+    save_manifest_at(manifest_path, &manifest)?;
+    Ok(forgotten)
 }
 
 // ── Revert ───────────────────────────────────────────────────────────────
