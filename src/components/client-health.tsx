@@ -30,6 +30,10 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { StackPowerCard } from "@/components/client-stack/power-card";
+import { TuningPanel } from "@/components/client-stack/tuning-panel";
+import { RuntimeDriftCard } from "@/components/client-stack/runtime-drift-card";
+import { PresetPanel } from "@/components/client-stack/preset-panel";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
@@ -520,6 +524,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [loadLogs, loadManaged, loadPlan]
   );
 
+  /** Re-read the folder after a management action changed it. Every write in
+   *  the panels below alters what `inspect_client_stack` would report, and the
+   *  rail *is* the inventory, so a stale one is a lie about the user's game. */
+  const reloadInstall = useCallback(async () => {
+    if (!selectedDir) return;
+    await loadInstall(selectedDir, ++runToken.current);
+  }, [loadInstall, selectedDir]);
+
   const detect = useCallback(async () => {
     const token = ++runToken.current;
     setDetecting(true);
@@ -931,6 +943,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   emergencyError={emergencyError}
                   emergencyResult={emergencyResult}
                   onEmergencyRemove={handleEmergencyRemove}
+                  onStackChanged={reloadInstall}
                 />
               )}
             </>
@@ -1166,6 +1179,8 @@ interface StackBodyProps {
   emergencyError: string | null;
   emergencyResult: EmergencyRemoval | null;
   onEmergencyRemove: (fileName: string) => void | Promise<void>;
+  /** Re-read the stack after a management action changed the folder. */
+  onStackChanged: () => Promise<void>;
 }
 
 function StackBody(props: StackBodyProps) {
@@ -1192,145 +1207,157 @@ function StackBody(props: StackBodyProps) {
   }, []);
 
   return (
-    <div className="flex gap-4">
-      <div
-        ref={railRef}
-        role="listbox"
-        aria-label="Stack layers"
-        onKeyDown={handleRailKeyDown}
-        className="w-[300px] shrink-0 space-y-2"
-      >
-        {plan && !plan.already_managed && (
+    <div className="space-y-3">
+      {/* Stack-wide, so it sits above the pipeline rather than inside one of
+          its layers: switching off touches the injector, both runtimes ESO
+          loads itself, and the meaning of every layer below them. */}
+      <StackPowerCard clientDir={stack.client_dir} stack={stack} onChanged={props.onStackChanged} />
+
+      <div className="flex gap-4">
+        <div
+          ref={railRef}
+          role="listbox"
+          aria-label="Stack layers"
+          onKeyDown={handleRailKeyDown}
+          className="w-[300px] shrink-0 space-y-2"
+        >
+          {plan && !plan.already_managed && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={effectiveSelection === "adoption"}
+              onClick={() => onSelect("adoption")}
+              className={cn(
+                "flex w-full flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
+                "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+                effectiveSelection === "adoption"
+                  ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+                  : "border-structure-06 bg-structure-02 hover:border-structure-10"
+              )}
+            >
+              <InfoPill color="gold" className="self-start">
+                Not managed yet
+              </InfoPill>
+              <span className="text-xs text-muted-foreground">Review and manage this stack</span>
+            </button>
+          )}
+
+          {isHealthyManaged && !railExpanded ? (
+            <GlassPanel variant="subtle" className="flex items-center justify-between gap-2 p-3">
+              <span className="flex min-w-0 items-center gap-2 text-[13px]">
+                <ShieldCheckIcon aria-hidden className="size-4 shrink-0 text-status-success" />
+                <span className="truncate">
+                  <span className="text-status-success">●</span> Managed &middot; DLSS 5 Neural
+                  Rendering &middot; {STAGE_ORDER.length} layers &middot; all consistent
+                </span>
+              </span>
+              <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
+                Show layers
+                <ChevronDownIcon />
+              </Button>
+            </GlassPanel>
+          ) : (
+            <>
+              {isHealthyManaged && (
+                <div className="flex justify-end">
+                  <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
+                    Hide layers
+                    <ChevronRightIcon />
+                  </Button>
+                </div>
+              )}
+              {STAGE_ORDER.map((stage, i) => (
+                <div key={stage}>
+                  <StageRow
+                    stage={stage}
+                    stack={stack}
+                    selected={effectiveSelection === stage}
+                    onSelect={() => onSelect(stage)}
+                  />
+                  {i < STAGE_ORDER.length - 1 && (
+                    <Connector
+                      findings={stack.findings.filter(
+                        (f) => CONNECTOR_FINDING_AFTER[f.id] === stage
+                      )}
+                    />
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+
+          {otherKept.length > 0 && (
+            <GlassPanel variant="subtle" className="space-y-1 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Other kept files
+              </p>
+              {otherKept.map((o) => (
+                <p
+                  key={o.file_name}
+                  className="truncate font-mono text-[11px] text-muted-foreground"
+                >
+                  {o.file_name}
+                </p>
+              ))}
+            </GlassPanel>
+          )}
+
+          <Divider />
+
           <button
             type="button"
             role="option"
-            aria-selected={effectiveSelection === "adoption"}
-            onClick={() => onSelect("adoption")}
+            aria-selected={effectiveSelection === "records"}
+            onClick={() => onSelect("records")}
             className={cn(
-              "flex w-full flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
+              "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
               "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-              effectiveSelection === "adoption"
+              effectiveSelection === "records"
                 ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
                 : "border-structure-06 bg-structure-02 hover:border-structure-10"
             )}
           >
-            <InfoPill color="gold" className="self-start">
-              Not managed yet
-            </InfoPill>
-            <span className="text-xs text-muted-foreground">Review and manage this stack</span>
-          </button>
-        )}
-
-        {isHealthyManaged && !railExpanded ? (
-          <GlassPanel variant="subtle" className="flex items-center justify-between gap-2 p-3">
-            <span className="flex min-w-0 items-center gap-2 text-[13px]">
-              <ShieldCheckIcon aria-hidden className="size-4 shrink-0 text-status-success" />
-              <span className="truncate">
-                <span className="text-status-success">●</span> Managed &middot; DLSS 5 Neural
-                Rendering &middot; {STAGE_ORDER.length} layers &middot; all consistent
-              </span>
-            </span>
-            <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
-              Show layers
-              <ChevronDownIcon />
-            </Button>
-          </GlassPanel>
-        ) : (
-          <>
-            {isHealthyManaged && (
-              <div className="flex justify-end">
-                <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
-                  Hide layers
-                  <ChevronRightIcon />
-                </Button>
-              </div>
-            )}
-            {STAGE_ORDER.map((stage, i) => (
-              <div key={stage}>
-                <StageRow
-                  stage={stage}
-                  stack={stack}
-                  selected={effectiveSelection === stage}
-                  onSelect={() => onSelect(stage)}
-                />
-                {i < STAGE_ORDER.length - 1 && (
-                  <Connector
-                    findings={stack.findings.filter((f) => CONNECTOR_FINDING_AFTER[f.id] === stage)}
-                  />
-                )}
-              </div>
-            ))}
-          </>
-        )}
-
-        {otherKept.length > 0 && (
-          <GlassPanel variant="subtle" className="space-y-1 p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Other kept files
-            </p>
-            {otherKept.map((o) => (
-              <p key={o.file_name} className="truncate font-mono text-[11px] text-muted-foreground">
-                {o.file_name}
-              </p>
-            ))}
-          </GlassPanel>
-        )}
-
-        <Divider />
-
-        <button
-          type="button"
-          role="option"
-          aria-selected={effectiveSelection === "records"}
-          onClick={() => onSelect("records")}
-          className={cn(
-            "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
-            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-            effectiveSelection === "records"
-              ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-              : "border-structure-06 bg-structure-02 hover:border-structure-10"
-          )}
-        >
-          <HardDriveIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1">
-            <span className="block font-heading text-[13px] font-semibold">
-              Kalpa&apos;s records
-            </span>
-            <span className="block text-xs text-muted-foreground">
-              {props.managedInventory?.files.length ?? 0} tracked file
-              {props.managedInventory?.files.length === 1 ? "" : "s"}
-            </span>
-          </span>
-        </button>
-
-        {props.logExcerpts.length > 0 && (
-          <button
-            type="button"
-            role="option"
-            aria-selected={effectiveSelection === "logs"}
-            onClick={() => onSelect("logs")}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-              effectiveSelection === "logs"
-                ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-                : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
-            )}
-          >
-            <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-status-warning" />
+            <HardDriveIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1">
-              <span className="block font-heading text-[13px] font-semibold">Log signals</span>
+              <span className="block font-heading text-[13px] font-semibold">
+                Kalpa&apos;s records
+              </span>
               <span className="block text-xs text-muted-foreground">
-                {props.logExcerpts.length} known problem line
-                {props.logExcerpts.length === 1 ? "" : "s"}
+                {props.managedInventory?.files.length ?? 0} tracked file
+                {props.managedInventory?.files.length === 1 ? "" : "s"}
               </span>
             </span>
           </button>
-        )}
-      </div>
 
-      <div className="min-w-0 flex-1 space-y-3">
-        <DetailPane {...props} />
+          {props.logExcerpts.length > 0 && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={effectiveSelection === "logs"}
+              onClick={() => onSelect("logs")}
+              className={cn(
+                "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
+                "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+                effectiveSelection === "logs"
+                  ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+                  : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
+              )}
+            >
+              <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-status-warning" />
+              <span className="min-w-0 flex-1">
+                <span className="block font-heading text-[13px] font-semibold">Log signals</span>
+                <span className="block text-xs text-muted-foreground">
+                  {props.logExcerpts.length} known problem line
+                  {props.logExcerpts.length === 1 ? "" : "s"}
+                </span>
+              </span>
+            </button>
+          )}
+        </div>
+
+        <div className="min-w-0 flex-1 space-y-3">
+          <DetailPane {...props} />
+        </div>
       </div>
     </div>
   );
@@ -1516,9 +1543,11 @@ function DetailPane(props: StackBodyProps) {
 
   const stage = effectiveSelection;
   if (stage === "shaders") return <ShadersDetail stack={stack} />;
-  if (stage === "preset") return <PresetDetail stack={stack} />;
-  if (stage === "tuning") return <TuningDetail stack={stack} />;
-  return <ItemsStageDetail stage={stage} stack={stack} />;
+  if (stage === "preset")
+    return <PresetDetail stack={stack} onStackChanged={props.onStackChanged} />;
+  if (stage === "tuning")
+    return <TuningDetail stack={stack} onStackChanged={props.onStackChanged} />;
+  return <ItemsStageDetail stage={stage} stack={stack} onStackChanged={props.onStackChanged} />;
 }
 
 function ComingNextNote() {
@@ -1562,7 +1591,15 @@ function ItemCard({ item, preserved }: { item: StackItem; preserved: PreservedOr
   );
 }
 
-function ItemsStageDetail({ stage, stack }: { stage: Stage; stack: ClientStack }) {
+function ItemsStageDetail({
+  stage,
+  stack,
+  onStackChanged,
+}: {
+  stage: Stage;
+  stack: ClientStack;
+  onStackChanged: () => Promise<void>;
+}) {
   const items = stack.items.filter((item) => ROLE_TO_STAGE[item.role] === stage);
   const findByFileName = (name: string) =>
     stack.preserved_originals.find((o) => o.backs_up?.toLowerCase() === name.toLowerCase()) ?? null;
@@ -1582,6 +1619,12 @@ function ItemsStageDetail({ stage, stack }: { stage: Stage; stack: ClientStack }
         </div>
       )}
       <StageFindingsList stage={stage} stack={stack} />
+      <RuntimeDriftCard
+        clientDir={stack.client_dir}
+        stack={stack}
+        onChanged={onStackChanged}
+        filePaths={items.map((item) => item.file_name)}
+      />
       {STAGE_COMING_NEXT.has(stage) && <ComingNextNote />}
     </div>
   );
@@ -1612,7 +1655,13 @@ function ShadersDetail({ stack }: { stack: ClientStack }) {
   );
 }
 
-function PresetDetail({ stack }: { stack: ClientStack }) {
+function PresetDetail({
+  stack,
+  onStackChanged,
+}: {
+  stack: ClientStack;
+  onStackChanged: () => Promise<void>;
+}) {
   const preset = stack.preset;
   return (
     <div className="space-y-3">
@@ -1672,12 +1721,18 @@ function PresetDetail({ stack }: { stack: ClientStack }) {
         </GlassPanel>
       )}
       <StageFindingsList stage="preset" stack={stack} />
-      <ComingNextNote />
+      <PresetPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />
     </div>
   );
 }
 
-function TuningDetail({ stack }: { stack: ClientStack }) {
+function TuningDetail({
+  stack,
+  onStackChanged,
+}: {
+  stack: ClientStack;
+  onStackChanged: () => Promise<void>;
+}) {
   return (
     <div className="space-y-3">
       <SectionHeader>Tuning</SectionHeader>
@@ -1699,7 +1754,7 @@ function TuningDetail({ stack }: { stack: ClientStack }) {
         </GlassPanel>
       )}
       <StageFindingsList stage="tuning" stack={stack} />
-      <ComingNextNote />
+      <TuningPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />
     </div>
   );
 }
