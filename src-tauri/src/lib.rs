@@ -6,6 +6,7 @@ mod auth;
 pub mod bench_alloc;
 mod client_health;
 mod client_install;
+pub mod client_write;
 mod commands;
 mod edit_backups;
 mod esoui;
@@ -522,6 +523,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(client_write::AllowedGameInstallPath::new())
         .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
@@ -919,6 +921,8 @@ pub fn run() {
             client_health::detect_eso_clients,
             client_health::validate_eso_client,
             client_health::inspect_eso_client,
+            client_write::set_game_install_path,
+            client_write::clear_game_install_path,
             commands::set_addons_path,
             commands::reveal_allowed_path,
             commands::set_text_zoom,
