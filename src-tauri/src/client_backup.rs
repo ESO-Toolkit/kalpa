@@ -64,7 +64,7 @@
 //! ReShade itself, or another tool) modified it, and Kalpa leaves it alone and
 //! says so rather than silently discarding someone's work.
 
-use crate::client_write::{ApprovedRoot, ManagedFile, ManagedKind, ManagedManifest};
+use crate::client_write::{ApprovedRoot, FileOrigin, ManagedFile, ManagedKind, ManagedManifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -560,6 +560,10 @@ fn record_incomplete_rollback_locked(
             sha256: hash_file(&record.resolved).unwrap_or_default(),
             placed_at: rfc3339_now(),
             displaced_backup: record.displaced_backup.clone(),
+            // Everything this module writes, Kalpa wrote. Adoption records
+            // its own entries and never comes through here.
+            origin: FileOrigin::Placed,
+            displaced_in_place: None,
         })
         .collect();
 
@@ -788,6 +792,8 @@ fn place_one(
         sha256,
         placed_at: rfc3339_now(),
         displaced_backup,
+        origin: FileOrigin::Placed,
+        displaced_in_place: None,
     })
 }
 
@@ -856,6 +862,16 @@ fn revert_placements_in_locked(
             skipped.push(relative.clone());
             continue;
         };
+        if entry.origin == FileOrigin::Adopted {
+            // Kalpa did not put this here. Uninstall removes what Kalpa
+            // placed; for an adopted file there is no displaced original of
+            // Kalpa's to restore, so deleting it would just destroy the
+            // user's own file and leave a gap. Dropping the record is
+            // `forget`, and putting an original back is `disable` — both are
+            // separate operations with their own plans.
+            skipped.push(relative.clone());
+            continue;
+        }
         let resolved = match crate::client_write::safe_relative_join(client_root, relative) {
             Ok(path) => path,
             Err(_) => {
@@ -1374,6 +1390,8 @@ mod tests {
                 sha256: "a".repeat(64),
                 placed_at: "2026-01-01T00:00:00Z".to_string(),
                 displaced_backup: Some("2026-01-01T00-00-00Z-000000-000000000".to_string()),
+                origin: FileOrigin::Placed,
+                displaced_in_place: None,
             }],
         );
         let manifest = ManagedManifest { installs };

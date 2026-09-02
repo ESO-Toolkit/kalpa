@@ -49,7 +49,8 @@
 
 use crate::client_backup;
 use crate::client_write::{
-    self, AllowedGameInstallPath, ApprovedRoot, ManagedFile, ManagedKind, ManagedManifest,
+    self, AllowedGameInstallPath, ApprovedRoot, FileOrigin, ManagedFile, ManagedKind,
+    ManagedManifest,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -533,6 +534,8 @@ mod tests {
                 sha256: self.hash_of(contents),
                 placed_at: "2026-01-01T00:00:00Z".to_string(),
                 displaced_backup,
+                origin: FileOrigin::Placed,
+                displaced_in_place: None,
             }
         }
 

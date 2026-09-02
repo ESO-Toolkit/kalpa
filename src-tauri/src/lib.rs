@@ -4,6 +4,7 @@ mod auth;
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
 /// so normal builds are unaffected.
 pub mod bench_alloc;
+pub mod client_adopt;
 pub mod client_backup;
 pub mod client_download;
 mod client_health;
@@ -930,6 +931,9 @@ pub fn run() {
             client_write::set_game_install_path,
             client_write::clear_game_install_path,
             client_stack::inspect_client_stack,
+            client_adopt::plan_adoption,
+            client_adopt::adopt_stack,
+            client_adopt::forget_stack,
             client_uninstall::list_managed_client_files,
             client_uninstall::uninstall_managed_client_files,
             client_uninstall::emergency_remove_injector,

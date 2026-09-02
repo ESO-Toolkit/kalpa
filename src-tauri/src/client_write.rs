@@ -115,7 +115,26 @@ pub enum ManagedKind {
     ShaderCompiler,
 }
 
-/// One file Kalpa placed in the client directory.
+/// How a file came to be in the manifest.
+///
+/// The distinction is not bookkeeping. It decides whether Kalpa is allowed to
+/// delete the file: uninstall removes what Kalpa put there, and Kalpa put
+/// none of an adopted stack there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOrigin {
+    /// Kalpa wrote this file. Uninstall may remove it and restore whatever it
+    /// displaced.
+    #[default]
+    Placed,
+    /// The file was already here and the user asked Kalpa to manage it.
+    /// Recorded for drift detection only. Uninstall must never delete it —
+    /// there is no displaced original of Kalpa's to put back, and the bytes
+    /// are the user's.
+    Adopted,
+}
+
+/// One file Kalpa placed in, or adopted from, the client directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedFile {
     /// Path relative to the client directory, always forward-slashed.
@@ -127,8 +146,26 @@ pub struct ManagedFile {
     pub sha256: String,
     /// RFC3339 timestamp.
     pub placed_at: String,
-    /// Backup folder name holding the file this one displaced, if any.
+    /// Backup folder name holding the file this one displaced, if any. Set
+    /// only when Kalpa did the displacing, and the copy lives under
+    /// `client_backup`'s backup root.
     pub displaced_backup: Option<String>,
+    /// Defaults to [`FileOrigin::Placed`] so manifests written before adoption
+    /// existed keep their meaning.
+    #[serde(default)]
+    pub origin: FileOrigin,
+    /// Relative path, inside the client directory, of a backup the **user**
+    /// made before Kalpa was involved — `nvngx_dlss.dll.disabled-bak` and the
+    /// like.
+    ///
+    /// This is deliberately not folded into [`displaced_backup`]. That field
+    /// names a folder under the backup root, and
+    /// `prune_unreferenced_backups` deletes folders there that nothing points
+    /// at. A path recorded here is somewhere Kalpa does not own and must never
+    /// move, rename or prune: it is the user's file, sitting where they left
+    /// it, and it is frequently the only copy of the original in existence.
+    #[serde(default)]
+    pub displaced_in_place: Option<String>,
 }
 
 /// Everything Kalpa has placed in one client directory.
