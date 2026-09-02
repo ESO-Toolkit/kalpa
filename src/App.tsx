@@ -445,6 +445,9 @@ function App() {
       setAddons([]);
       setSelectedFolders(new Set());
     } finally {
+      // Unconditional: the stamp is registered per REQUEST, not per winning
+      // request, so a superseded scan still has to release its own.
+      pendingRemovalsRef.current.release(since);
       if (seq === scanSeqRef.current) {
         setLoading(false);
       }
@@ -525,6 +528,7 @@ function App() {
           toast.error(`Failed to check for updates: ${getTauriErrorMessage(updateError)}`);
         }
       } finally {
+        pendingRemovalsRef.current.release(since);
         if (seq === checkSeqRef.current) {
           setCheckingUpdates(false);
         }

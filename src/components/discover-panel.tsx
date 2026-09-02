@@ -53,6 +53,13 @@ interface DiscoverPanelProps {
   isOffline?: boolean;
 }
 
+function sameIdSet(a: Set<number>, b: Set<number>): boolean {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const id of a) if (!b.has(id)) return false;
+  return true;
+}
+
 function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const resolvePendingDeps = useResolvePendingDeps();
@@ -82,11 +89,14 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
     persistedRef.current = persistedIds;
   }, [persistedIds]);
 
-  // `persistedIds` is rebuilt from the addon list on every scan, so a new
-  // identity means a fresh answer from disk has landed and supersedes the
-  // overlay — including a disk state where the addon is gone again.
+  // Expire on CONTENT, not `Set` identity. The parent rebuilds `persistedIds`
+  // from `addons`, which also changes on tag edits, disable toggles and the
+  // update-time merge — none of which are a fresh answer about what is
+  // installed, and all of which would otherwise flip a just-installed addon
+  // back to "Install" before its scan lands. A membership change IS a fresh
+  // answer, including the uninstall this overlay must stop outliving.
   const installedIds = useMemo(() => {
-    if (!sessionInstalled || sessionInstalled.basis !== persistedIds) return persistedIds;
+    if (!sessionInstalled || !sameIdSet(sessionInstalled.basis, persistedIds)) return persistedIds;
     const merged = new Set(persistedIds);
     for (const id of sessionInstalled.ids) merged.add(id);
     return merged;
@@ -113,7 +123,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         });
         const basis = persistedRef.current;
         setSessionInstalled((prev) => {
-          const ids = prev && prev.basis === basis ? new Set(prev.ids) : new Set<number>();
+          const ids = prev && sameIdSet(prev.basis, basis) ? new Set(prev.ids) : new Set<number>();
           ids.add(id);
           return { ids, basis };
         });

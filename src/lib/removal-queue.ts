@@ -77,16 +77,6 @@ function maskKey(addonsPath: string, folderName: string): string {
 }
 
 /**
- * How many confirmed removals the queue remembers.
- *
- * The log only has to outlive the requests that were in flight when a removal
- * landed, so this is a bound against unbounded growth over a long session
- * rather than a tuning knob. Anything evicted simply falls back to the
- * pre-existing masking answer.
- */
-const MAX_COMPLETED_REMOVALS = 256;
-
-/**
  * The queue itself. `clearTimer` is injectable so tests can assert *when* a
  * group's timer is cancelled without running real timers.
  */
@@ -133,6 +123,20 @@ export class RemovalQueue {
 
   /** Bumped once per confirmed removal; see {@link RemovalQueue.completed}. */
   private generation = 0;
+
+  /**
+   * Stamps of the requests currently in flight, refcounted (two scans issued
+   * back to back with no removal between them share a generation).
+   *
+   * This is what bounds {@link RemovalQueue.completed}. A log entry is only ever
+   * consulted by a request stamped BEFORE it, so once the oldest in-flight
+   * request has settled nothing can need it again and it can go. Capping the log
+   * by entry count instead would have been a silent correctness hole: removing
+   * more addons in one batch than the cap allows would evict the earliest
+   * removals while the very scan they need to be masked from was still in
+   * flight, resurrecting exactly the phantom rows this log exists to prevent.
+   */
+  private readonly active = new Map<number, number>();
 
   private readonly clearTimer: (handle: TimerHandle) => void;
 
@@ -190,13 +194,52 @@ export class RemovalQueue {
   }
 
   /**
-   * Snapshot the generation for a request about to be issued.
+   * Snapshot the generation for a request about to be issued, and register the
+   * request as in flight.
    *
    * Pair it with the `since` argument of {@link RemovalQueue.isHidden} (or
-   * {@link hidePendingRemovals}) when the result is applied.
+   * {@link hidePendingRemovals}) when the result is applied, and with
+   * {@link RemovalQueue.release} in a `finally` once the request has settled —
+   * a stamp that is never released pins the completed-removal log forever.
    */
   stamp(): number {
-    return this.generation;
+    const stamp = this.generation;
+    this.active.set(stamp, (this.active.get(stamp) ?? 0) + 1);
+    return stamp;
+  }
+
+  /** The request that took this stamp has settled. */
+  release(stamp: number): void {
+    const outstanding = this.active.get(stamp);
+    if (outstanding === undefined) return;
+    if (outstanding > 1) {
+      this.active.set(stamp, outstanding - 1);
+    } else {
+      this.active.delete(stamp);
+    }
+    this.pruneCompleted();
+  }
+
+  /**
+   * Forget completed removals no in-flight request can still ask about.
+   *
+   * An entry recorded at generation `g` only changes the answer for a request
+   * stamped strictly below `g`, so anything at or below the oldest outstanding
+   * stamp is dead weight — and with nothing in flight, all of it is.
+   */
+  private pruneCompleted(): void {
+    if (this.completed.size === 0) return;
+    if (this.active.size === 0) {
+      this.completed.clear();
+      return;
+    }
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const stamp of this.active.keys()) {
+      if (stamp < oldest) oldest = stamp;
+    }
+    for (const [key, recordedAt] of this.completed) {
+      if (recordedAt <= oldest) this.completed.delete(key);
+    }
   }
 
   /**
@@ -208,20 +251,8 @@ export class RemovalQueue {
    * row must come back.
    */
   markRemoved(folderName: string, addonsPath: string): void {
-    const key = maskKey(addonsPath, folderName);
-    // Re-setting an existing key keeps its ORIGINAL insertion slot, which would
-    // make the oldest-first eviction below evict a fresh entry. Delete first so
-    // insertion order and generation order stay the same ordering.
-    this.completed.delete(key);
-    this.completed.set(key, ++this.generation);
-    // Only requests in flight can still consult the log, so a small window of
-    // history is enough. Map iterates in insertion order and generations only
-    // ever increase, so the first key is always the oldest.
-    while (this.completed.size > MAX_COMPLETED_REMOVALS) {
-      const oldest = this.completed.keys().next();
-      if (oldest.done) break;
-      this.completed.delete(oldest.value);
-    }
+    this.completed.set(maskKey(addonsPath, folderName), ++this.generation);
+    this.pruneCompleted();
   }
 
   /** The undo window has closed and the backend delete is starting. */

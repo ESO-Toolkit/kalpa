@@ -332,27 +332,66 @@ describe("completed-removal masking (the phantom-row race)", () => {
     expect(hidePendingRemovals(scanned, queue, LIVE)).toBe(scanned);
   });
 
-  it("evicts the oldest entries instead of growing without bound", () => {
+  it("keeps every removal a batch bigger than any fixed window produces", () => {
+    // A count-capped log would evict the earliest of these while the scan that
+    // needs them masked was still in flight — the phantom rows come straight
+    // back for the addons removed first.
     const queue = new RemovalQueue(vi.fn());
     const since = queue.stamp();
-    for (let i = 0; i < 300; i++) queue.markRemoved(`Addon${i}`, LIVE);
+    for (let i = 0; i < 1000; i++) queue.markRemoved(`Addon${i}`, LIVE);
 
-    // The 256 most recent are still remembered; the oldest have aged out.
-    expect(queue.isHidden("Addon299", LIVE, since)).toBe(true);
-    expect(queue.isHidden("Addon44", LIVE, since)).toBe(true);
-    expect(queue.isHidden("Addon0", LIVE, since)).toBe(false);
+    expect(queue.isHidden("Addon0", LIVE, since)).toBe(true);
+    expect(queue.isHidden("Addon500", LIVE, since)).toBe(true);
+    expect(queue.isHidden("Addon999", LIVE, since)).toBe(true);
   });
 
-  it("re-recording a folder refreshes its slot rather than keeping the old one", () => {
-    // Remove -> reinstall -> remove again must not leave the second removal
-    // sitting in the first one's eviction slot.
+  it("forgets the log once nothing is in flight", () => {
     const queue = new RemovalQueue(vi.fn());
-    queue.markRemoved("Foo", LIVE);
-    for (let i = 0; i < 255; i++) queue.markRemoved(`Filler${i}`, LIVE);
-
     const since = queue.stamp();
     queue.markRemoved("Foo", LIVE);
-    for (let i = 0; i < 200; i++) queue.markRemoved(`More${i}`, LIVE);
+    expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
+
+    queue.release(since);
+
+    // The stale stamp is now meaningless, and a fresh request sees the folder
+    // exactly as the backend reports it.
+    expect(queue.isHidden("Foo", LIVE, queue.stamp())).toBe(false);
+  });
+
+  it("holds entries the OLDEST in-flight request still needs", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const early = queue.stamp();
+    queue.markRemoved("Foo", LIVE);
+    const late = queue.stamp();
+
+    // Releasing the later request must not drop what the earlier one needs.
+    queue.release(late);
+    expect(queue.isHidden("Foo", LIVE, early)).toBe(true);
+    expect(queue.isHidden("Foo", LIVE, late)).toBe(false);
+  });
+
+  it("refcounts concurrent requests that share a stamp", () => {
+    // Two scans issued back to back with no removal between them take the same
+    // generation; the first to settle must not free the second's history.
+    const queue = new RemovalQueue(vi.fn());
+    const a = queue.stamp();
+    const b = queue.stamp();
+    expect(a).toBe(b);
+
+    queue.markRemoved("Foo", LIVE);
+    queue.release(a);
+    expect(queue.isHidden("Foo", LIVE, b)).toBe(true);
+
+    queue.release(b);
+    expect(queue.isHidden("Foo", LIVE, queue.stamp())).toBe(false);
+  });
+
+  it("ignores a release for a stamp it never issued", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const since = queue.stamp();
+    queue.markRemoved("Foo", LIVE);
+
+    queue.release(9999);
 
     expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
   });
