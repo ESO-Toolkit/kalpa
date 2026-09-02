@@ -3817,6 +3817,10 @@ pub async fn update_batch_with_decisions(
 
         let auto_resolve = conflict_policy == "keep_mine" || conflict_policy == "take_update";
 
+        // Kept out of the producer's `move` capture so a worker panic can be
+        // reconciled against the full batch afterwards.
+        let folder_names: Vec<String> = updates.iter().map(|e| e.folder_name.clone()).collect();
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(download_thread_count(total))
             .build()
@@ -3885,7 +3889,7 @@ pub async fn update_batch_with_decisions(
         // Consumer: extract each download as it arrives, on THIS thread, holding
         // the metadata lock. `rx.iter()` blocks until a download is ready and
         // ends when the producer drops its sender.
-        let extract_outcome = extract_streamed_downloads(
+        let mut extract_outcome = extract_streamed_downloads(
             &addons_dir,
             &app,
             total,
@@ -3897,11 +3901,31 @@ pub async fn update_batch_with_decisions(
         );
 
         // The producer has finished sending by the time the channel drained;
-        // join so the thread isn't detached. A producer panic is intentionally
-        // swallowed — fetch_and_download_with_retry returns Result rather than
-        // panicking, so a panic here would be a bug, and the consumer has
-        // already produced a complete result from whatever it received.
-        let _ = producer.join();
+        // join so the thread isn't detached. A worker panic unwinds through
+        // rayon, drops the channel sender, and the consumer quietly finishes
+        // with whatever it received — which once surfaced to the user as
+        // Update All "starting then resetting" with zero completions and no
+        // error. Reconcile instead: any addon the consumer never heard about
+        // is reported failed, with the panic message attached.
+        if let Err(panic) = producer.join() {
+            let message = panic_payload_message(panic.as_ref());
+            eprintln!("[batch-update] download worker panicked: {message}");
+            for folder in &folder_names {
+                let accounted = extract_outcome.completed.contains(folder)
+                    || extract_outcome.failed.contains(folder)
+                    || extract_outcome
+                        .conflicts
+                        .iter()
+                        .any(|c| c.folder_name == *folder);
+                if !accounted {
+                    extract_outcome.failed.push(folder.clone());
+                    extract_outcome.errors.insert(
+                        folder.clone(),
+                        format!("Internal error while downloading updates: {message}"),
+                    );
+                }
+            }
+        }
 
         let elapsed = t_start.elapsed();
         eprintln!(
@@ -3917,6 +3941,19 @@ pub async fn update_batch_with_decisions(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Human-readable message from a joined thread's panic payload. `panic!` with
+/// a literal carries `&str`; with a format string, `String`; anything else is
+/// opaque.
+fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "a download worker panicked".to_string()
+    }
 }
 
 /// Pick a download parallelism that scales with the batch but stays polite to
@@ -13720,6 +13757,27 @@ mod tests {
 
         assert!(!report.has_hash_baseline);
         assert!(report.conflicts.is_empty());
+    }
+
+    #[test]
+    fn panic_payload_message_reads_str_and_string_payloads() {
+        let payload = std::thread::spawn(|| panic!("literal payload"))
+            .join()
+            .unwrap_err();
+        assert_eq!(panic_payload_message(payload.as_ref()), "literal payload");
+
+        let payload = std::thread::spawn(|| panic!("formatted {}", 42))
+            .join()
+            .unwrap_err();
+        assert_eq!(panic_payload_message(payload.as_ref()), "formatted 42");
+
+        let payload = std::thread::spawn(|| std::panic::panic_any(7u32))
+            .join()
+            .unwrap_err();
+        assert_eq!(
+            panic_payload_message(payload.as_ref()),
+            "a download worker panicked"
+        );
     }
 
     #[test]
