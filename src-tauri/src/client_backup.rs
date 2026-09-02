@@ -670,7 +670,13 @@ mod tests {
         }
 
         fn placement(&self, relative: &str, contents: &str) -> Placement {
-            let name = relative.replace(['/', '\\'], "_");
+            // Flatten the destination into a source fixture name. The colon MUST
+            // be replaced along with the separators: a name beginning "C:" is
+            // drive-relative on Windows, so joining it onto the temp dir silently
+            // discards that dir and resolves against the current directory on C:
+            // — which is how this helper used to write a fixture into the
+            // repository itself.
+            let name = relative.replace(['/', '\\', ':'], "_");
             Placement {
                 relative_path: relative.to_string(),
                 kind: ManagedKind::Shader,
