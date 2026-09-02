@@ -124,13 +124,27 @@ pub fn kind_for_role(role: StackRole, file_name: &str) -> ManagedKind {
 
 /// Which stack items are worth keeping a copy of.
 ///
-/// Only the runtimes, and only because the ZOS patcher rewrites them on a game
-/// update. Copying the 165 MB Neural Rendering runtime is defensible for that
-/// reason; copying the shader tree is not, since nothing overwrites it.
+/// The rule is "a file the user swapped in that they could lose and Kalpa
+/// could never fetch again". Two things put a file in that category:
+///
+/// * It replaces a file **ESO itself ships**, so the launcher patcher puts the
+///   stock version back on a game update -- `nvngx_dlss.dll` and
+///   `d3dcompiler_47.dll`. The user keeping their own `.disabled-bak` and
+///   `.eso-orig-bak` next to both is the tell that this happens in practice.
+/// * It is a large user-supplied runtime with no redistributable source, so
+///   losing it means finding it again by hand -- the 165 MB Neural Rendering
+///   runtime.
+///
+/// The injector and the addons are neither: ESO does not ship them, so no
+/// patch restores anything over them, and they are re-downloadable from
+/// upstream. The shader tree is not either, since nothing overwrites it.
 pub fn is_copyable(item: &StackItem) -> bool {
     matches!(
         item.role,
-        StackRole::NeuralRendering | StackRole::SuperSampling | StackRole::FrameGeneration
+        StackRole::NeuralRendering
+            | StackRole::SuperSampling
+            | StackRole::FrameGeneration
+            | StackRole::ShaderCompiler
     )
 }
 
@@ -508,6 +522,11 @@ mod tests {
             .collect();
         assert!(copyable.contains(&"nvngx_dlss.dll"), "{copyable:?}");
         assert!(copyable.contains(&"nvngx_dlssnr.dll"), "{copyable:?}");
+        assert!(
+            copyable.contains(&"d3dcompiler_47.dll"),
+            "ESO ships this one, so a patch reverts the swap: {copyable:?}"
+        );
+        // Neither of these is shipped by ESO, so no patch restores over them.
         assert!(!copyable.contains(&"dxgi.dll"), "{copyable:?}");
         assert!(!copyable.contains(&"renodx-dlss5.addon64"), "{copyable:?}");
 
