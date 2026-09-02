@@ -1180,6 +1180,86 @@ impl DownloadHooks<'_> {
 /// Stop request is observed promptly (the cancel flag is polled per chunk).
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
+/// How often a download that is receiving no data re-checks the cancel flag.
+const BODY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Pumps a blocking body reader on a dedicated thread so the consuming side
+/// can keep observing cancellation while the underlying `read()` is stalled.
+///
+/// The blocking client cannot take an idle-read timeout (see
+/// [`download_client`] for why wiring one up panics), so a read into a
+/// connection that stopped sending blocks until TCP keepalive gives up
+/// (~70s) — and a Stop click used to go unobserved for that whole window.
+/// Here the stalled read blocks the pump thread instead; `read` on this
+/// adapter returns `WouldBlock` every [`BODY_POLL_INTERVAL`] with no data,
+/// which [`stream_download_body`] treats as "poll cancel and retry".
+///
+/// After the consumer walks away (cancel, error), the pump thread lingers in
+/// its blocked read until keepalive fails it (≤70s), notices the dropped
+/// receiver, and exits — bounded, and it holds nothing but the response.
+struct ThreadedBodyReader {
+    rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// Chunk delivered by the pump but not yet fully consumed by `read`.
+    pending: Vec<u8>,
+    pending_pos: usize,
+}
+
+impl ThreadedBodyReader {
+    fn spawn<R: io::Read + Send + 'static>(mut body: R) -> Self {
+        // Bounded: a fast network with a slow disk must not buffer the whole
+        // download in memory. 4 chunks = 256 KB in flight.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(4);
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+            loop {
+                match body.read(&mut buf) {
+                    // EOF: drop tx, the consumer reads it as end of body.
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(Ok(buf[..n].to_vec())).is_err() {
+                            break; // consumer gone (cancelled or failed)
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            rx,
+            pending: Vec::new(),
+            pending_pos: 0,
+        }
+    }
+}
+
+impl io::Read for ThreadedBodyReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pending_pos >= self.pending.len() {
+            match self.rx.recv_timeout(BODY_POLL_INTERVAL) {
+                Ok(Ok(chunk)) => {
+                    self.pending = chunk;
+                    self.pending_pos = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "no data within the poll interval",
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.pending.len() - self.pending_pos);
+        buf[..n].copy_from_slice(&self.pending[self.pending_pos..self.pending_pos + n]);
+        self.pending_pos += n;
+        Ok(n)
+    }
+}
+
 fn report_download_progress(hooks: &DownloadHooks, done: u64, total: Option<u64>) {
     if let Some(cb) = hooks.progress {
         cb(done, total);
@@ -1260,13 +1340,15 @@ fn stream_download_body<R: io::Read, W: io::Write>(
         if download_is_cancelled(&hooks) {
             return Err(crate::installer::CANCELLED.to_string());
         }
-        // Cancellation is only observed between chunks, so a body that stops
-        // sending entirely is not interrupted here — the read blocks until TCP
-        // keepalive gives up (~70s). See `download_client` for why an idle-read
-        // timeout cannot be used to tighten that with the blocking client.
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| map_download_read_error(&e))?;
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            // A `ThreadedBodyReader` tick: no data within its poll window.
+            // Loop back to the cancel check instead of failing — this is what
+            // makes Stop responsive while a stalled read sits in TCP
+            // keepalive's ~70s window on the pump thread.
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(map_download_read_error(&e)),
+        };
         if n == 0 {
             break;
         }
@@ -1361,10 +1443,11 @@ pub fn download_addon_with(
 
     // One pass: body → temp file, MD5 folded in, progress reported per chunk.
     // The file is never re-read to hash it, which is what made a 19 MB /
-    // 5,642-file library pay for its own bytes twice.
-    let mut response = response;
-    let written =
-        stream_download_body(&mut response, &mut tmp, expected_size, expected_md5, hooks)?;
+    // 5,642-file library pay for its own bytes twice. The body is pumped on a
+    // dedicated thread (see `ThreadedBodyReader`) so a Stop lands within
+    // ~250ms even while a stalled connection blocks the actual read.
+    let mut body = ThreadedBodyReader::spawn(response);
+    let written = stream_download_body(&mut body, &mut tmp, expected_size, expected_md5, hooks)?;
 
     if let Some(expected) = expected_size {
         if written != expected {
@@ -2123,6 +2206,126 @@ mod tests {
         // Deliberately not the "Failed to write download to temp file" wording:
         // a mid-body timeout is the network, not the user's drive.
         assert!(err.contains("Download stalled"), "unexpected error: {err}");
+    }
+
+    /// The Stop-during-stall path: the read yields no data (`WouldBlock`
+    /// ticks from `ThreadedBodyReader`), and the loop must bounce back to the
+    /// cancel check instead of failing or blocking — here the flag is set
+    /// while the body is stalled, and the sentinel must come out.
+    #[test]
+    fn stream_download_body_observes_cancel_while_the_body_stalls() {
+        struct StallAndSetCancel<'a> {
+            flag: &'a AtomicBool,
+        }
+        impl io::Read for StallAndSetCancel<'_> {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                self.flag.store(true, Ordering::Relaxed);
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "stalled"))
+            }
+        }
+
+        let flag = AtomicBool::new(false);
+        let mut src = StallAndSetCancel { flag: &flag };
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut src,
+            &mut out,
+            None,
+            None,
+            DownloadHooks {
+                cancel: Some(&flag),
+                progress: None,
+            },
+        )
+        .expect_err("a cancelled stall must not report success");
+        assert_eq!(err, crate::installer::CANCELLED);
+    }
+
+    #[test]
+    fn threaded_body_reader_round_trips_the_body() {
+        use std::io::Read as _;
+        let payload: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let mut reader = ThreadedBodyReader::spawn(io::Cursor::new(payload.clone()));
+        let mut out = Vec::new();
+        // read_to_end retries on WouldBlock? No — it fails. Pull manually the
+        // way stream_download_body does: WouldBlock means try again.
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn threaded_body_reader_ticks_would_block_while_the_body_is_stalled() {
+        use std::io::Read as _;
+        // An underlying body blocked in a read (a stalled connection): the
+        // adapter must return a WouldBlock tick within its poll interval
+        // rather than block the caller.
+        struct BlockedUntilDropped(std::sync::mpsc::Receiver<()>);
+        impl io::Read for BlockedUntilDropped {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                let _ = self.0.recv(); // blocks until the sender is dropped
+                Ok(0)
+            }
+        }
+
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let mut reader = ThreadedBodyReader::spawn(BlockedUntilDropped(blocked));
+        let mut buf = [0u8; 16];
+        let err = reader
+            .read(&mut buf)
+            .expect_err("stall must tick, not block");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // Unblock the pump: the body EOFs and the adapter reads as done.
+        drop(release);
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => panic!("no data was ever sent"),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn threaded_body_reader_propagates_the_body_error_after_its_data() {
+        struct DataThenError {
+            sent: bool,
+        }
+        impl io::Read for DataThenError {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.sent {
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "keepalive gave up"))
+                } else {
+                    self.sent = true;
+                    buf[..3].copy_from_slice(b"abc");
+                    Ok(3)
+                }
+            }
+        }
+
+        use std::io::Read as _;
+        let mut reader = ThreadedBodyReader::spawn(DataThenError { sent: false });
+        let mut out = Vec::new();
+        let mut buf = [0u8; 16];
+        let err = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => panic!("must surface the error, not EOF"),
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(out, b"abc");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]
