@@ -94,6 +94,14 @@ export interface PreservedOriginal {
   size_bytes: number;
 }
 
+/** A file Kalpa parked (`.kalpa-off`) so the stack does not load. */
+export interface ParkedFile {
+  file_name: string;
+  restores: string;
+  size_bytes: number;
+  target_present: boolean;
+}
+
 export interface Technique {
   name: string;
   source: string;
@@ -132,6 +140,9 @@ export interface ClientStack {
   client_dir: string;
   items: StackItem[];
   preserved_originals: PreservedOriginal[];
+  parked: ParkedFile[];
+  /** True when the injector is parked — ESO is back to stock. */
+  is_disabled: boolean;
   shaders: ShaderTree;
   preset: PresetInfo | null;
   tuning: TuningValue[];

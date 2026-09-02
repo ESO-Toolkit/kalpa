@@ -94,6 +94,19 @@ pub struct PreservedOriginal {
     pub size_bytes: u64,
 }
 
+/// A file Kalpa has parked so the stack does not load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ParkedFile {
+    /// Name on disk, ending in [`PARKED_SUFFIX`].
+    pub file_name: String,
+    /// The live name it goes back to.
+    pub restores: String,
+    pub size_bytes: u64,
+    /// True when something already occupies the name it would restore, which
+    /// means re-enabling has to displace it rather than just rename.
+    pub target_present: bool,
+}
+
 /// One technique in a preset's ordered list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Technique {
@@ -176,6 +189,11 @@ pub struct ClientStack {
     /// re-deriving the order.
     pub items: Vec<StackItem>,
     pub preserved_originals: Vec<PreservedOriginal>,
+    /// Files Kalpa parked when the stack was switched off.
+    pub parked: Vec<ParkedFile>,
+    /// True when the injector itself is parked, i.e. ESO is back to stock and
+    /// loads none of this.
+    pub is_disabled: bool,
     pub shaders: ShaderTree,
     pub preset: Option<PresetInfo>,
     pub tuning: Vec<TuningValue>,
@@ -194,6 +212,15 @@ const ADDON_EXTENSIONS: [&str; 3] = ["addon64", "addon32", "addon"];
 /// Suffixes that mark a displaced original rather than a live file. The first
 /// two are the primary user's own hand-rolled convention.
 const BACKUP_SUFFIXES: [&str; 4] = [".disabled-bak", ".eso-orig-bak", ".bak", ".orig"];
+
+/// The suffix Kalpa parks a live file under when the stack is switched off.
+///
+/// Deliberately **not** one of [`BACKUP_SUFFIXES`]. Those are the user's own
+/// names for their own originals: in a real install `nvngx_dlss.dll.disabled-bak`
+/// *is* the stock DLL the fallback depends on, so parking a live file under that
+/// name would overwrite the one thing disable exists to restore. Kalpa only ever
+/// writes this suffix, and only ever removes files carrying it.
+pub const PARKED_SUFFIX: &str = ".kalpa-off";
 
 /// Files that are companions to a known addon: not loaded by the game, but the
 /// stack does not work without them.
@@ -345,6 +372,7 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
 
     // Addons and preserved originals both come from one directory walk.
     let mut preserved_originals: Vec<PreservedOriginal> = Vec::new();
+    let mut parked: Vec<ParkedFile> = Vec::new();
     let mut live_names: Vec<String> = Vec::new();
     let mut addon_files: Vec<String> = Vec::new();
 
@@ -357,6 +385,15 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
             let lower = name.to_ascii_lowercase();
             live_names.push(lower.clone());
 
+            if let Some(restores) = lower.strip_suffix(PARKED_SUFFIX) {
+                parked.push(ParkedFile {
+                    file_name: name.clone(),
+                    restores: restores.to_string(),
+                    size_bytes: size_of(&entry.path()),
+                    target_present: false,
+                });
+                continue;
+            }
             if let Some(target) = backup_target(&lower) {
                 preserved_originals.push(PreservedOriginal {
                     file_name: name.clone(),
@@ -408,6 +445,14 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     }
     preserved_originals.sort_by(|a, b| a.file_name.cmp(&b.file_name));
 
+    for file in &mut parked {
+        file.target_present = live_names.contains(&file.restores);
+    }
+    parked.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    let is_disabled = parked
+        .iter()
+        .any(|file| INJECTOR_NAMES.contains(&file.restores.as_str()));
+
     let shaders = read_shader_tree(client_dir, &ini);
     let preset = read_preset(client_dir, &ini);
 
@@ -433,12 +478,15 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
 
     items.sort_by(|a, b| a.role.cmp(&b.role).then(a.file_name.cmp(&b.file_name)));
 
-    let is_empty = items.is_empty() && preserved_originals.is_empty() && !shaders.present;
+    let is_empty =
+        items.is_empty() && preserved_originals.is_empty() && parked.is_empty() && !shaders.present;
 
     let mut stack = ClientStack {
         client_dir: client_dir.to_string_lossy().to_string(),
         items,
         preserved_originals,
+        parked,
+        is_disabled,
         shaders,
         preset,
         tuning,
@@ -666,6 +714,31 @@ fn has_file(stack: &ClientStack, name: &str) -> bool {
 pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
     let mut out = Vec::new();
     if stack.is_empty {
+        return out;
+    }
+
+    // A switched-off stack loads nothing, so every cross-layer check below
+    // would be describing a configuration that is not running. Reporting a
+    // missing injector — which disable deliberately created — or a DLSS that
+    // has "reverted" — which is disable putting the stock file back — would be
+    // Kalpa alarming the user about its own work. Say the one true thing and
+    // stop; the rest becomes relevant again on re-enable.
+    if stack.is_disabled {
+        out.push(finding(
+            "stack-disabled",
+            HealthLevel::Info,
+            "This stack is switched off",
+            format!(
+                "Kalpa has parked {} so ESO loads none of it, and put the game's own files \
+                 back. Re-enable to reverse that.",
+                stack
+                    .parked
+                    .iter()
+                    .map(|file| file.restores.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
         return out;
     }
 
@@ -1263,6 +1336,69 @@ DEBUG_VIEW=1
             .find(|o| o.file_name == "nvngx_dlssg.dll.bak")
             .expect("backup should be listed");
         assert_eq!(orphan.backs_up, None);
+    }
+
+    #[test]
+    fn a_parked_injector_reads_as_a_switched_off_stack() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        std::fs::rename(
+            tmp.path().join("dxgi.dll"),
+            tmp.path().join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+        let stack = inspect_stack(tmp.path());
+
+        assert!(stack.is_disabled);
+        assert!(!stack.is_empty);
+        assert_eq!(ids(&stack), vec!["stack-disabled"]);
+
+        let parked = stack.parked.first().expect("the parked injector");
+        assert_eq!(parked.file_name, "dxgi.dll.kalpa-off");
+        assert_eq!(parked.restores, "dxgi.dll");
+        assert!(!parked.target_present, "disable freed the live name");
+
+        // A parked file is neither a live stack item nor one of the user's own
+        // originals.
+        assert!(!stack
+            .items
+            .iter()
+            .any(|i| i.file_name.contains("kalpa-off")));
+        assert!(!stack
+            .preserved_originals
+            .iter()
+            .any(|o| o.file_name.contains("kalpa-off")));
+    }
+
+    #[test]
+    fn a_parked_file_whose_name_is_occupied_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(tmp.path(), "nvngx_dlss.dll.kalpa-off", "the modded one");
+        let stack = inspect_stack(tmp.path());
+
+        let parked = stack
+            .parked
+            .iter()
+            .find(|p| p.restores == "nvngx_dlss.dll")
+            .expect("parked runtime");
+        assert!(
+            parked.target_present,
+            "the stock file is live under that name, so re-enable must displace it"
+        );
+        // Parking a runtime is not parking the injector.
+        assert!(!stack.is_disabled);
+    }
+
+    /// The trap this suffix exists to avoid: Kalpa must never write, and never
+    /// treat as its own, any of the names a user uses for their originals.
+    #[test]
+    fn kalpas_parking_suffix_is_not_one_of_the_users_own() {
+        for suffix in BACKUP_SUFFIXES {
+            assert_ne!(PARKED_SUFFIX, suffix);
+            assert!(!PARKED_SUFFIX.ends_with(suffix));
+        }
+        assert_eq!(backup_target("dxgi.dll.kalpa-off"), None);
     }
 
     #[test]
