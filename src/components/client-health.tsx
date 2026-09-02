@@ -100,11 +100,20 @@ export interface Technique {
   source_present: boolean;
 }
 
+/** Which effect supplies the motion vectors DLSS5_Feed consumes. */
+export interface MvProvider {
+  kind: "launchpad" | "shared_texture";
+  /** The enabled technique producing them, or null when nothing does. */
+  technique: string | null;
+}
+
 export interface PresetInfo {
   path: string;
   exists: boolean;
   techniques: Technique[];
   available: string[];
+  /** Null when the preset does not enable the feed, so the question is moot. */
+  mv_provider: MvProvider | null;
 }
 
 export interface TuningValue {
@@ -1787,11 +1796,29 @@ function PresetDetail({ stack }: { stack: ClientStack }) {
                   <li key={t.name} className="flex flex-wrap items-center gap-2">
                     <span className="font-mono">{t.name}</span>
                     {!t.source_present && <InfoPill color="red">missing {t.source}</InfoPill>}
+                    {preset.mv_provider?.technique === t.name && (
+                      <InfoPill color="sky">motion vectors</InfoPill>
+                    )}
                   </li>
                 ))}
               </ol>
             )}
           </div>
+          {preset.mv_provider && (
+            <p className="break-words">
+              <span className="text-muted-foreground">Motion vectors from:</span>{" "}
+              {preset.mv_provider.technique ? (
+                <span className="font-mono">{preset.mv_provider.technique}</span>
+              ) : (
+                <span className="text-status-danger">
+                  nothing enabled{" "}
+                  {preset.mv_provider.kind === "launchpad"
+                    ? "(MV_PROVIDER selects iMMERSE LaunchPad)"
+                    : "(MV_PROVIDER selects texMotionVectors)"}
+                </span>
+              )}
+            </p>
+          )}
           {preset.available.length > 0 && (
             <p className="break-words">
               <span className="text-muted-foreground">All known techniques:</span>{" "}

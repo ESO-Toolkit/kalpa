@@ -105,6 +105,35 @@ pub struct Technique {
     pub source_present: bool,
 }
 
+/// Which motion-vector provider `DLSS5_Feed.fx` is configured to read.
+///
+/// The effect chooses on two levels, and both have to be read to get the
+/// answer right. `DLSS5_MV_SOURCE` is a *preprocessor* definition: at `1` the
+/// LaunchPad code path is not compiled in at all, so the `MV_PROVIDER`
+/// dropdown does not exist and the shared-texture convention is the only
+/// option. At `0` (the default) `MV_PROVIDER` picks between them at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MvProviderKind {
+    /// iMMERSE LaunchPad — `MV_PROVIDER=0`.
+    Launchpad,
+    /// The community `texMotionVectors` convention: ReshadeMotionEstimation,
+    /// qUINT, VORT, QuantMotion, LumeniteFX Kernel — anything that writes that
+    /// texture. Which one it is can only be answered by looking at which
+    /// enabled effect declares it.
+    SharedTexture,
+}
+
+/// The resolved provider, plus the enabled technique that actually supplies
+/// the vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MvProvider {
+    pub kind: MvProviderKind,
+    /// The enabled technique producing the vectors, when one was found. `None`
+    /// means nothing in the preset feeds the runtime — the feed reads zeros.
+    pub technique: Option<String>,
+}
+
 /// The active preset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PresetInfo {
@@ -116,6 +145,9 @@ pub struct PresetInfo {
     pub techniques: Vec<Technique>,
     /// Everything the preset knows about, enabled or not.
     pub available: Vec<String>,
+    /// Resolved motion-vector provider. `None` when the preset does not enable
+    /// the feed technique at all, so the question does not arise.
+    pub mv_provider: Option<MvProvider>,
 }
 
 /// One tunable from the `[RenoDX.DLSS5]` block.
@@ -171,10 +203,19 @@ const COMPANION_NAMES: [&str; 3] = [
     "dlss5-feed-host32.exe",
 ];
 
-/// The technique that must run *before* `DLSS5_Feed`, because it produces the
-/// motion vectors and normals the feed consumes.
-const FEED_PREREQUISITE: &str = "martysmods_launchpad";
+/// The technique that consumes the motion vectors, and the effect file it
+/// lives in.
 const FEED_TECHNIQUE: &str = "dlss5_feed";
+const FEED_SOURCE: &str = "dlss5_feed.fx";
+
+/// iMMERSE LaunchPad, the provider `MV_PROVIDER=0` selects.
+const LAUNCHPAD_TECHNIQUE: &str = "martysmods_launchpad";
+const LAUNCHPAD_SOURCE: &str = "martysmods_launchpad.fx";
+
+/// The shared texture every non-LaunchPad provider writes. `DLSS5_Feed.fx`
+/// declares it too, which is why the feed's own source is excluded when
+/// searching for who supplies it.
+const SHARED_MV_TEXTURE: &str = "texmotionvectors";
 
 // ── INI parsing ──────────────────────────────────────────────────────────
 
@@ -466,7 +507,7 @@ fn read_preset(
 
     let shader_dir = client_dir.join("reshade-shaders").join("Shaders");
     let technique_entries = ini_get(&preset_ini, "", "Techniques").unwrap_or_default();
-    let techniques = technique_entries
+    let techniques: Vec<Technique> = technique_entries
         .split(',')
         .filter_map(split_technique)
         .map(|(name, source)| Technique {
@@ -483,26 +524,118 @@ fn read_preset(
         .map(|(name, _)| name)
         .collect();
 
+    let mv_provider = resolve_mv_provider(&preset_ini, ini, &shader_dir, &techniques);
+
     Some(PresetInfo {
         path: raw.to_string(),
         exists,
         techniques,
         available,
+        mv_provider,
     })
 }
 
 /// Shader packs nest one level (`Shaders/MartysMods/...`), so look in the root
 /// and in immediate subdirectories.
-fn shader_source_exists(shader_dir: &Path, source: &str) -> bool {
-    if shader_dir.join(source).is_file() {
-        return true;
+fn find_shader_source(shader_dir: &Path, source: &str) -> Option<std::path::PathBuf> {
+    let direct = shader_dir.join(source);
+    if direct.is_file() {
+        return Some(direct);
     }
-    let Ok(entries) = std::fs::read_dir(shader_dir) else {
+    std::fs::read_dir(shader_dir).ok()?.flatten().find_map(|e| {
+        let nested = e.path().join(source);
+        (e.path().is_dir() && nested.is_file()).then_some(nested)
+    })
+}
+
+fn shader_source_exists(shader_dir: &Path, source: &str) -> bool {
+    find_shader_source(shader_dir, source).is_some()
+}
+
+/// Read one entry out of a ReShade `PreprocessorDefinitions=A=1,B=2` list.
+fn preprocessor_definition<'a>(
+    ini: &'a BTreeMap<String, BTreeMap<String, String>>,
+    section: &str,
+    name: &str,
+) -> Option<&'a str> {
+    let list = ini_get(ini, section, "PreprocessorDefinitions")?;
+    list.split(',').find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Work out who feeds `DLSS5_Feed`.
+///
+/// Kalpa used to assume LaunchPad. It is only the default: `MV_PROVIDER=1`, or
+/// a `DLSS5_MV_SOURCE=1` build in which LaunchPad is not compiled in at all,
+/// switches the effect to the shared `texMotionVectors` texture, which any of
+/// ReshadeMotionEstimation, qUINT, VORT, QuantMotion or LumeniteFX Kernel may
+/// be writing. Assuming LaunchPad there did not produce a wrong answer — it
+/// produced *no* answer, because the ordering check simply never ran.
+fn resolve_mv_provider(
+    preset_ini: &BTreeMap<String, BTreeMap<String, String>>,
+    reshade_ini: &BTreeMap<String, BTreeMap<String, String>>,
+    shader_dir: &Path,
+    techniques: &[Technique],
+) -> Option<MvProvider> {
+    if !techniques.iter().any(is_feed_technique) {
+        return None;
+    }
+
+    // Per-effect definitions win over the global list; absent both, the effect's
+    // own `#ifndef` default of 0 applies.
+    let mv_source = preprocessor_definition(preset_ini, FEED_SOURCE, "DLSS5_MV_SOURCE")
+        .or_else(|| preprocessor_definition(reshade_ini, "GENERAL", "DLSS5_MV_SOURCE"))
+        .unwrap_or("0");
+    let launchpad_compiled_in = mv_source.trim() == "0";
+    let selected = ini_get(preset_ini, FEED_SOURCE, "MV_PROVIDER")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+
+    let kind = if launchpad_compiled_in && selected == 0 {
+        MvProviderKind::Launchpad
+    } else {
+        MvProviderKind::SharedTexture
+    };
+
+    let technique = techniques
+        .iter()
+        .find(|t| match kind {
+            MvProviderKind::Launchpad => {
+                t.name.eq_ignore_ascii_case(LAUNCHPAD_TECHNIQUE)
+                    || t.source.eq_ignore_ascii_case(LAUNCHPAD_SOURCE)
+            }
+            // No name to match on, so ask the shader files themselves which
+            // enabled effect deals in the shared texture. The feed declares it
+            // too — as the consumer — so its own source is excluded.
+            MvProviderKind::SharedTexture => {
+                !t.source.eq_ignore_ascii_case(FEED_SOURCE)
+                    && source_mentions_shared_mv(shader_dir, &t.source)
+            }
+        })
+        .map(|t| t.name.clone());
+
+    Some(MvProvider { kind, technique })
+}
+
+/// Does this effect file deal in `texMotionVectors` at all?
+///
+/// A declaration is not proof the effect *writes* the texture — a second
+/// consumer would match too. It is the strongest signal available without
+/// parsing HLSL, and naming the wrong enabled effect is a far smaller error
+/// than the check not running.
+fn source_mentions_shared_mv(shader_dir: &Path, source: &str) -> bool {
+    let Some(path) = find_shader_source(shader_dir, source) else {
         return false;
     };
-    entries
-        .flatten()
-        .any(|entry| entry.path().is_dir() && entry.path().join(source).is_file())
+    std::fs::read_to_string(&path)
+        .map(|text| text.to_ascii_lowercase().contains(SHARED_MV_TEXTURE))
+        .unwrap_or(false)
+}
+
+fn is_feed_technique(t: &Technique) -> bool {
+    t.name.eq_ignore_ascii_case(FEED_TECHNIQUE)
 }
 
 // ── Findings ─────────────────────────────────────────────────────────────
@@ -614,37 +747,56 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
         }
 
         // The ordering rule. This is the failure worth catching: everything
-        // loads, nothing errors, and the output is quietly wrong.
+        // loads, nothing errors, and the output is quietly wrong. Which
+        // technique has to be above the feed depends on MV_PROVIDER, so the
+        // check is driven by the resolved provider rather than by a name.
         let position = |needle: &str| {
             preset
                 .techniques
                 .iter()
-                .position(|t| t.name.to_ascii_lowercase() == needle)
+                .position(|t| t.name.eq_ignore_ascii_case(needle))
         };
-        if let (Some(feed), Some(launchpad)) =
-            (position(FEED_TECHNIQUE), position(FEED_PREREQUISITE))
-        {
-            if launchpad > feed {
-                out.push(finding(
-                    "stack-technique-order",
+        match (position(FEED_TECHNIQUE), preset.mv_provider.as_ref()) {
+            (Some(feed), Some(provider)) => match &provider.technique {
+                Some(name) if position(name).is_some_and(|at| at > feed) => {
+                    out.push(finding(
+                        "stack-technique-order",
+                        HealthLevel::Danger,
+                        "Effects are in the wrong order",
+                        format!(
+                            "DLSS5_Feed runs before {name} in this preset. {name} produces the \
+                             motion vectors the feed consumes, so with this order the feed reads \
+                             last frame's data. Nothing errors — the image is just quietly wrong."
+                        ),
+                    ));
+                }
+                Some(_) => {}
+                None => out.push(finding(
+                    "stack-mv-provider-missing",
                     HealthLevel::Danger,
-                    "Effects are in the wrong order",
-                    "DLSS5_Feed runs before MartysMods_Launchpad in this preset. Launchpad \
-                     produces the motion vectors and normals the feed consumes, so with this \
-                     order the feed reads last frame's data. Nothing errors — the image is \
-                     just quietly wrong."
-                        .to_string(),
-                ));
-            }
-        } else if feed_addon && position(FEED_TECHNIQUE).is_none() {
-            out.push(finding(
+                    "Nothing is producing motion vectors",
+                    match provider.kind {
+                        MvProviderKind::Launchpad => "DLSS5_Feed is set to read motion vectors \
+                             from iMMERSE LaunchPad, but the preset does not enable LaunchPad's \
+                             technique. The feed reads zeros, so DLSS sees a still image."
+                            .to_string(),
+                        MvProviderKind::SharedTexture => "DLSS5_Feed is set to read motion \
+                             vectors from the shared texMotionVectors texture, but no enabled \
+                             effect in this preset writes it. The feed reads zeros, so DLSS sees \
+                             a still image."
+                            .to_string(),
+                    },
+                )),
+            },
+            _ if feed_addon => out.push(finding(
                 "stack-feed-technique-off",
                 HealthLevel::Warning,
                 "DLSS 5 Feed is installed but not enabled",
                 "The feed addon is present, but the active preset does not enable the \
                  DLSS5_Feed technique, so nothing feeds the runtime."
                     .to_string(),
-            ));
+            )),
+            _ => {}
         }
     }
 
@@ -805,6 +957,151 @@ DEBUG_VIEW=1
             "expected the ordering finding, got {:?}",
             ids(&stack)
         );
+    }
+
+    /// Write a `texMotionVectors` provider effect into the shader tree and
+    /// point the preset at it with `MV_PROVIDER=1`.
+    fn shared_texture_preset(dir: &Path, techniques: &str) {
+        std::fs::write(
+            dir.join("reshade-shaders")
+                .join("Shaders")
+                .join("MotionEstimation.fx"),
+            "texture texMotionVectors { Format = RG16F; };\n",
+        )
+        .unwrap();
+        write(
+            dir,
+            "ReShadePreset.ini",
+            &format!("Techniques={techniques}\n\n[DLSS5_Feed.fx]\nMV_PROVIDER=1\n"),
+        );
+    }
+
+    /// The bug this fixes: with a non-LaunchPad provider the ordering check
+    /// used to look for a technique that is not in the preset, so it never ran.
+    #[test]
+    fn a_shared_texture_provider_below_the_feed_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        shared_texture_preset(
+            tmp.path(),
+            "DLSS5_Feed@DLSS5_Feed.fx,MotionEstimation@MotionEstimation.fx",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            ids(&stack).contains(&"stack-technique-order"),
+            "expected the ordering finding, got {:?}",
+            ids(&stack)
+        );
+        let detail = &stack
+            .findings
+            .iter()
+            .find(|f| f.id == "stack-technique-order")
+            .unwrap()
+            .detail;
+        assert!(
+            detail.contains("MotionEstimation"),
+            "the finding must name the real provider, got {detail}"
+        );
+    }
+
+    #[test]
+    fn a_shared_texture_provider_above_the_feed_is_quiet() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        shared_texture_preset(
+            tmp.path(),
+            "MotionEstimation@MotionEstimation.fx,DLSS5_Feed@DLSS5_Feed.fx",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(stack.findings.is_empty(), "got {:?}", ids(&stack));
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+        assert_eq!(provider.kind, MvProviderKind::SharedTexture);
+        assert_eq!(provider.technique.as_deref(), Some("MotionEstimation"));
+    }
+
+    /// Selecting the shared texture with nothing enabled to write it is the
+    /// silent still-image case the effect's own tooltip warns about.
+    #[test]
+    fn a_provider_nobody_supplies_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nMV_PROVIDER=1\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            ids(&stack).contains(&"stack-mv-provider-missing"),
+            "got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// LaunchPad selected but not enabled is the same failure from the other
+    /// side, and also used to go unreported.
+    #[test]
+    fn launchpad_selected_but_not_enabled_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            ids(&stack).contains(&"stack-mv-provider-missing"),
+            "got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// `DLSS5_MV_SOURCE=1` means LaunchPad is not compiled into the effect at
+    /// all, so a stale `MV_PROVIDER=0` in the preset must not be believed.
+    #[test]
+    fn mv_source_one_forces_the_shared_texture_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &REAL_RESHADE_INI.replace(
+                "[GENERAL]",
+                "[GENERAL]\nPreprocessorDefinitions=DLSS5_MV_SOURCE=1,RESHADE_DEPTH_INPUT_IS_REVERSED=0",
+            ),
+        );
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nMV_PROVIDER=0\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+        assert_eq!(provider.kind, MvProviderKind::SharedTexture);
+        assert_eq!(provider.technique, None);
+    }
+
+    #[test]
+    fn a_preset_without_the_feed_has_no_provider_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.preset.as_ref().unwrap().mv_provider, None);
+        assert!(ids(&stack).contains(&"stack-feed-technique-off"));
     }
 
     #[test]
