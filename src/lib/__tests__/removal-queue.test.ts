@@ -279,6 +279,85 @@ describe("hidePendingRemovals", () => {
   });
 });
 
+describe("completed-removal masking (the phantom-row race)", () => {
+  it("masks a row a scan enumerated before the delete and delivered after it", () => {
+    // t=0.0  the scan is issued            -> stamp
+    // t=0.1  the backend enumerates Foo, still on disk
+    // t=0.2  user removes Foo              -> queued
+    // t=3.2  timer fires                   -> drop + beginCommit
+    // t=3.3  delete confirmed              -> markRemoved, endCommit
+    // t=3.4  the scan resolves             -> nothing queued, nothing committing
+    const queue = new RemovalQueue(vi.fn());
+    const since = queue.stamp();
+
+    queue.add("Foo", entry("Foo", { addonsPath: LIVE }));
+    queue.drop("Foo");
+    queue.beginCommit("Foo", LIVE);
+    queue.markRemoved("Foo", LIVE);
+    queue.endCommit("Foo", LIVE);
+
+    // The queue-only answer is the bug: visible.
+    expect(queue.isHidden("Foo", LIVE)).toBe(false);
+    // Stamped against the in-flight request, it stays hidden.
+    expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
+    expect(hidePendingRemovals([addon("Foo")], queue, LIVE, since)).toEqual([]);
+  });
+
+  it("stops masking once a request is issued after the removal landed", () => {
+    const queue = new RemovalQueue(vi.fn());
+    queue.markRemoved("Foo", LIVE);
+
+    const since = queue.stamp();
+    expect(queue.isHidden("Foo", LIVE, since)).toBe(false);
+    // So a reinstall shows through on the very next scan.
+    const scanned = [addon("Foo")];
+    expect(hidePendingRemovals(scanned, queue, LIVE, since)).toBe(scanned);
+  });
+
+  it("scopes completed removals to the instance they happened in", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const since = queue.stamp();
+    queue.markRemoved("Shared", LIVE);
+
+    expect(queue.isHidden("Shared", LIVE, since)).toBe(true);
+    expect(queue.isHidden("Shared", PTS, since)).toBe(false);
+  });
+
+  it("does not mask when the caller passes no stamp", () => {
+    // `runBatchUpdates` re-masks a list it already holds rather than applying an
+    // in-flight result, so it must keep the queue-only answer.
+    const queue = new RemovalQueue(vi.fn());
+    queue.markRemoved("Foo", LIVE);
+    const scanned = [addon("Foo")];
+    expect(hidePendingRemovals(scanned, queue, LIVE)).toBe(scanned);
+  });
+
+  it("evicts the oldest entries instead of growing without bound", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const since = queue.stamp();
+    for (let i = 0; i < 300; i++) queue.markRemoved(`Addon${i}`, LIVE);
+
+    // The 256 most recent are still remembered; the oldest have aged out.
+    expect(queue.isHidden("Addon299", LIVE, since)).toBe(true);
+    expect(queue.isHidden("Addon44", LIVE, since)).toBe(true);
+    expect(queue.isHidden("Addon0", LIVE, since)).toBe(false);
+  });
+
+  it("re-recording a folder refreshes its slot rather than keeping the old one", () => {
+    // Remove -> reinstall -> remove again must not leave the second removal
+    // sitting in the first one's eviction slot.
+    const queue = new RemovalQueue(vi.fn());
+    queue.markRemoved("Foo", LIVE);
+    for (let i = 0; i < 255; i++) queue.markRemoved(`Filler${i}`, LIVE);
+
+    const since = queue.stamp();
+    queue.markRemoved("Foo", LIVE);
+    for (let i = 0; i < 200; i++) queue.markRemoved(`More${i}`, LIVE);
+
+    expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
+  });
+});
+
 describe("optimistic hide reducers", () => {
   it("hides the addon and its update row together", () => {
     expect(hideAddon([addon("A"), addon("B")], "A").map((a) => a.folderName)).toEqual(["B"]);

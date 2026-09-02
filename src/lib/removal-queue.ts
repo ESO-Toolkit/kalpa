@@ -77,6 +77,16 @@ function maskKey(addonsPath: string, folderName: string): string {
 }
 
 /**
+ * How many confirmed removals the queue remembers.
+ *
+ * The log only has to outlive the requests that were in flight when a removal
+ * landed, so this is a bound against unbounded growth over a long session
+ * rather than a tuning knob. Anything evicted simply falls back to the
+ * pre-existing masking answer.
+ */
+const MAX_COMPLETED_REMOVALS = 256;
+
+/**
  * The queue itself. `clearTimer` is injectable so tests can assert *when* a
  * group's timer is cancelled without running real timers.
  */
@@ -99,6 +109,31 @@ export class RemovalQueue {
    * confirms the delete or fails and the row is restored.
    */
   private readonly committing = new Set<string>();
+
+  /**
+   * Removals the backend has CONFIRMED, stamped with the generation at which
+   * they landed.
+   *
+   * `committing` only covers the delete while it is in flight. It cannot cover
+   * the request that enumerated the folder BEFORE the delete started and is
+   * delivered after it finished — by then nothing is queued and nothing is
+   * committing, so the row goes back into the list and stays there until the
+   * next scan. Closing that window needs the queue to remember removals that
+   * completed after a given request began, which is what this log plus
+   * {@link RemovalQueue.stamp} provide: a caller snapshots the generation when
+   * it issues the request and masks anything whose removal was confirmed at a
+   * LATER generation.
+   *
+   * Comparing generations rather than just membership is what keeps a reinstall
+   * visible. A scan issued after the addon came back carries a stamp at or above
+   * the removal's generation, so the log no longer masks it and the fresh row
+   * shows through.
+   */
+  private readonly completed = new Map<string, number>();
+
+  /** Bumped once per confirmed removal; see {@link RemovalQueue.completed}. */
+  private generation = 0;
+
   private readonly clearTimer: (handle: TimerHandle) => void;
 
   /**
@@ -141,10 +176,52 @@ export class RemovalQueue {
    * would restore: `endCommit` only lifts the mask, it does not re-run the scan
    * that was filtered while it was up.
    */
-  isHidden(folderName: string, addonsPath: string): boolean {
+  isHidden(folderName: string, addonsPath: string, since = Number.POSITIVE_INFINITY): boolean {
     const queued = this.entries.get(folderName);
     if (queued && sameAddonsFolder(queued.addonsPath, addonsPath)) return true;
-    return this.committing.has(maskKey(addonsPath, folderName));
+    const key = maskKey(addonsPath, folderName);
+    if (this.committing.has(key)) return true;
+    // Confirmed gone AFTER the caller issued its request, so the folder the
+    // backend enumerated no longer exists by the time the answer is applied.
+    // A folder with no log entry is NOT hidden — the absent case has to read as
+    // "never removed", not as an unbounded generation.
+    const removedAt = this.completed.get(key);
+    return removedAt !== undefined && removedAt > since;
+  }
+
+  /**
+   * Snapshot the generation for a request about to be issued.
+   *
+   * Pair it with the `since` argument of {@link RemovalQueue.isHidden} (or
+   * {@link hidePendingRemovals}) when the result is applied.
+   */
+  stamp(): number {
+    return this.generation;
+  }
+
+  /**
+   * The backend confirmed the folder is gone. Records it so requests already in
+   * flight do not deliver it back as a phantom row.
+   *
+   * Call this on the SUCCESS path only, before {@link RemovalQueue.endCommit}
+   * lifts the in-flight mask — a failed delete leaves the folder on disk and its
+   * row must come back.
+   */
+  markRemoved(folderName: string, addonsPath: string): void {
+    const key = maskKey(addonsPath, folderName);
+    // Re-setting an existing key keeps its ORIGINAL insertion slot, which would
+    // make the oldest-first eviction below evict a fresh entry. Delete first so
+    // insertion order and generation order stay the same ordering.
+    this.completed.delete(key);
+    this.completed.set(key, ++this.generation);
+    // Only requests in flight can still consult the log, so a small window of
+    // history is enough. Map iterates in insertion order and generations only
+    // ever increase, so the first key is always the oldest.
+    while (this.completed.size > MAX_COMPLETED_REMOVALS) {
+      const oldest = this.completed.keys().next();
+      if (oldest.done) break;
+      this.completed.delete(oldest.value);
+    }
   }
 
   /** The undo window has closed and the backend delete is starting. */
@@ -209,18 +286,31 @@ export class RemovalQueue {
  * Generic over anything folder-keyed, so the addon list and its update rows
  * filter through the same rule.
  *
- * KNOWN LIMIT — the mask is read when the request RESOLVES, not when the
- * backend read the folder, and it only knows about removals that are still
- * queued or still committing. So the race is between the backend ENUMERATING
- * the addon and this code applying the result:
+ * The mask is read when the request RESOLVES, not when the backend read the
+ * folder, so "still queued or still committing" is not enough on its own. The
+ * race is between the backend ENUMERATING the addon and this code applying the
+ * result:
  *
  *     t=0.0  Refresh issues scan_installed_addons
  *     t=0.1  the backend enumerates the folder — Foo is still on disk
  *     t=0.2  user removes Foo — row hidden, entry queued
  *     t=3.2  timer fires, remove_addon starts (beginCommit masks Foo)
  *     t=3.3  delete succeeds, endCommit lifts the mask
- *     t=3.4  the scan resolves — nothing is queued, nothing is committing,
- *            so Foo goes back into `addons`
+ *     t=3.4  the scan resolves — nothing is queued, nothing is committing
+ *
+ * At t=3.4 the queue-only mask says "visible" and Foo goes back into `addons`
+ * as a phantom row — an addon that exists in neither the AddOns folder nor
+ * `kalpa.json`, sitting in the list until something else triggers a scan. That
+ * is the shipped "I uninstalled it and it still shows installed" report, and
+ * why it looked arbitrary: it needs a scan in flight across the delete, so two
+ * removals seconds apart can behave differently.
+ *
+ * `since` closes it. Callers snapshot {@link RemovalQueue.stamp} BEFORE issuing
+ * the request and pass it here; anything whose removal was confirmed at a later
+ * generation stays masked no matter what the backend reported. Omitting `since`
+ * keeps the old queue-only behaviour, which is what callers that are not
+ * applying an in-flight result (the pre-invoke re-mask in `runBatchUpdates`)
+ * actually want.
  *
  * The window is "enumerated before the delete, delivered after it", NOT the
  * whole request duration. A request that has not read the folder yet when the
@@ -230,23 +320,17 @@ export class RemovalQueue {
  * so a delete during that fetch is simply reflected. Its exposure is the
  * narrower gap between the metadata phase and delivery.
  *
- * The result is a phantom row and an inflated banner count until the next
- * scan. Closing it needs the queue to remember removals that COMPLETED after a
- * given request enumerated — a generation stamped on each request and an
- * expiring log of finished removals — which is materially more machinery than
- * the mask itself, on a path where the wrong answer is a stale row rather than
- * a lost file. Deliberately not built here; tracked as a follow-up.
- *
  * On `main` this window was not narrower, it was total: nothing masked these
  * lists at all, so every scan inside the undo window resurrected the row.
  */
 export function hidePendingRemovals<T extends { folderName: string }>(
   items: T[],
   queue: Pick<RemovalQueue, "isHidden">,
-  addonsPath: string
+  addonsPath: string,
+  since?: number
 ): T[] {
   if (items.length === 0) return items;
-  const masked = items.filter((item) => !queue.isHidden(item.folderName, addonsPath));
+  const masked = items.filter((item) => !queue.isHidden(item.folderName, addonsPath, since));
   return masked.length === items.length ? items : masked;
 }
 

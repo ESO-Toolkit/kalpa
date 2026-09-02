@@ -57,14 +57,40 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
-  const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
 
-  // Merge persisted (from metadata) with session-installed IDs
+  /**
+   * Ids installed this session that the scan behind `persistedIds` has not
+   * reported yet, tagged with the `persistedIds` identity they were recorded
+   * against.
+   *
+   * The overlay exists only to bridge install-success → rescan-lands, so it has
+   * to expire when the rescan lands. It used to be a plain set that was only
+   * ever added to, which meant an addon installed and then UNINSTALLED in the
+   * same session kept rendering as "Installed" — the merged answer could never
+   * go back down, and switching tabs (which unmounts this panel) was the only
+   * thing that cleared it.
+   */
+  const [sessionInstalled, setSessionInstalled] = useState<{
+    ids: Set<number>;
+    basis: Set<number>;
+  } | null>(null);
+
+  // `install` awaits several round trips, so it cannot tag the overlay with the
+  // `persistedIds` it closed over at click time.
+  const persistedRef = useRef(persistedIds);
+  useEffect(() => {
+    persistedRef.current = persistedIds;
+  }, [persistedIds]);
+
+  // `persistedIds` is rebuilt from the addon list on every scan, so a new
+  // identity means a fresh answer from disk has landed and supersedes the
+  // overlay — including a disk state where the addon is gone again.
   const installedIds = useMemo(() => {
+    if (!sessionInstalled || sessionInstalled.basis !== persistedIds) return persistedIds;
     const merged = new Set(persistedIds);
-    for (const id of sessionInstalledIds) merged.add(id);
+    for (const id of sessionInstalled.ids) merged.add(id);
     return merged;
-  }, [persistedIds, sessionInstalledIds]);
+  }, [persistedIds, sessionInstalled]);
 
   const install = useCallback(
     async (id: number) => {
@@ -85,7 +111,12 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           esouiVersion: info.version,
           dependencyPolicy: await getDependencyPolicy(),
         });
-        setSessionInstalledIds((prev) => new Set(prev).add(id));
+        const basis = persistedRef.current;
+        setSessionInstalled((prev) => {
+          const ids = prev && prev.basis === basis ? new Set(prev.ids) : new Set<number>();
+          ids.add(id);
+          return { ids, basis };
+        });
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
         onInstalled();
         // Empty unless the policy is "ask"; the app-level picker owns the rest.

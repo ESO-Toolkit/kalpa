@@ -413,6 +413,9 @@ function App() {
 
   const scanAddons = useCallback(async (path: string) => {
     const seq = ++scanSeqRef.current;
+    // Stamped BEFORE the invoke: a removal confirmed while this scan is in
+    // flight must mask the row even though the backend enumerated it.
+    const since = pendingRemovalsRef.current.stamp();
     setLoading(true);
     setError(null);
     setErrorShowSettings(false);
@@ -427,7 +430,7 @@ function App() {
       // so a rescan inside the 3s undo window reads it straight back off disk.
       // Left unmasked, the row returns and then STAYS after the delete
       // succeeds — the list shows an addon that no longer exists.
-      const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path);
+      const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path, since);
 
       setAddons(visible);
       if (selectedAddonRef.current) {
@@ -451,6 +454,9 @@ function App() {
   const checkForUpdates = useCallback(
     async (path: string, autoUpdate = false, notifyOnError = false) => {
       const seq = ++checkSeqRef.current;
+      // Same reason as the scan: stamp before the invoke so a removal that lands
+      // mid-flight still masks its update row.
+      const since = pendingRemovalsRef.current.stamp();
       // Deliberately does NOT clear updatingAll/updateProgress: those belong to
       // the batch path that set them, and a refresh landing mid-Update-All would
       // otherwise hide the progress UI and unlatch the batch re-entry guard.
@@ -470,7 +476,12 @@ function App() {
         // see, and — worse — let auto-update extract into a folder already
         // queued for deletion, racing the remover and surfacing dependency work
         // for an addon the user had removed.
-        const visibleResults = hidePendingRemovals(results, pendingRemovalsRef.current, path);
+        const visibleResults = hidePendingRemovals(
+          results,
+          pendingRemovalsRef.current,
+          path,
+          since
+        );
         setUpdateResults(visibleResults);
 
         // The check just wrote fresh esoui_last_update values to metadata, but the
@@ -1161,7 +1172,13 @@ function App() {
             addonsPath: entry.addonsPath,
             folderName: entry.addon.folderName,
           });
-          if (result.ok) return;
+          if (result.ok) {
+            // Confirmed gone: record it before `endCommit` below lifts the
+            // in-flight mask, so a scan still in flight cannot deliver the row
+            // back as a phantom.
+            pendingRemovalsRef.current.markRemoved(entry.addon.folderName, entry.addonsPath);
+            return;
+          }
           toast.error(`Remove failed: ${result.error}`);
           // Only restore into the view the addon belongs to — after an instance
           // switch the row would reappear in a folder that never had it.
@@ -1210,6 +1227,9 @@ function App() {
         // hides again once the delete succeeds.
         pendingRemovalsRef.current.beginCommit(folderName, queuedPath);
         void invokeOrThrow("remove_addon", { addonsPath: queuedPath, folderName })
+          // Success only — a failed delete leaves the folder on disk and the
+          // row must be free to come back.
+          .then(() => pendingRemovalsRef.current.markRemoved(folderName, queuedPath))
           .catch((e) => {
             toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
             if (entry && sameAddonsFolder(queuedPath, addonsPathRef.current)) {
@@ -1365,7 +1385,11 @@ function App() {
   const installedEsouiIds = useMemo(() => {
     const ids = new Set<number>();
     for (const addon of addons) {
-      if (addon.esouiId != null) ids.add(addon.esouiId);
+      // `> 0`, not just non-null: `record_installed_folders` stamps every
+      // SECONDARY folder of a multi-folder addon with esoui_id 0, so a bare
+      // null check seeds the set with 0 and makes `has(0)` true for every
+      // consumer — another way for the UI to claim something is installed.
+      if (addon.esouiId != null && addon.esouiId > 0) ids.add(addon.esouiId);
     }
     return ids;
   }, [addons]);
@@ -1770,9 +1794,17 @@ function App() {
         folderNames: entries.map((entry) => entry.addon.folderName),
       })
         .then((result) => {
+          const failedSet = new Set(result.failed);
+          // Record the confirmed deletions before `endCommit` lifts their mask,
+          // and before the instance-switch bail below — the folders are gone
+          // regardless of which instance the user is looking at now.
+          for (const entry of entries) {
+            if (!failedSet.has(entry.addon.folderName)) {
+              pendingRemovalsRef.current.markRemoved(entry.addon.folderName, entry.addonsPath);
+            }
+          }
           if (result.failed.length > 0) {
             // Restore only the addons that failed to remove
-            const failedSet = new Set(result.failed);
             const details = result.failed
               .map((name) => `${name}: ${result.errors[name] ?? "unknown error"}`)
               .join("; ");
