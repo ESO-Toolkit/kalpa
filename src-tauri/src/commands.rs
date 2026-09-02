@@ -1776,7 +1776,7 @@ pub async fn install_addon(
 /// the `tauri dev` console. Release builds get a zero-sized no-op: the fields
 /// and the printing are both behind `debug_assertions`, so nothing is measured
 /// or logged in a shipped binary.
-struct PhaseTimer {
+pub(crate) struct PhaseTimer {
     #[cfg(debug_assertions)]
     label: &'static str,
     #[cfg(debug_assertions)]
@@ -1787,7 +1787,7 @@ struct PhaseTimer {
 
 impl PhaseTimer {
     #[cfg(debug_assertions)]
-    fn start(label: &'static str) -> Self {
+    pub(crate) fn start(label: &'static str) -> Self {
         let now = std::time::Instant::now();
         Self {
             label,
@@ -1797,11 +1797,11 @@ impl PhaseTimer {
     }
 
     #[cfg(not(debug_assertions))]
-    fn start(_label: &'static str) -> Self {
+    pub(crate) fn start(_label: &'static str) -> Self {
         Self {}
     }
 
-    fn mark(&self, _phase: &str) {
+    pub(crate) fn mark(&self, _phase: &str) {
         #[cfg(debug_assertions)]
         {
             let now = std::time::Instant::now();

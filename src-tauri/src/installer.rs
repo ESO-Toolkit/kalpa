@@ -231,8 +231,15 @@ fn extract_with_rollback(
         HashSet::new()
     };
 
+    // Debug-only sub-phase timing. An UPDATE does work a fresh install does not
+    // — preserving residual files, then deleting the tombstoned old tree at
+    // commit — and lumping it all under one label hid that.
+    let phase = crate::commands::PhaseTimer::start("extract");
+
     let transaction = InstallTransaction::begin(addons_dir, hooks.cancel)?;
     let stage_dir = transaction.stage_dir();
+    phase.mark("begin transaction");
+
     let mut installed = extract_addon_zip_inner(
         &mut archive,
         &stage_dir,
@@ -241,6 +248,7 @@ fn extract_with_rollback(
         wrap_name.as_deref(),
     )?;
     installed.sort();
+    phase.mark("write entries");
 
     for folder in &installed {
         let live = addons_dir.join(folder);
@@ -249,6 +257,7 @@ fn extract_with_rollback(
             copy_residual_files(&live, &stage_dir.join(folder), &live)?;
         }
     }
+    phase.mark("preserve residual files");
 
     // A kept root file is absent from staging and must remain untouched live.
     root_files.retain(|relative| stage_dir.join(relative).is_file());
@@ -269,8 +278,11 @@ fn extract_with_rollback(
         }
         None => Vec::new(),
     };
+    phase.mark("hash baseline");
 
-    transaction.commit_with_root_files(&installed, &root_files, &manifests)
+    let result = transaction.commit_with_root_files(&installed, &root_files, &manifests);
+    phase.mark("commit (renames + tombstone delete)");
+    result
 }
 
 fn manifests_to_bytes(
