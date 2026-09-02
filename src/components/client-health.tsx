@@ -9,6 +9,7 @@ import {
   HardDriveIcon,
   ScrollTextIcon,
   PackageCheckIcon,
+  PowerOffIcon,
   RefreshCwIcon,
   SearchIcon,
   ShieldAlertIcon,
@@ -187,7 +188,7 @@ export interface AdoptionOutcome {
 /* These mirror `list_managed_client_files`, `uninstall_managed_client_files`  */
 /* and `emergency_remove_injector` in `src-tauri/src/client_uninstall.rs`.     */
 
-export type ManagedFileState = "present" | "modified" | "missing";
+export type ManagedFileState = "present" | "modified" | "missing" | "parked";
 
 export type ManagedKind =
   | "re_shade_core"
@@ -329,6 +330,12 @@ const FILE_STATE_META: Record<
     Icon: AlertCircleIcon,
     text: "text-status-info",
     hint: "Already gone. Removing just tidies the record and restores anything it displaced.",
+  },
+  parked: {
+    label: "Switched off",
+    Icon: PowerOffIcon,
+    text: "text-muted-foreground",
+    hint: "Moved aside so ESO does not load it. Switch the stack back on to put it back.",
   },
 };
 

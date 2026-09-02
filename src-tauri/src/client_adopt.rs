@@ -284,6 +284,7 @@ pub fn adopt_in(
             displaced_backup,
             origin: FileOrigin::Adopted,
             displaced_in_place: entry.displaced_in_place.clone(),
+            parked: false,
         });
         outcome.recorded.push(entry.relative_path.clone());
     }
@@ -700,6 +701,7 @@ mod tests {
                 displaced_backup: None,
                 origin: FileOrigin::Placed,
                 displaced_in_place: None,
+                parked: false,
             }],
         )
         .expect("record placed entry");

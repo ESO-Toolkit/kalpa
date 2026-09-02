@@ -166,6 +166,17 @@ pub struct ManagedFile {
     /// it, and it is frequently the only copy of the original in existence.
     #[serde(default)]
     pub displaced_in_place: Option<String>,
+    /// True while this file is parked — moved aside to
+    /// `relative_path + client_stack::PARKED_SUFFIX` so the game does not load
+    /// it, with the stack switched off.
+    ///
+    /// The entry keeps its live `relative_path` rather than being rewritten to
+    /// the parked name, because parking is temporary and the live name is what
+    /// re-enabling puts back. Anything that resolves an entry to a file on disk
+    /// has to consult this flag: without it a parked file reads as deleted, and
+    /// uninstall would "restore" over a stack the user only switched off.
+    #[serde(default)]
+    pub parked: bool,
 }
 
 /// Everything Kalpa has placed in one client directory.

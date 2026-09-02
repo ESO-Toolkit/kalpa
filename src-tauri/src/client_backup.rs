@@ -568,6 +568,7 @@ fn record_incomplete_rollback_locked(
             // its own entries and never comes through here.
             origin: FileOrigin::Placed,
             displaced_in_place: None,
+            parked: false,
         })
         .collect();
 
@@ -798,6 +799,7 @@ fn place_one(
         displaced_backup,
         origin: FileOrigin::Placed,
         displaced_in_place: None,
+        parked: false,
     })
 }
 
@@ -929,6 +931,16 @@ fn revert_placements_in_locked(
             skipped.push(relative.clone());
             continue;
         };
+        if entry.parked {
+            // The bytes are under the `.kalpa-off` name and the live path
+            // holds the game's own file. Deleting the entry here would drop
+            // the only record of a parked file, stranding it in the folder
+            // forever; "restoring" over the live path would overwrite the
+            // stock file disable deliberately put back. Switch the stack on
+            // first, then uninstall.
+            skipped.push(relative.clone());
+            continue;
+        }
         if entry.origin == FileOrigin::Adopted {
             // Kalpa did not put this here. Uninstall removes what Kalpa
             // placed; for an adopted file there is no displaced original of
@@ -1001,6 +1013,333 @@ fn collect_ancestors(client_root: &Path, start: &Path, out: &mut Vec<PathBuf>) {
             _ => break,
         }
     }
+}
+
+// ── Park / unpark ────────────────────────────────────────────────────────
+
+/// One reversible rearrangement of files that are **already** in the client
+/// directory, used to switch a stack off and back on.
+///
+/// Deliberately not a [`Placement`]. A placement brings bytes in from outside
+/// and displaces what was there, which is why it needs a backup folder. Nothing
+/// here destroys anything: every operation leaves the bytes it moved somewhere
+/// in the same folder under a name the inverse operation knows, so the whole
+/// batch is undoable without a backup root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOp {
+    /// Rename `relative_path` aside to `relative_path` + `PARKED_SUFFIX`.
+    Park { relative_path: String },
+    /// Rename `relative_path` + `PARKED_SUFFIX` back to `relative_path`.
+    Unpark { relative_path: String },
+    /// Copy `source` onto `destination`, both inside the client directory.
+    ///
+    /// This is how the user's own original (`nvngx_dlss.dll.disabled-bak`) goes
+    /// live when the stack is switched off. A **copy**, never a move: that file
+    /// is frequently the only copy of the stock DLL in existence, and Kalpa
+    /// does not get to consume it.
+    RestoreInPlace { source: String, destination: String },
+    /// Remove `relative_path` — the file a previous `RestoreInPlace` wrote.
+    ///
+    /// `must_match` names the original it was copied from, so the test is "are
+    /// these still the bytes Kalpa put here?". If they are not, something else
+    /// wrote the file while the stack was off (the launcher's patcher is the
+    /// obvious candidate), and those bytes are copied into the backup root
+    /// before the file is removed rather than simply discarded.
+    RemoveRestored {
+        relative_path: String,
+        must_match: String,
+    },
+}
+
+/// What running one batch of [`FileOp`]s did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FileOpOutcome {
+    /// One line per operation actually carried out, in order.
+    pub applied: Vec<String>,
+    /// Operations that had nothing to do, and why. Never an error: a park whose
+    /// file is already parked is the desired end state, not a failure.
+    pub skipped: Vec<String>,
+    /// Files whose unexpected contents were copied into the backup root before
+    /// being removed, with the backup id. Empty in the ordinary case.
+    pub preserved: Vec<String>,
+}
+
+/// Run a batch of [`FileOp`]s against the approved client directory.
+///
+/// All-or-nothing: on failure every operation already carried out is undone in
+/// reverse before returning, and the manifest is not touched at all — it is
+/// only updated once the whole batch has succeeded, so it can never describe a
+/// park that did not happen.
+pub fn run_file_ops(
+    app: &tauri::AppHandle,
+    root: &ApprovedRoot,
+    ops: &[FileOp],
+) -> Result<FileOpOutcome, String> {
+    let manifest = manifest_path(app)?;
+    let backups = backup_root(app)?;
+    run_file_ops_in(&manifest, &backups, root, ops)
+}
+
+/// Inner form of [`run_file_ops`], testable without an `AppHandle`.
+///
+/// Takes [`MANIFEST_LOCK`] across the filesystem work *and* the manifest
+/// update, for the same reason [`apply_placements_in_with`] does: the entries'
+/// `parked` flags must describe the files that are actually on disk, and a
+/// concurrent batch that loaded the manifest first would save over them.
+pub fn run_file_ops_in(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    ops: &[FileOp],
+) -> Result<FileOpOutcome, String> {
+    let _guard = lock_manifest();
+    run_file_ops_locked(manifest_path, backup_root, root, ops)
+}
+
+/// Body of [`run_file_ops_in`]; assumes [`MANIFEST_LOCK`] is already held and
+/// must never acquire it.
+fn run_file_ops_locked(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    ops: &[FileOp],
+) -> Result<FileOpOutcome, String> {
+    // Gate 4, re-asserted inside the lock and before any byte moves. Renaming
+    // the proxy DLL out from under a running client is exactly the case this
+    // exists for.
+    root.reassert_idle()?;
+    let client_root = root.path();
+
+    let mut outcome = FileOpOutcome::default();
+    let mut done: Vec<&FileOp> = Vec::new();
+
+    for op in ops {
+        match run_one_op(client_root, backup_root, op, &mut outcome) {
+            Ok(true) => done.push(op),
+            Ok(false) => {}
+            Err(error) => {
+                let stuck = undo_ops(client_root, &done);
+                return Err(if stuck.is_empty() {
+                    format!("{error}\n\nNothing was changed — every earlier step was undone.")
+                } else {
+                    format!(
+                        "{error}\n\nThe client folder is in a mixed state: these steps could \
+                         not be undone — {}.",
+                        stuck.join("; ")
+                    )
+                });
+            }
+        }
+    }
+
+    apply_parked_flags(manifest_path, client_root, ops)?;
+    Ok(outcome)
+}
+
+/// Resolve a live name and its parked twin, both through the containment
+/// check, so neither can name anything outside the client folder.
+fn park_pair(client_root: &Path, relative_path: &str) -> Result<(PathBuf, PathBuf), String> {
+    let live = crate::client_write::safe_relative_join(client_root, relative_path)?;
+    let parked = crate::client_write::safe_relative_join(
+        client_root,
+        &format!("{relative_path}{}", crate::client_stack::PARKED_SUFFIX),
+    )?;
+    Ok((live, parked))
+}
+
+/// Carry out one operation. `Ok(false)` means there was nothing to do.
+fn run_one_op(
+    client_root: &Path,
+    backup_root: &Path,
+    op: &FileOp,
+    outcome: &mut FileOpOutcome,
+) -> Result<bool, String> {
+    let suffix = crate::client_stack::PARKED_SUFFIX;
+    match op {
+        FileOp::Park { relative_path } => {
+            let (live, parked) = park_pair(client_root, relative_path)?;
+            if !live.is_file() {
+                outcome
+                    .skipped
+                    .push(format!("{relative_path} is not in the folder"));
+                return Ok(false);
+            }
+            if parked.exists() {
+                // Overwriting an earlier park would destroy the copy the
+                // matching unpark exists to put back.
+                return Err(format!(
+                    "{relative_path} already has a parked copy from an earlier switch-off. \
+                     Re-enable the stack first."
+                ));
+            }
+            fs::rename(&live, &parked)
+                .map_err(|e| format!("Could not park {relative_path}: {e}"))?;
+            outcome
+                .applied
+                .push(format!("Parked {relative_path} as {relative_path}{suffix}"));
+            Ok(true)
+        }
+
+        FileOp::Unpark { relative_path } => {
+            let (live, parked) = park_pair(client_root, relative_path)?;
+            if !parked.is_file() {
+                outcome
+                    .skipped
+                    .push(format!("{relative_path} was not parked"));
+                return Ok(false);
+            }
+            if live.exists() {
+                return Err(format!(
+                    "Cannot put {relative_path} back: something else already occupies that name."
+                ));
+            }
+            fs::rename(&parked, &live)
+                .map_err(|e| format!("Could not put {relative_path} back: {e}"))?;
+            outcome.applied.push(format!(
+                "Put {relative_path} back from {relative_path}{suffix}"
+            ));
+            Ok(true)
+        }
+
+        FileOp::RestoreInPlace {
+            source,
+            destination,
+        } => {
+            let from = crate::client_write::safe_relative_join(client_root, source)?;
+            let to = crate::client_write::safe_relative_join(client_root, destination)?;
+            if !from.is_file() {
+                return Err(format!(
+                    "Cannot put the game's own {destination} back: {source} is not in the folder."
+                ));
+            }
+            if to.exists() {
+                return Err(format!(
+                    "Cannot put the game's own {destination} back: that name is still occupied."
+                ));
+            }
+            fs::copy(&from, &to).map_err(|e| format!("Could not restore {destination}: {e}"))?;
+            outcome
+                .applied
+                .push(format!("Copied your own {source} back to {destination}"));
+            Ok(true)
+        }
+
+        FileOp::RemoveRestored {
+            relative_path,
+            must_match,
+        } => {
+            let live = crate::client_write::safe_relative_join(client_root, relative_path)?;
+            let original = crate::client_write::safe_relative_join(client_root, must_match)?;
+            if !live.is_file() {
+                outcome
+                    .skipped
+                    .push(format!("{relative_path} is already gone"));
+                return Ok(false);
+            }
+            let unchanged = match (hash_file(&live), hash_file(&original)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+            if !unchanged {
+                // Not the bytes Kalpa copied here. Most likely the launcher
+                // patched the file while the stack was off. Kalpa still has to
+                // free the name, but it does not get to destroy bytes it
+                // cannot account for.
+                let id = backup_existing_in(backup_root, client_root, relative_path)?.ok_or_else(
+                    || format!("Could not preserve {relative_path} before removing it."),
+                )?;
+                outcome.preserved.push(format!(
+                    "{relative_path} had changed since it was restored; a copy is in backup {id}"
+                ));
+            }
+            fs::remove_file(&live).map_err(|e| format!("Could not remove {relative_path}: {e}"))?;
+            outcome
+                .applied
+                .push(format!("Removed the stock {relative_path}"));
+            Ok(true)
+        }
+    }
+}
+
+/// Undo already-applied operations, newest first. Returns descriptions of the
+/// ones that could not be undone, which is what turns a clean failure into a
+/// reported mixed state.
+fn undo_ops(client_root: &Path, done: &[&FileOp]) -> Vec<String> {
+    let mut stuck = Vec::new();
+    for op in done.iter().rev() {
+        let result = match op {
+            FileOp::Park { relative_path } => {
+                park_pair(client_root, relative_path).and_then(|(live, parked)| {
+                    fs::rename(&parked, &live).map_err(|e| format!("{relative_path}: {e}"))
+                })
+            }
+            FileOp::Unpark { relative_path } => {
+                park_pair(client_root, relative_path).and_then(|(live, parked)| {
+                    fs::rename(&live, &parked).map_err(|e| format!("{relative_path}: {e}"))
+                })
+            }
+            // The copy is Kalpa's own; removing it puts the name back the way
+            // the batch found it.
+            FileOp::RestoreInPlace { destination, .. } => {
+                crate::client_write::safe_relative_join(client_root, destination)
+                    .and_then(|to| fs::remove_file(&to).map_err(|e| format!("{destination}: {e}")))
+            }
+            FileOp::RemoveRestored {
+                relative_path,
+                must_match,
+            } => {
+                crate::client_write::safe_relative_join(client_root, must_match).and_then(|from| {
+                    let to = crate::client_write::safe_relative_join(client_root, relative_path)?;
+                    fs::copy(&from, &to)
+                        .map(|_| ())
+                        .map_err(|e| format!("{relative_path}: {e}"))
+                })
+            }
+        };
+        if let Err(error) = result {
+            stuck.push(error);
+        }
+    }
+    stuck
+}
+
+/// Set or clear the `parked` flag on the manifest entries this batch moved.
+///
+/// A park keeps the entry's live `relative_path` and flips the flag, rather
+/// than rewriting the path to the parked name: parking is temporary, and the
+/// live name is what re-enabling puts back. Entries the manifest does not have
+/// are simply not recorded — an unmanaged file can be parked (the injector of
+/// an un-adopted stack) without inventing a manifest row for it.
+fn apply_parked_flags(
+    manifest_path: &Path,
+    client_root: &Path,
+    ops: &[FileOp],
+) -> Result<(), String> {
+    let mut manifest = load_manifest_at(manifest_path);
+    let key = install_key(client_root);
+    let Some(bucket) = manifest.installs.get_mut(&key) else {
+        return Ok(());
+    };
+
+    let mut changed = false;
+    for op in ops {
+        let (path, parked) = match op {
+            FileOp::Park { relative_path } => (relative_path, true),
+            FileOp::Unpark { relative_path } => (relative_path, false),
+            _ => continue,
+        };
+        for entry in bucket.iter_mut() {
+            if &entry.relative_path == path && entry.parked != parked {
+                entry.parked = parked;
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        save_manifest_at(manifest_path, &manifest)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1459,6 +1798,7 @@ mod tests {
                 displaced_backup: Some("2026-01-01T00-00-00Z-000000-000000000".to_string()),
                 origin: FileOrigin::Placed,
                 displaced_in_place: None,
+                parked: false,
             }],
         );
         let manifest = ManagedManifest { installs };
@@ -1881,5 +2221,364 @@ mod tests {
             assert!(!h.client.join("dxgi.dll").exists());
             assert!(h.entries().is_empty());
         }
+    }
+
+    // ── FileOp batches ───────────────────────────────────────────────────
+
+    /// A client folder shaped like the real one: a modded runtime with the
+    /// user's own stock copy beside it, and the injector that loads everything.
+    struct ParkHarness {
+        _temp: tempfile::TempDir,
+        manifest: PathBuf,
+        backups: PathBuf,
+        client: PathBuf,
+    }
+
+    impl ParkHarness {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let manifest = temp.path().join("client-managed.json");
+            let backups = temp.path().join("backups");
+            let client = temp.path().join("client");
+            std::fs::create_dir_all(&backups).expect("mkdir backups");
+            std::fs::create_dir_all(&client).expect("mkdir client");
+            for (name, body) in [
+                ("dxgi.dll", "reshade"),
+                ("nvngx_dlss.dll", "the modded 310.1"),
+                ("nvngx_dlss.dll.disabled-bak", "the stock 2.2.16"),
+            ] {
+                std::fs::write(client.join(name), body).expect("fixture");
+            }
+            Self {
+                _temp: temp,
+                manifest,
+                backups,
+                client,
+            }
+        }
+
+        fn record(&self, relative: &str, in_place: Option<&str>) {
+            let entry = ManagedFile {
+                relative_path: relative.to_string(),
+                kind: ManagedKind::ReShadeCore,
+                sha256: hash_file(&self.client.join(relative)).expect("hash fixture"),
+                placed_at: "2026-01-01T00:00:00Z".to_string(),
+                displaced_backup: None,
+                origin: FileOrigin::Adopted,
+                displaced_in_place: in_place.map(str::to_string),
+                parked: false,
+            };
+            record_adopted(&self.manifest, &self.client, vec![entry]).expect("record");
+        }
+
+        fn run(&self, ops: &[FileOp]) -> Result<FileOpOutcome, String> {
+            run_file_ops_in(
+                &self.manifest,
+                &self.backups,
+                &ApprovedRoot::for_tests_idle(self.client.clone()),
+                ops,
+            )
+        }
+
+        fn entry(&self, relative: &str) -> ManagedFile {
+            let manifest = load_manifest_at(&self.manifest);
+            manifest
+                .installs
+                .get(&install_key(&self.client))
+                .into_iter()
+                .flatten()
+                .find(|file| file.relative_path == relative)
+                .cloned()
+                .unwrap_or_else(|| panic!("no entry for {relative}"))
+        }
+
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.client.join(name)).unwrap_or_default()
+        }
+    }
+
+    /// The whole disable sequence: park the injector, park the modded runtime,
+    /// and put the user's own stock file live.
+    #[test]
+    fn a_disable_batch_parks_the_stack_and_puts_the_stock_file_live() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+        h.record("nvngx_dlss.dll", Some("nvngx_dlss.dll.disabled-bak"));
+
+        h.run(&[
+            FileOp::Park {
+                relative_path: "nvngx_dlss.dll".to_string(),
+            },
+            FileOp::RestoreInPlace {
+                source: "nvngx_dlss.dll.disabled-bak".to_string(),
+                destination: "nvngx_dlss.dll".to_string(),
+            },
+            FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            },
+        ])
+        .expect("disable should succeed");
+
+        assert_eq!(h.read("nvngx_dlss.dll"), "the stock 2.2.16");
+        assert_eq!(h.read("nvngx_dlss.dll.kalpa-off"), "the modded 310.1");
+        assert_eq!(h.read("dxgi.dll.kalpa-off"), "reshade");
+        assert!(!h.client.join("dxgi.dll").exists());
+        assert!(
+            h.client.join("nvngx_dlss.dll.disabled-bak").is_file(),
+            "the user's own original is copied from, never consumed"
+        );
+        assert!(h.entry("dxgi.dll").parked);
+        assert!(h.entry("nvngx_dlss.dll").parked);
+    }
+
+    /// Re-enable is the exact reverse, and gets the folder back byte for byte.
+    #[test]
+    fn re_enabling_reverses_a_disable_exactly() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+        h.record("nvngx_dlss.dll", Some("nvngx_dlss.dll.disabled-bak"));
+        let before = snapshot_dir(&h.client);
+
+        h.run(&[
+            FileOp::Park {
+                relative_path: "nvngx_dlss.dll".to_string(),
+            },
+            FileOp::RestoreInPlace {
+                source: "nvngx_dlss.dll.disabled-bak".to_string(),
+                destination: "nvngx_dlss.dll".to_string(),
+            },
+            FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            },
+        ])
+        .expect("disable");
+
+        h.run(&[
+            FileOp::Unpark {
+                relative_path: "dxgi.dll".to_string(),
+            },
+            FileOp::RemoveRestored {
+                relative_path: "nvngx_dlss.dll".to_string(),
+                must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
+            },
+            FileOp::Unpark {
+                relative_path: "nvngx_dlss.dll".to_string(),
+            },
+        ])
+        .expect("re-enable");
+
+        assert_eq!(
+            before,
+            snapshot_dir(&h.client),
+            "re-enable must leave the folder exactly as disable found it"
+        );
+        assert!(!h.entry("dxgi.dll").parked);
+        assert!(!h.entry("nvngx_dlss.dll").parked);
+    }
+
+    /// The trap the `.kalpa-off` suffix exists to avoid, pinned: parking must
+    /// never write over one of the user's own backup names.
+    #[test]
+    fn parking_never_touches_the_users_own_backup() {
+        let h = ParkHarness::new();
+        let original = std::fs::read(h.client.join("nvngx_dlss.dll.disabled-bak")).unwrap();
+
+        h.run(&[FileOp::Park {
+            relative_path: "nvngx_dlss.dll".to_string(),
+        }])
+        .expect("park");
+
+        assert_eq!(
+            std::fs::read(h.client.join("nvngx_dlss.dll.disabled-bak")).unwrap(),
+            original,
+            "the user's original must be byte-identical after a park"
+        );
+    }
+
+    /// A second park would overwrite the copy the matching unpark puts back.
+    #[test]
+    fn parking_over_an_existing_park_is_refused() {
+        let h = ParkHarness::new();
+        std::fs::write(h.client.join("dxgi.dll.kalpa-off"), "an earlier park").unwrap();
+
+        let error = h
+            .run(&[FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            }])
+            .expect_err("must refuse");
+        assert!(error.contains("already has a parked copy"), "{error}");
+        assert_eq!(h.read("dxgi.dll.kalpa-off"), "an earlier park");
+        assert_eq!(h.read("dxgi.dll"), "reshade");
+    }
+
+    /// A batch that fails half way leaves nothing behind.
+    #[test]
+    fn a_failed_batch_is_undone_in_full() {
+        let h = ParkHarness::new();
+        let before = snapshot_dir(&h.client);
+
+        let error = h
+            .run(&[
+                FileOp::Park {
+                    relative_path: "dxgi.dll".to_string(),
+                },
+                // Nothing to copy from: this fails, and the park above has to
+                // come back.
+                FileOp::RestoreInPlace {
+                    source: "dxgi.dll.eso-orig-bak".to_string(),
+                    destination: "dxgi.dll".to_string(),
+                },
+            ])
+            .expect_err("must fail");
+
+        assert!(error.contains("Nothing was changed"), "{error}");
+        assert_eq!(before, snapshot_dir(&h.client));
+    }
+
+    /// A batch that fails must not leave the manifest claiming a park that was
+    /// rolled back.
+    #[test]
+    fn a_failed_batch_leaves_the_manifest_alone() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+
+        h.run(&[
+            FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            },
+            FileOp::RestoreInPlace {
+                source: "dxgi.dll.eso-orig-bak".to_string(),
+                destination: "dxgi.dll".to_string(),
+            },
+        ])
+        .expect_err("must fail");
+
+        assert!(
+            !h.entry("dxgi.dll").parked,
+            "the manifest must not record a park that was undone"
+        );
+    }
+
+    /// The launcher patched the stock file while the stack was off. Kalpa still
+    /// has to free the name, but it does not get to destroy bytes it cannot
+    /// account for.
+    #[test]
+    fn unexpected_bytes_are_preserved_before_the_name_is_freed() {
+        let h = ParkHarness::new();
+        h.run(&[FileOp::Park {
+            relative_path: "nvngx_dlss.dll".to_string(),
+        }])
+        .expect("park");
+        std::fs::write(h.client.join("nvngx_dlss.dll"), "a newer stock build").unwrap();
+
+        let outcome = h
+            .run(&[FileOp::RemoveRestored {
+                relative_path: "nvngx_dlss.dll".to_string(),
+                must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
+            }])
+            .expect("should still free the name");
+
+        assert!(!h.client.join("nvngx_dlss.dll").exists());
+        assert_eq!(outcome.preserved.len(), 1, "{outcome:?}");
+        let id = outcome.preserved[0]
+            .rsplit(' ')
+            .next()
+            .expect("the backup id");
+        let kept = backup_file_path(&h.backups, id, "nvngx_dlss.dll").expect("backup path");
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "a newer stock build"
+        );
+    }
+
+    /// Uninstall must not touch a stack that is merely switched off: the live
+    /// path holds the game's own file, and the entry is the only record of the
+    /// parked one.
+    #[test]
+    fn uninstall_skips_parked_entries() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+        h.run(&[FileOp::Park {
+            relative_path: "dxgi.dll".to_string(),
+        }])
+        .expect("park");
+
+        let skipped = revert_placements_in(
+            &h.manifest,
+            &h.backups,
+            &ApprovedRoot::for_tests_idle(h.client.clone()),
+            &["dxgi.dll".to_string()],
+        )
+        .expect("revert should not error");
+
+        assert_eq!(skipped, vec!["dxgi.dll".to_string()]);
+        assert_eq!(h.read("dxgi.dll.kalpa-off"), "reshade");
+        assert!(
+            h.entry("dxgi.dll").parked,
+            "the record of the parked file must survive"
+        );
+    }
+
+    #[test]
+    fn a_batch_refuses_while_the_client_is_running() {
+        let h = ParkHarness::new();
+        let before = snapshot_dir(&h.client);
+        let active = ApprovedRoot::for_tests(h.client.clone(), std::sync::Arc::new(|| Ok(true)));
+
+        let error = run_file_ops_in(
+            &h.manifest,
+            &h.backups,
+            &active,
+            &[FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            }],
+        )
+        .expect_err("must refuse");
+
+        assert!(error.contains("running"), "{error}");
+        assert_eq!(before, snapshot_dir(&h.client));
+    }
+
+    /// Neither half of a park may name anything outside the client folder.
+    #[test]
+    fn park_paths_are_contained() {
+        let h = ParkHarness::new();
+        for relative in ["../evil.dll", "C:evil.dll", "sub/../../evil.dll"] {
+            assert!(
+                h.run(&[FileOp::Park {
+                    relative_path: relative.to_string(),
+                }])
+                .is_err(),
+                "{relative} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn parking_something_that_is_not_there_is_not_an_error() {
+        let h = ParkHarness::new();
+        let outcome = h
+            .run(&[FileOp::Park {
+                relative_path: "d3d11.dll".to_string(),
+            }])
+            .expect("a no-op park is the desired end state");
+        assert!(outcome.applied.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+    }
+
+    fn snapshot_dir(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .expect("read client")
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    std::fs::read(e.path()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
     }
 }
