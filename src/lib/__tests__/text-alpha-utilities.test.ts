@@ -35,6 +35,7 @@ const ALLOWLIST: Record<string, AllowlistReason> = {
   "src/components/app-header.tsx|text-muted-foreground/60": "icon-button",
   "src/components/backups.tsx|text-muted-foreground/60": "icon",
   "src/components/changelog-dialog.tsx|text-muted-foreground/60": "icon",
+  "src/components/client-health.tsx|text-muted-foreground/70": "aria-hidden",
   "src/components/diff-viewer.tsx|text-primary/40": "glyph",
   "src/components/discover-detail.tsx|text-muted-foreground/20": "glyph",
   "src/components/discover-detail.tsx|text-muted-foreground/30": "icon",

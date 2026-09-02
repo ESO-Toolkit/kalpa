@@ -29,6 +29,7 @@ const MigrationWizard = lazy(() =>
 const SafetyCenter = lazy(() =>
   import("./safety-center").then((m) => ({ default: m.SafetyCenter }))
 );
+const ClientHealthPanel = lazy(() => import("./client-health"));
 const SupportDialog = lazy(() =>
   import("./support-dialog").then((m) => ({ default: m.SupportDialog }))
 );
@@ -49,6 +50,7 @@ type ActiveDialog =
   | "support"
   | "shortcuts"
   | "log-upload"
+  | "client-health"
   | null;
 
 const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
@@ -64,6 +66,7 @@ const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
   support: "Help",
   shortcuts: "Keyboard Shortcuts",
   "log-upload": "Log Uploader",
+  "client-health": "Client Health",
 };
 
 interface AppDialogsProps {
@@ -223,6 +226,7 @@ function AppDialogsBase({
               onShowCharacters={() => onShowDialog("characters")}
               onShowMigrationWizard={() => onShowDialog("migration-wizard")}
               onShowSafetyCenter={() => onShowDialog("safety-center")}
+              onShowClientHealth={() => onShowDialog("client-health")}
               onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}
               onOpenLogUpload={() => {
@@ -259,6 +263,8 @@ function AppDialogsBase({
               updateResults={updateResults}
             />
           )}
+
+          {activeDialog === "client-health" && <ClientHealthPanel open onClose={onCloseDialog} />}
 
           {activeDialog === "shortcuts" && <KeyboardShortcuts onClose={onCloseDialog} />}
         </Suspense>

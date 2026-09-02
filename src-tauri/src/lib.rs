@@ -4,6 +4,15 @@ mod auth;
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
 /// so normal builds are unaffected.
 pub mod bench_alloc;
+pub mod client_adopt;
+pub mod client_backup;
+pub mod client_download;
+mod client_health;
+mod client_install;
+pub mod client_signature;
+pub mod client_stack;
+pub mod client_uninstall;
+pub mod client_write;
 mod commands;
 mod edit_backups;
 mod esoui;
@@ -520,6 +529,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(client_write::AllowedGameInstallPath::new())
         .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
@@ -914,6 +924,19 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            client_health::detect_eso_clients,
+            client_health::validate_eso_client,
+            client_health::inspect_eso_client,
+            commands::is_eso_or_launcher_running,
+            client_write::set_game_install_path,
+            client_write::clear_game_install_path,
+            client_stack::inspect_client_stack,
+            client_adopt::plan_adoption,
+            client_adopt::adopt_stack,
+            client_adopt::forget_stack,
+            client_uninstall::list_managed_client_files,
+            client_uninstall::uninstall_managed_client_files,
+            client_uninstall::emergency_remove_injector,
             commands::set_addons_path,
             commands::reveal_allowed_path,
             commands::set_text_zoom,
