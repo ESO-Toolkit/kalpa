@@ -4,6 +4,8 @@ mod auth;
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
 /// so normal builds are unaffected.
 pub mod bench_alloc;
+pub mod client_backup;
+pub mod client_download;
 mod client_health;
 mod client_install;
 pub mod client_write;
