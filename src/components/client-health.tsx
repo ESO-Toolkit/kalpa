@@ -12,6 +12,7 @@ import {
   SearchIcon,
   ShieldAlertIcon,
   ShieldCheckIcon,
+  Trash2Icon,
 } from "lucide-react";
 import {
   Dialog,
@@ -25,6 +26,8 @@ import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
@@ -78,6 +81,54 @@ export interface ClientHealthReport {
 export interface ClientHealthPanelProps {
   open: boolean;
   onClose: () => void;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Managed-files data contract                                               */
+/* -------------------------------------------------------------------------- */
+/* These mirror the Rust structs behind `list_managed_client_files`,           */
+/* `uninstall_managed_client_files` and `emergency_remove_injector` in         */
+/* `src-tauri/src/client_uninstall.rs`.                                        */
+
+export type ManagedFileState = "present" | "modified" | "missing";
+
+export type ManagedKind =
+  | "re_shade_core"
+  | "re_shade_config"
+  | "shader"
+  | "preset"
+  | "addon"
+  | "nvidia_runtime"
+  | "shader_compiler";
+
+export interface ManagedFileStatus {
+  relative_path: string;
+  kind: ManagedKind;
+  placed_at: string;
+  state: ManagedFileState;
+  restores_backup: boolean;
+}
+
+export interface OrphanInjector {
+  file_name: string;
+  product_name: string;
+  version: string | null;
+}
+
+export interface ManagedInventory {
+  client_dir: string;
+  files: ManagedFileStatus[];
+  orphan_injectors: OrphanInjector[];
+}
+
+export interface UninstallOutcome {
+  removed: string[];
+  skipped: string[];
+}
+
+export interface EmergencyRemoval {
+  file_name: string;
+  quarantine_path: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -139,6 +190,42 @@ const LEVEL_META: Record<
 /** Order findings worst-first so the thing that needs attention is on top. */
 const LEVEL_ORDER: Record<HealthLevel, number> = { danger: 0, warning: 1, info: 2, ok: 3 };
 
+const KIND_LABEL: Record<ManagedKind, string> = {
+  re_shade_core: "ReShade core",
+  re_shade_config: "ReShade config",
+  shader: "Shader",
+  preset: "Preset",
+  addon: "ReShade add-on",
+  nvidia_runtime: "NVIDIA runtime",
+  shader_compiler: "Shader compiler",
+};
+
+/** Same color+icon+word discipline as `LEVEL_META`, for the managed-file
+ *  state instead of the health-finding level. */
+const FILE_STATE_META: Record<
+  ManagedFileState,
+  { label: string; Icon: typeof ShieldCheckIcon; text: string; hint: string }
+> = {
+  present: {
+    label: "Present",
+    Icon: ShieldCheckIcon,
+    text: "text-status-success",
+    hint: "Unchanged since Kalpa wrote it. Safe to remove.",
+  },
+  modified: {
+    label: "Modified",
+    Icon: AlertTriangleIcon,
+    text: "text-status-warning",
+    hint: "Changed since Kalpa wrote it. Kalpa will not delete this — that protects your edits.",
+  },
+  missing: {
+    label: "Missing",
+    Icon: AlertCircleIcon,
+    text: "text-status-info",
+    hint: "Already gone. Removing just tidies the record and restores anything it displaced.",
+  },
+};
+
 const Spinner = ({ className }: { className?: string }) => (
   <span
     aria-hidden
@@ -187,10 +274,52 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 
   const [logsExpanded, setLogsExpanded] = useState(false);
 
+  // Managed-by-Kalpa inventory for the selected install.
+  const [managedInventory, setManagedInventory] = useState<ManagedInventory | null>(null);
+  const [managedLoading, setManagedLoading] = useState(false);
+  const [managedError, setManagedError] = useState<string | null>(null);
+
+  // Selection + destructive-confirm state for managed uninstall. All of this
+  // is per-install: it is reset every time the selected install changes or a
+  // refresh runs, so a stale "are you sure" latch can never survive a content
+  // swap onto a different folder.
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [removeMode, setRemoveMode] = useState<"selected" | "all" | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [removeOutcome, setRemoveOutcome] = useState<UninstallOutcome | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  // Emergency removal: collapsed disclosure + typed-confirmation state, also
+  // reset on every install switch/refresh.
+  const [emergencyOpen, setEmergencyOpen] = useState(false);
+  const [emergencyTarget, setEmergencyTarget] = useState<string | null>(null);
+  const [emergencyConfirmInput, setEmergencyConfirmInput] = useState("");
+  const [emergencyBusy, setEmergencyBusy] = useState(false);
+  const [emergencyError, setEmergencyError] = useState<string | null>(null);
+  const [emergencyResult, setEmergencyResult] = useState<EmergencyRemoval | null>(null);
+
   // Monotonic token: a slow detect/inspect that resolves after the user has
   // already refreshed or picked a different install must not overwrite newer
   // state. Bumped by every load entry point.
   const runToken = useRef(0);
+
+  /** Clears every per-install control latch (selection, confirm state,
+   *  emergency disclosure and its typed input, and the last outcome/error).
+   *  Called at every point the selected install changes or is reloaded, so
+   *  none of it can survive onto a different folder. */
+  const resetManagedUiState = useCallback(() => {
+    setSelectedPaths(new Set());
+    setRemoveMode(null);
+    setRemoving(false);
+    setRemoveOutcome(null);
+    setRemoveError(null);
+    setEmergencyOpen(false);
+    setEmergencyTarget(null);
+    setEmergencyConfirmInput("");
+    setEmergencyBusy(false);
+    setEmergencyError(null);
+    setEmergencyResult(null);
+  }, []);
 
   const inspect = useCallback(async (clientDir: string, token: number) => {
     setInspecting(true);
@@ -208,6 +337,24 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     }
   }, []);
 
+  const loadManaged = useCallback(async (clientDir: string, token: number) => {
+    setManagedLoading(true);
+    setManagedError(null);
+    try {
+      const next = await invokeOrThrow<ManagedInventory>("list_managed_client_files", {
+        clientDir,
+      });
+      if (runToken.current !== token) return;
+      setManagedInventory(next);
+    } catch (e) {
+      if (runToken.current !== token) return;
+      setManagedInventory(null);
+      setManagedError(getTauriErrorMessage(e));
+    } finally {
+      if (runToken.current === token) setManagedLoading(false);
+    }
+  }, []);
+
   const detect = useCallback(async () => {
     const token = ++runToken.current;
     setDetecting(true);
@@ -215,6 +362,9 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setBrowseError(null);
     setInspectError(null);
     setReport(null);
+    setManagedInventory(null);
+    setManagedError(null);
+    resetManagedUiState();
     try {
       const found = await invokeOrThrow<EsoClientLocation[]>("detect_eso_clients");
       if (runToken.current !== token) return;
@@ -222,7 +372,8 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       const first = found[0];
       setSelectedDir(first ? first.client_dir : null);
       setDetecting(false);
-      if (first) await inspect(first.client_dir, token);
+      if (first)
+        await Promise.all([inspect(first.client_dir, token), loadManaged(first.client_dir, token)]);
     } catch (e) {
       if (runToken.current !== token) return;
       setClients([]);
@@ -230,7 +381,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       setDetectError(getTauriErrorMessage(e));
       setDetecting(false);
     }
-  }, [inspect]);
+  }, [inspect, loadManaged, resetManagedUiState]);
 
   // On-open fetch only. Project policy forbids background polling, so there is
   // no interval here — the Refresh button is the only other trigger.
@@ -250,9 +401,13 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       const token = ++runToken.current;
       setSelectedDir(clientDir);
       setReport(null);
+      setManagedInventory(null);
+      setManagedError(null);
+      resetManagedUiState();
       void inspect(clientDir, token);
+      void loadManaged(clientDir, token);
     },
-    [inspect, selectedDir]
+    [inspect, loadManaged, resetManagedUiState, selectedDir]
   );
 
   const handleBrowse = useCallback(async () => {
@@ -278,13 +433,19 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       setSelectedDir(validated.client_dir);
       setReport(null);
       setDetectError(null);
-      await inspect(validated.client_dir, token);
+      setManagedInventory(null);
+      setManagedError(null);
+      resetManagedUiState();
+      await Promise.all([
+        inspect(validated.client_dir, token),
+        loadManaged(validated.client_dir, token),
+      ]);
     } catch (e) {
       setBrowseError(getTauriErrorMessage(e));
     } finally {
       setBrowsing(false);
     }
-  }, [inspect]);
+  }, [inspect, loadManaged, resetManagedUiState]);
 
   const sortedFindings = useMemo(() => {
     if (!report) return [];
@@ -302,6 +463,85 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     ];
   }, [report]);
 
+  const handleToggleSelect = useCallback((relativePath: string) => {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(relativePath)) next.delete(relativePath);
+      else next.add(relativePath);
+      return next;
+    });
+    // Disarm the confirm step. `pendingPaths` is derived live from the
+    // selection, so leaving the confirm block open across a selection change
+    // would let a user arm it for one set of files and confirm it for a
+    // different one -- the prompt only ever states a count, so swapping one
+    // file for another is invisible. Consent is for the set that was on
+    // screen when it was given; change the set and it has to be given again.
+    setRemoveMode(null);
+  }, []);
+
+  const handleRequestRemove = useCallback((mode: "selected" | "all") => {
+    setRemoveError(null);
+    setRemoveOutcome(null);
+    setRemoveMode(mode);
+  }, []);
+
+  const handleCancelRemove = useCallback(() => {
+    setRemoveMode(null);
+  }, []);
+
+  const handleConfirmRemove = useCallback(
+    async (paths: string[]) => {
+      if (!selectedDir || paths.length === 0) return;
+      const token = runToken.current;
+      setRemoving(true);
+      setRemoveError(null);
+      try {
+        const outcome = await invokeOrThrow<UninstallOutcome>("uninstall_managed_client_files", {
+          clientDir: selectedDir,
+          relativePaths: paths,
+        });
+        if (runToken.current !== token) return;
+        setRemoveOutcome(outcome);
+        setRemoveMode(null);
+        setSelectedPaths(new Set());
+        await loadManaged(selectedDir, token);
+      } catch (e) {
+        if (runToken.current !== token) return;
+        setRemoveError(getTauriErrorMessage(e));
+      } finally {
+        if (runToken.current === token) setRemoving(false);
+      }
+    },
+    [loadManaged, selectedDir]
+  );
+
+  const handleEmergencyRemove = useCallback(
+    async (fileName: string) => {
+      if (!selectedDir) return;
+      const token = runToken.current;
+      setEmergencyBusy(true);
+      setEmergencyError(null);
+      try {
+        const result = await invokeOrThrow<EmergencyRemoval>("emergency_remove_injector", {
+          clientDir: selectedDir,
+          fileName,
+          confirmation: emergencyConfirmInput,
+        });
+        if (runToken.current !== token) return;
+        setEmergencyResult(result);
+        setEmergencyTarget(null);
+        setEmergencyConfirmInput("");
+        await loadManaged(selectedDir, token);
+      } catch (e) {
+        if (runToken.current !== token) return;
+        setEmergencyError(getTauriErrorMessage(e));
+      } finally {
+        if (runToken.current === token) setEmergencyBusy(false);
+      }
+    },
+    [emergencyConfirmInput, loadManaged, selectedDir]
+  );
+
   const busy = detecting || inspecting;
 
   return (
@@ -310,8 +550,8 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         <DialogHeader>
           <DialogTitle>Client Health</DialogTitle>
           <DialogDescription>
-            A read-only report on your ESO client folder. Kalpa never installs, downloads or changes
-            anything here — it only tells you what it found.
+            A report on your ESO client folder. Kalpa downloads nothing here — it can only remove
+            files it placed itself, restoring whatever they displaced.
           </DialogDescription>
         </DialogHeader>
 
@@ -403,6 +643,40 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   logsExpanded={logsExpanded}
                   onToggleLogs={() => setLogsExpanded((v) => !v)}
                 />
+              )}
+
+              {!inspecting && selectedDir && (
+                <>
+                  <Divider />
+                  <ManagedSection
+                    loading={managedLoading}
+                    error={managedError}
+                    inventory={managedInventory}
+                    selectedPaths={selectedPaths}
+                    onToggleSelect={handleToggleSelect}
+                    removeMode={removeMode}
+                    removing={removing}
+                    removeOutcome={removeOutcome}
+                    removeError={removeError}
+                    onRequestRemove={handleRequestRemove}
+                    onCancelRemove={handleCancelRemove}
+                    onConfirmRemove={handleConfirmRemove}
+                    emergencyOpen={emergencyOpen}
+                    onToggleEmergencyOpen={() => setEmergencyOpen((v) => !v)}
+                    emergencyTarget={emergencyTarget}
+                    onSetEmergencyTarget={(name) => {
+                      setEmergencyTarget(name);
+                      setEmergencyConfirmInput("");
+                      setEmergencyError(null);
+                    }}
+                    emergencyConfirmInput={emergencyConfirmInput}
+                    onEmergencyConfirmInputChange={setEmergencyConfirmInput}
+                    emergencyBusy={emergencyBusy}
+                    emergencyError={emergencyError}
+                    emergencyResult={emergencyResult}
+                    onEmergencyRemove={handleEmergencyRemove}
+                  />
+                </>
               )}
             </>
           )}
@@ -689,6 +963,368 @@ function FindingRow({ finding }: { finding: HealthFinding }) {
           )}
         </div>
       </div>
+    </li>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Managed by Kalpa                                                          */
+/* -------------------------------------------------------------------------- */
+
+function ManagedSection({
+  loading,
+  error,
+  inventory,
+  selectedPaths,
+  onToggleSelect,
+  removeMode,
+  removing,
+  removeOutcome,
+  removeError,
+  onRequestRemove,
+  onCancelRemove,
+  onConfirmRemove,
+  emergencyOpen,
+  onToggleEmergencyOpen,
+  emergencyTarget,
+  onSetEmergencyTarget,
+  emergencyConfirmInput,
+  onEmergencyConfirmInputChange,
+  emergencyBusy,
+  emergencyError,
+  emergencyResult,
+  onEmergencyRemove,
+}: {
+  loading: boolean;
+  error: string | null;
+  inventory: ManagedInventory | null;
+  selectedPaths: Set<string>;
+  onToggleSelect: (relativePath: string) => void;
+  removeMode: "selected" | "all" | null;
+  removing: boolean;
+  removeOutcome: UninstallOutcome | null;
+  removeError: string | null;
+  onRequestRemove: (mode: "selected" | "all") => void;
+  onCancelRemove: () => void;
+  onConfirmRemove: (paths: string[]) => void | Promise<void>;
+  emergencyOpen: boolean;
+  onToggleEmergencyOpen: () => void;
+  emergencyTarget: string | null;
+  onSetEmergencyTarget: (fileName: string | null) => void;
+  emergencyConfirmInput: string;
+  onEmergencyConfirmInputChange: (value: string) => void;
+  emergencyBusy: boolean;
+  emergencyError: string | null;
+  emergencyResult: EmergencyRemoval | null;
+  onEmergencyRemove: (fileName: string) => void | Promise<void>;
+}) {
+  const files = useMemo(() => inventory?.files ?? [], [inventory]);
+  const orphans = inventory?.orphan_injectors ?? [];
+
+  const pendingPaths = useMemo(() => {
+    if (removeMode === "all") return files.map((f) => f.relative_path);
+    if (removeMode === "selected") return Array.from(selectedPaths);
+    return [];
+  }, [files, removeMode, selectedPaths]);
+
+  return (
+    <section aria-labelledby="client-health-managed">
+      <SectionHeader id="client-health-managed" className="mb-2">
+        Managed by Kalpa
+      </SectionHeader>
+
+      {loading && (
+        <div className="flex items-center gap-3 py-6 text-sm text-muted-foreground" role="status">
+          <Spinner />
+          <span>Checking files Kalpa has placed here...</span>
+        </div>
+      )}
+
+      {!loading && error && (
+        <GlassPanel variant="subtle" className="flex items-start gap-2 p-3 text-sm" role="alert">
+          <ShieldAlertIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-status-danger" />
+          <div>
+            <p className="font-heading text-[13px] font-semibold text-status-danger">
+              Could not check managed files
+            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">{error}</p>
+          </div>
+        </GlassPanel>
+      )}
+
+      {!loading && !error && inventory && files.length === 0 && orphans.length === 0 && (
+        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
+          Kalpa has not placed anything in this folder.
+        </GlassPanel>
+      )}
+
+      {!loading && !error && inventory && files.length > 0 && (
+        <div className="space-y-2">
+          <ul className="space-y-2">
+            {files.map((file) => (
+              <ManagedFileRow
+                key={file.relative_path}
+                file={file}
+                selected={selectedPaths.has(file.relative_path)}
+                onToggle={() => onToggleSelect(file.relative_path)}
+              />
+            ))}
+          </ul>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={selectedPaths.size === 0 || removing}
+              onClick={() => onRequestRemove("selected")}
+            >
+              <Trash2Icon />
+              Remove selected ({selectedPaths.size})
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={removing}
+              onClick={() => onRequestRemove("all")}
+            >
+              <Trash2Icon />
+              Remove all ({files.length})
+            </Button>
+          </div>
+
+          {removeMode && (
+            <GlassPanel
+              variant="subtle"
+              className="flex flex-col gap-2 border-status-danger/20 p-3 text-xs"
+            >
+              <p className="text-muted-foreground">
+                Remove {pendingPaths.length} file{pendingPaths.length === 1 ? "" : "s"}? Kalpa will
+                skip anything modified since it wrote it, and say why.
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={removing || pendingPaths.length === 0}
+                  onClick={() => void onConfirmRemove(pendingPaths)}
+                >
+                  {removing ? <Spinner className="size-3.5" /> : <Trash2Icon />}
+                  {removing ? "Removing..." : "Confirm remove"}
+                </Button>
+                <Button size="sm" variant="outline" disabled={removing} onClick={onCancelRemove}>
+                  Cancel
+                </Button>
+              </div>
+            </GlassPanel>
+          )}
+
+          {removeError && (
+            <p className="text-xs text-status-danger" role="alert">
+              {removeError}
+            </p>
+          )}
+
+          {removeOutcome && (
+            <GlassPanel variant="subtle" className="space-y-1 p-3 text-xs" role="status">
+              <p className="text-status-success">
+                Removed {removeOutcome.removed.length} file
+                {removeOutcome.removed.length === 1 ? "" : "s"}.
+              </p>
+              {removeOutcome.skipped.length > 0 && (
+                <p className="text-muted-foreground">
+                  Skipped {removeOutcome.skipped.length} file
+                  {removeOutcome.skipped.length === 1 ? "" : "s"}: modified since Kalpa wrote them,
+                  or already accounted for. Left in place, not a failure.
+                </p>
+              )}
+            </GlassPanel>
+          )}
+        </div>
+      )}
+
+      {!loading && !error && orphans.length > 0 && (
+        <GlassPanel variant="subtle" className="mt-3 overflow-hidden p-0">
+          <button
+            type="button"
+            aria-expanded={emergencyOpen}
+            aria-controls="client-health-emergency-list"
+            onClick={onToggleEmergencyOpen}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors duration-150 hover:bg-structure-04 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20"
+          >
+            {emergencyOpen ? (
+              <ChevronDownIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRightIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+            )}
+            <ShieldAlertIcon aria-hidden className="size-4 shrink-0 text-status-danger" />
+            <span className="text-[13px]">
+              Emergency removal ({orphans.length} unmanaged{" "}
+              {orphans.length === 1 ? "file" : "files"})
+            </span>
+          </button>
+          {emergencyOpen && (
+            <div
+              id="client-health-emergency-list"
+              className="space-y-3 border-t border-structure-06 p-3"
+            >
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Kalpa has no record of these — the manifest is gone, or they were placed by hand
+                before Kalpa existed. Steam&apos;s Verify integrity and the ZOS launcher&apos;s
+                Repair only check files they shipped, so neither removes a foreign injector. Kalpa
+                only lists a file here when its version information positively identifies it as
+                ReShade.
+              </p>
+              <ul className="space-y-2">
+                {orphans.map((injector) => (
+                  <OrphanInjectorRow
+                    key={injector.file_name}
+                    injector={injector}
+                    active={emergencyTarget === injector.file_name}
+                    confirmInput={emergencyConfirmInput}
+                    onSetTarget={onSetEmergencyTarget}
+                    onInputChange={onEmergencyConfirmInputChange}
+                    busy={emergencyBusy}
+                    error={emergencyError}
+                    result={emergencyResult}
+                    onRemove={onEmergencyRemove}
+                  />
+                ))}
+              </ul>
+            </div>
+          )}
+        </GlassPanel>
+      )}
+    </section>
+  );
+}
+
+function ManagedFileRow({
+  file,
+  selected,
+  onToggle,
+}: {
+  file: ManagedFileStatus;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const meta = FILE_STATE_META[file.state];
+  const { Icon } = meta;
+  return (
+    <li
+      className={cn(
+        "flex items-start gap-3 rounded-xl border p-3 transition-colors duration-150",
+        selected ? "border-primary/30 bg-primary/[0.04]" : "border-structure-06 bg-structure-02"
+      )}
+    >
+      <Checkbox
+        checked={selected}
+        onCheckedChange={() => onToggle()}
+        aria-label={`Select ${file.relative_path}`}
+        className="mt-0.5"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-[12px]" title={file.relative_path}>
+            {file.relative_path}
+          </span>
+          <InfoPill color="muted">{KIND_LABEL[file.kind]}</InfoPill>
+        </div>
+        <div className="mt-1 flex items-center gap-1.5">
+          <Icon aria-hidden className={cn("size-3.5 shrink-0", meta.text)} />
+          <span className={cn("text-[11px] font-semibold uppercase tracking-wide", meta.text)}>
+            {meta.label}
+          </span>
+        </div>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{meta.hint}</p>
+        {file.restores_backup && (
+          <p className="mt-1 text-xs text-status-info">Restores your original file when removed.</p>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function OrphanInjectorRow({
+  injector,
+  active,
+  confirmInput,
+  onSetTarget,
+  onInputChange,
+  busy,
+  error,
+  result,
+  onRemove,
+}: {
+  injector: OrphanInjector;
+  active: boolean;
+  confirmInput: string;
+  onSetTarget: (fileName: string | null) => void;
+  onInputChange: (value: string) => void;
+  busy: boolean;
+  error: string | null;
+  result: EmergencyRemoval | null;
+  onRemove: (fileName: string) => void | Promise<void>;
+}) {
+  const matches = confirmInput === injector.file_name;
+  const succeeded = result?.file_name === injector.file_name;
+  return (
+    <li className="rounded-xl border border-l-[3px] border-status-danger/20 border-l-status-danger bg-status-danger/[0.04] p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-heading text-[13px] font-semibold">{injector.file_name}</p>
+          <p className="text-xs text-muted-foreground">
+            Matched: {injector.product_name}
+            {injector.version ? ` · v${injector.version}` : ""}
+          </p>
+        </div>
+        {!active && !succeeded && (
+          <Button size="sm" variant="destructive" onClick={() => onSetTarget(injector.file_name)}>
+            <Trash2Icon />
+            Remove
+          </Button>
+        )}
+      </div>
+
+      {active && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            This moves the file to quarantine — it is not deleted. Type{" "}
+            <span className="font-mono text-foreground">{injector.file_name}</span> to confirm.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={confirmInput}
+              onChange={(e) => onInputChange(e.target.value)}
+              placeholder={injector.file_name}
+              aria-label={`Type ${injector.file_name} to confirm removal`}
+              className="max-w-[220px]"
+            />
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={!matches || busy}
+              onClick={() => void onRemove(injector.file_name)}
+            >
+              {busy ? <Spinner className="size-3.5" /> : <Trash2Icon />}
+              {busy ? "Quarantining..." : "Quarantine"}
+            </Button>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onSetTarget(null)}>
+              Cancel
+            </Button>
+          </div>
+          {error && (
+            <p className="text-xs text-status-danger" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+      )}
+
+      {succeeded && result && (
+        <p className="mt-2 text-xs text-status-success" role="status">
+          Moved to quarantine: <span className="font-mono">{result.quarantine_path}</span>
+        </p>
+      )}
     </li>
   );
 }
