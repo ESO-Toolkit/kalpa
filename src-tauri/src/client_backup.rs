@@ -52,7 +52,50 @@ use crate::client_write::{ManagedFile, ManagedKind, ManagedManifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Serializes every manifest read-modify-write sequence in this module.
+///
+/// `load_manifest_at` -> mutate -> `save_manifest_at` is not safe to run
+/// concurrently: `atomic_write` only guarantees the *write* half is atomic,
+/// not the read-then-write sequence around it. Two concurrent callers (a
+/// double-clicked button, an install racing a preset switch) can both load
+/// the same manifest, both mutate their own copy, and the second save
+/// silently discards the first caller's entries. For a placed file that is
+/// not cosmetic: an unrecorded entry is a ghost — uninstall can never find it
+/// to remove it, and its backup folder is unreferenced, so
+/// [`prune_unreferenced_backups`] eventually deletes the user's displaced
+/// original out from under them.
+///
+/// This is module-level rather than Tauri-managed state (the pattern used
+/// elsewhere in this codebase, see `MetadataLock` in `lib.rs`) because this
+/// module may only be edited in isolation from `lib.rs` and `commands.rs`
+/// while this fix lands; a `static Mutex` gives the same process-wide
+/// exclusion without threading a new managed value through the app builder
+/// or any command signature.
+///
+/// **Known limit**: this is a single process's lock. It does nothing to
+/// protect a client directory against two separate Kalpa processes (two app
+/// windows, or a stray second instance) racing the same manifest file. That
+/// is a pre-existing gap this change does not attempt to close.
+static MANIFEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the process-wide manifest lock, recovering from poisoning instead of
+/// propagating it.
+///
+/// The data this lock protects is a file on disk, re-read fresh from disk on
+/// every acquisition — there is no in-memory invariant that a panicking
+/// holder could have left half-updated. A poisoned lock here just means some
+/// earlier critical section panicked; refusing every future manifest
+/// read-modify-write because of that would brick placement/revert entirely,
+/// which is a worse outcome than proceeding with a guard over a value nobody
+/// actually reads (`()`).
+fn lock_manifest() -> std::sync::MutexGuard<'static, ()> {
+    MANIFEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// File name of the managed-file manifest inside the app data directory.
 const MANIFEST_FILE: &str = "client-managed.json";
@@ -452,7 +495,13 @@ fn roll_back_with(
 /// "the user's original". Writing the entry is what stops both. The returned
 /// error still carries the original failure as its primary cause; the rollback
 /// status is appended, not substituted.
-fn record_incomplete_rollback(
+///
+/// Assumes the [`MANIFEST_LOCK`] is already held by the caller — it performs
+/// its own load-mutate-save sequence on the manifest and must not race a
+/// concurrent placement or revert. `std::sync::Mutex` is not reentrant, so
+/// this function must never acquire the lock itself; every call site is
+/// inside a section that already holds it.
+fn record_incomplete_rollback_locked(
     manifest_path: &Path,
     client_root: &Path,
     placed: &[PlacedRecord],
@@ -554,7 +603,43 @@ fn apply_placements_in(
 
 /// Inner form of [`apply_placements_in`] taking the restore-copy used during
 /// rollback, so tests can drive the mixed-state path.
+///
+/// Takes [`MANIFEST_LOCK`] for the whole batch, not just the final save.
+/// This is the load-modify-save sequence the module doc warns about:
+/// `atomic_write` only makes the write itself atomic, and without the lock
+/// two concurrent batches (a double-clicked button, an install racing a
+/// preset switch) can each load the same manifest, mutate their own copy,
+/// and have the second save silently discard the first batch's entries — a
+/// lost entry that later leaves an orphaned backup for `prune_unreferenced_backups`
+/// to delete.
+///
+/// The lock is held across the placement loop itself (file copies, backups,
+/// hashing), not only around the manifest load/save at the end, for two
+/// reasons: first, a mid-batch failure calls
+/// [`record_incomplete_rollback_locked`], which is itself a manifest
+/// load-mutate-save and must not race a concurrent batch; second, the
+/// manifest entries this function writes must describe exactly the files
+/// this batch placed on disk, so the disk work and the manifest write have
+/// to be one critical section to stay consistent with each other. That does
+/// mean a second `apply_placements` blocks on filesystem I/O rather than
+/// just a manifest write — accepted here because correctness (no lost
+/// entries, no manifest describing files that were never placed) matters
+/// more than one caller waiting slightly longer.
 fn apply_placements_in_with(
+    manifest_path: &Path,
+    backup_root: &Path,
+    client_root: &Path,
+    placements: Vec<Placement>,
+    restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
+) -> Result<Vec<ManagedFile>, String> {
+    let _guard = lock_manifest();
+    apply_placements_in_with_locked(manifest_path, backup_root, client_root, placements, restore)
+}
+
+/// Body of [`apply_placements_in_with`]; assumes [`MANIFEST_LOCK`] is already
+/// held. Must never acquire the lock itself and must never call another
+/// function that does — `std::sync::Mutex` is not reentrant.
+fn apply_placements_in_with_locked(
     manifest_path: &Path,
     backup_root: &Path,
     client_root: &Path,
@@ -579,7 +664,7 @@ fn apply_placements_in_with(
                 if failed.is_empty() {
                     return Err(error);
                 }
-                return Err(record_incomplete_rollback(
+                return Err(record_incomplete_rollback_locked(
                     manifest_path,
                     client_root,
                     &placed,
@@ -606,7 +691,7 @@ fn apply_placements_in_with(
         if failed.is_empty() {
             return Err(error);
         }
-        return Err(record_incomplete_rollback(
+        return Err(record_incomplete_rollback_locked(
             manifest_path,
             client_root,
             &placed,
@@ -681,7 +766,26 @@ pub fn revert_placements(
 }
 
 /// Inner form of [`revert_placements`], testable without an `AppHandle`.
+///
+/// Takes [`MANIFEST_LOCK`] across the whole load-mutate-save sequence (and
+/// the file removal/restore work that must stay consistent with what gets
+/// written to the manifest), for the same reason
+/// [`apply_placements_in_with`] does: without it, a revert racing an apply
+/// (or another revert) on the same manifest can read a bucket that is about
+/// to be overwritten and lose the other call's changes when it saves.
 fn revert_placements_in(
+    manifest_path: &Path,
+    backup_root: &Path,
+    client_root: &Path,
+    relative_paths: &[String],
+) -> Result<Vec<String>, String> {
+    let _guard = lock_manifest();
+    revert_placements_in_locked(manifest_path, backup_root, client_root, relative_paths)
+}
+
+/// Body of [`revert_placements_in`]; assumes [`MANIFEST_LOCK`] is already
+/// held. Must never acquire the lock itself.
+fn revert_placements_in_locked(
     manifest_path: &Path,
     backup_root: &Path,
     client_root: &Path,
@@ -1447,5 +1551,96 @@ mod tests {
             "the recorded entry is what makes the original recoverable"
         );
         assert!(h.entries().is_empty());
+    }
+
+    // ── MANIFEST_LOCK regression coverage ──────────────────────────────
+
+    /// Without the lock, two threads each doing load-modify-save on the same
+    /// manifest race: the second save silently discards whatever the first
+    /// thread's copy recorded. This is the actual bug — a double-clicked
+    /// button, or an install racing a preset switch — and a lost entry here
+    /// is a ghost file: uninstall can never find it, and its backup folder
+    /// becomes unreferenced and eventually pruned out from under the user's
+    /// own displaced original.
+    #[test]
+    fn concurrent_applies_to_different_files_lose_no_entries() {
+        for _ in 0..30 {
+            let h = Harness::new();
+
+            std::thread::scope(|scope| {
+                let h_ref = &h;
+                scope.spawn(|| {
+                    h_ref
+                        .apply(vec![h_ref.placement("dxgi.dll", "a")])
+                        .expect("apply a should succeed");
+                });
+                scope.spawn(|| {
+                    h_ref
+                        .apply(vec![h_ref.placement("ReShade.ini", "b")])
+                        .expect("apply b should succeed");
+                });
+            });
+
+            let entries = h.entries();
+            let paths: std::collections::BTreeSet<&str> =
+                entries.iter().map(|e| e.relative_path.as_str()).collect();
+            assert_eq!(
+                entries.len(),
+                2,
+                "both concurrent placements must be recorded, not just one: {entries:?}"
+            );
+            assert!(paths.contains("dxgi.dll"), "lost entry: {entries:?}");
+            assert!(paths.contains("ReShade.ini"), "lost entry: {entries:?}");
+            assert!(h.client.join("dxgi.dll").is_file());
+            assert!(h.client.join("ReShade.ini").is_file());
+        }
+    }
+
+    /// An apply and a revert racing on the same manifest must not leave it
+    /// pointing at a file that no longer exists, nor silently keep a file on
+    /// disk with no manifest entry to make it reachable again.
+    #[test]
+    fn concurrent_apply_and_revert_stay_self_consistent() {
+        for _ in 0..30 {
+            let h = Harness::new();
+            h.apply(vec![h.placement("existing.ini", "seed")])
+                .expect("seed placement should succeed");
+            assert!(h.client.join("existing.ini").is_file());
+
+            std::thread::scope(|scope| {
+                let h_ref = &h;
+                scope.spawn(|| {
+                    h_ref
+                        .apply(vec![h_ref.placement("new.dll", "fresh")])
+                        .expect("apply new should succeed");
+                });
+                scope.spawn(|| {
+                    h_ref
+                        .revert(&["existing.ini".to_string()])
+                        .expect("revert existing should succeed");
+                });
+            });
+
+            let entries = h.entries();
+            let paths: std::collections::BTreeSet<&str> =
+                entries.iter().map(|e| e.relative_path.as_str()).collect();
+
+            assert!(
+                paths.contains("new.dll"),
+                "the concurrent apply's entry must survive the interleaved revert: {entries:?}"
+            );
+            assert!(
+                !paths.contains("existing.ini"),
+                "a reverted entry must not still be recorded: {entries:?}"
+            );
+            assert!(
+                h.client.join("new.dll").is_file(),
+                "an entry must not exist without its file on disk"
+            );
+            assert!(
+                !h.client.join("existing.ini").exists(),
+                "a removed file must not still be reachable through the manifest"
+            );
+        }
     }
 }

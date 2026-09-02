@@ -8,6 +8,7 @@ pub mod client_backup;
 pub mod client_download;
 mod client_health;
 mod client_install;
+pub mod client_signature;
 pub mod client_write;
 mod commands;
 mod edit_backups;
@@ -923,6 +924,7 @@ pub fn run() {
             client_health::detect_eso_clients,
             client_health::validate_eso_client,
             client_health::inspect_eso_client,
+            commands::is_eso_or_launcher_running,
             client_write::set_game_install_path,
             client_write::clear_game_install_path,
             commands::set_addons_path,

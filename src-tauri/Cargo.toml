@@ -76,7 +76,18 @@ keyring = { version = "3", features = ["windows-native"] }
 # 0.38/windows-core-0.61 type. Dependabot minors for these two crates are
 # ignored in .github/dependabot.yml; drop those rules when tauri/wry move.
 webview2-com = "0.38"
-windows = "0.61"
+# Features are additive within a version and cannot create the duplicate
+# windows-core the note above warns about — that hazard is specific to moving
+# off 0.61. WinTrust/Cryptography are needed by `client_signature` for
+# Authenticode verification of user-supplied DLLs; generated bindings are used
+# there rather than hand-written `extern "system"` declarations because a single
+# wrong field offset in CERT_INFO would mean reading the wrong bytes while
+# reporting a confident answer, in the one place that gates writing a binary
+# into the user's game folder.
+windows = { version = "0.61", features = [
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS Keychain for token storage (same chunked layout as Windows).

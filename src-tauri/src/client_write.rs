@@ -370,9 +370,17 @@ pub async fn begin_write(
 ) -> Result<PathBuf, String> {
     refuse_under_sandbox()?;
     let root = require_allowed_client_path(state, client_dir)?;
-    if crate::commands::is_eso_running().await? {
+    // Deliberately the launcher-aware check, not `is_eso_running`. The ZOS
+    // launcher's patcher rewrites files in the client directory during a game
+    // update or a Repair — including `nvngx_dlss.dll` — so writing while it is
+    // open is a race against a process that is also mid-write. `is_eso_running`
+    // stays narrow because the migration preconditions and the ESO-running
+    // dialog use it to say "close the game", and an idle launcher should not
+    // trip those.
+    if crate::commands::is_eso_or_launcher_running().await? {
         return Err(
-            "The Elder Scrolls Online is running. Close the game before changing client files."
+            "The Elder Scrolls Online or its launcher is running. Close both before changing \
+             client files — the launcher's patcher writes to this folder too."
                 .to_string(),
         );
     }

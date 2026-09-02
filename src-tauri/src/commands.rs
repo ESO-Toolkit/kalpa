@@ -10621,7 +10621,7 @@ pub async fn is_eso_running() -> Result<bool, String> {
     tokio::task::spawn_blocking(|| {
         #[cfg(target_os = "windows")]
         {
-            is_eso_running_windows()
+            is_eso_running_windows(is_eso_client_process_name)
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -10636,10 +10636,66 @@ pub async fn is_eso_running() -> Result<bool, String> {
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Check for eso64.exe / eso.exe using the Windows Toolhelp32 snapshot API.
-/// This avoids spawning a `tasklist` subprocess (which lists every process as CSV).
+/// Like [`is_eso_running`], but also true while the ZOS/Bethesda launcher is
+/// open. The launcher's patcher rewrites files inside the client directory —
+/// including `nvngx_dlss.dll` — during a game update or a Repair, so any
+/// feature that writes into that directory (ReShade install, DLSS DLL swap)
+/// must treat the launcher as "the client is active" even though no addon
+/// manager or migration flow needs to.
+///
+/// This is intentionally a separate command from `is_eso_running` rather than
+/// broadening it in place: `is_eso_running` already backs the migration
+/// wizard's preconditions (`safe_migration.rs`) and the `eso-running-dialog`
+/// UI, both of which tell the user to close *the game*. Making that check
+/// also fire while only the launcher window is open (a common idle state)
+/// would be a false-positive regression for those callers.
+///
+/// Used by `client_write::begin_write` as the gate on every client-directory
+/// write.
+#[tauri::command]
+pub async fn is_eso_or_launcher_running() -> Result<bool, String> {
+    tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            is_eso_running_windows(is_eso_or_launcher_process_name)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Same substring-match caveat as `is_eso_running`'s unix branch.
+            Ok(crate::platform::unix_process_running("eso64")
+                || crate::platform::unix_process_running("bethesda.net_launcher")
+                || crate::platform::unix_process_running("esolauncher"))
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// True if `name` is `eso64.exe` or `eso.exe`, compared case-insensitively.
+/// `name` may be mixed-case; this lowercases before matching.
+fn is_eso_client_process_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "eso64.exe" || lower == "eso.exe"
+}
+
+/// True if `name` is the ESO client, or the ZOS/Bethesda launcher, compared
+/// case-insensitively. The launcher names are kept in sync with
+/// `PROTECTED_NAMES` in `client_write.rs`, which refuses to let Kalpa write
+/// over these same executables.
+fn is_eso_or_launcher_process_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    is_eso_client_process_name(&lower)
+        || lower == "bethesda.net_launcher.exe"
+        || lower == "esolauncher.exe"
+}
+
+/// Check the running-process snapshot on Windows for a process name matching
+/// `matches`. Shared by [`is_eso_running`] and [`is_eso_or_launcher_running`]
+/// so the Toolhelp32 FFI walk is written once. This avoids spawning a
+/// `tasklist` subprocess (which lists every process as CSV).
 #[cfg(target_os = "windows")]
-fn is_eso_running_windows() -> Result<bool, String> {
+fn is_eso_running_windows(matches: impl Fn(&str) -> bool) -> Result<bool, String> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
 
@@ -10681,10 +10737,9 @@ fn is_eso_running_windows() -> Result<bool, String> {
         if Process32FirstW(snap, &mut entry) != 0 {
             loop {
                 let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
-                let name = OsString::from_wide(&entry.szExeFile[..len])
-                    .to_string_lossy()
-                    .to_lowercase();
-                if name == "eso64.exe" || name == "eso.exe" {
+                let name_os = OsString::from_wide(&entry.szExeFile[..len]);
+                let name = name_os.to_string_lossy();
+                if matches(&name) {
                     found = true;
                     break;
                 }
@@ -12284,6 +12339,28 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn eso_client_process_name_matches_case_insensitively() {
+        assert!(is_eso_client_process_name("eso64.exe"));
+        assert!(is_eso_client_process_name("ESO64.EXE"));
+        assert!(is_eso_client_process_name("eso.exe"));
+        assert!(!is_eso_client_process_name("notepad.exe"));
+        // Substring, not a match: "eso" appearing inside another exe name.
+        assert!(!is_eso_client_process_name("resolve.exe"));
+        assert!(!is_eso_client_process_name("bethesda.net_launcher.exe"));
+    }
+
+    #[test]
+    fn eso_or_launcher_process_name_also_matches_the_zos_launcher() {
+        assert!(is_eso_or_launcher_process_name("eso64.exe"));
+        assert!(is_eso_or_launcher_process_name("ESO64.EXE"));
+        assert!(is_eso_or_launcher_process_name("bethesda.net_launcher.exe"));
+        assert!(is_eso_or_launcher_process_name("Bethesda.net_Launcher.exe"));
+        assert!(is_eso_or_launcher_process_name("esolauncher.exe"));
+        assert!(!is_eso_or_launcher_process_name("notepad.exe"));
+        assert!(!is_eso_or_launcher_process_name("resolve.exe"));
+    }
 
     #[test]
     fn reveal_paths_are_confined_to_the_approved_eso_tree() {
