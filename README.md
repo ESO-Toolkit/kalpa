@@ -29,7 +29,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea on a native stack:
 
 - **No bundled runtime.** A Rust backend instead of Minion's Java: 17 MB to install on Windows, 10 MB from the Linux `.deb`/`.rpm`. (The AppImage is 84 MB because it carries its own GTK and WebKit.)
-- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 135 MB with the window open. Task Manager figures on a 119-addon profile.
+- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 250 MB with the window open. Task Manager figures on a 119-addon profile.
 - **Dependency resolution that actually resolves**, including transitive dependencies, embedded libraries, and version checks.
 - **Pack Hub**, for publishing and installing shared addon collections. Minion has no equivalent.
 
