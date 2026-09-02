@@ -11,6 +11,7 @@ mod client_health;
 mod client_install;
 pub mod client_signature;
 pub mod client_stack;
+pub mod client_toggle;
 pub mod client_uninstall;
 pub mod client_write;
 mod commands;
@@ -934,6 +935,8 @@ pub fn run() {
             client_adopt::plan_adoption,
             client_adopt::adopt_stack,
             client_adopt::forget_stack,
+            client_toggle::plan_client_toggle,
+            client_toggle::apply_client_toggle,
             client_uninstall::list_managed_client_files,
             client_uninstall::uninstall_managed_client_files,
             client_uninstall::emergency_remove_injector,

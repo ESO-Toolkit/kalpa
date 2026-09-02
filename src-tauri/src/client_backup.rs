@@ -225,7 +225,7 @@ fn save_manifest_at(path: &Path, manifest: &ManagedManifest) -> Result<(), Strin
 /// Canonical where possible so two spellings of the same install share a
 /// bucket; the configured form is the fallback when the directory has gone
 /// away (uninstall bookkeeping still has to be findable).
-fn install_key(client_root: &Path) -> String {
+pub fn install_key(client_root: &Path) -> String {
     dunce::canonicalize(client_root)
         .unwrap_or_else(|_| client_root.to_path_buf())
         .to_string_lossy()
