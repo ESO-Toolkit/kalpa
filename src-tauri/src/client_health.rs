@@ -41,11 +41,9 @@ pub enum HealthLevel {
     Ok,
     Info,
     Warning,
-    /// No finding in this module emits `Danger` today — every problem it can
-    /// detect is recoverable and non-destructive. The level exists so the
-    /// frontend's severity ladder is complete and a future probe (a corrupt
-    /// install, say) can use it without a breaking enum change.
-    #[allow(dead_code)]
+    /// `client_health`'s own probes never emit this — every problem they can
+    /// detect is recoverable. `client_stack` does, for cross-layer breakage
+    /// like an addon whose runtime is missing.
     Danger,
 }
 
