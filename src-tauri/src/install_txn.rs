@@ -129,6 +129,10 @@ impl InstallTransaction {
         root_files: &[String],
         manifests: &[(String, Vec<u8>)],
     ) -> Result<Vec<String>, String> {
+        // Debug-only: a tiny addon was observed spending ~3s here, which the
+        // single "commit" label could not explain.
+        let phase = crate::commands::PhaseTimer::start("commit");
+
         let mut folders = folders.to_vec();
         folders.sort();
         folders.dedup();
@@ -186,6 +190,7 @@ impl InstallTransaction {
             pre_existing_root_files,
         };
         write_journal(&self.root, &journal)?;
+        phase.mark("stage journal");
 
         let mut landed = Vec::new();
         for folder in &folders {
@@ -288,9 +293,12 @@ impl InstallTransaction {
                 "Failed to persist the completed addon-folder swap: {error}.{rollback}"
             ));
         }
+        phase.mark("renames");
         promote_hashes(&self.addons_dir, &self.root, &journal.hash_folders)?;
+        phase.mark("promote hashes");
         journal.phase = Phase::Promoted;
         finish_committed_transaction(&self.addons_dir, &self.root, &journal);
+        phase.mark("cleanup (tombstone delete)");
         self.finished = true;
         Ok(folders)
     }

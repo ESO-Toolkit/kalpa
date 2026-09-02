@@ -72,6 +72,32 @@ export interface InstallResult {
   pendingDeps: PendingDependency[];
 }
 
+/** Per-addon phase of a batch run, from the `batch-update-progress` event.
+ *  Shared by App's status map and the update banner, which sorts by it. */
+export type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+
+/** Phase of ONE addon's install or update, from the `update-progress` event.
+ *  A different vocabulary from {@link AddonPhase}: this event tracks a single
+ *  operation through its stages, so it has no terminal "completed"/"failed" —
+ *  the command's promise settling is what ends it. */
+export type InstallPhase = "downloading" | "extracting" | "dependencies";
+
+/** Payload of the `update-progress` event (Rust `UpdateProgressEvent`).
+ *
+ *  One event shape covers every phase. `fileIndex`/`fileTotal` count files while
+ *  extracting and dependencies-in-this-round while resolving; the byte fields
+ *  are present only while downloading, and `bytesTotal` is absent when the
+ *  server sent no `Content-Length`. */
+export interface InstallProgressEvent {
+  operationId: string;
+  folderName: string;
+  phase: InstallPhase;
+  fileIndex: number;
+  fileTotal: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+}
+
 export interface UpdateCheckResult {
   folderName: string;
   esouiId: number;

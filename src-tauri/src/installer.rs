@@ -231,8 +231,15 @@ fn extract_with_rollback(
         HashSet::new()
     };
 
+    // Debug-only sub-phase timing. An UPDATE does work a fresh install does not
+    // — preserving residual files, then deleting the tombstoned old tree at
+    // commit — and lumping it all under one label hid that.
+    let phase = crate::commands::PhaseTimer::start("extract");
+
     let transaction = InstallTransaction::begin(addons_dir, hooks.cancel)?;
     let stage_dir = transaction.stage_dir();
+    phase.mark("begin transaction");
+
     let mut installed = extract_addon_zip_inner(
         &mut archive,
         &stage_dir,
@@ -241,6 +248,7 @@ fn extract_with_rollback(
         wrap_name.as_deref(),
     )?;
     installed.sort();
+    phase.mark("write entries");
 
     for folder in &installed {
         let live = addons_dir.join(folder);
@@ -249,6 +257,7 @@ fn extract_with_rollback(
             copy_residual_files(&live, &stage_dir.join(folder), &live)?;
         }
     }
+    phase.mark("preserve residual files");
 
     // A kept root file is absent from staging and must remain untouched live.
     root_files.retain(|relative| stage_dir.join(relative).is_file());
@@ -269,8 +278,11 @@ fn extract_with_rollback(
         }
         None => Vec::new(),
     };
+    phase.mark("hash baseline");
 
-    transaction.commit_with_root_files(&installed, &root_files, &manifests)
+    let result = transaction.commit_with_root_files(&installed, &root_files, &manifests);
+    phase.mark("commit (renames + tombstone delete)");
+    result
 }
 
 fn manifests_to_bytes(
@@ -367,6 +379,42 @@ fn is_windows_reparse_point(_: &fs::Metadata) -> bool {
     false
 }
 
+/// True when `file_name` is an ESO manifest for a folder named `dir_name`
+/// (`<dir_name>.txt` or `<dir_name>.addon`), matched case-insensitively the
+/// way the game resolves names.
+fn is_manifest_name(file_name: &str, dir_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    let dir = dir_name.to_lowercase();
+    lower == format!("{dir}.txt") || lower == format!("{dir}.addon")
+}
+
+/// True when a live file is the manifest of its containing folder AND the
+/// staged replacement folder ships a manifest of its own. Such a file must not
+/// be preserved as residual: a manifest is upstream data, not user data, and
+/// when an author renames theirs (LibGPS 3.3.2 shipped `LibGPS.txt`, 3.3.3
+/// ships `LibGPS.addon`) the preserved old `.txt` wins `find_manifest_in`'s
+/// txt-first probe forever after, so Kalpa keeps reading the stale version and
+/// misreports the addon on every update check. When the archive ships NO
+/// manifest for the folder, the live one is still preserved — dropping it
+/// would unload the addon in game.
+fn is_superseded_manifest(file_name: &std::ffi::OsStr, current: &Path, target: &Path) -> bool {
+    let Some(dir_name) = current.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return false;
+    };
+    if !is_manifest_name(&file_name.to_string_lossy(), &dir_name) {
+        return false;
+    }
+    let Some(stage_parent) = target.parent() else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(stage_parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        is_manifest_name(&entry.file_name().to_string_lossy(), &dir_name) && entry.path().is_file()
+    })
+}
+
 fn copy_residual_files(
     current: &Path,
     stage_folder: &Path,
@@ -392,6 +440,9 @@ fn copy_residual_files(
             fs::create_dir_all(&target).map_err(|e| describe_write_error(&target, &e))?;
             copy_residual_files(&source, stage_folder, live_root)?;
         } else if metadata.is_file() && !target.exists() {
+            if is_superseded_manifest(&entry.file_name(), current, &target) {
+                continue;
+            }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
             }
@@ -630,6 +681,16 @@ fn extract_addon_zip_inner(
     wrap_name: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let mut created_folders: HashSet<String> = HashSet::new();
+    // Parent directories already materialised by this extraction. A media addon
+    // is thousands of files spread over a few dozen folders — LibCustomIcons is
+    // 5,642 entries across 31 directories — so calling `create_dir_all` per file
+    // spent ~0.66s re-confirming directories that existed after the first few
+    // entries. Remembering them turns 5,642 syscalls into 31.
+    //
+    // Scoped to this call, never global: the staging tree is new every time, so
+    // a cache outliving the extraction would skip creating a directory that a
+    // later run genuinely needs.
+    let mut ensured_dirs: HashSet<std::path::PathBuf> = HashSet::new();
     let mut total_extracted: u64 = 0;
     let total = archive.len();
 
@@ -699,7 +760,9 @@ fn extract_addon_zip_inner(
         }
 
         if entry.is_dir() {
-            fs::create_dir_all(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
+            if ensured_dirs.insert(out_path.clone()) {
+                fs::create_dir_all(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
+            }
         } else {
             // Check declared size against remaining budget before extracting
             let declared_size = entry.size();
@@ -710,9 +773,11 @@ fn extract_addon_zip_inner(
                 ));
             }
 
-            // Ensure parent directory exists
+            // Ensure parent directory exists (once per directory, not per file)
             if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
+                if ensured_dirs.insert(parent.to_path_buf()) {
+                    fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
+                }
             }
 
             let mut outfile =
@@ -728,10 +793,32 @@ fn extract_addon_zip_inner(
                     "Failed to extract {out_path:?}: archive declared {declared_size} bytes but produced {bytes_written}; the archive may be corrupt."
                 ));
             }
-            outfile
-                .sync_all()
-                .map_err(|e| describe_write_error(&out_path, &e))?;
-
+            // Deliberately NO `sync_all()` here. An fsync per entry made a
+            // many-file addon pathologically slow: extracting 5,642 small files
+            // (LibCustomIcons' shape) measured 39.3s with a per-file fsync vs
+            // 3.3s without — a 12x penalty paid on every install and update.
+            //
+            // Nothing is traded away that matters. Crash *atomicity* comes from
+            // the transaction, not from these syncs: entries land in an isolated
+            // staging dir and only become live via the commit renames in
+            // `install_txn`, so a crash mid-extract leaves the previous version
+            // untouched and the staging tree is discarded on recovery. Recovery
+            // itself never reads payload bytes — `recover_staging_locked` decides
+            // purely from the journal phase and path presence, i.e. from rename
+            // metadata, which NTFS journals.
+            //
+            // An application crash is therefore harmless outright: the page cache
+            // outlives the process and the OS flushes it. The only window a
+            // per-entry fsync closed is an OS crash or power loss inside the
+            // lazy-writer window right after commit. Worst case there is an addon
+            // with zeroed files — ESOUI bytes we do not own and can always fetch
+            // again. Note the remedy is a manual REINSTALL, not an automatic
+            // re-download: `kalpa.json` is written durably, so the app still
+            // believes this version is installed and will not re-offer it.
+            //
+            // The fsyncs that guard data we CANNOT refetch stay exactly where
+            // they are: `copy_residual_files` (the user's own files, carried
+            // across an update) and the transaction journal / hash manifests.
             total_extracted += bytes_written;
 
             // Double-check actual bytes written against budget
@@ -926,6 +1013,55 @@ mod tests {
         assert_eq!(folders, vec!["MainAddon".to_string()]);
         assert!(addons_dir.join("MainAddon/init.lua").is_file());
         assert!(addons_dir.join("readme.txt").is_file());
+    }
+
+    /// Regression: LibGPS 3.3.2 shipped `LibGPS.txt`, 3.3.3 ships
+    /// `LibGPS.addon`. Residual preservation used to carry the old `.txt`
+    /// forward, and `find_manifest_in` prefers `.txt`, so Kalpa read the stale
+    /// manifest and permanently misreported the installed version. The old
+    /// manifest must be dropped when the update ships its own.
+    #[test]
+    fn update_drops_a_renamed_manifest_instead_of_preserving_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("LibGPS")).unwrap();
+        fs::write(addons_dir.join("LibGPS/LibGPS.txt"), b"## AddOnVersion: 68").unwrap();
+        fs::write(addons_dir.join("LibGPS/settings.cfg"), b"USER DATA").unwrap();
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "libgps.zip",
+            &["LibGPS/LibGPS.addon", "LibGPS/core.lua"],
+        );
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+
+        assert!(
+            !addons_dir.join("LibGPS/LibGPS.txt").exists(),
+            "stale renamed manifest survived the update"
+        );
+        assert!(addons_dir.join("LibGPS/LibGPS.addon").is_file());
+        // Genuine user files still ride across the update.
+        assert_eq!(
+            fs::read(addons_dir.join("LibGPS/settings.cfg")).unwrap(),
+            b"USER DATA"
+        );
+    }
+
+    /// The guard on the fix above: when the update ships NO manifest of its
+    /// own, the live manifest is user-visible load-bearing state and must
+    /// still be preserved — dropping it would unload the addon in game.
+    #[test]
+    fn update_without_a_new_manifest_still_preserves_the_old_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("LibGPS")).unwrap();
+        fs::write(addons_dir.join("LibGPS/LibGPS.txt"), b"## AddOnVersion: 68").unwrap();
+        let zip_path = create_zip_with_entries(tmp.path(), "patch.zip", &["LibGPS/extra.lua"]);
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+
+        assert!(addons_dir.join("LibGPS/LibGPS.txt").is_file());
+        assert!(addons_dir.join("LibGPS/extra.lua").is_file());
     }
 
     #[test]

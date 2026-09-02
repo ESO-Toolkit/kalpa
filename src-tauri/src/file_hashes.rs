@@ -275,47 +275,6 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
         .collect()
 }
 
-/// Build a hash baseline for a just-extracted addon folder by reusing a ZIP-derived
-/// hash map (`zip_hashes`, keyed folder-relative) for every file the ZIP provided,
-/// and hashing from disk ONLY the files the ZIP did not cover.
-///
-/// This is the optimized equivalent of [`compute_addon_hashes`] for the
-/// install/update path. The result is identical to hashing the whole folder from
-/// disk, because extraction writes the ZIP's bytes verbatim — so a covered file's
-/// disk hash equals its ZIP hash. The only files actually read from disk here are
-/// the ones the ZIP did not contain: files removed in the new version that linger,
-/// and user-added files. (For kept/skipped files the disk holds the user's bytes,
-/// but the caller overlays the upstream ZIP hash afterwards, and the ZIP hash is
-/// already what this function recorded — so the overlay is a safe no-op there.)
-///
-/// Driving the merge from a DISK walk (rather than starting from `zip_hashes`)
-/// guarantees the baseline only ever contains keys that actually exist on disk.
-/// A ZIP entry that extraction skips structurally — a symlink entry, which
-/// `hash_zip_entries` still hashes but `extract_addon_zip*` does not write — is
-/// therefore never recorded, matching `compute_addon_hashes` and avoiding a
-/// spurious "file deleted" flag on the next modification scan.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn compute_baseline_with_zip(
-    addon_path: &Path,
-    zip_hashes: &HashMap<String, String>,
-) -> Result<HashMap<String, String>, String> {
-    let mut entries: Vec<(String, PathBuf)> = Vec::new();
-    walk_addon_files(addon_path, |key, path| {
-        entries.push((key, path.to_path_buf()));
-        Ok(())
-    })?;
-    entries
-        .into_par_iter()
-        .map(|(key, path)| {
-            let value = match zip_hashes.get(&key) {
-                Some(h) => h.clone(),
-                None => file_signature(&key, &path)?,
-            };
-            Ok((key, value))
-        })
-        .collect()
-}
-
 /// Hash files inside a ZIP that belong to a specific addon folder, without extracting.
 /// Keys are forward-slash-normalized relative paths (excluding the top-level folder prefix).
 /// Every top-level folder an archive writes, each with its own bare-keyed hash
@@ -484,8 +443,11 @@ pub fn hash_zip_entries_by_folder(zip_path: &Path) -> Result<ZipHashSet, String>
 
 /// The hashes for a single folder of an archive.
 ///
-/// Retained so the many single-folder call sites keep working; new code that
-/// needs more than one folder should use [`hash_zip_entries_by_folder`].
+/// Every production caller goes through [`hash_zip_entries_by_folder`], the
+/// multi-folder entry point. This single-folder view survives only as a test
+/// convenience, so it is compiled out of release builds entirely rather than
+/// carrying an `allow(dead_code)` that would quietly outlive its last caller.
+#[cfg(test)]
 pub fn hash_zip_entries(
     zip_path: &Path,
     folder_name: &str,
@@ -495,6 +457,7 @@ pub fn hash_zip_entries(
         .remove(folder_name)
         .unwrap_or_default())
 }
+
 pub fn save_hash_manifest(addons_dir: &Path, manifest: &HashManifest) -> Result<(), String> {
     let dir = hashes_dir(addons_dir);
     if !dir.exists() {
@@ -677,11 +640,6 @@ pub fn record_hashes_for_folders(
 /// conflict resolution. For "keep_mine" files, we store the *upstream* hash
 /// (from the ZIP) so the next update still detects the user's edit.
 ///
-/// This variant hashes every folder from disk. Prefer
-/// [`record_hashes_with_zip_baseline`] on the conflict-aware update paths, where
-/// the ZIP has already been hashed once for conflict detection and that map can
-/// be reused instead of re-walking the whole folder.
-///
 /// Every folder is attempted; the first per-folder failure is reported via the
 /// returned `Err` (later folders still get their manifests written).
 #[cfg_attr(not(test), allow(dead_code))]
@@ -737,74 +695,9 @@ pub(crate) fn build_hash_manifests_for_folders(
     Ok(manifests)
 }
 
-/// Record hash baselines after a conflict-aware install/update, reusing the
-/// already-computed archive hashes instead of re-hashing each folder from disk.
-///
-/// Every folder in `installed_folders` is guaranteed an attempt at a manifest:
-/// if reusing the archive map fails for any folder it falls back to a full disk
-/// hash pass, and only a folder that fails *both* contributes an `Err`. Returns
-/// `Err` (after attempting all folders) if any folder could not be recorded, so
-/// the caller can fail the update instead of leaving metadata pointing at a
-/// folder with no hash baseline.
-///
-/// `zip_hashes` covers the whole archive, so a bundled sibling no longer has to
-/// re-open and re-hash the ZIP just to get its own map. `hash_overrides` is
-/// keyed by folder for the same reason: kept-mine files can now come from any
-/// folder the archive touches, not just the primary.
-#[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn record_hashes_with_zip_baseline(
-    addons_dir: &Path,
-    zip_path: &Path,
-    installed_folders: &[String],
-    zip_hashes: &ZipHashSet,
-    esoui_id: u32,
-    version: &str,
-    hash_overrides: Option<&BTreeMap<String, HashMap<String, String>>>,
-) -> Result<(), String> {
-    let timestamp = manifest_timestamp();
-
-    record_each_folder(installed_folders, |folder| {
-        let addon_path = addons_dir.join(folder);
-
-        // Build the folder's baseline from the archive map where possible,
-        // always falling back to a full disk hash so a ZIP-side failure (e.g.
-        // an entry exceeding the streaming hash cap) still produces a correct
-        // manifest.
-        let files = match zip_hashes.folders.get(folder) {
-            Some(folder_hashes) => compute_baseline_with_zip(&addon_path, folder_hashes)
-                .or_else(|_| compute_addon_hashes(&addon_path))?,
-            None => {
-                // The archive set was built elsewhere and does not cover this
-                // folder. Re-derive just this one rather than trusting a gap.
-                match hash_zip_entries(zip_path, folder) {
-                    Ok(folder_hashes) => compute_baseline_with_zip(&addon_path, &folder_hashes),
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: failed to hash ZIP for {folder}, falling back to disk: {e}"
-                        );
-                        compute_addon_hashes(&addon_path)
-                    }
-                }
-                .or_else(|_| compute_addon_hashes(&addon_path))?
-            }
-        };
-
-        write_folder_manifest(
-            addons_dir,
-            folder,
-            files,
-            esoui_id,
-            version,
-            &timestamp,
-            hash_overrides.and_then(|all| all.get(folder)),
-        )
-    })
-}
-
 /// Run `record` for every folder, attempting all of them and returning the first
 /// error encountered (logging each). Centralizes the "attempt all, report any
-/// failure" policy both record paths share.
+/// failure" policy of the record path.
 #[cfg_attr(not(test), allow(dead_code))]
 fn record_each_folder<F>(installed_folders: &[String], mut record: F) -> Result<(), String>
 where
@@ -836,9 +729,10 @@ fn manifest_timestamp() -> String {
 }
 
 /// Apply kept-file overrides, derive the `modified_files` cache, and persist one
-/// folder's manifest. Shared by the disk-only and ZIP-baseline record paths so
-/// they produce byte-identical manifests for the same `files` map. Returns the
-/// `save_hash_manifest` error so callers can treat a failed write as fatal.
+/// folder's manifest. Wraps [`build_folder_manifest`] so this path and the
+/// installer's staged-transaction path produce byte-identical manifests for the
+/// same `files` map. Returns the `save_hash_manifest` error so callers can
+/// treat a failed write as fatal.
 #[cfg_attr(not(test), allow(dead_code))]
 fn write_folder_manifest(
     addons_dir: &Path,
@@ -1365,29 +1259,6 @@ mod tests {
             .is_empty());
     }
 
-    // ── ZIP-baseline recording (the perf refactor) ──────────────────────
-    //
-    // Each test computes the OLD-CODE baseline the slow way (compute_addon_hashes
-    // over the extracted folder, then overlay overrides) as an oracle, then asserts
-    // the manifest written by record_hashes_with_zip_baseline matches it exactly.
-
-    /// Build the manifest `files` map the OLD code path would have produced:
-    /// hash the whole folder from disk, then overlay kept-file overrides.
-    fn oracle_baseline(
-        addon_path: &Path,
-        overrides: Option<&HashMap<String, String>>,
-    ) -> HashMap<String, String> {
-        let mut files = compute_addon_hashes(addon_path).unwrap();
-        if let Some(ov) = overrides {
-            for (k, v) in ov {
-                if files.contains_key(k) {
-                    files.insert(k.clone(), v.clone());
-                }
-            }
-        }
-        files
-    }
-
     fn sha256_hex(content: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
@@ -1398,136 +1269,34 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn compute_baseline_with_zip_matches_disk_for_covered_files() {
-        // When every disk file is covered by the ZIP map, the baseline equals
-        // the ZIP hashes — and equals a full disk hash pass (ZIP bytes == disk
-        // bytes after extraction).
-        let tmp = tempfile::tempdir().unwrap();
-        let addon = create_addon_dir(
-            tmp.path(),
-            "MyAddon",
-            &[("init.lua", "a"), ("sub/x.lua", "b")],
-        );
-        let zip_hashes = compute_addon_hashes(&addon).unwrap();
-
-        let baseline = compute_baseline_with_zip(&addon, &zip_hashes).unwrap();
-        assert_eq!(baseline, oracle_baseline(&addon, None));
-        assert_eq!(baseline, zip_hashes);
-    }
+    // ── Kept-file override baselines ─────────────────────────────────────
+    //
+    // A conflict resolution that keeps the user's copy must still record the
+    // UPSTREAM signature as the baseline, so the edit stays detectable on the
+    // next update. `build_folder_manifest` owns that overlay for both the
+    // record path exercised here and the staged-transaction path the installer
+    // drives through `build_hash_manifests_for_folders`.
 
     #[test]
-    fn compute_baseline_hashes_disk_only_files_from_disk() {
-        // A file on disk but NOT in the ZIP map (lingering from an old version,
-        // or user-added) must still be hashed — from disk.
-        let tmp = tempfile::tempdir().unwrap();
-        let addon = create_addon_dir(
-            tmp.path(),
-            "MyAddon",
-            &[("init.lua", "fresh"), ("legacy.lua", "old-leftover")],
-        );
-        // ZIP only provides init.lua; legacy.lua is disk-only.
-        let mut zip_hashes = HashMap::new();
-        zip_hashes.insert("init.lua".to_string(), sha256_hex("fresh"));
-
-        let baseline = compute_baseline_with_zip(&addon, &zip_hashes).unwrap();
-        assert_eq!(baseline, oracle_baseline(&addon, None));
-        assert_eq!(baseline["legacy.lua"], sha256_hex("old-leftover"));
-        assert_eq!(baseline["init.lua"], sha256_hex("fresh"));
-    }
-
-    #[test]
-    fn compute_baseline_excludes_zip_keys_not_on_disk() {
-        // C1 guard: a ZIP key with no corresponding on-disk file (e.g. a symlink
-        // entry the extractor skipped) must NOT appear in the baseline, or the
-        // next scan would falsely flag it as "deleted".
-        let tmp = tempfile::tempdir().unwrap();
-        let addon = create_addon_dir(tmp.path(), "MyAddon", &[("init.lua", "x")]);
-        let mut zip_hashes = HashMap::new();
-        zip_hashes.insert("init.lua".to_string(), sha256_hex("x"));
-        zip_hashes.insert("phantom.lua".to_string(), "deadbeef".repeat(8));
-
-        let baseline = compute_baseline_with_zip(&addon, &zip_hashes).unwrap();
-        assert!(baseline.contains_key("init.lua"));
-        assert!(
-            !baseline.contains_key("phantom.lua"),
-            "ZIP key with no on-disk file must not be recorded"
-        );
-        assert_eq!(baseline, oracle_baseline(&addon, None));
-    }
-
-    #[test]
-    fn record_with_zip_baseline_overwritten_files_match_oracle() {
-        // No prior conflict (no kept files): the recorded manifest equals a full
-        // disk hash of the extracted folder.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        let addon = create_addon_dir(
-            &addons_dir,
-            "MyAddon",
-            &[("init.lua", "v2"), ("data.lua", "d")],
-        );
-        let zip = create_test_zip(
-            tmp.path(),
-            "u.zip",
-            "MyAddon",
-            &[("init.lua", "v2"), ("data.lua", "d")],
-        );
-        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
-
-        record_hashes_with_zip_baseline(
-            &addons_dir,
-            &zip,
-            &["MyAddon".to_string()],
-            &zip_hashes,
-            7,
-            "2.0",
-            None,
-        )
-        .unwrap();
-
-        let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        assert_eq!(m.files, oracle_baseline(&addon, None));
-        assert_eq!(m.esoui_ids, vec![7]);
-        assert_eq!(m.installed_version, "2.0");
-        assert!(m.modified_files.is_empty());
-    }
-
-    #[test]
-    fn record_with_zip_baseline_kept_file_stores_upstream_hash() {
+    fn kept_file_baseline_stores_upstream_hash() {
         // A kept ("keep_mine") file: the user's bytes stay on disk, but the
-        // baseline must store the UPSTREAM (ZIP) hash so the edit is detectable
-        // next update. Oracle = disk hash with the override overlaid.
+        // baseline must store the UPSTREAM hash so the edit is detectable on
+        // the next update.
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
-        // On disk: user's edited init.lua (NOT overwritten because it was skipped).
-        let addon = create_addon_dir(
+        // On disk: the user's edited init.lua (not overwritten — it was skipped).
+        create_addon_dir(
             &addons_dir,
             "MyAddon",
             &[("init.lua", "USER EDIT"), ("other.lua", "o")],
         );
-        // ZIP has the upstream init.lua.
-        let zip = create_test_zip(
-            tmp.path(),
-            "u.zip",
-            "MyAddon",
-            &[("init.lua", "UPSTREAM"), ("other.lua", "o")],
-        );
-        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
 
-        let mut folder_overrides = HashMap::new();
-        folder_overrides.insert(
-            "init.lua".to_string(),
-            zip_hashes.folders["MyAddon"]["init.lua"].clone(),
-        );
-        let mut overrides = BTreeMap::new();
-        overrides.insert("MyAddon".to_string(), folder_overrides);
+        let mut overrides = HashMap::new();
+        overrides.insert("init.lua".to_string(), sha256_hex("UPSTREAM"));
 
-        record_hashes_with_zip_baseline(
+        record_hashes_for_folders_with_overrides(
             &addons_dir,
-            &zip,
             &["MyAddon".to_string()],
-            &zip_hashes,
             7,
             "2.0",
             Some(&overrides),
@@ -1535,281 +1304,51 @@ mod tests {
         .unwrap();
 
         let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        assert_eq!(m.files, oracle_baseline(&addon, overrides.get("MyAddon")));
         // init.lua baseline = upstream hash, NOT the user's on-disk hash.
         assert_eq!(m.files["init.lua"], sha256_hex("UPSTREAM"));
         assert_ne!(m.files["init.lua"], sha256_hex("USER EDIT"));
+        // Files without an override are still recorded from disk.
+        assert_eq!(m.files["other.lua"], sha256_hex("o"));
         assert_eq!(m.modified_files, vec!["init.lua".to_string()]);
     }
 
     #[test]
-    fn record_with_zip_baseline_keeps_disk_only_files() {
-        // File on disk but absent from the ZIP (removed in the new version) must
-        // survive in the baseline, hashed from disk — matching old behavior.
+    fn kept_deletion_baseline_stores_upstream_hash() {
+        // A user DELETED a file that upstream still ships. The conflict scan
+        // auto-keeps the deletion and extraction skips re-creating it, so the
+        // file is absent from disk during baseline recording. The override must
+        // still be stored (upstream hash) so the next scan keeps detecting the
+        // deletion — otherwise the file would be silently re-extracted.
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
-        let addon = create_addon_dir(
-            &addons_dir,
-            "MyAddon",
-            &[("init.lua", "new"), ("removed_upstream.lua", "lingering")],
-        );
-        // ZIP only ships init.lua.
-        let zip = create_test_zip(tmp.path(), "u.zip", "MyAddon", &[("init.lua", "new")]);
-        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
+        // settings.lua is NOT on disk (user deleted it; extraction skipped it).
+        create_addon_dir(&addons_dir, "MyAddon", &[("init.lua", "code")]);
 
-        record_hashes_with_zip_baseline(
+        let mut overrides = HashMap::new();
+        overrides.insert("settings.lua".to_string(), sha256_hex("UPSTREAM"));
+
+        record_hashes_for_folders_with_overrides(
             &addons_dir,
-            &zip,
             &["MyAddon".to_string()],
-            &zip_hashes,
             7,
             "2.0",
-            None,
+            Some(&overrides),
         )
         .unwrap();
 
         let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        assert_eq!(m.files, oracle_baseline(&addon, None));
-        assert_eq!(m.files["removed_upstream.lua"], sha256_hex("lingering"));
-    }
-
-    #[test]
-    fn record_with_zip_baseline_handles_nested_paths() {
-        // Path-separator normalization: nested dirs hash to forward-slash keys
-        // identically whether the hash came from the ZIP map or a disk walk.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        let addon = create_addon_dir(
-            &addons_dir,
-            "MyAddon",
-            &[
-                ("init.lua", "a"),
-                ("controls/slider.lua", "b"),
-                ("libs/inner/deep.lua", "c"),
-            ],
-        );
-        let zip = create_test_zip(
-            tmp.path(),
-            "u.zip",
-            "MyAddon",
-            &[
-                ("init.lua", "a"),
-                ("controls/slider.lua", "b"),
-                ("libs/inner/deep.lua", "c"),
-            ],
-        );
-        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
-
-        record_hashes_with_zip_baseline(
-            &addons_dir,
-            &zip,
-            &["MyAddon".to_string()],
-            &zip_hashes,
-            7,
-            "2.0",
-            None,
-        )
-        .unwrap();
-
-        let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        assert_eq!(m.files, oracle_baseline(&addon, None));
-        assert!(m.files.contains_key("controls/slider.lua"));
-        assert!(m.files.contains_key("libs/inner/deep.lua"));
-        for k in m.files.keys() {
-            assert!(!k.contains('\\'), "key {k:?} must use forward slashes");
-        }
-    }
-
-    #[test]
-    fn record_with_zip_baseline_handles_multi_folder_zip() {
-        // A ZIP that extracts two top-level folders (bundled library): EACH
-        // folder gets its own correct manifest. The primary folder reuses the
-        // passed map; the secondary is hashed from the ZIP internally. Overrides
-        // apply only to the primary.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        let primary = create_addon_dir(&addons_dir, "AddonX", &[("x.lua", "xx")]);
-        let secondary = create_addon_dir(&addons_dir, "LibFoo", &[("foo.lua", "ff")]);
-
-        // One ZIP carrying both folders.
-        let zip_path = tmp.path().join("bundle.zip");
-        let file = fs::File::create(&zip_path).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        archive.start_file("AddonX/x.lua", options).unwrap();
-        archive.write_all(b"xx").unwrap();
-        archive.start_file("LibFoo/foo.lua", options).unwrap();
-        archive.write_all(b"ff").unwrap();
-        archive.finish().unwrap();
-
-        let primary_zip_hashes = hash_zip_entries_by_folder(&zip_path).unwrap();
-
-        record_hashes_with_zip_baseline(
-            &addons_dir,
-            &zip_path,
-            &["AddonX".to_string(), "LibFoo".to_string()],
-            &primary_zip_hashes,
-            42,
-            "1.0",
-            None,
-        )
-        .unwrap();
-
-        let mx = load_hash_manifest(&addons_dir, "AddonX").unwrap();
-        let ml = load_hash_manifest(&addons_dir, "LibFoo").unwrap();
-        assert_eq!(mx.files, oracle_baseline(&primary, None));
-        assert_eq!(ml.files, oracle_baseline(&secondary, None));
-        assert_eq!(mx.files["x.lua"], sha256_hex("xx"));
-        assert_eq!(ml.files["foo.lua"], sha256_hex("ff"));
-        // Secondary manifest must NOT inherit primary's keys.
-        assert!(!ml.files.contains_key("x.lua"));
-    }
-
-    #[test]
-    fn record_with_zip_baseline_equivalent_to_old_path_no_manifest() {
-        // "No prior manifest" case (fresh-feeling update): record_hashes_with_zip_baseline
-        // produces the same manifest as the old record_hashes_for_folders path.
-        let tmp = tempfile::tempdir().unwrap();
-
-        // Old path.
-        let old_dir = tmp.path().join("Old");
-        create_addon_dir(&old_dir, "MyAddon", &[("init.lua", "z"), ("m/n.lua", "q")]);
-        record_hashes_for_folders(&old_dir, &["MyAddon".to_string()], 5, "3.0").unwrap();
-        let old_m = load_hash_manifest(&old_dir, "MyAddon").unwrap();
-
-        // New path with the same extracted content.
-        let new_dir = tmp.path().join("New");
-        create_addon_dir(&new_dir, "MyAddon", &[("init.lua", "z"), ("m/n.lua", "q")]);
-        let zip = create_test_zip(
-            tmp.path(),
-            "u.zip",
-            "MyAddon",
-            &[("init.lua", "z"), ("m/n.lua", "q")],
-        );
-        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
-        record_hashes_with_zip_baseline(
-            &new_dir,
-            &zip,
-            &["MyAddon".to_string()],
-            &zip_hashes,
-            5,
-            "3.0",
-            None,
-        )
-        .unwrap();
-        let new_m = load_hash_manifest(&new_dir, "MyAddon").unwrap();
-
-        assert_eq!(new_m.files, old_m.files);
-        assert_eq!(new_m.modified_files, old_m.modified_files);
-        assert_eq!(new_m.esoui_ids, old_m.esoui_ids);
-    }
-
-    #[test]
-    fn record_with_zip_baseline_secondary_falls_back_on_bad_zip_path() {
-        // If a secondary folder's ZIP hashing fails (bad/missing zip path), it
-        // must fall back to a full disk hash pass rather than skip the manifest.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        let primary = create_addon_dir(&addons_dir, "AddonX", &[("x.lua", "xx")]);
-        let secondary = create_addon_dir(&addons_dir, "LibFoo", &[("foo.lua", "ff")]);
-
-        let mut primary_zip_hashes = ZipHashSet::default();
-        primary_zip_hashes.folders.insert(
-            "AddonX".to_string(),
-            HashMap::from([("x.lua".to_string(), sha256_hex("xx"))]),
-        );
-
-        // Nonexistent zip path: secondary hash_zip_entries fails → disk fallback.
-        let bad_zip = tmp.path().join("does-not-exist.zip");
-
-        record_hashes_with_zip_baseline(
-            &addons_dir,
-            &bad_zip,
-            &["AddonX".to_string(), "LibFoo".to_string()],
-            &primary_zip_hashes,
-            42,
-            "1.0",
-            None,
-        )
-        .unwrap();
-
-        // Primary uses the passed map; secondary fell back to disk — both correct.
-        let mx = load_hash_manifest(&addons_dir, "AddonX").unwrap();
-        let ml = load_hash_manifest(&addons_dir, "LibFoo").unwrap();
-        assert_eq!(mx.files, oracle_baseline(&primary, None));
-        assert_eq!(ml.files, oracle_baseline(&secondary, None));
-        assert_eq!(ml.files["foo.lua"], sha256_hex("ff"));
-    }
-
-    #[test]
-    fn record_with_zip_baseline_primary_falls_back_to_disk() {
-        // If the primary ZIP map is unusable, the primary folder must still get a
-        // manifest via a full disk hash pass (not be silently skipped).
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        let primary = create_addon_dir(&addons_dir, "MyAddon", &[("init.lua", "real")]);
-        let zip = create_test_zip(tmp.path(), "u.zip", "MyAddon", &[("init.lua", "real")]);
-
-        // Empty primary map: compute_baseline_with_zip still succeeds by hashing
-        // every file from disk, so the manifest matches the full-disk oracle.
-        let empty = ZipHashSet::default();
-        record_hashes_with_zip_baseline(
-            &addons_dir,
-            &zip,
-            &["MyAddon".to_string()],
-            &empty,
-            7,
-            "2.0",
-            None,
-        )
-        .unwrap();
-
-        let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        assert_eq!(m.files, oracle_baseline(&primary, None));
-        assert_eq!(m.files["init.lua"], sha256_hex("real"));
-    }
-
-    #[test]
-    fn record_with_zip_baseline_errors_when_folder_unhashable() {
-        // A folder in installed_folders that doesn't exist on disk can't be
-        // hashed by either the ZIP-map path or the disk fallback. The function
-        // must (a) still write manifests for the folders it CAN hash, and
-        // (b) return Err so the caller can fail the update instead of recording
-        // metadata for a folder with no baseline.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        let good = create_addon_dir(&addons_dir, "GoodAddon", &[("a.lua", "aa")]);
-        // "GhostAddon" is intentionally never created on disk.
-        let zip = create_test_zip(tmp.path(), "u.zip", "GoodAddon", &[("a.lua", "aa")]);
-        let good_zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
-
-        let result = record_hashes_with_zip_baseline(
-            &addons_dir,
-            &zip,
-            &["GoodAddon".to_string(), "GhostAddon".to_string()],
-            &good_zip_hashes,
-            7,
-            "2.0",
-            None,
-        );
-
-        // The good folder's manifest is still written...
-        let mg = load_hash_manifest(&addons_dir, "GoodAddon").unwrap();
-        assert_eq!(mg.files, oracle_baseline(&good, None));
-        // ...the ghost folder has no manifest...
-        assert!(load_hash_manifest(&addons_dir, "GhostAddon").is_none());
-        // ...and the overall call reports failure.
-        assert!(
-            result.is_err(),
-            "expected Err when a folder can't be hashed"
-        );
-        assert!(result.unwrap_err().contains("GhostAddon"));
+        // The deleted-but-kept file IS in the baseline with the upstream hash...
+        assert_eq!(m.files.get("settings.lua"), Some(&sha256_hex("UPSTREAM")));
+        // ...and is flagged as a user modification so the deletion stays tracked.
+        assert!(m.modified_files.contains(&"settings.lua".to_string()));
+        // The on-disk file is still recorded normally.
+        assert_eq!(m.files["init.lua"], sha256_hex("code"));
     }
 
     #[test]
     fn record_hashes_for_folders_errors_when_folder_unhashable() {
-        // The disk-only path has the same contract: report Err if any folder
-        // can't be recorded, after writing the ones that can.
+        // The record path must report Err if any folder can't be recorded,
+        // after writing manifests for the ones that can.
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
         create_addon_dir(&addons_dir, "GoodAddon", &[("a.lua", "aa")]);
@@ -1824,54 +1363,6 @@ mod tests {
         assert!(load_hash_manifest(&addons_dir, "GoodAddon").is_some());
         assert!(load_hash_manifest(&addons_dir, "GhostAddon").is_none());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn record_with_zip_baseline_kept_deletion_stores_upstream_hash() {
-        // A user DELETED a file that upstream still ships. The conflict scan
-        // auto-keeps the deletion and selective extraction skips re-creating it,
-        // so the file is absent from disk during baseline recording. The override
-        // must still be stored (upstream hash) so the next scan keeps detecting
-        // the deletion — otherwise the file would be silently re-extracted.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        // settings.lua is NOT on disk (user deleted it; extraction skipped it).
-        create_addon_dir(&addons_dir, "MyAddon", &[("init.lua", "code")]);
-        let zip = create_test_zip(
-            tmp.path(),
-            "u.zip",
-            "MyAddon",
-            &[("init.lua", "code"), ("settings.lua", "UPSTREAM")],
-        );
-        let zip_hashes = hash_zip_entries_by_folder(&zip).unwrap();
-
-        // The kept deletion's override carries the upstream hash.
-        let mut folder_overrides = HashMap::new();
-        folder_overrides.insert(
-            "settings.lua".to_string(),
-            zip_hashes.folders["MyAddon"]["settings.lua"].clone(),
-        );
-        let mut overrides = BTreeMap::new();
-        overrides.insert("MyAddon".to_string(), folder_overrides);
-
-        record_hashes_with_zip_baseline(
-            &addons_dir,
-            &zip,
-            &["MyAddon".to_string()],
-            &zip_hashes,
-            7,
-            "2.0",
-            Some(&overrides),
-        )
-        .unwrap();
-
-        let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
-        // The deleted-but-kept file IS in the baseline with the upstream hash...
-        assert_eq!(m.files.get("settings.lua"), Some(&sha256_hex("UPSTREAM")));
-        // ...and is flagged as a user modification so the deletion stays tracked.
-        assert!(m.modified_files.contains(&"settings.lua".to_string()));
-        // The on-disk file is still recorded normally.
-        assert_eq!(m.files["init.lua"], sha256_hex("code"));
     }
 
     #[test]
@@ -1941,9 +1432,6 @@ mod tests {
         let zip_hashes = hash_zip_entries(&zip, "MediaAddon").unwrap();
         assert_eq!(disk["icons/a.dds"], zip_hashes["icons/a.dds"]);
         assert!(is_size_signature(&zip_hashes["icons/a.dds"]));
-        // The ZIP-baseline merge agrees too.
-        let baseline = compute_baseline_with_zip(&addon, &zip_hashes).unwrap();
-        assert_eq!(baseline, disk);
     }
 
     #[test]

@@ -83,6 +83,7 @@ import type {
   FilterMode,
   ViewMode,
   DiscoverTab,
+  AddonPhase,
 } from "./types";
 import type { LogPathDetection } from "@/types/uploader";
 
@@ -116,8 +117,6 @@ interface PendingDeepLinkPayload {
   logUpload: boolean;
   packHub: boolean;
 }
-
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
 
 /**
  * Merge duplicate entries so the picker asks about each library once, listing
