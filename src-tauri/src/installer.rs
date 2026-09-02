@@ -379,6 +379,42 @@ fn is_windows_reparse_point(_: &fs::Metadata) -> bool {
     false
 }
 
+/// True when `file_name` is an ESO manifest for a folder named `dir_name`
+/// (`<dir_name>.txt` or `<dir_name>.addon`), matched case-insensitively the
+/// way the game resolves names.
+fn is_manifest_name(file_name: &str, dir_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    let dir = dir_name.to_lowercase();
+    lower == format!("{dir}.txt") || lower == format!("{dir}.addon")
+}
+
+/// True when a live file is the manifest of its containing folder AND the
+/// staged replacement folder ships a manifest of its own. Such a file must not
+/// be preserved as residual: a manifest is upstream data, not user data, and
+/// when an author renames theirs (LibGPS 3.3.2 shipped `LibGPS.txt`, 3.3.3
+/// ships `LibGPS.addon`) the preserved old `.txt` wins `find_manifest_in`'s
+/// txt-first probe forever after, so Kalpa keeps reading the stale version and
+/// misreports the addon on every update check. When the archive ships NO
+/// manifest for the folder, the live one is still preserved — dropping it
+/// would unload the addon in game.
+fn is_superseded_manifest(file_name: &std::ffi::OsStr, current: &Path, target: &Path) -> bool {
+    let Some(dir_name) = current.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return false;
+    };
+    if !is_manifest_name(&file_name.to_string_lossy(), &dir_name) {
+        return false;
+    }
+    let Some(stage_parent) = target.parent() else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(stage_parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        is_manifest_name(&entry.file_name().to_string_lossy(), &dir_name) && entry.path().is_file()
+    })
+}
+
 fn copy_residual_files(
     current: &Path,
     stage_folder: &Path,
@@ -404,6 +440,9 @@ fn copy_residual_files(
             fs::create_dir_all(&target).map_err(|e| describe_write_error(&target, &e))?;
             copy_residual_files(&source, stage_folder, live_root)?;
         } else if metadata.is_file() && !target.exists() {
+            if is_superseded_manifest(&entry.file_name(), current, &target) {
+                continue;
+            }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
             }
@@ -974,6 +1013,55 @@ mod tests {
         assert_eq!(folders, vec!["MainAddon".to_string()]);
         assert!(addons_dir.join("MainAddon/init.lua").is_file());
         assert!(addons_dir.join("readme.txt").is_file());
+    }
+
+    /// Regression: LibGPS 3.3.2 shipped `LibGPS.txt`, 3.3.3 ships
+    /// `LibGPS.addon`. Residual preservation used to carry the old `.txt`
+    /// forward, and `find_manifest_in` prefers `.txt`, so Kalpa read the stale
+    /// manifest and permanently misreported the installed version. The old
+    /// manifest must be dropped when the update ships its own.
+    #[test]
+    fn update_drops_a_renamed_manifest_instead_of_preserving_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("LibGPS")).unwrap();
+        fs::write(addons_dir.join("LibGPS/LibGPS.txt"), b"## AddOnVersion: 68").unwrap();
+        fs::write(addons_dir.join("LibGPS/settings.cfg"), b"USER DATA").unwrap();
+        let zip_path = create_zip_with_entries(
+            tmp.path(),
+            "libgps.zip",
+            &["LibGPS/LibGPS.addon", "LibGPS/core.lua"],
+        );
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+
+        assert!(
+            !addons_dir.join("LibGPS/LibGPS.txt").exists(),
+            "stale renamed manifest survived the update"
+        );
+        assert!(addons_dir.join("LibGPS/LibGPS.addon").is_file());
+        // Genuine user files still ride across the update.
+        assert_eq!(
+            fs::read(addons_dir.join("LibGPS/settings.cfg")).unwrap(),
+            b"USER DATA"
+        );
+    }
+
+    /// The guard on the fix above: when the update ships NO manifest of its
+    /// own, the live manifest is user-visible load-bearing state and must
+    /// still be preserved — dropping it would unload the addon in game.
+    #[test]
+    fn update_without_a_new_manifest_still_preserves_the_old_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("LibGPS")).unwrap();
+        fs::write(addons_dir.join("LibGPS/LibGPS.txt"), b"## AddOnVersion: 68").unwrap();
+        let zip_path = create_zip_with_entries(tmp.path(), "patch.zip", &["LibGPS/extra.lua"]);
+
+        extract_addon_zip(&zip_path, &addons_dir).unwrap();
+
+        assert!(addons_dir.join("LibGPS/LibGPS.txt").is_file());
+        assert!(addons_dir.join("LibGPS/extra.lua").is_file());
     }
 
     #[test]
