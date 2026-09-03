@@ -900,9 +900,14 @@ pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<Forget
         .map(|file| file.relative_path.clone())
         .collect();
     if !parked.is_empty() {
+        // A list of three files reading "... is parked" is the kind of small
+        // wrongness that makes a refusal look like a bug rather than a
+        // decision, and this is the message standing between the user and a
+        // stranded stack.
+        let verb = if parked.len() == 1 { "is" } else { "are" };
         return Err(format!(
-            "This stack is switched off — {} is parked. Switch it back on before Kalpa gives up \
-             its records for this folder.",
+            "This stack is switched off — {} {verb} parked. Switch it back on before Kalpa \
+             gives up its records for this folder.",
             parked.join(", ")
         ));
     }
