@@ -84,7 +84,14 @@ function ControlledRail({ showLogs = true }: { showLogs?: boolean }) {
     emergencyError: null,
     emergencyResult: null,
     onEmergencyRemove: vi.fn(),
-    onStackChanged: vi.fn(async () => {}),
+    mutation: {
+      pending: false,
+      pendingLabel: null,
+      run: vi.fn(async (_label, _clientDir, operation) => ({
+        status: "committed" as const,
+        value: await operation(),
+      })),
+    },
   };
   return <StackBody {...props} />;
 }

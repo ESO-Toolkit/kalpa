@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDownIcon, ChevronRightIcon, SlidersHorizontalIcon } from "lucide-react";
 
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -86,7 +86,7 @@ function liveSliderMin(field: TuningField, current: string | null): number {
  * draft-then-apply rather than per-control save: ReShade rewrites the whole
  * INI file itself, and a save on every slider drag would race it.
  */
-export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
+export function TuningPanel({ clientDir, mutation }: StackPanelProps) {
   const [form, setForm] = useState<TuningForm | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -97,23 +97,32 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applied, setApplied] = useState(false);
+  const requestToken = useRef(0);
 
-  const load = useCallback(async (dir: string) => {
-    setLoading(true);
-    setLoadError(null);
-    setApplyError(null);
-    setApplied(false);
-    try {
-      const next = await invokeOrThrow<TuningForm>("read_client_tuning", { clientDir: dir });
-      setForm(next);
-      setDraft(buildDraft(next.fields));
-    } catch (e) {
-      setForm(null);
-      setLoadError(getTauriErrorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (resetApplied = true): Promise<boolean> => {
+      const token = ++requestToken.current;
+      setLoading(true);
+      setLoadError(null);
+      setApplyError(null);
+      if (resetApplied) setApplied(false);
+      try {
+        const next = await invokeOrThrow<TuningForm>("read_client_tuning", { clientDir });
+        if (requestToken.current !== token) return false;
+        setForm(next);
+        setDraft(buildDraft(next.fields));
+        return true;
+      } catch (e) {
+        if (requestToken.current !== token) return false;
+        setForm(null);
+        setLoadError(getTauriErrorMessage(e));
+        return false;
+      } finally {
+        if (requestToken.current === token) setLoading(false);
+      }
+    },
+    [clientDir]
+  );
 
   useEffect(() => {
     // `load` flips the loading flag before its first await, which the rule
@@ -121,8 +130,11 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
     // the spinner has to appear on the same commit `clientDir` changes — and
     // matches the existing pattern in `client-health.tsx`.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load(clientDir);
-  }, [clientDir, load]);
+    void load();
+    return () => {
+      requestToken.current += 1;
+    };
+  }, [load]);
 
   const setFieldValue = useCallback((key: string, value: string) => {
     setApplied(false);
@@ -145,24 +157,28 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
 
   const handleApply = useCallback(async () => {
     if (dirtyEdits.length === 0) return;
+    const token = ++requestToken.current;
     setApplying(true);
     setApplyError(null);
     setApplied(false);
     try {
-      await approveClientWrites(clientDir);
-      await invokeOrThrow<TuningApplyOutcome>("apply_client_tuning", {
-        clientDir,
-        edits: dirtyEdits,
+      const result = await mutation.run("Applying client tuning", clientDir, async () => {
+        await approveClientWrites(clientDir);
+        return invokeOrThrow<TuningApplyOutcome>("apply_client_tuning", {
+          clientDir,
+          edits: dirtyEdits,
+        });
       });
-      setApplied(true);
-      await onChanged();
-      await load(clientDir);
+      if (requestToken.current !== token || result.status !== "committed") return;
+      setApplying(false);
+      if (await load(false)) setApplied(true);
     } catch (e) {
+      if (requestToken.current !== token) return;
       setApplyError(getTauriErrorMessage(e));
     } finally {
-      setApplying(false);
+      if (requestToken.current === token) setApplying(false);
     }
-  }, [clientDir, dirtyEdits, load, onChanged]);
+  }, [clientDir, dirtyEdits, load, mutation]);
 
   if (loading) {
     return (
@@ -241,7 +257,7 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          disabled={dirtyEdits.length === 0 || applying}
+          disabled={dirtyEdits.length === 0 || applying || mutation.pending}
           onClick={() => void handleApply()}
         >
           {applying ? (
@@ -257,7 +273,7 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
         <Button
           variant="outline"
           size="sm"
-          disabled={dirtyEdits.length === 0 || applying}
+          disabled={dirtyEdits.length === 0 || applying || mutation.pending}
           onClick={handleDiscard}
         >
           Discard changes
