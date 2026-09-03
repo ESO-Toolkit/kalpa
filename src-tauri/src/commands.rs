@@ -11297,6 +11297,10 @@ pub fn open_ransomware_protection_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Lives in saved_variables::scrub. The pack hub extraction took the
+    // module-level `use` for it out of commands.rs along with the code that
+    // called it, but these tests still exercise it.
+    use crate::saved_variables::scrub::has_unresolved_identity_placeholders;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
