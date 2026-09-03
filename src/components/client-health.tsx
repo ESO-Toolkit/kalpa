@@ -1197,6 +1197,25 @@ interface StackBodyProps {
 
 function StackBody(props: StackBodyProps) {
   const { stack, plan, effectiveSelection, onSelect, railExpanded, isHealthyManaged } = props;
+  const detailRef = useRef<HTMLDivElement>(null);
+
+  /** Select a layer, then bring the detail pane into view.
+   *
+   *  The rail and the detail sit side by side inside ONE scroller, and the
+   *  rail is the taller of the two — eight layers plus connectors, records and
+   *  log signals. So by the time a lower layer is on screen the detail pane's
+   *  content has scrolled off the top, and clicking Preset or Tuning looks
+   *  like it did nothing at all until you scroll back up. Reported as exactly
+   *  that. */
+  const selectAndReveal = useCallback(
+    (key: SelectionKey) => {
+      onSelect(key);
+      requestAnimationFrame(() => {
+        detailRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      });
+    },
+    [onSelect]
+  );
   const railRef = useRef<HTMLDivElement>(null);
 
   const otherKept = useMemo(() => stack.preserved_originals.filter((o) => !o.backs_up), [stack]);
@@ -1238,7 +1257,7 @@ function StackBody(props: StackBodyProps) {
               type="button"
               role="option"
               aria-selected={effectiveSelection === "adoption"}
-              onClick={() => onSelect("adoption")}
+              onClick={() => selectAndReveal("adoption")}
               className={cn(
                 "flex w-full flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
                 "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
@@ -1284,7 +1303,7 @@ function StackBody(props: StackBodyProps) {
                     stage={stage}
                     stack={stack}
                     selected={effectiveSelection === stage}
-                    onSelect={() => onSelect(stage)}
+                    onSelect={() => selectAndReveal(stage)}
                   />
                   {i < STAGE_ORDER.length - 1 && (
                     <Connector
@@ -1320,7 +1339,7 @@ function StackBody(props: StackBodyProps) {
             type="button"
             role="option"
             aria-selected={effectiveSelection === "records"}
-            onClick={() => onSelect("records")}
+            onClick={() => selectAndReveal("records")}
             className={cn(
               "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
               "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
@@ -1346,7 +1365,7 @@ function StackBody(props: StackBodyProps) {
               type="button"
               role="option"
               aria-selected={effectiveSelection === "logs"}
-              onClick={() => onSelect("logs")}
+              onClick={() => selectAndReveal("logs")}
               className={cn(
                 "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
                 "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
@@ -1367,7 +1386,7 @@ function StackBody(props: StackBodyProps) {
           )}
         </div>
 
-        <div className="min-w-0 flex-1 space-y-3">
+        <div ref={detailRef} className="min-w-0 flex-1 scroll-mt-2 space-y-3">
           <DetailPane {...props} />
         </div>
       </div>
@@ -1421,11 +1440,12 @@ function StageRow({
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left transition-colors duration-150",
+        "flex w-full cursor-pointer flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left",
+        "transition-colors duration-150",
         "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         selected
           ? "border-primary/30 border-l-primary bg-primary/[0.04]"
-          : cn(meta.border, meta.tint)
+          : cn(meta.border, meta.tint, "hover:border-structure-10 hover:bg-structure-02")
       )}
     >
       <div className="flex items-center justify-between gap-2">
