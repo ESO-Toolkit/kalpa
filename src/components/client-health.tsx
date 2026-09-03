@@ -1255,9 +1255,10 @@ interface StackBodyProps {
   onStackChanged: () => Promise<void>;
 }
 
-function StackBody(props: StackBodyProps) {
+export function StackBody(props: StackBodyProps) {
   const { stack, plan, effectiveSelection, onSelect } = props;
   const railRef = useRef<HTMLDivElement>(null);
+  const railHadFocus = useRef(false);
   const detailScrollRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<PanelTab>("overview");
 
@@ -1278,21 +1279,61 @@ function StackBody(props: StackBodyProps) {
 
   const otherKept = useMemo(() => stack.preserved_originals.filter((o) => !o.backs_up), [stack]);
 
+  const availableKeys = useMemo<SelectionKey[]>(
+    () => [
+      ...(plan && !plan.already_managed ? ["adoption" as const] : []),
+      ...STAGE_ORDER,
+      "records",
+      ...(props.logExcerpts.length > 0 ? ["logs" as const] : []),
+    ],
+    [plan, props.logExcerpts.length]
+  );
+  const selectedKey =
+    effectiveSelection && availableKeys.includes(effectiveSelection)
+      ? effectiveSelection
+      : (availableKeys[0] ?? null);
+
+  useEffect(() => {
+    if (selectedKey && selectedKey !== effectiveSelection) onSelect(selectedKey);
+  }, [effectiveSelection, onSelect, selectedKey]);
+
+  useEffect(() => {
+    if (!railHadFocus.current) return;
+    const container = railRef.current;
+    if (!container?.querySelector('[role="option"]:focus')) {
+      container?.querySelector<HTMLElement>('[role="option"][tabindex="0"]')?.focus();
+    }
+  }, [availableKeys, selectedKey]);
+
   const handleRailKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     const container = railRef.current;
     if (!container) return;
+
+    if (e.key === "Enter" || e.key === " ") {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.getAttribute("role") === "option") {
+        e.preventDefault();
+        active.click();
+      }
+      return;
+    }
+
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") {
+      return;
+    }
     const items = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'));
     if (items.length === 0) return;
     e.preventDefault();
     const idx = items.indexOf(document.activeElement as HTMLElement);
-    const nextIdx =
-      idx === -1
-        ? 0
-        : e.key === "ArrowDown"
-          ? Math.min(idx + 1, items.length - 1)
-          : Math.max(idx - 1, 0);
-    items[nextIdx]?.focus();
+    let nextIdx: number;
+    if (e.key === "Home") nextIdx = 0;
+    else if (e.key === "End") nextIdx = items.length - 1;
+    else if (idx === -1) nextIdx = e.key === "ArrowUp" ? items.length - 1 : 0;
+    else if (e.key === "ArrowDown") nextIdx = Math.min(idx + 1, items.length - 1);
+    else nextIdx = Math.max(idx - 1, 0);
+    const next = items[nextIdx];
+    next?.focus();
+    next?.click();
   }, []);
 
   return (
@@ -1322,18 +1363,33 @@ function StackBody(props: StackBodyProps) {
           role="listbox"
           aria-label="Stack layers"
           onKeyDown={handleRailKeyDown}
+          onFocusCapture={(e) => {
+            if ((e.target as HTMLElement).getAttribute("role") === "option") {
+              railHadFocus.current = true;
+            }
+          }}
+          onBlurCapture={(e) => {
+            // A null relatedTarget means React removed the focused option
+            // during a refresh; retain the flag so the effect above can
+            // restore focus to the new selected option.
+            if (e.relatedTarget && !railRef.current?.contains(e.relatedTarget as Node)) {
+              railHadFocus.current = false;
+            }
+          }}
           className="min-h-0 w-[280px] shrink-0 space-y-2 overflow-y-auto pr-1"
         >
           {plan && !plan.already_managed && (
             <button
               type="button"
               role="option"
-              aria-selected={effectiveSelection === "adoption"}
+              aria-selected={selectedKey === "adoption"}
+              tabIndex={selectedKey === "adoption" ? 0 : -1}
+              data-rail-option="adoption"
               onClick={() => onSelect("adoption")}
               className={cn(
                 "flex w-full cursor-pointer flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
                 "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-                effectiveSelection === "adoption"
+                selectedKey === "adoption"
                   ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
                   : "border-structure-06 bg-structure-02 hover:border-structure-10"
               )}
@@ -1351,7 +1407,8 @@ function StackBody(props: StackBodyProps) {
               <StageRow
                 stage={stage}
                 stack={stack}
-                selected={effectiveSelection === stage}
+                selected={selectedKey === stage}
+                tabIndex={selectedKey === stage ? 0 : -1}
                 onSelect={() => onSelect(stage)}
               />
               {i < STAGE_ORDER.length - 1 && (
@@ -1383,12 +1440,14 @@ function StackBody(props: StackBodyProps) {
           <button
             type="button"
             role="option"
-            aria-selected={effectiveSelection === "records"}
+            aria-selected={selectedKey === "records"}
+            tabIndex={selectedKey === "records" ? 0 : -1}
+            data-rail-option="records"
             onClick={() => onSelect("records")}
             className={cn(
               "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
               "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-              effectiveSelection === "records"
+              selectedKey === "records"
                 ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
                 : "border-structure-06 bg-structure-02 hover:border-structure-10"
             )}
@@ -1409,12 +1468,14 @@ function StackBody(props: StackBodyProps) {
             <button
               type="button"
               role="option"
-              aria-selected={effectiveSelection === "logs"}
+              aria-selected={selectedKey === "logs"}
+              tabIndex={selectedKey === "logs" ? 0 : -1}
+              data-rail-option="logs"
               onClick={() => onSelect("logs")}
               className={cn(
                 "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
                 "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-                effectiveSelection === "logs"
+                selectedKey === "logs"
                   ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
                   : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
               )}
@@ -1435,7 +1496,7 @@ function StackBody(props: StackBodyProps) {
           ref={detailScrollRef}
           className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1"
         >
-          <DetailPane {...props} />
+          <DetailPane {...props} effectiveSelection={selectedKey} />
         </div>
       </TabsContent>
     </Tabs>
@@ -1551,11 +1612,13 @@ function StageRow({
   stage,
   stack,
   selected,
+  tabIndex,
   onSelect,
 }: {
   stage: Stage;
   stack: ClientStack;
   selected: boolean;
+  tabIndex: number;
   onSelect: () => void;
 }) {
   const level = stageLevel(stage, stack);
@@ -1591,6 +1654,8 @@ function StageRow({
       type="button"
       role="option"
       aria-selected={selected}
+      tabIndex={tabIndex}
+      data-rail-option={stage}
       onClick={onSelect}
       className={cn(
         "flex w-full cursor-pointer flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left",
