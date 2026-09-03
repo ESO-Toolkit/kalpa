@@ -70,7 +70,7 @@ src/                        # React frontend
 e2e/                       # Windows WebView2 read-only and sandbox Playwright specs
 
 src-tauri/src/              # Rust backend
-  commands.rs               # Tauri command handlers (except the uploader's)
+  commands.rs               # Tauri command handlers (except the uploader's and Pack Hub's)
   esoui.rs                  # ESOUI API client and HTML scraping
   manifest.rs               # ESO addon manifest parser
   manifest_cache.rs         # SQLite-backed manifest cache
@@ -85,6 +85,8 @@ src-tauri/src/              # Rust backend
   saved_variables/          # SavedVariables parsing, scrubbing, per-character backups
   uploader/                 # ESO Logs uploader (scan, split, encode, upload, live)
     commands.rs             # The uploader's own Tauri commands
+  pack_hub/                 # Pack Hub worker client (packs, votes, shares, .esopack)
+    commands.rs             # Pack Hub's own Tauri commands
   auth.rs                   # Authentication
   token_store.rs            # Credential storage (Credential Manager / Keychain / Secret Service)
   lib.rs                    # Module definitions, MetadataLock, Tauri app setup
@@ -127,14 +129,14 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed s
 - **Shared D1 mirror**: every pack mutation is dual-written inline into the `packs`/`pack_tags` tables of `roster-hub-db` (binding `ROSTER_HUB_DB`) so esotk.com reflects the latest pack data. **These tables are shared with `roster-hub-api` — any schema or SQL change has to be coordinated with the website.**
 - **Index serialization**: `PackIndexDO` (Durable Object binding `PACK_INDEX`) owns mutations of the `index:packs` value
 - **Rate limiting**: three built-in limiter bindings — `READ_LIMITER` (60/min), `WRITE_LIMITER` (10/min), `VOTE_LIMITER` (20/min)
-- **API format**: snake_case JSON matching Rust `HubPack` struct in `commands.rs`
+- **API format**: snake_case JSON matching the Rust `HubPack` struct in `pack_hub/commands.rs`
 - **Auth**: ESO Logs Bearer token via `validateBearerToken()` in `shares.ts`
 - **Backup**: Daily cron at midnight UTC snapshots pack index to `backup:YYYY-MM-DD` keys (90-day TTL)
 - **CI**: `.github/workflows/deploy-worker.yml` — auto-deploys on push to main, with typecheck + name guard + health check
 
 ### Rust integration:
 
-- `commands.rs` calls `kalpa-pack-hub.eso-toolkit.workers.dev` (see `pack_hub_url()` and `share_worker_url()`)
+- `pack_hub/commands.rs` calls `kalpa-pack-hub.eso-toolkit.workers.dev` (see `pack_hub_url()` and `share_worker_url()`)
 - Response format: `{ packs: [...], page, sort }` for list, `{ pack: {...} }` for detail
 - Pack fields are snake_case: `title`, `pack_type`, `author_id`, `author_name`, `is_anonymous`, `vote_count`, etc.
 
