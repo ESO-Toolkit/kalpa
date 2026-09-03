@@ -18,6 +18,11 @@ const [CheckboxProvider, useCheckbox] = getStrictContext<CheckboxContextType>("C
 // `render` is fixed to a `motion.button` below, so `nativeButton` is not the
 // caller's to choose — it can only ever be `true` here. Both are omitted from
 // the public props so no consumer can put the two out of sync.
+//
+// Checkbox is the one Base UI component in this tree that needs saying out
+// loud: its default element is a `<span>`, so `nativeButton` defaults to
+// `false`. Dialog and Popover triggers default to `true` and match their own
+// default element, which is why only this wrapper broke.
 type CheckboxProps = Omit<
   React.ComponentProps<typeof CheckboxPrimitive.Root>,
   "render" | "nativeButton"
