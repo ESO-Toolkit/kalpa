@@ -698,44 +698,48 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                     {`Installs (${clients.length})`}
                   </SectionHeader>
                 )}
-                <div
-                  className={cn("space-y-2", clients.length > 1 && "max-h-32 overflow-y-auto pr-1")}
-                >
-                  {clients.map((client) => (
-                    <InstallRow
-                      key={client.client_dir}
-                      client={client}
-                      selected={client.client_dir === selectedDir}
-                      selectable={clients.length > 1}
-                      onSelect={() => handleSelect(client.client_dir)}
-                    />
-                  ))}
-                </div>
-                <div
-                  className={cn(
-                    "flex flex-wrap items-center gap-2",
-                    clients.length > 1 ? "mt-2" : "-mt-7 justify-end"
-                  )}
-                >
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    disabled={browsing}
-                    onClick={() => void handleBrowse()}
-                  >
-                    {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
-                    {browsing
-                      ? "Browsing..."
-                      : clients.length > 1
-                        ? "Browse for eso64.exe"
-                        : "Change"}
-                  </Button>
-                  {browseError && (
-                    <p className="text-xs text-status-danger" role="alert">
-                      {browseError}
-                    </p>
-                  )}
-                </div>
+                {(() => {
+                  const many = clients.length > 1;
+                  const browseButton = (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="shrink-0"
+                      disabled={browsing}
+                      onClick={() => void handleBrowse()}
+                    >
+                      {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
+                      {browsing ? "Browsing..." : many ? "Browse for eso64.exe" : "Change"}
+                    </Button>
+                  );
+                  return (
+                    <>
+                      <div className={cn("space-y-2", many && "max-h-32 overflow-y-auto pr-1")}>
+                        {clients.map((client) => (
+                          <InstallRow
+                            key={client.client_dir}
+                            client={client}
+                            selected={client.client_dir === selectedDir}
+                            selectable={many}
+                            onSelect={() => handleSelect(client.client_dir)}
+                            // One install is one line: name, source, and the
+                            // control that changes it, all in the same flex
+                            // row so they cannot land on top of each other.
+                            trailing={many ? undefined : browseButton}
+                          />
+                        ))}
+                      </div>
+                      {many && (
+                        <div className="mt-2 flex flex-wrap items-center gap-2">{browseButton}</div>
+                      )}
+                      {browseError && (
+                        <p className="mt-1 text-xs text-status-danger" role="alert">
+                          {browseError}
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </section>
 
               {stackLoading && (
@@ -899,11 +903,20 @@ function InstallRow({
   selected,
   selectable,
   onSelect,
+  trailing,
 }: {
   client: EsoClientLocation;
   selected: boolean;
   selectable: boolean;
   onSelect: () => void;
+  /** Rendered at the end of the single-install row.
+   *
+   *  Takes the control as a child rather than letting the caller lay it over
+   *  the row: the browse button used to be a separate block pulled up by
+   *  `-mt-7` to fake one line, which put it straight on top of the source
+   *  pill. A negative margin reserves no space, so nothing could have
+   *  prevented that collision — the row has to actually contain the button. */
+  trailing?: React.ReactNode;
 }) {
   const pill = SOURCE_PILL[client.source];
   const body = (
@@ -925,11 +938,15 @@ function InstallRow({
     // title attribute rather than on its own line: on a short window every
     // row above the stack is a row the stack does not get.
     return (
-      <div className="flex items-center gap-2 py-0.5" title={client.exe_path}>
-        <p className="min-w-0 flex-1 truncate font-heading text-[13px] font-semibold">
+      <div className="flex items-center gap-2 py-0.5">
+        <p
+          className="min-w-0 flex-1 truncate font-heading text-[13px] font-semibold"
+          title={client.exe_path}
+        >
           {shortDirName(client.client_dir)}
         </p>
         <InfoPill color={pill.color}>{pill.label}</InfoPill>
+        {trailing}
       </div>
     );
   }
