@@ -104,7 +104,13 @@ function PackRow({
     : linkOnly
       ? "text-muted-foreground"
       : "text-primary";
-  const line2 = linkOnly && pack.source.kind === "link_only" ? pack.source.reason : pack.summary;
+  // The reason a pack cannot be fetched is the sentence that stops someone
+  // filing "the Install button is missing" as a bug — but only while they do
+  // not have it. iMMERSE is link-only AND present in this user's shader tree,
+  // and telling them Kalpa will not download something they are already
+  // running is answering a question nobody asked.
+  const line2 =
+    !pack.installed && pack.source.kind === "link_only" ? pack.source.reason : pack.summary;
   const expanded = armed || Boolean(outcome) || Boolean(installError);
 
   return (

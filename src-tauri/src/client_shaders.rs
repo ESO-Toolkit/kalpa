@@ -118,7 +118,14 @@ pub struct ShaderPack {
     pub name: &'static str,
     pub author: &'static str,
     pub summary: &'static str,
-    /// Named exactly as the pack's own licence file names itself.
+    /// The licence, as a **badge**: short enough to sit in a pill beside four
+    /// others without setting the row width.
+    ///
+    /// "All rights reserved (see the repository's LICENSE)" was the honest long
+    /// form, and it was half the width of the pack row — so the action buttons
+    /// down the right edge stopped aligning and the list lost its spine. The
+    /// full wording belongs in the pack's own LICENSE file, which the install
+    /// path now copies into the shader tree anyway.
     pub licence: &'static str,
     pub source: PackSource,
     pub layout: ArchiveLayout,
@@ -149,7 +156,7 @@ pub const PACKS: &[ShaderPack] = &[
         author: "Afzaal (Kaidō)",
         summary: "Motion vectors, temporal AA and ambient occlusion. Upstream's \
                   recommended motion-vector provider for DLSS 5.",
-        licence: "AGNYA License Rev 1.4",
+        licence: "AGNYA 1.4",
         source: PackSource::Fetchable {
             owner: "umar-afzaal",
             repo: "LumeniteFX",
@@ -202,7 +209,7 @@ pub const PACKS: &[ShaderPack] = &[
         author: "Pascal Gilcher (Marty McFly)",
         summary: "Launchpad, MXAO, anti-aliasing and more. Launchpad is a \
                   DLSS 5 motion-vector provider and is in the free repository.",
-        licence: "All rights reserved (see the repository's LICENSE)",
+        licence: "All rights reserved",
         source: PackSource::LinkOnly {
             url: "https://github.com/martymcmodding/iMMERSE",
             reason: "This licence forbids redistributing the project and grants \
