@@ -85,6 +85,11 @@ function liveSliderMin(field: TuningField, current: string | null): number {
  * See `src-tauri/src/client_tuning.rs`'s module doc for why this is
  * draft-then-apply rather than per-control save: ReShade rewrites the whole
  * INI file itself, and a save on every slider drag would race it.
+ *
+ * Kalpa does not compete with the RenoDX Home-key overlay on tuning — the
+ * overlay is live, knows the real float ranges, and needs no restart. This
+ * panel is a recovery tool: it opens read-only, and editing is one explicit
+ * click away, for the case where a bad value is blocking the overlay itself.
  */
 export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
   const [form, setForm] = useState<TuningForm | null>(null);
@@ -93,10 +98,12 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
 
   const [draft, setDraft] = useState<Draft>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applied, setApplied] = useState(false);
+  const [lastBackupId, setLastBackupId] = useState<string | null>(null);
 
   const load = useCallback(async (dir: string) => {
     setLoading(true);
@@ -122,6 +129,8 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
     // matches the existing pattern in `client-health.tsx`.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(clientDir);
+    setLastBackupId(null);
+    setEditorOpen(false);
   }, [clientDir, load]);
 
   const setFieldValue = useCallback((key: string, value: string) => {
@@ -150,11 +159,12 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
     setApplied(false);
     try {
       await approveClientWrites(clientDir);
-      await invokeOrThrow<TuningApplyOutcome>("apply_client_tuning", {
+      const outcome = await invokeOrThrow<TuningApplyOutcome>("apply_client_tuning", {
         clientDir,
         edits: dirtyEdits,
       });
       setApplied(true);
+      setLastBackupId(outcome.backup_id);
       await onChanged();
       await load(clientDir);
     } catch (e) {
@@ -206,77 +216,154 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
 
   return (
     <div className="space-y-3">
-      {groups.map(({ group, fields }) =>
-        group === "advanced" ? (
-          <AdvancedGroup
-            key={group}
-            open={advancedOpen}
-            onToggle={() => setAdvancedOpen((v) => !v)}
-            fields={fields}
-            draft={draft}
-            onFieldChange={setFieldValue}
-          />
-        ) : (
-          <GlassPanel key={group} variant="subtle" className="space-y-3 p-3">
-            <SectionHeader>{GROUP_LABEL[group]}</SectionHeader>
-            <div className="space-y-3">
-              {fields.map((field) => (
-                <FieldRow
-                  key={field.key}
-                  field={field}
-                  value={draftValue(field, draft)}
-                  dirty={isDirty(field, draft)}
-                  onChange={(value) => setFieldValue(field.key, value)}
-                />
-              ))}
-            </div>
-          </GlassPanel>
-        )
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Press Home in ESO to tune Neural Rendering. The overlay is live, knows the real ranges, and
+        needs no restart — it is better at this than Kalpa. Use this page when you can&apos;t get
+        there: a setting that blacks the screen or stops the overlay opening, or to put the block
+        back the way it was.
+      </p>
+
+      {/* Hidden once the editor is open: the controls below show the same
+          values as live fields, and in a ~348px pane two readings of eighteen
+          settings is most of the height for none of the information. */}
+      {!editorOpen && (
+        <>
+          <ReadOnlyValues form={form} />
+          <Button variant="ghost" size="xs" onClick={() => setEditorOpen(true)}>
+            Edit anyway…
+          </Button>
+        </>
       )}
 
-      {form.unknown.length > 0 && <UnknownSettings unknown={form.unknown} />}
+      {editorOpen && (
+        <>
+          <div className="border-t border-structure-06" />
 
-      <div className="border-t border-structure-06" />
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          disabled={dirtyEdits.length === 0 || applying}
-          onClick={() => void handleApply()}
-        >
-          {applying ? (
-            <span
-              aria-hidden
-              className="inline-block size-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-primary"
-            />
-          ) : (
-            <SlidersHorizontalIcon />
+          {groups.map(({ group, fields }) =>
+            group === "advanced" ? (
+              <AdvancedGroup
+                key={group}
+                open={advancedOpen}
+                onToggle={() => setAdvancedOpen((v) => !v)}
+                fields={fields}
+                draft={draft}
+                onFieldChange={setFieldValue}
+              />
+            ) : (
+              <GlassPanel key={group} variant="subtle" className="space-y-3 p-3">
+                <SectionHeader>{GROUP_LABEL[group]}</SectionHeader>
+                <div className="space-y-3">
+                  {fields.map((field) => (
+                    <FieldRow
+                      key={field.key}
+                      field={field}
+                      value={draftValue(field, draft)}
+                      dirty={isDirty(field, draft)}
+                      onChange={(value) => setFieldValue(field.key, value)}
+                    />
+                  ))}
+                </div>
+              </GlassPanel>
+            )
           )}
-          {applying ? "Applying..." : "Apply"}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={dirtyEdits.length === 0 || applying}
-          onClick={handleDiscard}
-        >
-          Discard changes
-        </Button>
-        {dirtyEdits.length > 0 && !applying && (
-          <span className="text-xs text-muted-foreground">
-            {dirtyEdits.length} unsaved change{dirtyEdits.length === 1 ? "" : "s"}
-          </span>
-        )}
-        {applied && dirtyEdits.length === 0 && !applying && (
-          <InfoPill color="sky">Applies at next launch</InfoPill>
-        )}
-      </div>
 
-      {applyError && (
-        <p className="text-xs text-status-danger" role="alert">
-          {applyError}
-        </p>
+          {form.unknown.length > 0 && <UnknownSettings unknown={form.unknown} />}
+
+          <div className="border-t border-structure-06" />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              disabled={dirtyEdits.length === 0 || applying}
+              onClick={() => void handleApply()}
+            >
+              {applying ? (
+                <span
+                  aria-hidden
+                  className="inline-block size-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-primary"
+                />
+              ) : (
+                <SlidersHorizontalIcon />
+              )}
+              {applying ? "Applying..." : "Apply"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={dirtyEdits.length === 0 || applying}
+              onClick={handleDiscard}
+            >
+              Discard changes
+            </Button>
+            {dirtyEdits.length > 0 && !applying && (
+              <span className="text-xs text-muted-foreground">
+                {dirtyEdits.length} unsaved change{dirtyEdits.length === 1 ? "" : "s"}
+              </span>
+            )}
+            {applied && dirtyEdits.length === 0 && !applying && (
+              <InfoPill color="sky">Applies at next launch</InfoPill>
+            )}
+          </div>
+
+          {applied && lastBackupId && dirtyEdits.length === 0 && !applying && (
+            <p className="text-xs text-muted-foreground">
+              The previous <code>ReShade.ini</code> was kept in Kalpa&apos;s backups.
+            </p>
+          )}
+
+          {applyError && (
+            <p className="text-xs text-status-danger" role="alert">
+              {applyError}
+            </p>
+          )}
+        </>
       )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Read-only value view — the default state                                   */
+/* -------------------------------------------------------------------------- */
+
+/** Compact key/value listing of every known and unknown setting currently in
+ *  the file. This is the panel's default view — editing is a deliberate
+ *  extra click (`Edit anyway…`), since the Home-key overlay is the better
+ *  place to tune. Labels are shown only where the backend has a confirmed
+ *  one (see `client_tuning.rs`); otherwise the raw key is the label. */
+function ReadOnlyValues({ form }: { form: TuningForm }) {
+  const orderedFields = GROUP_ORDER.flatMap((group) =>
+    form.fields.filter((f) => f.group === group)
+  );
+  return (
+    <GlassPanel variant="subtle" className="space-y-0.5 p-2.5">
+      {orderedFields.map((field) => (
+        <ReadOnlyRow key={field.key} rawKey={field.key} label={field.label} value={field.current} />
+      ))}
+      {form.unknown.map(([key, value]) => (
+        <ReadOnlyRow key={key} rawKey={key} label={key} value={value} />
+      ))}
+    </GlassPanel>
+  );
+}
+
+function ReadOnlyRow({
+  rawKey,
+  label,
+  value,
+}: {
+  rawKey: string;
+  label: string;
+  value: string | null;
+}) {
+  const hasConfirmedLabel = label !== rawKey;
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="min-w-0 truncate">
+        {hasConfirmedLabel && <span className="mr-1.5 truncate text-[12px]">{label}</span>}
+        <span className="font-mono text-[11px] text-muted-foreground">{rawKey}</span>
+      </span>
+      <span className="shrink-0 font-mono text-[12px]">{value ?? "—"}</span>
     </div>
   );
 }

@@ -247,15 +247,19 @@ function SwitchPresetCard({
 }) {
   const { choices } = options;
 
+  // One preset is a fact, not an empty state. Rendering a "Switch preset"
+  // header over "nothing to switch to" was the panel's clearest tell that it
+  // was a stub — it announced a chooser and then withdrew it, which reads as a
+  // feature that has not landed rather than as a folder with one file in it.
+  // The slot above already says which preset is active and where it lives, so
+  // there is nothing left for this card to add until a second one exists.
+  if (choices.length <= 1) return null;
+
   return (
     <GlassPanel variant="subtle" className="space-y-3 p-4">
       <SectionHeader>Switch preset</SectionHeader>
 
-      {choices.length <= 1 ? (
-        <p className="text-xs text-muted-foreground">
-          Only one preset lives in this folder — nothing to switch to.
-        </p>
-      ) : (
+      {
         <ul className="space-y-2">
           {choices.map((choice) => {
             const isPending = pendingChoice?.relative_path === choice.relative_path;
@@ -299,7 +303,7 @@ function SwitchPresetCard({
             );
           })}
         </ul>
-      )}
+      }
 
       {pendingChoice && (
         <div className="space-y-2 border-t border-structure-06 pt-3">
