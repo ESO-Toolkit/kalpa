@@ -57,14 +57,16 @@ interface DiscoverPanelProps {
   isOffline?: boolean;
 }
 
-function sameIdSet(a: Set<number>, b: Set<number>): boolean {
-  if (a === b) return true;
-  if (a.size !== b.size) return false;
-  for (const id of a) if (!b.has(id)) return false;
-  return true;
-}
-
-function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
+/**
+ * Exported for tests: the install-then-uninstall regression below is a property
+ * of this hook's state, and reaching it through the whole panel would mean
+ * standing up the virtualizer and the ESOUI catalog for a badge.
+ */
+export function useAddonInstall(
+  addonsPath: string,
+  onInstalled: () => void,
+  persistedIds: Set<number>
+) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
@@ -72,40 +74,38 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
 
   /**
    * Ids installed this session that the scan behind `persistedIds` has not
-   * reported yet, tagged with the `persistedIds` contents they were recorded
-   * against.
-   *
-   * The overlay exists only to bridge install-success -> rescan-lands, so it has
-   * to expire when the rescan lands. It used to be a plain set that was only
-   * ever added to, which meant an addon installed and then UNINSTALLED in the
-   * same session kept rendering as "Installed" — the merged answer could never
-   * go back down, and switching tabs (which unmounts this panel) was the only
-   * thing that cleared it.
+   * reported yet. Bridges install-success -> rescan-lands, and nothing more.
    */
-  const [sessionInstalled, setSessionInstalled] = useState<{
-    ids: Set<number>;
-    basis: Set<number>;
-  } | null>(null);
+  const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
 
-  // `install` awaits several round trips, so it cannot tag the overlay with the
-  // `persistedIds` it closed over at click time.
-  const persistedRef = useRef(persistedIds);
+  // A new `persistedIds` identity is App publishing a freshly scanned addon
+  // list — a better answer than this overlay, so the overlay retires.
+  //
+  // Retiring the STATE is the point, not just ignoring it when merging. This
+  // was a plain set that was only ever added to, so an addon installed and then
+  // UNINSTALLED in the same session stayed badged as Installed for the rest of
+  // the session; the only thing that cleared it was the tab switch that
+  // unmounts this panel. Holding a snapshot of `persistedIds` from install time
+  // and merging only while it still matches does NOT fix that: an overlay
+  // recorded when nothing was installed matches the empty set again the moment
+  // the addon is removed, and revives the badge it was supposed to drop.
+  //
+  // The cost is that an `addons` change from a non-scan source (a tag edit, a
+  // disable toggle) also retires it, which can flash "Install" on an addon
+  // whose scan has not landed. That needs the user to act on the installed list
+  // during the few hundred ms after an install they started from Discover, and
+  // a momentary understatement beats a badge that is wrong until restart.
   useEffect(() => {
-    persistedRef.current = persistedIds;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSessionInstalledIds((prev) => (prev.size === 0 ? prev : new Set()));
   }, [persistedIds]);
 
-  // Expire on CONTENT, not `Set` identity. The parent rebuilds `persistedIds`
-  // from `addons`, which also changes on tag edits, disable toggles and the
-  // update-time merge — none of which are a fresh answer about what is
-  // installed, and all of which would otherwise flip a just-installed addon
-  // back to "Install" before its scan lands. A membership change IS a fresh
-  // answer, including the uninstall this overlay must stop outliving.
   const installedIds = useMemo(() => {
-    if (!sessionInstalled || !sameIdSet(sessionInstalled.basis, persistedIds)) return persistedIds;
+    if (sessionInstalledIds.size === 0) return persistedIds;
     const merged = new Set(persistedIds);
-    for (const id of sessionInstalled.ids) merged.add(id);
+    for (const id of sessionInstalledIds) merged.add(id);
     return merged;
-  }, [persistedIds, sessionInstalled]);
+  }, [persistedIds, sessionInstalledIds]);
 
   const install = useCallback(
     async (id: number) => {
@@ -129,12 +129,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           // `update-progress` with this row.
           operationId: beginOperation(),
         });
-        const basis = persistedRef.current;
-        setSessionInstalled((prev) => {
-          const ids = prev && sameIdSet(prev.basis, basis) ? new Set(prev.ids) : new Set<number>();
-          ids.add(id);
-          return { ids, basis };
-        });
+        setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
         reportDependencyFailures(res.failedDeps);
         onInstalled();
