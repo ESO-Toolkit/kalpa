@@ -335,8 +335,16 @@ function ReadOnlyValues({ form }: { form: TuningForm }) {
   const orderedFields = GROUP_ORDER.flatMap((group) =>
     form.fields.filter((f) => f.group === group)
   );
+  // Two columns. Eighteen settings stacked singly is ~324px of a pane that has
+  // ~505px for everything including the overlay lead and the editor button;
+  // paired, the same values are ~162px. Each row is short — a label, a mono key
+  // and a mono value — so the width was going spare in a dialog that is 970px
+  // wide and vertically starved.
   return (
-    <GlassPanel variant="subtle" className="space-y-0.5 p-2.5">
+    <GlassPanel
+      variant="subtle"
+      className="grid grid-cols-1 gap-x-6 gap-y-0.5 p-2.5 sm:grid-cols-2"
+    >
       {orderedFields.map((field) => (
         <ReadOnlyRow key={field.key} rawKey={field.key} label={field.label} value={field.current} />
       ))}

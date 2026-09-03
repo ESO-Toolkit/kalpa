@@ -323,6 +323,36 @@ export const SOURCE_PILL_COLOR: Record<SlotSource, "gold" | "muted" | "sky"> = {
   derived: "muted",
 };
 
+/**
+ * Provenance as a colour role: **whose hand is on this thing.**
+ *
+ * Colour in this panel used to mean exactly one thing — severity — while the
+ * brand accent quietly meant three (selected, fetchable, and "needs
+ * attention"). Two axes now, each with its own physical channel so they never
+ * compete for the same pixel: severity owns the 3px left border and the level
+ * word, provenance owns the *glyph tint* and the word beside it.
+ *
+ * Gold is the narrow one. It marks Kalpa's own hand and nothing else — a file
+ * Kalpa placed or could fetch — which is why selection had to stop using it.
+ * `link_only` is deliberately uncoloured: a tint there would claim an
+ * involvement Kalpa does not have.
+ *
+ * The word is not optional. On the three light themes every status token
+ * collapses towards one near-black hue, so hue separation is weak by
+ * construction and the label is what actually carries the meaning.
+ */
+export const SOURCE_META: Record<SlotSource, { glyph: string; word: string }> = {
+  fetchable: { glyph: "text-primary", word: "Kalpa can fetch" },
+  byo: { glyph: "text-accent-sky", word: "Bring your own" },
+  yours: { glyph: "text-accent-sky", word: "Your files" },
+  link_only: { glyph: "text-muted-foreground", word: "Link only" },
+  // Not a file you obtain — a setting other slots consume. `status-library` is
+  // the one status token this panel does not otherwise use, so it arrives
+  // without baggage, and the addon list already uses violet for "a thing other
+  // things depend on rather than run".
+  derived: { glyph: "text-status-library", word: "Setting" },
+};
+
 /* -------------------------------------------------------------------------- */
 /* Derived state                                                              */
 /* -------------------------------------------------------------------------- */
@@ -379,44 +409,69 @@ export function slotLevel(slot: Slot, stack: ClientStack): HealthLevel {
 }
 
 /**
- * The `font-mono` sub-line: what is in the slot right now, named as the
- * filesystem names it.
+ * What is in the slot right now: the identifier, and what else is worth saying
+ * about it.
+ *
+ * Split into two fields rather than one joined string because **only `id` is
+ * a real thing on disk.** Monospace was doing duty for filenames, counts,
+ * states and prose alike, which drains it of meaning — the reason to set
+ * `dxgi.dll` in mono is that a forum guide says "rename dxgi.dll" and the two
+ * should match on screen. `28 effects` is not that; it is a count, and it
+ * belongs in the sans face.
  *
  * Returns null when the slot is empty — the caller renders its own empty copy
  * rather than this rendering "none", so each slot can say something specific.
  */
-export function slotSubLine(slot: Slot, stack: ClientStack): string | null {
+export interface SlotSubLine {
+  /** A string that exists on disk or in an INI file. Rendered in mono. */
+  id: string;
+  /** Counts, versions, states. Rendered in the sans face. */
+  meta?: string;
+}
+
+export function slotSubLine(slot: Slot, stack: ClientStack): SlotSubLine | null {
   const items = stack.items.filter((item) => ROLE_TO_SLOT[item.role] === slot);
   switch (slot) {
     case "shaders":
       return stack.shaders.present
-        ? `reshade-shaders · ${stack.shaders.effect_count} effect${
-            stack.shaders.effect_count === 1 ? "" : "s"
-          }`
+        ? {
+            id: "reshade-shaders",
+            meta: `${stack.shaders.effect_count} effect${
+              stack.shaders.effect_count === 1 ? "" : "s"
+            }`,
+          }
         : null;
     case "preset": {
       const preset = stack.preset;
       if (!preset?.exists) return null;
       const name = preset.path.split(/[\\/]/).pop() ?? preset.path;
-      return `${name} · ${preset.techniques.length} technique${
-        preset.techniques.length === 1 ? "" : "s"
-      }`;
+      return {
+        id: name,
+        meta: `${preset.techniques.length} technique${preset.techniques.length === 1 ? "" : "s"}`,
+      };
     }
     case "tuning":
       return stack.tuning.length > 0
-        ? `[RenoDX.DLSS5] · ${stack.tuning.length} value${stack.tuning.length === 1 ? "" : "s"}`
+        ? {
+            id: "[RenoDX.DLSS5]",
+            meta: `${stack.tuning.length} value${stack.tuning.length === 1 ? "" : "s"}`,
+          }
         : null;
-    case "motion":
+    case "motion": {
       // The technique as the *preset* spells it: that is the identifier the
       // user can grep for in the file and the one Kalpa lists elsewhere.
-      return stack.preset?.mv_provider?.technique ?? null;
+      const technique = stack.preset?.mv_provider?.technique;
+      return technique ? { id: technique } : null;
+    }
     default: {
       if (items.length === 0) return null;
       const [item] = items;
       if (items.length === 1 && item) {
-        return item.version ? `${item.file_name} · ${item.version}` : item.file_name;
+        return { id: item.file_name, meta: item.version ?? undefined };
       }
-      return items.map((item) => item.file_name).join(" · ");
+      return {
+        id: items.map((entry) => entry.file_name).join(" · "),
+      };
     }
   }
 }

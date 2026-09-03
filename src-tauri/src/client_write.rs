@@ -286,6 +286,27 @@ const PROTECTED_NAMES: [&str; 6] = [
 /// Extensions belonging to the game's own data, never to a mod.
 const PROTECTED_EXTENSIONS: [&str; 4] = ["mnf", "dat", "sig", "manifest"];
 
+/// A licence or attribution notice, matched by **exact name** rather than by
+/// extension.
+///
+/// These are permitted in the shader tree because dropping them can be a
+/// licence breach: LumeniteFX's `NOTICE` carries the MIT attributions for
+/// Glamarye's Fast Effects and Alan Wolfe's blue-noise texture, and MIT
+/// requires that the notice accompany copies. Installing a pack's shaders and
+/// silently discarding its attribution file is not a tidier install, it is a
+/// non-compliant one.
+///
+/// Scoped as narrowly as it can be. Extension matching would let anything named
+/// `evil.md` through; whole-name matching admits six specific files, none of
+/// which is executable or loadable by ReShade. `license.txt` and `notice.txt`
+/// are listed for completeness — they already pass on their extension.
+fn is_attribution_file(file_name: &str) -> bool {
+    matches!(
+        file_name,
+        "license" | "license.md" | "license.txt" | "notice" | "notice.md" | "notice.txt"
+    )
+}
+
 /// Require that `relative_path` is a plausible destination for `kind`.
 ///
 /// Each kind may only write filenames that kind is actually about. This is what
@@ -330,7 +351,9 @@ pub fn validate_placement(kind: ManagedKind, relative_path: &str) -> Result<(), 
             at_root && matches!(extension.as_str(), "ini" | "log" | "cfg")
         }
         ManagedKind::Shader => {
-            in_shader_tree && matches!(extension.as_str(), "fx" | "fxh" | "png" | "jpg" | "txt")
+            in_shader_tree
+                && (matches!(extension.as_str(), "fx" | "fxh" | "png" | "jpg" | "txt")
+                    || is_attribution_file(&file_name))
         }
         ManagedKind::Preset => extension == "ini",
         ManagedKind::Addon => {
@@ -712,6 +735,41 @@ mod tests {
         assert!(validate_placement(ManagedKind::ReShadeCore, "DXGI.DLL").is_ok());
         assert!(validate_placement(ManagedKind::Shader, "ESO64.EXE").is_err());
         assert!(validate_placement(ManagedKind::Shader, "RESHADE-SHADERS/A.FX").is_ok());
+    }
+
+    /// Attribution files are allowed in the shader tree because MIT-derived
+    /// packs require their notice to travel with the copies. The allowance is
+    /// by whole name, so it must not generalise to the extension.
+    #[test]
+    fn attribution_files_are_allowed_only_by_exact_name() {
+        for allowed in [
+            "reshade-shaders/Shaders/LICENSE",
+            "reshade-shaders/Shaders/NOTICE",
+            "reshade-shaders/Shaders/license.md",
+            "reshade-shaders/Shaders/NOTICE.md",
+        ] {
+            assert!(
+                validate_placement(ManagedKind::Shader, allowed).is_ok(),
+                "{allowed} should be allowed"
+            );
+        }
+
+        for refused in [
+            // Not an attribution name — the .md allowance must not generalise.
+            "reshade-shaders/Shaders/readme.md",
+            "reshade-shaders/Shaders/evil.md",
+            // Still not loadable content, whatever it is called.
+            "reshade-shaders/Shaders/LICENSE.dll",
+            "reshade-shaders/Shaders/notice.exe",
+            // And the tree boundary still applies to attribution files.
+            "LICENSE",
+            "NOTICE",
+        ] {
+            assert!(
+                validate_placement(ManagedKind::Shader, refused).is_err(),
+                "{refused} should be refused"
+            );
+        }
     }
 
     #[test]
