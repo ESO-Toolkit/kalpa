@@ -89,7 +89,7 @@ export interface Technique {
 
 /** Which effect supplies the motion vectors DLSS5_Feed consumes. */
 export interface MvProvider {
-  kind: "launchpad" | "shared_texture";
+  kind: "shared_texture" | "launchpad" | "vort" | "lumenite_kernel" | "lumenite_quant_motion";
   /** The enabled technique producing them, or null when nothing does. */
   technique: string | null;
 }

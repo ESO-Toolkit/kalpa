@@ -128,13 +128,63 @@ pub struct Technique {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MvProviderKind {
-    /// iMMERSE LaunchPad — `MV_PROVIDER=0`.
-    Launchpad,
-    /// The community `texMotionVectors` convention: ReshadeMotionEstimation,
-    /// qUINT, VORT, QuantMotion, LumeniteFX Kernel — anything that writes that
-    /// texture. Which one it is can only be answered by looking at which
-    /// enabled effect declares it.
+    /// Anything writing the shared `texMotionVectors` texture — qUINT,
+    /// `dh_uber_motion`, DRME, ReshadeMotionEstimation. There is no name to
+    /// match on, so which effect it is can only be answered by looking at which
+    /// enabled one declares that texture.
     SharedTexture,
+    /// iMMERSE LaunchPad (MartysMods).
+    Launchpad,
+    /// VORT.
+    Vort,
+    /// LumeniteFX Kernel — upstream's current recommendation.
+    LumeniteKernel,
+    /// LumeniteFX QuantMotion.
+    LumeniteQuantMotion,
+}
+
+impl MvProviderKind {
+    /// The technique name upstream says to enable for this provider, plus the
+    /// spellings older presets use for the same effect.
+    ///
+    /// Matching is by name because that is what upstream documents per provider.
+    /// [`MvProviderKind::SharedTexture`] has no entry: it is a convention rather
+    /// than a named effect, and is resolved by reading the shader sources.
+    fn technique_names(self) -> &'static [&'static str] {
+        match self {
+            MvProviderKind::SharedTexture => &[],
+            // `Launchpad` is what current DLSS5-Feeder documents;
+            // `MartysMods_Launchpad` is what iMMERSE presets of the 0.4.x era
+            // actually contain, including the primary user's.
+            MvProviderKind::Launchpad => &["Launchpad", "MartysMods_Launchpad"],
+            MvProviderKind::Vort => &["vort_Motion"],
+            MvProviderKind::LumeniteKernel => &["LUMENITE: Kernel 2.0"],
+            MvProviderKind::LumeniteQuantMotion => &["LUMENITE: QuantMotion"],
+        }
+    }
+
+    /// Upstream's own name for the provider, for use in a sentence.
+    fn label(self) -> &'static str {
+        match self {
+            MvProviderKind::SharedTexture => "the shared texMotionVectors texture",
+            MvProviderKind::Launchpad => "iMMERSE LaunchPad",
+            MvProviderKind::Vort => "VORT",
+            MvProviderKind::LumeniteKernel => "LumeniteFX Kernel",
+            MvProviderKind::LumeniteQuantMotion => "LumeniteFX QuantMotion",
+        }
+    }
+
+    /// `DLSS5_MV_PROVIDER`'s value, in current DLSS5-Feeder.
+    fn from_mv_provider_definition(value: i64) -> Option<Self> {
+        match value {
+            0 => Some(MvProviderKind::SharedTexture),
+            1 => Some(MvProviderKind::Launchpad),
+            2 => Some(MvProviderKind::Vort),
+            3 => Some(MvProviderKind::LumeniteKernel),
+            4 => Some(MvProviderKind::LumeniteQuantMotion),
+            _ => None,
+        }
+    }
 }
 
 /// The resolved provider, plus the enabled technique that actually supplies
@@ -235,8 +285,10 @@ const COMPANION_NAMES: [&str; 3] = [
 const FEED_TECHNIQUE: &str = "dlss5_feed";
 const FEED_SOURCE: &str = "dlss5_feed.fx";
 
-/// iMMERSE LaunchPad, the provider `MV_PROVIDER=0` selects.
-const LAUNCHPAD_TECHNIQUE: &str = "martysmods_launchpad";
+/// LaunchPad's effect file. Its *technique* names live in
+/// [`MvProviderKind::technique_names`] alongside every other provider's; the
+/// source is matched as well because a preset can rename a technique but not
+/// the file it comes from.
 const LAUNCHPAD_SOURCE: &str = "martysmods_launchpad.fx";
 
 /// The shared texture every non-LaunchPad provider writes. `DLSS5_Feed.fx`
@@ -622,12 +674,25 @@ fn preprocessor_definition<'a>(
 
 /// Work out who feeds `DLSS5_Feed`.
 ///
-/// Kalpa used to assume LaunchPad. It is only the default: `MV_PROVIDER=1`, or
-/// a `DLSS5_MV_SOURCE=1` build in which LaunchPad is not compiled in at all,
-/// switches the effect to the shared `texMotionVectors` texture, which any of
-/// ReshadeMotionEstimation, qUINT, VORT, QuantMotion or LumeniteFX Kernel may
-/// be writing. Assuming LaunchPad there did not produce a wrong answer — it
-/// produced *no* answer, because the ordering check simply never ran.
+/// Kalpa used to assume LaunchPad. It is only ever one option, and which
+/// options exist depends on which generation of `DLSS5_Feed.fx` is installed —
+/// so both are read, newest first:
+///
+/// * **Current DLSS5-Feeder** uses one preprocessor definition,
+///   `DLSS5_MV_PROVIDER`, taking `0`–`4`: shared `texMotionVectors`, iMMERSE
+///   LaunchPad, VORT, LumeniteFX Kernel (upstream's recommendation), LumeniteFX
+///   QuantMotion. Each names the technique to enable, so the provider is matched
+///   by name.
+/// * **0.4.x**, which is what the primary user runs, uses two levels instead:
+///   `DLSS5_MV_SOURCE` decides at compile time whether the LaunchPad path is
+///   linked in at all — its headers cannot coexist with `ReShade.fxh` — and the
+///   runtime `MV_PROVIDER` uniform picks between LaunchPad (`0`) and the shared
+///   texture (`1`).
+///
+/// Assuming LaunchPad did not produce a wrong answer, it produced *no* answer:
+/// the ordering check looked for a technique that was not in the preset and
+/// silently never ran. Reading only the 0.4.x scheme would do the same thing
+/// again to anyone on a current build.
 fn resolve_mv_provider(
     preset_ini: &BTreeMap<String, BTreeMap<String, String>>,
     reshade_ini: &BTreeMap<String, BTreeMap<String, String>>,
@@ -639,34 +704,51 @@ fn resolve_mv_provider(
     }
 
     // Per-effect definitions win over the global list; absent both, the effect's
-    // own `#ifndef` default of 0 applies.
-    let mv_source = preprocessor_definition(preset_ini, FEED_SOURCE, "DLSS5_MV_SOURCE")
-        .or_else(|| preprocessor_definition(reshade_ini, "GENERAL", "DLSS5_MV_SOURCE"))
-        .unwrap_or("0");
-    let launchpad_compiled_in = mv_source.trim() == "0";
-    let selected = ini_get(preset_ini, FEED_SOURCE, "MV_PROVIDER")
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-
-    let kind = if launchpad_compiled_in && selected == 0 {
-        MvProviderKind::Launchpad
-    } else {
-        MvProviderKind::SharedTexture
+    // own `#ifndef` default applies.
+    let definition = |name: &str| {
+        preprocessor_definition(preset_ini, FEED_SOURCE, name)
+            .or_else(|| preprocessor_definition(reshade_ini, "GENERAL", name))
     };
 
+    let kind = match definition("DLSS5_MV_PROVIDER") {
+        // Current scheme. An unrecognised value is a build newer than this
+        // table, and guessing which provider it means is exactly the mistake
+        // this function exists to stop making — fall back to the convention
+        // that needs no name.
+        Some(value) => value
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .and_then(MvProviderKind::from_mv_provider_definition)
+            .unwrap_or(MvProviderKind::SharedTexture),
+        None => {
+            let launchpad_compiled_in = definition("DLSS5_MV_SOURCE").unwrap_or("0").trim() == "0";
+            let selected = ini_get(preset_ini, FEED_SOURCE, "MV_PROVIDER")
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+            if launchpad_compiled_in && selected == 0 {
+                MvProviderKind::Launchpad
+            } else {
+                MvProviderKind::SharedTexture
+            }
+        }
+    };
+
+    let names = kind.technique_names();
     let technique = techniques
         .iter()
-        .find(|t| match kind {
-            MvProviderKind::Launchpad => {
-                t.name.eq_ignore_ascii_case(LAUNCHPAD_TECHNIQUE)
-                    || t.source.eq_ignore_ascii_case(LAUNCHPAD_SOURCE)
-            }
-            // No name to match on, so ask the shader files themselves which
-            // enabled effect deals in the shared texture. The feed declares it
-            // too — as the consumer — so its own source is excluded.
-            MvProviderKind::SharedTexture => {
+        .find(|t| {
+            if names.is_empty() {
+                // A convention, not a named effect: ask the shader files
+                // themselves which enabled one deals in the shared texture. The
+                // feed declares it too — as the consumer — so its own source is
+                // excluded.
                 !t.source.eq_ignore_ascii_case(FEED_SOURCE)
                     && source_mentions_shared_mv(shader_dir, &t.source)
+            } else {
+                names.iter().any(|name| t.name.eq_ignore_ascii_case(name))
+                    || (kind == MvProviderKind::Launchpad
+                        && t.source.eq_ignore_ascii_case(LAUNCHPAD_SOURCE))
             }
         })
         .map(|t| t.name.clone());
@@ -855,15 +937,16 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
                     "stack-mv-provider-missing",
                     HealthLevel::Danger,
                     "Nothing is producing motion vectors",
-                    match provider.kind {
-                        MvProviderKind::Launchpad => "DLSS5_Feed is set to read motion vectors \
-                             from iMMERSE LaunchPad, but the preset does not enable LaunchPad's \
-                             technique. The feed reads zeros, so DLSS sees a still image."
-                            .to_string(),
-                        MvProviderKind::SharedTexture => "DLSS5_Feed is set to read motion \
-                             vectors from the shared texMotionVectors texture, but no enabled \
-                             effect in this preset writes it. The feed reads zeros, so DLSS sees \
-                             a still image."
+                    match provider.kind.technique_names().first() {
+                        Some(technique) => format!(
+                            "DLSS5_Feed is set to read motion vectors from {}, but this preset \
+                             does not enable its technique ({technique}). The feed reads zeros, \
+                             so DLSS sees a still image.",
+                            provider.kind.label()
+                        ),
+                        None => "DLSS5_Feed is set to read motion vectors from the shared \
+                             texMotionVectors texture, but no enabled effect in this preset \
+                             writes it. The feed reads zeros, so DLSS sees a still image."
                             .to_string(),
                     },
                 )),
@@ -1083,6 +1166,82 @@ DEBUG_VIEW=1
             detail.contains("MotionEstimation"),
             "the finding must name the real provider, got {detail}"
         );
+    }
+
+    /// Current DLSS5-Feeder replaced the two-level `DLSS5_MV_SOURCE` +
+    /// `MV_PROVIDER` scheme with a single `DLSS5_MV_PROVIDER` definition taking
+    /// 0–4, and recommends LumeniteFX Kernel (3). Reading only the older scheme
+    /// would leave the ordering check looking for a technique that is not in
+    /// the preset — the exact silent no-op this whole resolver exists to stop.
+    #[test]
+    fn the_current_mv_provider_definition_is_understood() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,LUMENITE: Kernel 2.0@lumenite_kernel.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=3\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        let provider = stack
+            .preset
+            .as_ref()
+            .and_then(|preset| preset.mv_provider.as_ref())
+            .expect("provider");
+        assert_eq!(provider.kind, MvProviderKind::LumeniteKernel);
+        assert_eq!(provider.technique.as_deref(), Some("LUMENITE: Kernel 2.0"));
+
+        let detail = &stack
+            .findings
+            .iter()
+            .find(|f| f.id == "stack-technique-order")
+            .expect("the ordering check must run for this provider too")
+            .detail;
+        assert!(detail.contains("LUMENITE: Kernel 2.0"), "{detail}");
+    }
+
+    /// The numbering is not the same as the old runtime combo: `1` is LaunchPad
+    /// under `DLSS5_MV_PROVIDER`, where `0` was LaunchPad under `MV_PROVIDER`.
+    /// Getting that backwards would name the wrong effect.
+    #[test]
+    fn the_two_provider_schemes_number_launchpad_differently() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=1\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+
+        assert_eq!(provider.kind, MvProviderKind::Launchpad);
+        assert_eq!(
+            provider.technique.as_deref(),
+            Some("MartysMods_Launchpad"),
+            "the preset's own spelling is matched, not just upstream's"
+        );
+    }
+
+    /// A build newer than this table must not be guessed at. Falling back to the
+    /// convention that needs no name is the honest answer.
+    #[test]
+    fn an_unknown_provider_value_falls_back_rather_than_guessing() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=9\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+
+        assert_eq!(provider.kind, MvProviderKind::SharedTexture);
     }
 
     #[test]

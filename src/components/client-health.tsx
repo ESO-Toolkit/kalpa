@@ -50,6 +50,7 @@ import type {
   HealthLevel,
   ManagedFileState,
   ManagedFileStatus,
+  PresetInfo,
   ManagedInventory,
   ManagedKind,
   OrphanInjector,
@@ -119,6 +120,16 @@ const LEVEL_META: Record<
     tint: "bg-status-danger/[0.04]",
     line: "border-status-danger",
   },
+};
+
+/** Upstream's own name for each motion-vector provider. Kalpa does not invent
+ *  wording for these — they are what DLSS5-Feeder's own table calls them. */
+const MV_PROVIDER_LABEL: Record<NonNullable<PresetInfo["mv_provider"]>["kind"], string> = {
+  shared_texture: "the shared texMotionVectors texture",
+  launchpad: "iMMERSE LaunchPad",
+  vort: "VORT",
+  lumenite_kernel: "LumeniteFX Kernel",
+  lumenite_quant_motion: "LumeniteFX QuantMotion",
 };
 
 /** Worst-first ordering for picking a representative level across findings. */
@@ -1705,10 +1716,7 @@ function PresetDetail({
                 <span className="font-mono">{preset.mv_provider.technique}</span>
               ) : (
                 <span className="text-status-danger">
-                  nothing enabled{" "}
-                  {preset.mv_provider.kind === "launchpad"
-                    ? "(MV_PROVIDER selects iMMERSE LaunchPad)"
-                    : "(MV_PROVIDER selects texMotionVectors)"}
+                  nothing enabled ({MV_PROVIDER_LABEL[preset.mv_provider.kind]} is selected)
                 </span>
               )}
             </p>
