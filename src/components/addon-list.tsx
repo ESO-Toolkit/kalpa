@@ -341,6 +341,12 @@ function InstalledAddonRows({
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (addons.length === 0) return;
 
+      // Batch mode puts each row checkbox in the tab order, so keydown can
+      // bubble here from a focused descendant. The list's own navigation
+      // applies only when the listbox itself holds focus — otherwise the
+      // preventDefault() below cancels the checkbox's native Space activation.
+      if (e.target !== e.currentTarget) return;
+
       const currentIndex = selectedAddon
         ? addons.findIndex((a) => a.folderName === selectedAddon.folderName)
         : -1;

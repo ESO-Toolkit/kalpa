@@ -135,6 +135,7 @@ function Harness({
   onSelect,
   onToggleSelect,
   selectedFolders,
+  selectedAddon,
 }: {
   children?: ReactNode;
   onRemoveAddon?: (folderName: string) => void;
@@ -142,6 +143,7 @@ function Harness({
   onSelect?: (addon: AddonManifest) => void;
   onToggleSelect?: (folderName: string) => void;
   selectedFolders?: Set<string>;
+  selectedAddon?: AddonManifest | null;
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>("installed");
 
@@ -150,7 +152,7 @@ function Harness({
       <AddonList
         addons={[addon]}
         allAddons={[addon]}
-        selectedAddon={null}
+        selectedAddon={selectedAddon ?? null}
         onSelect={onSelect ?? vi.fn()}
         searchQuery=""
         onSearchChange={vi.fn()}
@@ -311,5 +313,37 @@ describe("AddonList", () => {
     expect(checkbox).toHaveAttribute("tabindex", "-1");
     expect(screen.queryByText("· 1 selected")).not.toBeInTheDocument();
     expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("still navigates the list from the keyboard when the listbox holds focus", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+
+    // Space only re-selects the current row, so the harness has to track which
+    // row ArrowDown landed on.
+    function NavHarness() {
+      const [selected, setSelected] = useState<AddonManifest | null>(null);
+      return (
+        <Harness
+          selectedAddon={selected}
+          onSelect={(next) => {
+            setSelected(next);
+            onSelect(next);
+          }}
+        />
+      );
+    }
+
+    render(<NavHarness />);
+
+    const listbox = await screen.findByRole("listbox");
+    listbox.focus();
+    expect(listbox).toHaveFocus();
+
+    await user.keyboard("{ArrowDown}");
+    expect(onSelect).toHaveBeenCalledWith(addon);
+
+    onSelect.mockClear();
+    await user.keyboard("[Space]");
+    expect(onSelect).toHaveBeenCalledWith(addon);
   });
 });
