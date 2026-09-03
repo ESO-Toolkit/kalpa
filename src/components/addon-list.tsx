@@ -249,20 +249,17 @@ const AddonListItem = memo(function AddonListItem({
               : "w-0 opacity-0 group-hover:w-6 group-hover:opacity-100 group-focus-within:w-6 group-focus-within:opacity-100"
           )}
         >
-          <button
-            type="button"
-            role="checkbox"
-            aria-checked={isSelected}
+          {/* The Checkbox is the control itself — it renders a native <button
+              role="checkbox">, so wrapping it in another button nested two
+              interactive elements and announced two checkboxes per row. */}
+          <Checkbox
+            checked={isSelected}
+            onCheckedChange={() => onToggleSelect(addon.folderName)}
             aria-label={`Select ${addon.title}`}
             tabIndex={batchMode ? 0 : -1}
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleSelect(addon.folderName);
-            }}
-            className="flex items-center justify-center rounded-[5px] outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/40"
-          >
-            <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
-          </button>
+            onClick={(e) => e.stopPropagation()}
+            className="focus-visible:ring-2 focus-visible:ring-accent-sky/40"
+          />
         </div>
         <div className="flex-1 min-w-0">{content}</div>
       </div>
@@ -343,6 +340,12 @@ function InstalledAddonRows({
   const handleListKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (addons.length === 0) return;
+
+      // Batch mode puts each row checkbox in the tab order, so keydown can
+      // bubble here from a focused descendant. The list's own navigation
+      // applies only when the listbox itself holds focus — otherwise the
+      // preventDefault() below cancels the checkbox's native Space activation.
+      if (e.target !== e.currentTarget) return;
 
       const currentIndex = selectedAddon
         ? addons.findIndex((a) => a.folderName === selectedAddon.folderName)

@@ -4,7 +4,7 @@ import * as React from "react";
 import { motion, type HTMLMotionProps } from "motion/react";
 
 import { getStrictContext } from "@/lib/get-strict-context";
-import { Slot, type WithAsChild } from "@/components/animate-ui/primitives/animate/slot";
+import { Slot } from "@/components/animate-ui/primitives/animate/slot";
 
 type Ripple = {
   id: number;
@@ -20,12 +20,32 @@ type RippleButtonContextType = {
 const [RippleButtonProvider, useRippleButton] =
   getStrictContext<RippleButtonContextType>("RippleButtonContext");
 
-type RippleButtonProps = WithAsChild<
-  HTMLMotionProps<"button"> & {
-    hoverScale?: number;
-    tapScale?: number;
-  }
->;
+type RippleButtonOwnProps = {
+  hoverScale?: number;
+  tapScale?: number;
+};
+
+// Attributes only a <button> understands. Slot spreads props straight onto the
+// `asChild` element, which may be any tag, so they are offered on the default
+// form only.
+type ButtonOnlyProps =
+  | "type"
+  | "disabled"
+  | "form"
+  | "formAction"
+  | "formEncType"
+  | "formMethod"
+  | "formNoValidate"
+  | "formTarget"
+  | "name"
+  | "value"
+  | "popoverTarget"
+  | "popoverTargetAction";
+
+type RippleButtonProps =
+  | (Omit<HTMLMotionProps<"button">, ButtonOnlyProps> &
+      RippleButtonOwnProps & { asChild: true; children: React.ReactElement })
+  | (HTMLMotionProps<"button"> & RippleButtonOwnProps & { asChild?: false | undefined });
 
 function RippleButton({
   ref,
@@ -92,12 +112,15 @@ function RippleButton({
   );
 }
 
-type RippleButtonRipplesProps = WithAsChild<
-  HTMLMotionProps<"span"> & {
-    color?: string;
-    scale?: number;
-  }
->;
+type RippleButtonRipplesProps =
+  | (HTMLMotionProps<"span"> & {
+      color?: string;
+      scale?: number;
+    } & { asChild: true; children: React.ReactElement })
+  | (HTMLMotionProps<"span"> & {
+      color?: string;
+      scale?: number;
+    } & { asChild?: false | undefined });
 
 function RippleButtonRipples({
   color = "var(--ripple-button-ripple-color)",
