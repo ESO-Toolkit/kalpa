@@ -92,6 +92,12 @@ async function showAllAddons(page: Page): Promise<void> {
 }
 
 test.describe.serial("Addon lifecycle @sandbox", () => {
+  // The readiness probe has an explicit 120s application-state deadline for
+  // cold WebView2 machines. Let the beforeAll hook reach that deadline so a
+  // genuine readiness failure reports its IPC/page diagnostics instead of
+  // Playwright aborting the hook at its 30s default.
+  test.describe.configure({ timeout: 130_000 });
+
   let browser: Browser;
   let page: Page;
 
