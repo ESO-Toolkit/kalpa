@@ -1,5 +1,7 @@
 import { lazy, memo, Suspense, useState } from "react";
 import type { AddonManifest, AuthUser, GameInstance, UpdateCheckResult } from "@/types";
+import { DIALOG_LABELS } from "@/lib/features";
+import type { ActiveDialog, DialogId } from "@/lib/features";
 import {
   Dialog,
   DialogContent,
@@ -37,38 +39,6 @@ const UploaderWorkspace = lazy(() =>
   import("./uploader/uploader-workspace").then((m) => ({ default: m.UploaderWorkspace }))
 );
 
-type ActiveDialog =
-  | "settings"
-  | "profiles"
-  | "packs"
-  | "backups"
-  | "api-compat"
-  | "characters"
-  | "saved-variables"
-  | "migration-wizard"
-  | "safety-center"
-  | "support"
-  | "shortcuts"
-  | "log-upload"
-  | "client-health"
-  | null;
-
-const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
-  settings: "Settings",
-  profiles: "Profiles",
-  packs: "Pack Hub",
-  backups: "Backups",
-  "api-compat": "API Compatibility",
-  characters: "Characters",
-  "saved-variables": "Saved Variables",
-  "migration-wizard": "Migration",
-  "safety-center": "Safety Center",
-  support: "Help",
-  shortcuts: "Keyboard Shortcuts",
-  "log-upload": "Log Uploader",
-  "client-health": "Client Health",
-};
-
 interface AppDialogsProps {
   activeDialog: ActiveDialog;
   addons: AddonManifest[];
@@ -82,13 +52,14 @@ interface AppDialogsProps {
   isOffline: boolean;
   lastError: string | null;
   logUploaderMounted: boolean;
+  minionDetected: boolean;
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;
   onInstancesDetected: (instances: GameInstance[]) => void;
   onPathChange: (path: string) => void;
   onRefresh: () => void;
-  onShowDialog: (dialog: Exclude<ActiveDialog, null>) => void;
+  onShowDialog: (dialog: DialogId) => void;
   updateResults: UpdateCheckResult[];
 }
 
@@ -129,6 +100,7 @@ function AppDialogsBase({
   isOffline,
   lastError,
   logUploaderMounted,
+  minionDetected,
   onAuthChange,
   onCheckForAppUpdate,
   onCloseDialog,
@@ -221,12 +193,8 @@ function AppDialogsBase({
               onPathChange={onPathChange}
               onClose={onCloseDialog}
               onRefresh={onRefresh}
-              onShowBackups={() => onShowDialog("backups")}
-              onShowApiCompat={() => onShowDialog("api-compat")}
-              onShowCharacters={() => onShowDialog("characters")}
-              onShowMigrationWizard={() => onShowDialog("migration-wizard")}
-              onShowSafetyCenter={() => onShowDialog("safety-center")}
-              onShowClientHealth={() => onShowDialog("client-health")}
+              minionDetected={minionDetected}
+              onOpenFeature={onShowDialog}
               onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}
               onOpenLogUpload={() => {

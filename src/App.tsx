@@ -59,6 +59,13 @@ import {
   type PendingRemovalGroup,
 } from "@/lib/removal-queue";
 import { isModKey, isWindows } from "@/lib/platform";
+import {
+  FEATURES,
+  visibleToolbar,
+  type ActiveDialog,
+  type DialogId,
+  type FeatureId,
+} from "@/lib/features";
 import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
 import {
   countUpdatesWithoutProtectedEditsBaseline,
@@ -94,21 +101,9 @@ const AddonDetail = lazy(() =>
   import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
 );
 
-type ActiveDialog =
-  | "settings"
-  | "profiles"
-  | "packs"
-  | "backups"
-  | "api-compat"
-  | "characters"
-  | "saved-variables"
-  | "migration-wizard"
-  | "safety-center"
-  | "support"
-  | "shortcuts"
-  | "log-upload"
-  | "client-health"
-  | null;
+// `hidden` (persisted toolbarHidden preference) is always empty in this phase —
+// a later phase replaces this with a real preference read.
+const EMPTY_HIDDEN: FeatureId[] = [];
 
 interface PendingDeepLinkPayload {
   packId: string | null;
@@ -166,6 +161,7 @@ function App() {
   const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [minionDetected, setMinionDetected] = useState(false);
   const [logUploaderMounted, setLogUploaderMounted] = useState(false);
   const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -684,6 +680,14 @@ function App() {
         .finally(() => setAuthVerifying(false));
     }
 
+    // Fire-and-forget: this used to run every time Settings opened, but it
+    // only needs to run once at startup. On error, leave it false.
+    void invokeResult<boolean>("detect_minion").then((result) => {
+      if (result.ok) {
+        setMinionDetected(result.data);
+      }
+    });
+
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
     const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed] = await Promise.all([
@@ -828,7 +832,12 @@ function App() {
         }
         if (activeDialogRef.current !== null || setupInstancesRef.current !== null) return;
         event.preventDefault();
-        setActiveDialog("shortcuts");
+        const shortcutFeature = FEATURES.find(
+          (f) => f.shortcut?.key === "?" && f.shortcut.mod === false
+        );
+        if (shortcutFeature) {
+          setActiveDialog(shortcutFeature.id);
+        }
       }
 
       if (isModKey(event) && key === "r") {
@@ -2147,6 +2156,8 @@ function App() {
   const showUploaderIntro =
     uploaderIntroHasLog && authUser === null && !uploaderIntroDismissed && !authVerifying;
 
+  const toolbarFeatures = useMemo(() => visibleToolbar(FEATURES, EMPTY_HIDDEN), []);
+
   const dismissUploaderIntro = useCallback(() => {
     setUploaderIntroDismissed(true);
     setUploaderIntroHasLog(false);
@@ -2166,10 +2177,25 @@ function App() {
     [dismissUploaderIntro, srAnnounce]
   );
 
-  const handleOpenDialog = useCallback((dialog: Exclude<ActiveDialog, null>) => {
-    if (dialog === "log-upload") setLogUploaderMounted(true);
-    setActiveDialog(dialog);
-  }, []);
+  const handleOpenDialog = useCallback(
+    (dialog: DialogId) => {
+      if (dialog === "log-upload") {
+        setLogUploaderMounted(true);
+        dismissUploaderIntro();
+      }
+      setActiveDialog(dialog);
+    },
+    [dismissUploaderIntro]
+  );
+
+  const handleOpenSettingsDialog = useCallback(
+    () => handleOpenDialog("settings"),
+    [handleOpenDialog]
+  );
+  const handleOpenLogUploadDialog = useCallback(
+    () => handleOpenDialog("log-upload"),
+    [handleOpenDialog]
+  );
 
   const handleCloseDialog = useCallback(() => {
     setActiveDialog(null);
@@ -2188,16 +2214,10 @@ function App() {
   );
   const handleBatchRemoveClick = useCallback(() => void handleBatchRemove(), [handleBatchRemove]);
   const handleBatchUpdateClick = useCallback(() => void handleBatchUpdate(), [handleBatchUpdate]);
-  const handleOpenPacks = useCallback(() => setActiveDialog("packs"), []);
-  const handleOpenProfiles = useCallback(() => setActiveDialog("profiles"), []);
-  const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
-  const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
-  const handleOpenSupport = useCallback(() => setActiveDialog("support"), []);
-  const handleOpenLogUpload = useCallback(() => {
-    dismissUploaderIntro();
-    setLogUploaderMounted(true);
-    setActiveDialog("log-upload");
-  }, [dismissUploaderIntro]);
+  const handleOpenSupportDialog = useCallback(
+    () => handleOpenDialog("support"),
+    [handleOpenDialog]
+  );
   const handleUpdateAddonClick = useCallback(
     (folderName: string) => void handleSingleUpdate(folderName),
     [handleSingleUpdate]
@@ -2462,12 +2482,10 @@ function App() {
             onBatchRemove={handleBatchRemoveClick}
             onBatchTag={handleBatchTag}
             onBatchUpdate={handleBatchUpdateClick}
-            onOpenPacks={handleOpenPacks}
-            onOpenProfiles={handleOpenProfiles}
-            onOpenSavedVars={handleOpenSavedVars}
-            onOpenSettings={handleOpenSettings}
-            onOpenSupport={handleOpenSupport}
-            onOpenLogUpload={handleOpenLogUpload}
+            toolbarFeatures={toolbarFeatures}
+            onOpenFeature={handleOpenDialog}
+            onOpenSettings={handleOpenSettingsDialog}
+            onOpenSupport={handleOpenSupportDialog}
             onAuthChange={handleAuthChange}
             onRefresh={handleRefresh}
           />
@@ -2478,7 +2496,7 @@ function App() {
             appUpdateState={appUpdateState}
             onDownload={downloadAndInstall}
             onRestart={restartApp}
-            onOpenSettings={errorShowSettings ? handleOpenSettings : undefined}
+            onOpenSettings={errorShowSettings ? handleOpenSettingsDialog : undefined}
           />
 
           <UpdateBanner
@@ -2494,7 +2512,7 @@ function App() {
 
           {showUploaderIntro && (
             <UploaderIntroCard
-              onOpenLogUpload={handleOpenLogUpload}
+              onOpenLogUpload={handleOpenLogUploadDialog}
               onDismiss={dismissUploaderIntro}
             />
           )}
@@ -2608,6 +2626,7 @@ function App() {
             isOffline={isOffline}
             lastError={error}
             logUploaderMounted={logUploaderMounted}
+            minionDetected={minionDetected}
             onAuthChange={handleAuthChange}
             onCheckForAppUpdate={handleCheckForAppUpdateClick}
             onCloseDialog={handleCloseDialog}

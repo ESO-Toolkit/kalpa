@@ -64,6 +64,7 @@ src/                        # React frontend
   hooks/                    # Shared React hooks
   hooks/__tests__/          # Shared hook tests
   lib/                      # Utilities, Tauri bindings, store, theme presets
+  lib/features.ts           # App-shell feature registry (see below)
   lib/__tests__/            # Frontend utility and contract tests
   types.ts                  # Shared TypeScript interfaces
 
@@ -104,6 +105,29 @@ backend/eso-packs-worker/   # Pack Hub Cloudflare Worker
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar, shipped on Windows
 ```
+
+### The shell feature registry
+
+`src/lib/features.ts` is the single source of truth for Kalpa's app-shell surfaces:
+what each feature is called, which icon it wears, and where the user finds it
+(pinned in the header toolbar, listed in the Tools menu, or shown in
+Settings > Tools). `App.tsx`, `app-header.tsx`, `app-dialogs.tsx`,
+`settings.tsx` and `keyboard-shortcuts.tsx` all read from it.
+
+**Add a new shell surface by adding a `FeatureDef` there — not by threading
+another `onOpenX` prop through App -> AppHeader -> Settings.** That prop-drilling
+is what the registry replaced, and it is how the toolbar and the Settings Tools
+list drifted apart in the first place.
+
+It is **not** a feature-flag system. No entry gates a Tauri command, a Cargo
+feature, or a build variant; every feature is always registered and always
+reachable by keyboard shortcut and deep link. The registry only decides where a
+surface appears. `visibleToolbar()` and `toolsMenuFeatures()` are pure functions
+of `(FEATURES, hidden, ctx)` so they can be unit-tested without a DOM.
+
+Two strings per feature look redundant but are not: `label` is the menu/row text
+("Backup & Restore") and `dialogTitle` is the dialog's loading-fallback title
+("Backups"). Leave `dialogTitle` unset when they agree.
 
 Both `commands.rs` files register handlers into the single `generate_handler!` list in `lib.rs`. When adding new logic, pick the closest existing file that matches the concern before creating new modules — uploader and SavedVariables work belongs in `uploader/` and `saved_variables/`, not in the root `commands.rs`.
 
