@@ -1,18 +1,14 @@
-import { memo, useState, useRef, useEffect } from "react";
+import { memo, useCallback, useState, useRef, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Check,
   ChevronDown,
-  CloudUpload,
   DownloadIcon,
-  FileSliders,
-  Layers,
   LifeBuoy,
   Loader2Icon,
   MinusIcon,
   Monitor,
-  PackageIcon,
   Plus,
   Power,
   RefreshCwIcon,
@@ -26,6 +22,7 @@ import { AccountChip } from "@/components/account-chip";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
 import { SimpleTooltip } from "@/components/ui/tooltip";
+import type { FeatureDef, FeatureId } from "@/lib/features";
 import { isMac, modKeyLabel } from "@/lib/platform";
 import { PRESET_TAGS, type AuthUser, type GameInstance } from "@/types";
 import { cn } from "@/lib/utils";
@@ -51,11 +48,9 @@ interface AppHeaderProps {
   onBatchRemove: () => void;
   onBatchTag: (tag: string) => void;
   onBatchUpdate: () => void;
-  onOpenPacks: () => void;
-  onOpenProfiles: () => void;
-  onOpenSavedVars: () => void;
+  toolbarFeatures: FeatureDef[];
+  onOpenFeature: (id: FeatureId) => void;
   onOpenSettings: () => void;
-  onOpenLogUpload: () => void;
   onOpenSupport: () => void;
   onAuthChange: (user: AuthUser | null) => void;
   onRefresh: () => void;
@@ -181,15 +176,14 @@ function AppHeaderBase({
   onBatchRemove,
   onBatchTag,
   onBatchUpdate,
-  onOpenPacks,
-  onOpenProfiles,
-  onOpenSavedVars,
+  toolbarFeatures,
+  onOpenFeature,
   onOpenSettings,
-  onOpenLogUpload,
   onOpenSupport,
   onAuthChange,
   onRefresh,
 }: AppHeaderProps) {
+  const openLogUpload = useCallback(() => onOpenFeature("log-upload"), [onOpenFeature]);
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const [customTagInput, setCustomTagInput] = useState("");
   const tagMenuRef = useRef<HTMLDivElement>(null);
@@ -451,42 +445,50 @@ function AppHeaderBase({
                 <RefreshCwIcon className={loading ? "animate-spin" : ""} />
               </Button>
             </SimpleTooltip>
-            <SimpleTooltip content="Addon Packs" side="bottom">
-              <Button variant="ghost" size="icon-sm" onClick={onOpenPacks} aria-label="Addon Packs">
-                <PackageIcon />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="Addon Profiles" side="bottom">
-              <Button variant="ghost" size="icon-sm" onClick={onOpenProfiles} aria-label="Profiles">
-                <Layers />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="SavedVariables Manager" side="bottom">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onOpenSavedVars}
-                aria-label="Saved Vars"
-              >
-                <FileSliders />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="Upload to ESO Logs" side="bottom">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onOpenLogUpload}
-                aria-label="Upload to ESO Logs"
-              >
-                <CloudUpload className="size-3.5" />
-                <span className="hidden min-[860px]:inline">Upload logs</span>
-              </Button>
-            </SimpleTooltip>
+            {toolbarFeatures.map((feature) => {
+              const Icon = feature.icon;
+              const isUploader = feature.id === "log-upload";
+              if (isUploader) {
+                return (
+                  <SimpleTooltip
+                    key={feature.id}
+                    content={feature.tooltip ?? feature.label}
+                    side="bottom"
+                  >
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={openLogUpload}
+                      aria-label={feature.ariaLabel ?? feature.label}
+                    >
+                      <Icon className="size-3.5" />
+                      <span className="hidden min-[860px]:inline">Upload logs</span>
+                    </Button>
+                  </SimpleTooltip>
+                );
+              }
+              return (
+                <SimpleTooltip
+                  key={feature.id}
+                  content={feature.tooltip ?? feature.label}
+                  side="bottom"
+                >
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => onOpenFeature(feature.id)}
+                    aria-label={feature.ariaLabel ?? feature.label}
+                  >
+                    <Icon />
+                  </Button>
+                </SimpleTooltip>
+              );
+            })}
             <AccountChip
               authUser={authUser}
               authVerifying={authVerifying}
               onAuthChange={onAuthChange}
-              onOpenLogUpload={onOpenLogUpload}
+              onOpenLogUpload={openLogUpload}
             />
             <SimpleTooltip content="Get help" side="bottom">
               <Button variant="ghost" size="sm" onClick={onOpenSupport} aria-label="Get help">
