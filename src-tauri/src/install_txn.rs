@@ -131,7 +131,7 @@ impl InstallTransaction {
     ) -> Result<Vec<String>, String> {
         // Debug-only: a tiny addon was observed spending ~3s here, which the
         // single "commit" label could not explain.
-        let phase = crate::commands::PhaseTimer::start("commit");
+        let phase = crate::phase_timer::PhaseTimer::start("commit");
 
         let mut folders = folders.to_vec();
         folders.sort();

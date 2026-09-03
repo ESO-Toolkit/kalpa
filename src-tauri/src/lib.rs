@@ -29,6 +29,7 @@ mod manifest_cache;
 mod metadata;
 mod native_boot;
 mod pack_hub;
+mod phase_timer;
 pub mod platform;
 mod safe_migration;
 mod saved_variables;

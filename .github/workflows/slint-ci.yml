@@ -10,6 +10,10 @@ on:
     branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
+      # The sidecar includes a number of src-tauri modules with #[path]. Run
+      # its real build whenever any shared Rust source changes, so a desktop
+      # refactor cannot silently break packaged sidecar compilation.
+      - "src-tauri/src/**"
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
   # Also run on main pushes: GitHub Actions caches saved on PR branches are
@@ -20,6 +24,7 @@ on:
     branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
+      - "src-tauri/src/**"
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
 

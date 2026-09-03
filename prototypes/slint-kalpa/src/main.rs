@@ -24,6 +24,8 @@ mod file_hashes;
 
 #[path = "../../../src-tauri/src/install_txn.rs"]
 mod install_txn;
+#[path = "../../../src-tauri/src/phase_timer.rs"]
+mod phase_timer;
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/installer.rs"]
 mod installer;

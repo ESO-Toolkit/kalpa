@@ -234,7 +234,7 @@ fn extract_with_rollback(
     // Debug-only sub-phase timing. An UPDATE does work a fresh install does not
     // — preserving residual files, then deleting the tombstoned old tree at
     // commit — and lumping it all under one label hid that.
-    let phase = crate::commands::PhaseTimer::start("extract");
+    let phase = crate::phase_timer::PhaseTimer::start("extract");
 
     let transaction = InstallTransaction::begin(addons_dir, hooks.cancel)?;
     let stage_dir = transaction.stage_dir();
