@@ -221,11 +221,21 @@ fn plan_disable(
     // otherwise hide an injector that is sitting right there and refuse the
     // whole operation with "no injector present" — which the folder plainly
     // contradicts.
-    let injector = managed.iter().find(|entry| {
-        entry.kind == ManagedKind::ReShadeCore
-            && role_of(stack, &entry.relative_path) == Some(StackRole::Injector)
-    });
-    if injector.is_none() {
+    //
+    // Every live managed injector is parked, not just the first one found. The
+    // DLL search order will load `dxgi.dll` and `d3d11.dll` alike, so a folder
+    // carrying both under management has two doors into ReShade. Parking one
+    // and reporting the stack "off" — which `is_disabled` would, since it asks
+    // only whether *an* injector name is parked — would be a false statement
+    // about the thing the user pressed the switch for.
+    let injectors: Vec<&ManagedFile> = managed
+        .iter()
+        .filter(|entry| {
+            entry.kind == ManagedKind::ReShadeCore
+                && role_of(stack, &entry.relative_path) == Some(StackRole::Injector)
+        })
+        .collect();
+    if injectors.is_empty() {
         blockers.push(
             "No injector (dxgi.dll or d3d11.dll) is present in the folder to switch off."
                 .to_string(),
@@ -332,7 +342,7 @@ fn plan_disable(
 
     // Parked last: a failure part-way through this batch leaves the folder
     // still loading the stack, rather than a half-stock mix.
-    if let Some(injector) = injector {
+    for injector in &injectors {
         operations.push(PlannedOp {
             kind: ToggleOpKind::Park,
             file_name: injector.relative_path.clone(),
@@ -348,7 +358,6 @@ fn plan_disable(
     }
 }
 
-/// Build the enable half of [`plan_toggle`]: the exact reverse of disable.
 /// Build the enable half of [`plan_toggle`] **from the folder, not the manifest**.
 ///
 /// This is deliberately the one operation in the client layer that does not need
@@ -570,7 +579,11 @@ pub fn plan_client_toggle(app: tauri::AppHandle, client_dir: String) -> Result<T
 /// to refuse and re-plan, not to run the other direction silently.
 ///
 /// The plan is recomputed here from the directory rather than accepted from the
-/// caller, for the same reason `adopt_stack` recomputes its own.
+/// caller, for the same reason `adopt_stack` recomputes its own — and it is
+/// recomputed *inside* `MANIFEST_LOCK`, so the folder and the manifest that
+/// `expected` is checked against are the same ones the batch then acts on.
+/// Read before the lock, the direction check answers for a state another batch
+/// may already have replaced.
 #[tauri::command]
 pub async fn apply_client_toggle(
     app: tauri::AppHandle,
@@ -583,33 +596,34 @@ pub async fn apply_client_toggle(
     let backup_root = crate::client_backup::backup_root(&app)?;
 
     tokio::task::spawn_blocking(move || {
-        let stack = crate::client_stack::inspect_stack(root.path());
-        let managed = managed_entries(&manifest_path, root.path());
-        let dir = stack.client_dir.clone();
-        let plan = plan_toggle(&stack, &managed, &dir);
+        crate::client_backup::run_planned_file_ops_in(&manifest_path, &backup_root, &root, || {
+            let stack = crate::client_stack::inspect_stack(root.path());
+            let managed = managed_entries(&manifest_path, root.path());
+            let dir = stack.client_dir.clone();
+            let plan = plan_toggle(&stack, &managed, &dir);
 
-        let action_word = |action: ToggleAction| match action {
-            ToggleAction::Disable => "disable",
-            ToggleAction::Enable => "enable",
-        };
+            let action_word = |action: ToggleAction| match action {
+                ToggleAction::Disable => "disable",
+                ToggleAction::Enable => "enable",
+            };
 
-        if !plan.blockers.is_empty() {
-            return Err(format!(
-                "Cannot {} this stack: {}",
-                action_word(expected),
-                plan.blockers.join(" ")
-            ));
-        }
-        if plan.action != expected {
-            return Err(format!(
-                "The client folder has changed since this was planned, so Kalpa is refusing to \
-                 {} it. Re-open the confirmation to see the current plan.",
-                action_word(expected)
-            ));
-        }
+            if !plan.blockers.is_empty() {
+                return Err(format!(
+                    "Cannot {} this stack: {}",
+                    action_word(expected),
+                    plan.blockers.join(" ")
+                ));
+            }
+            if plan.action != expected {
+                return Err(format!(
+                    "The client folder has changed since this was planned, so Kalpa is refusing to \
+                     {} it. Re-open the confirmation to see the current plan.",
+                    action_word(expected)
+                ));
+            }
 
-        let ops = to_file_ops(&plan)?;
-        crate::client_backup::run_file_ops_in(&manifest_path, &backup_root, &root, &ops)
+            to_file_ops(&plan)
+        })
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -1102,6 +1116,41 @@ mod tests {
             snapshot(&client),
             "the folder must be byte-identical after a full round trip"
         );
+    }
+
+    /// The DLL search order loads `dxgi.dll` and `d3d11.dll` alike, so a
+    /// folder carrying both under management has two doors into ReShade.
+    /// Parking one and calling the stack off would be a false statement about
+    /// the thing the switch is for — `is_disabled` only asks whether *an*
+    /// injector name is parked.
+    #[test]
+    fn disable_parks_every_managed_injector_not_just_the_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        real_install(dir.path());
+        write(dir.path(), "d3d11.dll", "the other reshade");
+
+        let stack = inspect_stack(dir.path());
+        let mut managed = managed_stack();
+        managed.push(managed_file(
+            "d3d11.dll",
+            ManagedKind::ReShadeCore,
+            None,
+            false,
+        ));
+        managed.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+        assert_eq!(plan.action, ToggleAction::Disable);
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+
+        let parked: Vec<&str> = plan
+            .operations
+            .iter()
+            .filter(|op| op.kind == ToggleOpKind::Park)
+            .map(|op| op.file_name.as_str())
+            .collect();
+        assert!(parked.contains(&"dxgi.dll"), "{parked:?}");
+        assert!(parked.contains(&"d3d11.dll"), "{parked:?}");
     }
 
     #[test]

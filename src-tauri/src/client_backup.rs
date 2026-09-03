@@ -1172,6 +1172,37 @@ pub fn run_file_ops_in(
     )
 }
 
+/// Like [`run_file_ops_in`], but the batch is **computed inside** the lock.
+///
+/// A plan built before [`MANIFEST_LOCK`] is taken is a read of the folder and
+/// the manifest that another batch can invalidate before this one starts
+/// moving bytes — so the compare-and-swap the caller thinks it is performing
+/// is against a state that has already gone. Every individual op re-checks
+/// disk under the lock, so a stale plan degrades to skips and refusals rather
+/// than damage; but "refuses confusingly" is still worse than "never went
+/// stale", and the caller's own blockers and direction check are only as
+/// current as the read they came from.
+///
+/// `plan` therefore runs with the lock already held. It must not call anything
+/// that takes [`MANIFEST_LOCK`] itself — [`load_manifest_at`] is a lock-free
+/// read and is what the toggle planner uses.
+pub fn run_planned_file_ops_in(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    plan: impl FnOnce() -> Result<Vec<FileOp>, String>,
+) -> Result<FileOpOutcome, String> {
+    let _guard = lock_manifest();
+    let ops = plan()?;
+    run_file_ops_locked(
+        manifest_path,
+        backup_root,
+        root,
+        &ops,
+        reconcile_parked_flags,
+    )
+}
+
 /// Inner form of [`run_file_ops_in`] taking the manifest update, so a save that
 /// fails after the files have already moved is a test rather than a comment.
 ///
@@ -2535,6 +2566,62 @@ mod tests {
     }
 
     // ── FileOp batches ───────────────────────────────────────────────────
+
+    /// The planned form runs the caller's plan and applies what it returns.
+    #[test]
+    fn a_planned_batch_runs_the_ops_its_plan_returned() {
+        let harness = ParkHarness::new();
+        harness.record("dxgi.dll", None);
+
+        let outcome = run_planned_file_ops_in(
+            &harness.manifest,
+            &harness.backups,
+            &ApprovedRoot::for_tests_idle(harness.client.clone()),
+            || {
+                Ok(vec![FileOp::Park {
+                    relative_path: "dxgi.dll".to_string(),
+                }])
+            },
+        )
+        .expect("the batch must run");
+
+        assert_eq!(outcome.applied.len(), 1);
+        assert!(!harness.client.join("dxgi.dll").exists());
+        assert!(harness
+            .client
+            .join(format!("dxgi.dll{}", crate::client_stack::PARKED_SUFFIX))
+            .is_file());
+    }
+
+    /// A plan that refuses — a blocker, or the compare-and-swap finding the
+    /// folder pointing the other way — must leave the folder exactly as it
+    /// was. The plan runs inside the lock, so "refused" and "nothing moved"
+    /// have to be the same moment.
+    #[test]
+    fn a_planned_batch_that_refuses_moves_nothing() {
+        let harness = ParkHarness::new();
+        harness.record("dxgi.dll", None);
+        let before = std::fs::read(harness.client.join("dxgi.dll")).expect("read fixture");
+
+        let error = run_planned_file_ops_in(
+            &harness.manifest,
+            &harness.backups,
+            &ApprovedRoot::for_tests_idle(harness.client.clone()),
+            || Err("the folder changed since this was planned".to_string()),
+        )
+        .expect_err("a refusing plan must refuse the batch");
+
+        assert!(error.contains("changed since"));
+        assert_eq!(
+            std::fs::read(harness.client.join("dxgi.dll")).expect("read after"),
+            before,
+            "the injector must still be live"
+        );
+        assert!(!harness
+            .client
+            .join(format!("dxgi.dll{}", crate::client_stack::PARKED_SUFFIX))
+            .exists());
+    }
 
     /// A client folder shaped like the real one: a modded runtime with the
     /// user's own stock copy beside it, and the injector that loads everything.
