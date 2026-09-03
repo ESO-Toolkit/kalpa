@@ -151,14 +151,25 @@ pub fn is_drift_prone(role: StackRole) -> bool {
 /// newer one somewhere `prune_unreferenced_backups` can reach. It is exactly the
 /// wrong way round.
 ///
-/// `nvngx_dlssg.dll` ([`StackRole::FrameGeneration`]) is deliberately absent,
-/// and the call is a judgement rather than a certainty: it is not in the primary
-/// user's install, and ESO is not known to ship or request frame generation. The
-/// two ways of being wrong are not symmetric. Treating it as shipped when it is
-/// not **blocks disable outright** for anyone holding one, with no way past;
-/// treating it as not shipped when it is means disable leaves that one file
-/// modded instead of stock, which is a smaller and visible miss. If a stock
-/// install is ever confirmed to contain it, move it here.
+/// `nvngx_dlssg.dll` ([`StackRole::FrameGeneration`]) is absent, and that is
+/// **confirmed rather than assumed**. It is an NVIDIA *driver* file — it ships
+/// in `C:\Windows\System32\DriverStore\FileRepository\nv_dispi.inf_amd64_*\`,
+/// not in any game folder — and DLSS Frame Generation only works through native
+/// Streamline integration, which ESO does not have: the client ships no
+/// `sl.*.dll` modules at all, and the RenoDX add-on's own log says as much when
+/// it reports `EnableHooks=2 (Streamline modules left unpatched)`. So no ESO
+/// install has one to revert, and a `nvngx_dlssg.dll` in a client folder was put
+/// there by hand.
+///
+/// `nvngx_dlss.dll` is listed here on the strength of the observed behaviour
+/// this module exists for — the launcher's patcher putting a stock build back
+/// over a swap, and users keeping a `.disabled-bak` because of it. One report
+/// suggests ESO may not ship a super-resolution runtime either, which would make
+/// that file the same case as the NR runtime. It is deliberately **not** changed
+/// on that basis: being wrong in this direction merely leaves one file modded
+/// after a disable, but being wrong in the other switches off drift detection for
+/// the exact scenario the feature was built for. Settle it against a freshly
+/// verified install before moving it.
 pub fn eso_ships(role: StackRole) -> bool {
     matches!(role, StackRole::SuperSampling | StackRole::ShaderCompiler)
 }
@@ -706,6 +717,12 @@ mod tests {
             assert!(eso_ships(role), "{role:?}");
             assert!(is_drift_prone(role), "{role:?}");
         }
+
+        // Frame generation is an NVIDIA driver file, and ESO ships no Streamline
+        // modules to use it through. Nothing in a client folder can be a stock
+        // build of it, so a change there is never an update to undo — and
+        // treating it as one would block disable for anyone holding a copy.
+        assert!(!eso_ships(StackRole::FrameGeneration));
     }
 
     #[test]

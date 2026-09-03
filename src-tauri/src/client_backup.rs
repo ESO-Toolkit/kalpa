@@ -1146,8 +1146,25 @@ pub fn run_file_ops_in(
     root: &ApprovedRoot,
     ops: &[FileOp],
 ) -> Result<FileOpOutcome, String> {
+    run_file_ops_in_with(manifest_path, backup_root, root, ops, apply_parked_flags)
+}
+
+/// Inner form of [`run_file_ops_in`] taking the manifest update, so a save that
+/// fails after the files have already moved is a test rather than a comment.
+///
+/// Injected rather than provoked through the filesystem because the ways to make
+/// a write fail are not portable: marking the file read-only stops the rename on
+/// Windows and does nothing on Unix, where `atomic_write` renames a staging file
+/// and only the directory's permissions matter.
+fn run_file_ops_in_with(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    ops: &[FileOp],
+    record: impl FnOnce(&Path, &Path, &[FileOp]) -> Result<(), String>,
+) -> Result<FileOpOutcome, String> {
     let _guard = lock_manifest();
-    run_file_ops_locked(manifest_path, backup_root, root, ops)
+    run_file_ops_locked(manifest_path, backup_root, root, ops, record)
 }
 
 /// Body of [`run_file_ops_in`]; assumes [`MANIFEST_LOCK`] is already held and
@@ -1157,6 +1174,7 @@ fn run_file_ops_locked(
     backup_root: &Path,
     root: &ApprovedRoot,
     ops: &[FileOp],
+    record: impl FnOnce(&Path, &Path, &[FileOp]) -> Result<(), String>,
 ) -> Result<FileOpOutcome, String> {
     // Gate 4, re-asserted inside the lock and before any byte moves. Renaming
     // the proxy DLL out from under a running client is exactly the case this
@@ -1193,7 +1211,7 @@ fn run_file_ops_locked(
     // that state is still recoverable, but leaving it is still the wrong
     // outcome when the whole batch is undoable, so undo it, exactly as the
     // placement path does.
-    if let Err(error) = apply_parked_flags(manifest_path, client_root, ops) {
+    if let Err(error) = record(manifest_path, client_root, ops) {
         let stuck = undo_ops(client_root, &done);
         return Err(if stuck.is_empty() {
             format!("{error}\n\nNothing was changed — every step was undone.")
@@ -2817,17 +2835,16 @@ mod tests {
         h.record("dxgi.dll", None);
         let before = snapshot_dir(&h.client);
 
-        // Read-only, so the load still succeeds and finds the entry to flag but
-        // the save that follows cannot land.
-        let mut perms = std::fs::metadata(&h.manifest).expect("stat").permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&h.manifest, perms).expect("make the manifest read-only");
-
-        let error = h
-            .run(&[FileOp::Park {
+        let error = run_file_ops_in_with(
+            &h.manifest,
+            &h.backups,
+            &ApprovedRoot::for_tests_idle(h.client.clone()),
+            &[FileOp::Park {
                 relative_path: "dxgi.dll".to_string(),
-            }])
-            .expect_err("an unwritable manifest must fail the batch");
+            }],
+            |_, _, _| Err("Failed to write the client manifest: disk full".to_string()),
+        )
+        .expect_err("an unwritable manifest must fail the batch");
 
         assert!(error.contains("Nothing was changed"), "{error}");
         assert_eq!(
