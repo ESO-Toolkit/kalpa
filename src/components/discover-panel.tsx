@@ -57,15 +57,51 @@ interface DiscoverPanelProps {
   isOffline?: boolean;
 }
 
-function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
+/**
+ * Exported for tests: the install-then-uninstall regression below is a property
+ * of this hook's state, and reaching it through the whole panel would mean
+ * standing up the virtualizer and the ESOUI catalog for a badge.
+ */
+export function useAddonInstall(
+  addonsPath: string,
+  onInstalled: () => void,
+  persistedIds: Set<number>
+) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
-  const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
   const { progress, beginOperation, endOperation } = useInstallProgress();
 
-  // Merge persisted (from metadata) with session-installed IDs
+  /**
+   * Ids installed this session that the scan behind `persistedIds` has not
+   * reported yet. Bridges install-success -> rescan-lands, and nothing more.
+   */
+  const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
+
+  // A new `persistedIds` identity is App publishing a freshly scanned addon
+  // list — a better answer than this overlay, so the overlay retires.
+  //
+  // Retiring the STATE is the point, not just ignoring it when merging. This
+  // was a plain set that was only ever added to, so an addon installed and then
+  // UNINSTALLED in the same session stayed badged as Installed for the rest of
+  // the session; the only thing that cleared it was the tab switch that
+  // unmounts this panel. Holding a snapshot of `persistedIds` from install time
+  // and merging only while it still matches does NOT fix that: an overlay
+  // recorded when nothing was installed matches the empty set again the moment
+  // the addon is removed, and revives the badge it was supposed to drop.
+  //
+  // The cost is that an `addons` change from a non-scan source (a tag edit, a
+  // disable toggle) also retires it, which can flash "Install" on an addon
+  // whose scan has not landed. That needs the user to act on the installed list
+  // during the few hundred ms after an install they started from Discover, and
+  // a momentary understatement beats a badge that is wrong until restart.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSessionInstalledIds((prev) => (prev.size === 0 ? prev : new Set()));
+  }, [persistedIds]);
+
   const installedIds = useMemo(() => {
+    if (sessionInstalledIds.size === 0) return persistedIds;
     const merged = new Set(persistedIds);
     for (const id of sessionInstalledIds) merged.add(id);
     return merged;

@@ -1453,7 +1453,11 @@ function App() {
   const installedEsouiIds = useMemo(() => {
     const ids = new Set<number>();
     for (const addon of addons) {
-      if (addon.esouiId != null) ids.add(addon.esouiId);
+      // `> 0`, not just non-null: `record_installed_folders` stamps every
+      // SECONDARY folder of a multi-folder addon with esoui_id 0, so a bare
+      // null check seeds the set with 0 and makes `has(0)` true for every
+      // consumer — Packs and Discover both read this set.
+      if (addon.esouiId != null && addon.esouiId > 0) ids.add(addon.esouiId);
     }
     return ids;
   }, [addons]);
