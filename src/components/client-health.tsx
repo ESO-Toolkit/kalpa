@@ -307,6 +307,21 @@ interface LogExcerpt {
 
 type SelectionKey = Stage | "adoption" | "records" | "logs";
 
+/** Does the layer rail start expanded?
+ *
+ *  Yes. A healthy managed stack used to collapse to a one-line "8 layers, all
+ *  consistent" summary. That reads well as a health report and fails as a
+ *  management panel: switching a preset, fixing technique order, tuning and
+ *  the drift card all live *inside* those layers, so collapsing them hid every
+ *  action the panel exists to offer — reported as "no idea I could click
+ *  those". Collapsing is still one click away for anyone who wants the
+ *  summary.
+ *
+ *  Shared by the initializer and `resetInstallUiState`, which runs on every
+ *  load: two places holding this default separately is how the first attempt
+ *  at this change did nothing at all. */
+const RAIL_EXPANDED_DEFAULT = true;
+
 function computeDefaultSelection(
   stack: ClientStack | null,
   plan: AdoptionPlan | null,
@@ -384,7 +399,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   // default is derived live from stack/plan (see `computeDefaultSelection`) so
   // there is never a stale setState racing the data it depends on.
   const [selection, setSelection] = useState<SelectionKey | null>(null);
-  const [railManualExpand, setRailManualExpand] = useState(false);
+  const [railManualExpand, setRailManualExpand] = useState(RAIL_EXPANDED_DEFAULT);
   const [adoptionDismissed, setAdoptionDismissed] = useState(false);
 
   // Adoption flow. Reset per install alongside everything else below.
@@ -428,7 +443,10 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
    *  folder or a stale content swap. */
   const resetInstallUiState = useCallback(() => {
     setSelection(null);
-    setRailManualExpand(false);
+    // The default, not `false` — `resetInstallUiState` runs on every load, so
+    // hardcoding the collapsed state here would silently override the
+    // initializer and reinstate the old behaviour.
+    setRailManualExpand(RAIL_EXPANDED_DEFAULT);
     setAdoptionDismissed(false);
     setKeepCopies(true);
     setAdopting(false);
@@ -1259,7 +1277,7 @@ function StackBody(props: StackBodyProps) {
               aria-selected={effectiveSelection === "adoption"}
               onClick={() => selectAndReveal("adoption")}
               className={cn(
-                "flex w-full flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
+                "flex w-full cursor-pointer flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
                 "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
                 effectiveSelection === "adoption"
                   ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
@@ -1341,7 +1359,7 @@ function StackBody(props: StackBodyProps) {
             aria-selected={effectiveSelection === "records"}
             onClick={() => selectAndReveal("records")}
             className={cn(
-              "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
+              "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
               "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
               effectiveSelection === "records"
                 ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
@@ -1367,7 +1385,7 @@ function StackBody(props: StackBodyProps) {
               aria-selected={effectiveSelection === "logs"}
               onClick={() => selectAndReveal("logs")}
               className={cn(
-                "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
+                "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
                 "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
                 effectiveSelection === "logs"
                   ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
