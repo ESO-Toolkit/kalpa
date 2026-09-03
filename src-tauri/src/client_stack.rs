@@ -310,6 +310,12 @@ fn parse_ini(contents: &str) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut section = String::new();
 
+    // `str::trim` does not remove `U+FEFF` — it is a format character, not
+    // whitespace — so a file saved with a BOM opens with `\u{feff}[GENERAL]`,
+    // whose header match fails and whose keys then land in the headerless
+    // section. Every reading of that file would be silently wrong.
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+
     for raw in contents.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
@@ -644,14 +650,28 @@ fn read_preset(
 
 /// Shader packs nest one level (`Shaders/MartysMods/...`), so look in the root
 /// and in immediate subdirectories.
+///
+/// `source` is the right-hand side of a `Technique@Source.fx` entry in a preset
+/// file, which the user or ReShade owns and Kalpa does not validate on the way
+/// in. A bare `Path::join` with a segment like `C:pwned.fx` is drive-relative on
+/// Windows: it discards `shader_dir` entirely and resolves against the process
+/// cwd. Nothing here writes, so the worst case today is reporting a shader as
+/// present because an unrelated file exists elsewhere — but it is the same
+/// class as the two joins already fixed in this module, and the answer feeds
+/// findings the user acts on. `safe_relative_join` refusing reads as "not
+/// found", which is the safe direction for a presence test.
 fn find_shader_source(shader_dir: &Path, source: &str) -> Option<std::path::PathBuf> {
-    let direct = shader_dir.join(source);
+    let direct = crate::client_write::safe_relative_join(shader_dir, source).ok()?;
     if direct.is_file() {
         return Some(direct);
     }
     std::fs::read_dir(shader_dir).ok()?.flatten().find_map(|e| {
-        let nested = e.path().join(source);
-        (e.path().is_dir() && nested.is_file()).then_some(nested)
+        let dir = e.path();
+        if !dir.is_dir() {
+            return None;
+        }
+        let nested = crate::client_write::safe_relative_join(&dir, source).ok()?;
+        nested.is_file().then_some(nested)
     })
 }
 
@@ -1358,6 +1378,46 @@ DEBUG_VIEW=1
         std::fs::remove_file(tmp.path().join("nvngx_dlssnr.dll")).unwrap();
         let stack = inspect_stack(tmp.path());
         assert!(ids(&stack).contains(&"stack-nr-runtime-missing"));
+    }
+
+    /// A preset names its own shader sources, and `C:evil.fx` is
+    /// drive-relative on Windows: a bare join would discard the shader
+    /// directory and answer from the process cwd instead.
+    #[test]
+    fn a_drive_relative_shader_source_is_not_resolved_outside_the_shader_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shaders = dir.path().join("reshade-shaders").join("Shaders");
+        std::fs::create_dir_all(&shaders).expect("create shader dir");
+        std::fs::write(shaders.join("Real.fx"), "technique").expect("write shader");
+        // A real file outside the shader tree, so the escaping forms have
+        // something to reach and the assertion is about the refusal rather
+        // than about the target happening not to exist.
+        std::fs::write(dir.path().join("Outside.fx"), "technique").expect("write outside");
+
+        assert!(
+            shader_source_exists(&shaders, "Real.fx"),
+            "an ordinary source must still resolve"
+        );
+        assert!(
+            dir.path().join("Outside.fx").is_file(),
+            "the escape target must exist for this test to mean anything"
+        );
+        for source in ["../../Outside.fx", "C:Outside.fx", "/Outside.fx"] {
+            assert!(
+                !shader_source_exists(&shaders, source),
+                "{source} must not resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_first_section() {
+        let ini = parse_ini("\u{feff}[GENERAL]\nPresetPath=.\\a.ini\n");
+        assert_eq!(
+            ini_get(&ini, "GENERAL", "PresetPath"),
+            Some(".\\a.ini"),
+            "a BOM must not push the first section's keys into the headerless bucket"
+        );
     }
 
     #[test]

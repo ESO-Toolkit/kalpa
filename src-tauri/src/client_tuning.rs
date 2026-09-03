@@ -375,6 +375,19 @@ fn split_terminator(raw: &str) -> (&str, &str) {
 }
 
 /// Is this trimmed line a `[Section]` header, and if so, its name (trimmed)?
+/// A UTF-8 BOM, if the file opens with one.
+///
+/// `str::trim` does not remove `U+FEFF` — it is a format character, not
+/// whitespace — so a `ReShade.ini` saved by an editor that writes a BOM has a
+/// first line of `\u{feff}[GENERAL]`, which fails every `starts_with('[')`
+/// test. That is only ever the *first* line, but the section Kalpa needs can
+/// be it, and a missed header reads as "the section is not there" rather than
+/// as a parse problem. Stripped for matching only: `apply_edits` rebuilds the
+/// file from the original line contents, so the BOM is written back untouched.
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 fn section_header(trimmed: &str) -> Option<&str> {
     trimmed
         .strip_prefix('[')
@@ -395,7 +408,7 @@ pub fn read_form(reshade_ini: &str, client_dir: &str) -> TuningForm {
 
     for raw in reshade_ini.split_inclusive('\n') {
         let (content, _) = split_terminator(raw);
-        let trimmed = content.trim();
+        let trimmed = without_bom(content).trim();
         if let Some(name) = section_header(trimmed) {
             in_section = name.eq_ignore_ascii_case(TUNING_SECTION);
             if in_section {
@@ -515,10 +528,20 @@ pub fn validate_edit(edit: &TuningEdit) -> Result<(), String> {
             }
         }
         TuningControl::Float => {
-            edit.value
+            // `"NaN"`, `"inf"` and `"-inf"` all parse as `f64`, so a bare
+            // `parse` would let Kalpa write one of them into `ReShade.ini`.
+            // The add-on reads these back with a C++ float parse and would
+            // then run a non-finite strength through its own maths — and the
+            // user has no way to see what went in, because the value Kalpa
+            // shows them is the string it wrote.
+            let parsed: f64 = edit
+                .value
                 .trim()
-                .parse::<f64>()
+                .parse()
                 .map_err(|_| format!("{} must be a number.", spec.key))?;
+            if !parsed.is_finite() {
+                return Err(format!("{} must be a finite number.", spec.key));
+            }
         }
         TuningControl::KeyCode => {
             edit.value
@@ -576,13 +599,13 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
     let headers: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| section_header(line.content.trim()).is_some())
+        .filter(|(_, line)| section_header(without_bom(&line.content).trim()).is_some())
         .map(|(i, _)| i)
         .collect();
     let section_start = *headers
         .iter()
         .find(|&&i| {
-            section_header(lines[i].content.trim())
+            section_header(without_bom(&lines[i].content).trim())
                 .is_some_and(|name| name.eq_ignore_ascii_case(TUNING_SECTION))
         })
         .ok_or_else(|| format!("The [{TUNING_SECTION}] section was not found in {TUNING_FILE}."))?;
@@ -597,7 +620,15 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
         .find(|&i| i > section_start)
         .unwrap_or(lines.len());
 
-    let mut remaining: Vec<&TuningEdit> = edits.iter().collect();
+    // Every occurrence of the key inside the section is rewritten, not just
+    // the first. A section naming a key twice is not something ReShade writes,
+    // but a hand-edited file has it, and ReShade resolves it to the *last*
+    // occurrence — which is also what `read_form` reports, so the panel shows
+    // the last value. Editing only the first would leave the value the user
+    // was looking at unchanged and report success: the edit would silently do
+    // nothing. Rewriting all of them makes the file agree with itself, and is
+    // correct whichever occurrence the reader happens to take.
+    let mut applied = vec![false; edits.len()];
 
     for line in lines.iter_mut().take(section_end).skip(section_start + 1) {
         let trimmed = line.content.trim();
@@ -608,15 +639,22 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
             continue;
         };
         let key_trimmed = line.content[..eq_pos].trim();
-        if let Some(pos) = remaining
+        if let Some(pos) = edits
             .iter()
             .position(|edit| edit.key.eq_ignore_ascii_case(key_trimmed))
         {
-            let edit = remaining.remove(pos);
             let key_part = &line.content[..eq_pos];
-            line.content = format!("{key_part}={}", edit.value);
+            line.content = format!("{key_part}={}", edits[pos].value);
+            applied[pos] = true;
         }
     }
+
+    let remaining: Vec<&TuningEdit> = edits
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !applied[*index])
+        .map(|(_, edit)| edit)
+        .collect();
 
     if !remaining.is_empty() {
         // Every remaining edit was already validated against `FIELDS`, so this
@@ -1000,6 +1038,79 @@ mod tests {
 
         let updated = apply_edits(original, &edits).expect("section exists");
         assert_eq!(updated, "[RenoDX.DLSS5]\nNeuralUplift=1\nEnableHooks=1\n");
+    }
+
+    /// ReShade resolves a duplicated key to the last occurrence, and
+    /// `read_form` reports that same one — so the panel shows the last value.
+    /// Editing only the first would leave what the user was looking at
+    /// unchanged while reporting success.
+    #[test]
+    fn apply_edits_rewrites_every_occurrence_of_a_duplicated_key() {
+        let original = "[RenoDX.DLSS5]\nNRStyle=1\nNeuralUplift=1\nNRStyle=0\n";
+        let edits = vec![TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "1".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nNRStyle=1\nNeuralUplift=1\nNRStyle=1\n",
+            "both occurrences must carry the new value, not just the first"
+        );
+    }
+
+    /// The value the panel reads back must be the value that was written, for
+    /// a duplicated key as much as any other.
+    #[test]
+    fn a_duplicated_key_reads_back_as_what_was_written() {
+        let original = "[RenoDX.DLSS5]\nNRStyle=0\nNRStyle=1\n";
+        let edits = vec![TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "0".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        let form = read_form(&updated, "C:/game/client");
+        let field = form
+            .fields
+            .iter()
+            .find(|f| f.key == "NRStyle")
+            .expect("NRStyle is a known field");
+        assert_eq!(field.current.as_deref(), Some("0"));
+    }
+
+    /// `str::trim` does not strip `U+FEFF`, so a BOM on line 1 used to make the
+    /// section unfindable — reported to the user as "the add-on has never run".
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_section() {
+        let original = "\u{feff}[RenoDX.DLSS5]\nNeuralUplift=1\n";
+        let edits = vec![TuningEdit {
+            key: "NeuralUplift".to_string(),
+            value: "0".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("the BOM must not hide the section");
+        assert_eq!(
+            updated, "\u{feff}[RenoDX.DLSS5]\nNeuralUplift=0\n",
+            "the BOM is stripped for matching only and must be written back"
+        );
+        assert!(read_form(original, "C:/game/client").section_present);
+    }
+
+    #[test]
+    fn validate_edit_refuses_a_non_finite_float() {
+        for value in ["NaN", "inf", "-inf", "infinity"] {
+            let edit = TuningEdit {
+                key: "NRIntensity".to_string(),
+                value: value.to_string(),
+            };
+            let err =
+                validate_edit(&edit).expect_err("a non-finite float must never reach the ini file");
+            assert!(
+                err.contains("finite"),
+                "{value} was refused with an unhelpful message: {err}"
+            );
+        }
     }
 
     #[test]
