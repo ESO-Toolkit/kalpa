@@ -241,6 +241,14 @@ const FINDING_STAGE: Record<string, Stage> = {
   "stack-feed-technique-off": "preset",
   "stack-search-path-mismatch": "shaders",
   "stack-dlss-reverted": "sr",
+  // The preset picks the provider, so this belongs with the preset. It was
+  // missing from both this table and CONNECTOR_FINDING_AFTER, and findings
+  // render only through those two — so "nothing is producing motion vectors",
+  // which means Neural Rendering has nothing to work from, appeared nowhere
+  // in the panel at all.
+  "stack-mv-provider-missing": "preset",
+  // `stack-disabled` is deliberately absent: the power card at the top of the
+  // panel IS that finding, stated more usefully and with the action attached.
 };
 
 /** Findings that are a relationship *between* two layers, rendered on the
@@ -251,9 +259,19 @@ const CONNECTOR_FINDING_AFTER: Record<string, Stage> = {
   "stack-technique-source-missing": "shaders",
 };
 
-/** Stages where a real feature (tuning controls, disable/re-enable, runtime
- *  swap, preset reordering) is deliberately not built yet. */
-const STAGE_COMING_NEXT = new Set<Stage>(["nr", "sr", "addons", "preset", "tuning"]);
+/** Stages where Kalpa still only reports, and cannot act.
+ *
+ *  Keep this honest in BOTH directions. It used to list `nr`, `sr`, `preset`
+ *  and `tuning` as well, all of which shipped — so the runtime stages rendered
+ *  a working "Put your copy back" drift card and then told the user that
+ *  editing this "is coming next", and the preset and tuning stages claimed the
+ *  same about panels sitting right there. A stale note like that does not just
+ *  age badly; it actively tells someone the feature they are looking at is not
+ *  there yet.
+ *
+ *  `addons` stays: enabling a disabled add-on (`DisabledAddons`) is on the
+ *  shortlist and is genuinely not built. */
+const STAGE_COMING_NEXT = new Set<Stage>(["addons"]);
 
 function stagePresent(stage: Stage, stack: ClientStack): boolean {
   switch (stage) {
