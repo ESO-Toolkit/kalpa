@@ -144,22 +144,53 @@ pub enum MvProviderKind {
 }
 
 impl MvProviderKind {
-    /// The technique name upstream says to enable for this provider, plus the
-    /// spellings older presets use for the same effect.
+    /// The technique *identifiers* this provider declares, plus the spellings
+    /// older presets use for the same effect.
     ///
-    /// Matching is by name because that is what upstream documents per provider.
+    /// **These are identifiers, never `ui_label`s.** A ReShade preset's
+    /// `Techniques=` line records the identifier a shader declares after the
+    /// `technique` keyword; the `ui_label` annotation beside it is display text
+    /// for the in-game overlay and never reaches the preset file. Upstream prose
+    /// quotes the labels, because those are what a user reading the overlay
+    /// sees — so DLSS5-Feeder's provider table says "enable `LUMENITE: Kernel
+    /// 2.0`" for a technique whose identifier is `Lumenite_Kernel`. Matching a
+    /// label against a preset can therefore never fire, which is exactly what
+    /// this table did for VORT and both LumeniteFX entries: any user on those
+    /// providers had a correctly configured stack reported as
+    /// `stack-mv-provider-missing`. Each entry below was read from the
+    /// shader source, not from upstream documentation.
+    ///
     /// [`MvProviderKind::SharedTexture`] has no entry: it is a convention rather
     /// than a named effect, and is resolved by reading the shader sources.
     fn technique_names(self) -> &'static [&'static str] {
         match self {
             MvProviderKind::SharedTexture => &[],
-            // `Launchpad` is what current DLSS5-Feeder documents;
-            // `MartysMods_Launchpad` is what iMMERSE presets of the 0.4.x era
-            // actually contain, including the primary user's.
-            MvProviderKind::Launchpad => &["Launchpad", "MartysMods_Launchpad"],
-            MvProviderKind::Vort => &["vort_Motion"],
-            MvProviderKind::LumeniteKernel => &["LUMENITE: Kernel 2.0"],
-            MvProviderKind::LumeniteQuantMotion => &["LUMENITE: QuantMotion"],
+            // `MartysMods_Launchpad` is the identifier (label: "iMMERSE:
+            // Launchpad (enable and move to the top!)"), and is what the
+            // primary user's preset contains. `Launchpad` is the bare spelling
+            // DLSS5-Feeder's table uses, kept as an alias.
+            MvProviderKind::Launchpad => &["MartysMods_Launchpad", "Launchpad"],
+            // `vort_Motion` is the *file* name; the technique it declares is
+            // `vort_MotionEffects`.
+            MvProviderKind::Vort => &["vort_MotionEffects"],
+            MvProviderKind::LumeniteKernel => &["Lumenite_Kernel"],
+            MvProviderKind::LumeniteQuantMotion => &["Lumenite_QuantMotion"],
+        }
+    }
+
+    /// The provider's `ui_label`, i.e. what the ReShade overlay calls it.
+    ///
+    /// Kept separate from [`MvProviderKind::technique_names`] on purpose: a
+    /// finding that tells the user to enable something has to name what they
+    /// will actually read in the overlay, while matching has to use what the
+    /// preset actually stores. Conflating the two is what broke matching.
+    fn technique_label(self) -> Option<&'static str> {
+        match self {
+            MvProviderKind::SharedTexture => None,
+            MvProviderKind::Launchpad => Some("iMMERSE: Launchpad"),
+            MvProviderKind::Vort => Some("vort_MotionEffects"),
+            MvProviderKind::LumeniteKernel => Some("LUMENITE: Kernel 2.0"),
+            MvProviderKind::LumeniteQuantMotion => Some("LUMENITE: QuantMotion"),
         }
     }
 
@@ -957,7 +988,10 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
                     "stack-mv-provider-missing",
                     HealthLevel::Danger,
                     "Nothing is producing motion vectors",
-                    match provider.kind.technique_names().first() {
+                    // The overlay's label, not the identifier: the user's next
+                    // act is to find this in ReShade's technique list, and the
+                    // list shows labels.
+                    match provider.kind.technique_label() {
                         Some(technique) => format!(
                             "DLSS5_Feed is set to read motion vectors from {}, but this preset \
                              does not enable its technique ({technique}). The feed reads zeros, \
@@ -1193,6 +1227,12 @@ DEBUG_VIEW=1
     /// 0–4, and recommends LumeniteFX Kernel (3). Reading only the older scheme
     /// would leave the ordering check looking for a technique that is not in
     /// the preset — the exact silent no-op this whole resolver exists to stop.
+    ///
+    /// The fixture said `LUMENITE: Kernel 2.0@lumenite_kernel.fx` until
+    /// 2026-09-03, which ReShade would never write — that is the shader's
+    /// `ui_label`, and a preset records the identifier. The invented fixture is
+    /// what held the wrong provider table in place; see
+    /// [`MvProviderKind::technique_names`].
     #[test]
     fn the_current_mv_provider_definition_is_understood() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1200,7 +1240,7 @@ DEBUG_VIEW=1
         write(
             tmp.path(),
             "ReShadePreset.ini",
-            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,LUMENITE: Kernel 2.0@lumenite_kernel.fx\n\n\
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,Lumenite_Kernel@lumenite_Kernel.fx\n\n\
              [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=3\n",
         );
         let stack = inspect_stack(tmp.path());
@@ -1211,15 +1251,18 @@ DEBUG_VIEW=1
             .and_then(|preset| preset.mv_provider.as_ref())
             .expect("provider");
         assert_eq!(provider.kind, MvProviderKind::LumeniteKernel);
-        assert_eq!(provider.technique.as_deref(), Some("LUMENITE: Kernel 2.0"));
+        assert_eq!(provider.technique.as_deref(), Some("Lumenite_Kernel"));
 
+        // The ordering finding names the technique as the *preset* spells it,
+        // so it matches the technique list Kalpa shows beside it and stays
+        // greppable against the file.
         let detail = &stack
             .findings
             .iter()
             .find(|f| f.id == "stack-technique-order")
             .expect("the ordering check must run for this provider too")
             .detail;
-        assert!(detail.contains("LUMENITE: Kernel 2.0"), "{detail}");
+        assert!(detail.contains("Lumenite_Kernel"), "{detail}");
     }
 
     /// The numbering is not the same as the old runtime combo: `1` is LaunchPad
@@ -1319,6 +1362,54 @@ DEBUG_VIEW=1
             "got {:?}",
             ids(&stack)
         );
+    }
+
+    /// A preset stores technique *identifiers*, so the provider table has to
+    /// hold identifiers too.
+    ///
+    /// This is the regression for a table that held `ui_label`s
+    /// (`LUMENITE: Kernel 2.0`) and a file name (`vort_Motion`) instead. Every
+    /// case below is a correctly configured stack: the selected provider's
+    /// technique is enabled and sits above the feed, so there is nothing to
+    /// report. Against the old table none of them matched, the provider
+    /// resolved to `technique: None`, and each was reported as
+    /// `stack-mv-provider-missing` — Kalpa telling a working install it was
+    /// broken.
+    #[test]
+    fn a_provider_is_matched_by_its_identifier_not_its_overlay_label() {
+        // (DLSS5_MV_PROVIDER value, technique identifier, effect file)
+        let cases = [
+            (2, "vort_MotionEffects", "vort_Motion.fx"),
+            (3, "Lumenite_Kernel", "lumenite_Kernel.fx"),
+            (4, "Lumenite_QuantMotion", "lumenite_QuantMotion.fx"),
+        ];
+        for (value, technique, source) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            healthy_stack(tmp.path());
+            write(tmp.path(), &format!("reshade-shaders/Shaders/{source}"), "");
+            write(
+                tmp.path(),
+                "ReShadePreset.ini",
+                &format!(
+                    "Techniques={technique}@{source},DLSS5_Feed@DLSS5_Feed.fx\n\n\
+                     [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER={value}\n"
+                ),
+            );
+            let stack = inspect_stack(tmp.path());
+
+            assert!(
+                !ids(&stack).contains(&"stack-mv-provider-missing"),
+                "{technique} is enabled above the feed, so nothing should be reported; \
+                 got {:?}",
+                ids(&stack)
+            );
+            let provider = stack.preset.unwrap().mv_provider.unwrap();
+            assert_eq!(
+                provider.technique.as_deref(),
+                Some(technique),
+                "{technique} should have been resolved as the supplying technique"
+            );
+        }
     }
 
     /// `DLSS5_MV_SOURCE=1` means LaunchPad is not compiled into the effect at
