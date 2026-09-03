@@ -271,4 +271,45 @@ describe("AddonList", () => {
     expect(onToggleSelect).toHaveBeenCalledWith(addon.folderName);
     expect(onSelect).not.toHaveBeenCalled();
   });
+  it("drives batch-select mode end to end from the row checkbox", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+
+    function BatchHarness() {
+      const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+      return (
+        <Harness
+          onSelect={onSelect}
+          selectedFolders={selectedFolders}
+          onToggleSelect={(folderName) =>
+            setSelectedFolders((prev) => {
+              const next = new Set(prev);
+              if (next.has(folderName)) next.delete(folderName);
+              else next.add(folderName);
+              return next;
+            })
+          }
+        />
+      );
+    }
+
+    render(<BatchHarness />);
+
+    const checkbox = await screen.findByRole("checkbox", { name: `Select ${addon.title}` });
+    expect(checkbox).toHaveAttribute("aria-checked", "false");
+    expect(checkbox).toHaveAttribute("tabindex", "-1");
+
+    // Entering batch mode checks the row and pulls the checkbox into the tab order.
+    await user.click(checkbox);
+    expect(checkbox).toHaveAttribute("aria-checked", "true");
+    expect(checkbox).toHaveAttribute("tabindex", "0");
+    expect(await screen.findByText("· 1 selected")).toBeInTheDocument();
+
+    // Leaving it again clears the row and drops the checkbox back out.
+    await user.click(checkbox);
+    expect(checkbox).toHaveAttribute("aria-checked", "false");
+    expect(checkbox).toHaveAttribute("tabindex", "-1");
+    expect(screen.queryByText("· 1 selected")).not.toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });
