@@ -18,7 +18,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -28,10 +27,17 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { StackPowerCard } from "@/components/client-stack/power-card";
 import { SlotPane } from "@/components/client-stack/slot-pane";
 import { SlotRail } from "@/components/client-stack/slot-rail";
-import { StatusStrip } from "@/components/client-stack/status-strip";
+import type { StackView } from "@/components/client-stack/slot-rail";
 import {
   LEVEL_ORDER,
   SLOT_ORDER,
@@ -643,32 +649,109 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [plan, stack]
   );
 
+  const selectedClient = useMemo(
+    () => clients?.find((client) => client.client_dir === selectedDir) ?? null,
+    [clients, selectedDir]
+  );
+
+  /** Findings above `info`, across every slot — the header's one-glance answer. */
+  const attentionCount = useMemo(
+    () => stack?.findings.filter((f) => f.level !== "info" && f.level !== "ok").length ?? 0,
+    [stack]
+  );
+
   const busy = detecting || stackLoading;
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-4xl h-[85vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle>Graphics stack</DialogTitle>
-          {/* "Kalpa downloads nothing here" used to sit in this line as a
-              blanket claim. It is not one: it is true of the NVIDIA runtimes
-              because they are not licensed for redistribution, and false of
-              ReShade and the shader packs, which are fetched from their
-              authors at install time. Each slot now states its own answer,
-              where it is actually checkable. */}
-          <DialogDescription>
+      <DialogContent className="flex h-[calc(100dvh-2rem)] max-h-[760px] flex-col gap-0 sm:max-w-5xl">
+        {/* One header row instead of three stacked ones.
+
+            The panel used to spend 184px before any content appeared: a
+            DialogHeader with a description restating the title, then an install
+            row, then a status strip — in a dialog whose whole content region was
+            267px. Title, which install, and how that install is doing are all
+            one thought, so they are one line. The description stays for screen
+            readers via `aria-describedby`; it said what the title says. */}
+        <DialogHeader className="shrink-0 pt-4 pb-3">
+          <div className="flex h-7 items-center gap-2">
+            <DialogTitle className="shrink-0">Graphics stack</DialogTitle>
+
+            {clients && clients.length > 0 && (
+              <>
+                <div className="h-4 shrink-0 border-l border-structure-10" />
+                {clients.length > 1 ? (
+                  // Several installs used to be a bounded scrolling list that
+                  // could cost 128px on its own. A select costs 24.
+                  <Select
+                    value={selectedDir ?? undefined}
+                    onValueChange={(next) => next && handleSelect(next)}
+                  >
+                    <SelectTrigger size="sm" className="h-6 w-auto max-w-[220px] gap-1 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {clients.map((client) => (
+                        <SelectItem key={client.client_dir} value={client.client_dir}>
+                          {shortDirName(client.client_dir)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <p
+                    className="min-w-0 truncate font-heading text-[13px] font-semibold"
+                    title={clients[0]!.exe_path}
+                  >
+                    {shortDirName(clients[0]!.client_dir)}
+                  </p>
+                )}
+                {selectedClient && (
+                  <InfoPill color={SOURCE_PILL[selectedClient.source].color}>
+                    {SOURCE_PILL[selectedClient.source].label}
+                  </InfoPill>
+                )}
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="shrink-0"
+                  disabled={browsing}
+                  onClick={() => void handleBrowse()}
+                >
+                  {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
+                  Change
+                </Button>
+              </>
+            )}
+
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              {stack && !stack.is_empty && (
+                <InfoPill color={attentionCount > 0 ? "amber" : "emerald"}>
+                  {attentionCount > 0 ? `${attentionCount} need attention` : "Everything agrees"}
+                </InfoPill>
+              )}
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Refresh"
+                disabled={busy}
+                onClick={() => void detect()}
+              >
+                {busy ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
+              </Button>
+            </div>
+          </div>
+          <DialogDescription className="sr-only">
             The ReShade and DLSS 5 setup in your ESO game folder — what is in each slot, and what
             you can put there instead.
           </DialogDescription>
         </DialogHeader>
 
-        {/* A flex column that does NOT scroll. The Details tab puts its own
-            scroller on each of its two panes, and a pane can only be given a
-            height if every ancestor between it and the fixed-height dialog is
-            a flex box with `min-h-0`. Scrolling here instead would put the
-            rail and the detail back in one scrollport, which is the bug this
-            replaced. */}
-        <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {/* Does NOT scroll. A pane can only be given a height if every ancestor
+            between it and the fixed-height dialog is a flex box with `min-h-0`;
+            scrolling here would put the rail and the pane back in one
+            scrollport, which is the bug this replaced. */}
+        <div className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
           {detecting && (
             <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground">
               <Spinner />
@@ -685,63 +768,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
             />
           )}
 
+          {browseError && clients && clients.length > 0 && (
+            <p className="shrink-0 text-xs text-status-danger" role="alert">
+              {browseError}
+            </p>
+          )}
+
           {!detecting && clients && clients.length > 0 && (
             <>
-              {/* Deliberately compact. On a short window the dialog is only
-                  ~530px tall, and a header block plus a full-width install card
-                  used to eat two thirds of it before the stack appeared at
-                  all. One install is one line; several stay a scrollable list
-                  with its own bounded height. */}
-              <section aria-labelledby="client-health-install" className="shrink-0">
-                {clients.length > 1 && (
-                  <SectionHeader id="client-health-install" className="mb-2">
-                    {`Installs (${clients.length})`}
-                  </SectionHeader>
-                )}
-                {(() => {
-                  const many = clients.length > 1;
-                  const browseButton = (
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      className="shrink-0"
-                      disabled={browsing}
-                      onClick={() => void handleBrowse()}
-                    >
-                      {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
-                      {browsing ? "Browsing..." : many ? "Browse for eso64.exe" : "Change"}
-                    </Button>
-                  );
-                  return (
-                    <>
-                      <div className={cn("space-y-2", many && "max-h-32 overflow-y-auto pr-1")}>
-                        {clients.map((client) => (
-                          <InstallRow
-                            key={client.client_dir}
-                            client={client}
-                            selected={client.client_dir === selectedDir}
-                            selectable={many}
-                            onSelect={() => handleSelect(client.client_dir)}
-                            // One install is one line: name, source, and the
-                            // control that changes it, all in the same flex
-                            // row so they cannot land on top of each other.
-                            trailing={many ? undefined : browseButton}
-                          />
-                        ))}
-                      </div>
-                      {many && (
-                        <div className="mt-2 flex flex-wrap items-center gap-2">{browseButton}</div>
-                      )}
-                      {browseError && (
-                        <p className="mt-1 text-xs text-status-danger" role="alert">
-                          {browseError}
-                        </p>
-                      )}
-                    </>
-                  );
-                })()}
-              </section>
-
               {stackLoading && (
                 <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground">
                   <Spinner />
@@ -829,24 +863,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
             </>
           )}
         </div>
-
-        <DialogFooter>
-          {stack && !stack.is_empty && (
-            <TracksButton
-              plan={plan}
-              inventory={managedInventory}
-              active={effectiveSelection === "records"}
-              onSelect={() => setSelection("records")}
-            />
-          )}
-          <Button variant="outline" onClick={onClose}>
-            Close
-          </Button>
-          <Button variant="outline" disabled={busy} onClick={() => void detect()}>
-            {busy ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}
-            Refresh
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -895,77 +911,6 @@ function EmptyState({
         </p>
       )}
     </GlassPanel>
-  );
-}
-
-function InstallRow({
-  client,
-  selected,
-  selectable,
-  onSelect,
-  trailing,
-}: {
-  client: EsoClientLocation;
-  selected: boolean;
-  selectable: boolean;
-  onSelect: () => void;
-  /** Rendered at the end of the single-install row.
-   *
-   *  Takes the control as a child rather than letting the caller lay it over
-   *  the row: the browse button used to be a separate block pulled up by
-   *  `-mt-7` to fake one line, which put it straight on top of the source
-   *  pill. A negative margin reserves no space, so nothing could have
-   *  prevented that collision — the row has to actually contain the button. */
-  trailing?: React.ReactNode;
-}) {
-  const pill = SOURCE_PILL[client.source];
-  const body = (
-    <>
-      <div className="min-w-0 flex-1 text-left">
-        <p className="truncate font-heading text-[13px] font-semibold">
-          {shortDirName(client.client_dir)}
-        </p>
-        <p className="truncate text-xs text-muted-foreground" title={client.exe_path}>
-          {client.exe_path}
-        </p>
-      </div>
-      <InfoPill color={pill.color}>{pill.label}</InfoPill>
-    </>
-  );
-
-  if (!selectable) {
-    // One install needs a label, not a card. The full exe path lives in the
-    // title attribute rather than on its own line: on a short window every
-    // row above the stack is a row the stack does not get.
-    return (
-      <div className="flex items-center gap-2 py-0.5">
-        <p
-          className="min-w-0 flex-1 truncate font-heading text-[13px] font-semibold"
-          title={client.exe_path}
-        >
-          {shortDirName(client.client_dir)}
-        </p>
-        <InfoPill color={pill.color}>{pill.label}</InfoPill>
-        {trailing}
-      </div>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={onSelect}
-      className={cn(
-        "flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors duration-150",
-        "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-        selected
-          ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-          : "border-structure-06 bg-structure-02 hover:border-structure-10"
-      )}
-    >
-      {body}
-    </button>
   );
 }
 
@@ -1069,73 +1014,28 @@ function StackBody(props: StackBodyProps) {
     paneScrollRef.current?.scrollTo({ top: 0 });
   }, [effectiveSelection]);
 
-  const attention = useMemo(
-    () => stack.findings.filter((f) => f.level !== "info" && f.level !== "ok").length,
-    [stack.findings]
-  );
-
-  const selectedSlot = useMemo(
-    () => (SLOT_ORDER.includes(effectiveSelection as Slot) ? (effectiveSelection as Slot) : null),
-    [effectiveSelection]
-  );
-
+  // The rail owns the whole-stack views too now, so the only thing between the
+  // header and the two columns is this row. There is no strip and no footer:
+  // both were chrome spent restating what a 32px rail row says, in a dialog
+  // whose content region was half its own height.
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <StatusStrip
+    <div className="flex min-h-0 flex-1 gap-4">
+      <SlotRail
         stack={stack}
-        attention={attention}
+        selected={
+          effectiveSelection === "adoption"
+            ? "records"
+            : (effectiveSelection as Slot | StackView | null)
+        }
+        onSelect={onSelect}
         isManaged={props.isManaged}
+        trackedCount={props.managedInventory?.files.length ?? null}
         logCount={props.logExcerpts.length}
-        onOpenPower={() => onSelect("power")}
-        onOpenAdoption={() => onSelect("adoption")}
-        onOpenLogs={() => onSelect("logs")}
       />
-
-      <div className="flex min-h-0 flex-1 gap-4">
-        <SlotRail stack={stack} selected={selectedSlot} onSelect={onSelect} />
-        <div ref={paneScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
-          <DetailPane {...props} />
-        </div>
+      <div ref={paneScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+        <DetailPane {...props} />
       </div>
     </div>
-  );
-}
-
-/**
- * Recovery, one click from every state.
- *
- * Lives in the dialog's own footer rather than in a row of its own above it:
- * as a separate row it cost 117px of a 532px dialog, measured in the running
- * app, and the pane is where that height belongs. It used to be collapsed at
- * the bottom of a scroller, which is the one place a panicking user scrolls
- * straight past.
- */
-function TracksButton({
-  plan,
-  inventory,
-  active,
-  onSelect,
-}: {
-  plan: AdoptionPlan | null;
-  inventory: ManagedInventory | null;
-  active: boolean;
-  onSelect: () => void;
-}) {
-  const count = inventory?.files.length;
-  return (
-    <Button variant="ghost" size="xs" className="mr-auto" aria-pressed={active} onClick={onSelect}>
-      <HardDriveIcon />
-      What Kalpa tracks
-      {/* The count is withheld until the inventory has actually loaded — it
-          renders "0 files" otherwise, which for an adopted stack is a false
-          statement rather than a pending one. */}
-      {plan?.already_managed && count !== undefined && (
-        <span className="text-muted-foreground">
-          {" "}
-          &middot; {count} file{count === 1 ? "" : "s"}
-        </span>
-      )}
-    </Button>
   );
 }
 
