@@ -1302,6 +1302,23 @@ fn run_one_op(
         } => {
             let live = crate::client_write::safe_relative_join(client_root, relative_path)?;
             let original = crate::client_write::safe_relative_join(client_root, must_match)?;
+
+            // This op only ever exists to free a name for the `.kalpa-off` file
+            // that is about to take it back. If that file is not there, the name
+            // is not occupied by a stock build waiting to be cleared — it is
+            // occupied by the live stack, and removing it would delete the very
+            // DLL this batch exists to restore. Structural, not incidental: it
+            // holds even if the plan was computed against a folder that has
+            // since changed underneath it.
+            let (_, parked) = park_pair(client_root, relative_path)?;
+            if !parked.is_file() {
+                outcome.skipped.push(format!(
+                    "{relative_path} was left alone: there is no parked copy to put back in its \
+                     place"
+                ));
+                return Ok(false);
+            }
+
             if !live.is_file() {
                 outcome
                     .skipped
@@ -2769,6 +2786,31 @@ mod tests {
     /// fails there would otherwise leave the folder switched off with nothing
     /// recording it — the same conditions that fail the move (unwritable
     /// app-data, a full disk) are exactly when this happens.
+    /// An enable batch run against a folder that is already enabled — a stale
+    /// plan, a second in-flight call — must not delete the live modded DLL. The
+    /// absent parked twin is the proof that the name is not holding a stock
+    /// build waiting to be cleared.
+    #[test]
+    fn removing_a_restored_file_requires_the_parked_copy_that_replaces_it() {
+        let h = ParkHarness::new();
+        let before = snapshot_dir(&h.client);
+
+        let outcome = h
+            .run(&[FileOp::RemoveRestored {
+                relative_path: "nvngx_dlss.dll".to_string(),
+                must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
+            }])
+            .expect("a no-op is not a failure");
+
+        assert!(outcome.applied.is_empty());
+        assert_eq!(outcome.skipped.len(), 1, "{outcome:?}");
+        assert_eq!(
+            before,
+            snapshot_dir(&h.client),
+            "the live modded DLL must survive: nothing was parked to take its place"
+        );
+    }
+
     #[test]
     fn a_batch_whose_manifest_save_fails_is_undone() {
         let h = ParkHarness::new();
