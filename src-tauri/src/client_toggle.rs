@@ -144,7 +144,12 @@ pub struct TogglePlan {
 /// * Disable where a runtime that replaces an ESO-shipped file has no
 ///   `displaced_in_place` on disk: switching off would leave the game with no
 ///   file under that name at all. Name the file.
-/// * Enable where a parked file is no longer in the folder. Name it.
+///
+/// Note what is deliberately *not* a blocker: a manifest entry whose `parked`
+/// flag the folder contradicts. The folder decides — a stale flag gets an
+/// informational line and `client_backup::reconcile_parked_flags` corrects the
+/// record on the next batch. Refusing on the flag was itself a dead end, since
+/// nothing in the app could then clear it.
 pub fn plan_toggle(stack: &ClientStack, managed: &[ManagedFile], client_dir: &str) -> TogglePlan {
     // **Disk decides, not the manifest.** Any `.kalpa-off` file at all means there
     // is parking to undo, even one — a batch that died between parking a runtime
@@ -211,9 +216,13 @@ fn plan_disable(
     // The injector has to be both managed and actually loaded by the game
     // right now — a manifest entry alone does not prove a live dxgi.dll is
     // still sitting in the folder to park.
+    // `role_of` reading the live inventory is the presence test; the entry's
+    // own `parked` flag is deliberately not consulted. A stale flag would
+    // otherwise hide an injector that is sitting right there and refuse the
+    // whole operation with "no injector present" — which the folder plainly
+    // contradicts.
     let injector = managed.iter().find(|entry| {
-        !entry.parked
-            && entry.kind == ManagedKind::ReShadeCore
+        entry.kind == ManagedKind::ReShadeCore
             && role_of(stack, &entry.relative_path) == Some(StackRole::Injector)
     });
     if injector.is_none() {
@@ -224,25 +233,36 @@ fn plan_disable(
     }
 
     for entry in managed {
-        // Recorded as parked, but disk says nothing is parked under that name —
-        // so the file is neither live nor in its `.kalpa-off` copy. Planning a
-        // disable around it would quietly omit a managed file; say so instead.
-        if entry.parked
-            && !stack
-                .parked
-                .iter()
-                .any(|file| file.restores.eq_ignore_ascii_case(&entry.relative_path))
-        {
-            blockers.push(format!(
-                "{} is recorded as switched off, but neither it nor its parked copy is in the \
-                 folder.",
-                entry.relative_path
-            ));
+        // The folder decides, not the flag. A record saying "parked" whose
+        // `.kalpa-off` file is not there is stale — most often because the user
+        // renamed it back by hand — and the live file is sitting right where it
+        // belongs. Believing the flag would refuse to switch off a folder that
+        // is working, with no way to clear it; `reconcile_parked_flags` will
+        // correct the record as soon as this batch runs.
+        let parked_on_disk = stack
+            .parked
+            .iter()
+            .any(|file| file.restores.eq_ignore_ascii_case(&entry.relative_path));
+        let live_on_disk = role_of(stack, &entry.relative_path).is_some();
+
+        if entry.parked && !parked_on_disk && !live_on_disk {
+            // Genuinely absent, both names. Worth saying, but it is one file
+            // missing — not a reason to refuse to switch off the rest.
+            operations.push(PlannedOp {
+                kind: ToggleOpKind::LeaveInPlace,
+                file_name: entry.relative_path.clone(),
+                partner: None,
+                summary: format!("{} is not in the folder", entry.relative_path),
+                detail: "Kalpa has a record of this file but neither it nor a parked copy is \
+                         here, so there is nothing to switch off. The record is left alone in \
+                         case you put the file back."
+                    .to_string(),
+            });
             continue;
         }
-        // Already off, or is the injector itself — the injector gets its own
-        // step below, parked last.
-        if entry.parked || entry.kind == ManagedKind::ReShadeCore {
+        // Already off on disk, or is the injector itself — the injector gets
+        // its own step below, parked last.
+        if parked_on_disk || entry.kind == ManagedKind::ReShadeCore {
             continue;
         }
 
@@ -374,21 +394,36 @@ fn plan_enable(
             })
     };
 
-    // Records that claim a park the folder does not have. The parked copy has
-    // been deleted or renamed by hand, so the file it held is simply gone —
-    // enable cannot conjure it back, and proceeding silently would restore the
-    // rest and leave the user to discover this one later.
+    // Records claiming a park the folder does not have. Two cases, and only one
+    // of them is a problem: if the live file is there, the record is merely
+    // stale (a hand-renamed `.kalpa-off`) and `reconcile_parked_flags` clears it
+    // after this batch. If neither name is present the file is genuinely gone,
+    // which is worth saying — but it is one file, and refusing to put the rest
+    // of the stack back because of it would be the dead end this planner exists
+    // to avoid.
     for entry in managed.iter().filter(|entry| entry.parked) {
-        if !stack
+        let parked_on_disk = stack
             .parked
             .iter()
-            .any(|file| file.restores.eq_ignore_ascii_case(&entry.relative_path))
-        {
-            blockers.push(format!(
-                "{} is recorded as switched off, but its parked copy is no longer in the folder, \
-                 so Kalpa has nothing to put back.",
-                entry.relative_path
-            ));
+            .any(|file| file.restores.eq_ignore_ascii_case(&entry.relative_path));
+        if !parked_on_disk {
+            // Said whether or not the live name is occupied. What is missing is
+            // the *parked copy* — the bytes Kalpa moved aside — and that is
+            // equally true if someone renamed it back by hand or deleted it. A
+            // planner that stays quiet because *something* holds the live name
+            // would be reassuring the user about a file it cannot account for.
+            operations.push(PlannedOp {
+                kind: ToggleOpKind::LeaveInPlace,
+                file_name: entry.relative_path.clone(),
+                partner: None,
+                summary: format!("No parked copy of {} to put back", entry.relative_path),
+                detail: format!(
+                    "Kalpa recorded {} as switched off, but there is no {}{PARKED_SUFFIX} in \
+                     the folder. Either it was renamed back by hand — in which case nothing \
+                     needs doing — or it was deleted.",
+                    entry.relative_path, entry.relative_path
+                ),
+            });
         }
     }
 
@@ -1132,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn enable_blocks_when_a_parked_file_has_been_deleted() {
+    fn a_deleted_parked_copy_is_reported_without_refusing_the_rest() {
         let tmp = tempfile::tempdir().unwrap();
         real_install(tmp.path());
         std::fs::rename(
@@ -1169,12 +1204,65 @@ mod tests {
         let plan = plan_toggle(&stack, &managed, &stack.client_dir);
 
         assert_eq!(plan.action, ToggleAction::Enable);
+        // One file being gone must not refuse to put the rest of the stack
+        // back — that was the dead end this planner exists to avoid.
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert_eq!(
+            to_file_ops(&plan).expect("plan is complete"),
+            vec![FileOp::Unpark {
+                relative_path: "dxgi.dll".to_string(),
+            }],
+            "the injector still goes back"
+        );
+        // But the missing parked copy is still named rather than silently
+        // dropped — something holds the live name, and Kalpa cannot say it is
+        // the file it moved aside.
         assert!(
-            plan.blockers
-                .iter()
-                .any(|blocker| blocker.contains("nvngx_dlss.dll")),
+            plan.operations.iter().any(|op| {
+                op.kind == ToggleOpKind::LeaveInPlace
+                    && op.file_name == "nvngx_dlss.dll"
+                    && op.summary.contains("No parked copy")
+            }),
             "{:?}",
+            plan.operations
+        );
+    }
+
+    /// The state a user creates by "fixing it themselves": they rename
+    /// `x.dll.kalpa-off` back by hand, so the folder is correct and only Kalpa's
+    /// record is stale. Believing the record would refuse to switch off a stack
+    /// that is working, with nothing in the app able to clear the flag.
+    #[test]
+    fn a_stale_parked_record_does_not_wedge_a_folder_that_is_fine() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+        assert!(stack.parked.is_empty(), "nothing is parked on disk");
+
+        // The manifest still claims the injector is parked.
+        let managed = vec![
+            managed_file("dxgi.dll", ManagedKind::ReShadeCore, None, true),
+            managed_file(
+                "nvngx_dlss.dll",
+                ManagedKind::NvidiaRuntime,
+                Some("nvngx_dlss.dll.disabled-bak"),
+                false,
+            ),
+        ];
+        let plan = plan_toggle(&stack, &managed, "client");
+
+        assert_eq!(plan.action, ToggleAction::Disable);
+        assert!(
+            plan.blockers.is_empty(),
+            "a stale flag must not block a working folder: {:?}",
             plan.blockers
+        );
+        assert!(
+            plan.operations
+                .iter()
+                .any(|op| { op.kind == ToggleOpKind::Park && op.file_name == "dxgi.dll" }),
+            "the injector is live, so it is parked like any other: {:?}",
+            plan.operations
         );
     }
 }

@@ -877,9 +877,26 @@ pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<Forget
     // being dropped are the ones that say a `.kalpa-off` file is Kalpa's doing
     // and which original belongs to it, and the UI's promise that "your stack
     // keeps working" is simply false: it is switched off.
+    // Checked against the folder, not the flag. A record saying "parked" whose
+    // `.kalpa-off` file is not there describes nothing — most often because the
+    // user renamed it back by hand, which is the first thing someone does to
+    // fix this themselves. Refusing on the flag alone would leave them unable
+    // to stop managing a folder that is, in fact, perfectly fine.
     let parked: Vec<String> = bucket
         .iter()
         .filter(|file| file.parked)
+        .filter(|file| {
+            crate::client_write::safe_relative_join(
+                client_root,
+                &format!(
+                    "{}{}",
+                    file.relative_path,
+                    crate::client_stack::PARKED_SUFFIX
+                ),
+            )
+            .map(|path| path.is_file())
+            .unwrap_or(false)
+        })
         .map(|file| file.relative_path.clone())
         .collect();
     if !parked.is_empty() {
@@ -1146,7 +1163,13 @@ pub fn run_file_ops_in(
     root: &ApprovedRoot,
     ops: &[FileOp],
 ) -> Result<FileOpOutcome, String> {
-    run_file_ops_in_with(manifest_path, backup_root, root, ops, apply_parked_flags)
+    run_file_ops_in_with(
+        manifest_path,
+        backup_root,
+        root,
+        ops,
+        reconcile_parked_flags,
+    )
 }
 
 /// Inner form of [`run_file_ops_in`] taking the manifest update, so a save that
@@ -1161,7 +1184,7 @@ fn run_file_ops_in_with(
     backup_root: &Path,
     root: &ApprovedRoot,
     ops: &[FileOp],
-    record: impl FnOnce(&Path, &Path, &[FileOp]) -> Result<(), String>,
+    record: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<FileOpOutcome, String> {
     let _guard = lock_manifest();
     run_file_ops_locked(manifest_path, backup_root, root, ops, record)
@@ -1174,7 +1197,7 @@ fn run_file_ops_locked(
     backup_root: &Path,
     root: &ApprovedRoot,
     ops: &[FileOp],
-    record: impl FnOnce(&Path, &Path, &[FileOp]) -> Result<(), String>,
+    record: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<FileOpOutcome, String> {
     // Gate 4, re-asserted inside the lock and before any byte moves. Renaming
     // the proxy DLL out from under a running client is exactly the case this
@@ -1211,7 +1234,7 @@ fn run_file_ops_locked(
     // that state is still recoverable, but leaving it is still the wrong
     // outcome when the whole batch is undoable, so undo it, exactly as the
     // placement path does.
-    if let Err(error) = record(manifest_path, client_root, ops) {
+    if let Err(error) = record(manifest_path, client_root) {
         let stuck = undo_ops(client_root, &done);
         return Err(if stuck.is_empty() {
             format!("{error}\n\nNothing was changed — every step was undone.")
@@ -1410,18 +1433,22 @@ fn undo_ops(client_root: &Path, done: &[&FileOp]) -> Vec<String> {
     stuck
 }
 
-/// Set or clear the `parked` flag on the manifest entries this batch moved.
+/// Bring every entry's `parked` flag into line with what is actually on disk.
 ///
 /// A park keeps the entry's live `relative_path` and flips the flag, rather
 /// than rewriting the path to the parked name: parking is temporary, and the
 /// live name is what re-enabling puts back. Entries the manifest does not have
 /// are simply not recorded — an unmanaged file can be parked (the injector of
 /// an un-adopted stack) without inventing a manifest row for it.
-fn apply_parked_flags(
-    manifest_path: &Path,
-    client_root: &Path,
-    ops: &[FileOp],
-) -> Result<(), String> {
+///
+/// This reconciles against the folder rather than replaying the batch's
+/// operations, for two reasons. An operation that *skipped* — a park whose file
+/// was not there — would otherwise still set the flag, recording a park that
+/// never happened. And a flag left stale by anything else, including a user
+/// renaming a `.kalpa-off` file back by hand, is corrected the next time any
+/// batch runs instead of persisting forever. Disk is the truth here exactly as
+/// it is in `client_toggle::plan_enable`; the flag is a cache of it.
+fn reconcile_parked_flags(manifest_path: &Path, client_root: &Path) -> Result<(), String> {
     let mut manifest = load_manifest_at(manifest_path);
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get_mut(&key) else {
@@ -1429,17 +1456,20 @@ fn apply_parked_flags(
     };
 
     let mut changed = false;
-    for op in ops {
-        let (path, parked) = match op {
-            FileOp::Park { relative_path } => (relative_path, true),
-            FileOp::Unpark { relative_path } => (relative_path, false),
-            _ => continue,
-        };
-        for entry in bucket.iter_mut() {
-            if &entry.relative_path == path && entry.parked != parked {
-                entry.parked = parked;
-                changed = true;
-            }
+    for entry in bucket.iter_mut() {
+        let parked = crate::client_write::safe_relative_join(
+            client_root,
+            &format!(
+                "{}{}",
+                entry.relative_path,
+                crate::client_stack::PARKED_SUFFIX
+            ),
+        )
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+        if entry.parked != parked {
+            entry.parked = parked;
+            changed = true;
         }
     }
 
@@ -2829,6 +2859,57 @@ mod tests {
         );
     }
 
+    /// The flag is a cache of the folder, so any batch corrects it. Without
+    /// this, a user who renamed a `.kalpa-off` file back by hand left a record
+    /// that nothing in the app could clear — and every path that read it
+    /// refused to act.
+    #[test]
+    fn a_stale_parked_flag_is_corrected_by_the_next_batch() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+        h.run(&[FileOp::Park {
+            relative_path: "dxgi.dll".to_string(),
+        }])
+        .expect("park");
+        assert!(h.entry("dxgi.dll").parked);
+
+        // The user renames it back themselves. The folder is now correct and
+        // only Kalpa's record is wrong.
+        std::fs::rename(
+            h.client.join("dxgi.dll.kalpa-off"),
+            h.client.join("dxgi.dll"),
+        )
+        .unwrap();
+
+        // Any subsequent batch reconciles, even one that does nothing itself.
+        h.run(&[FileOp::Park {
+            relative_path: "not-here.dll".to_string(),
+        }])
+        .expect("a no-op batch still reconciles");
+
+        assert!(
+            !h.entry("dxgi.dll").parked,
+            "the folder says it is live, so the record must too"
+        );
+    }
+
+    /// A park that skipped must not record a park that never happened — that
+    /// manufactured the stale flag above.
+    #[test]
+    fn a_skipped_park_records_nothing() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+
+        let outcome = h
+            .run(&[FileOp::Park {
+                relative_path: "d3d11.dll".to_string(),
+            }])
+            .expect("skips are not failures");
+
+        assert!(outcome.applied.is_empty());
+        assert!(!h.entry("dxgi.dll").parked);
+    }
+
     #[test]
     fn a_batch_whose_manifest_save_fails_is_undone() {
         let h = ParkHarness::new();
@@ -2842,7 +2923,7 @@ mod tests {
             &[FileOp::Park {
                 relative_path: "dxgi.dll".to_string(),
             }],
-            |_, _, _| Err("Failed to write the client manifest: disk full".to_string()),
+            |_, _| Err("Failed to write the client manifest: disk full".to_string()),
         )
         .expect_err("an unwritable manifest must fail the batch");
 
