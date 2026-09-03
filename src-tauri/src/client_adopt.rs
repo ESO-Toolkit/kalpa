@@ -208,27 +208,57 @@ pub fn plan_adoption_for(stack: &ClientStack, already_managed: bool) -> Adoption
     }
 }
 
-/// Record an adoption plan into the manifest.
+/// Re-inspect and record the current stack in the manifest.
 ///
 /// Inner form taking the write token and explicit paths, so it is testable
 /// without Tauri.
 ///
-/// `keep_copies` copies the `copyable` entries into `backup_root` under one
-/// shared folder id, and records that id in `displaced_backup` so the copy is
-/// referenced and therefore never pruned.
+/// Planning, hashing, optional copies, and the manifest update all happen
+/// under the managed transaction. A plan shown by the UI is deliberately not
+/// accepted here because the directory may have changed since it was shown.
 pub fn adopt_in(
     manifest_path: &Path,
     backup_root: &Path,
     root: &ApprovedRoot,
+    keep_copies: bool,
+) -> Result<AdoptionOutcome, String> {
+    adopt_in_with(manifest_path, backup_root, root, keep_copies, |_| Ok(()))
+}
+
+fn adopt_in_with(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    keep_copies: bool,
+    after_plan: impl FnOnce(&AdoptionPlan) -> Result<(), String>,
+) -> Result<AdoptionOutcome, String> {
+    crate::client_backup::run_managed_transaction_in(
+        manifest_path,
+        backup_root,
+        root,
+        |transaction| {
+            let stack = crate::client_stack::inspect_stack(transaction.client_root());
+            let manifest = transaction.load_manifest();
+            let key = crate::client_backup::install_key(transaction.client_root());
+            let already_managed = manifest
+                .installs
+                .get(&key)
+                .is_some_and(|bucket| bucket.iter().any(|file| file.origin == FileOrigin::Adopted));
+            let plan = plan_adoption_for(&stack, already_managed);
+            after_plan(&plan)?;
+            adopt_plan_locked(transaction, backup_root, &plan, keep_copies)
+        },
+    )
+}
+
+/// Apply a freshly computed plan while the complete managed transaction is
+/// held. Keeping this body separate makes the critical section reviewable.
+fn adopt_plan_locked(
+    transaction: &mut crate::client_backup::ManagedTransaction<'_>,
+    backup_root: &Path,
     plan: &AdoptionPlan,
     keep_copies: bool,
 ) -> Result<AdoptionOutcome, String> {
-    // Adoption writes nothing into the client directory, but it does read
-    // every file to hash it, and copying a runtime the launcher's patcher is
-    // part-way through rewriting would preserve torn bytes as if they were
-    // the user's good copy. The gate costs nothing and rules that out.
-    root.reassert_idle()?;
-
     // See `AdoptionPlan::stack_switched_off`. Recording a switched-off stack
     // would hash the game's own files as the managed ones and clear the park
     // flags that are the only record of where the user's files went.
@@ -240,7 +270,7 @@ pub fn adopt_in(
         );
     }
 
-    let client_root = root.path();
+    let client_root = transaction.client_root();
 
     let copy_id = crate::client_backup::new_backup_id();
     let mut outcome = AdoptionOutcome {
@@ -317,7 +347,7 @@ pub fn adopt_in(
             "Nothing could be recorded from this folder. Refresh and try again.".to_string(),
         );
     }
-    crate::client_backup::record_adopted(manifest_path, client_root, entries)?;
+    transaction.record_adopted(entries)?;
     Ok(outcome)
 }
 
@@ -399,14 +429,9 @@ pub async fn adopt_stack(
     let manifest_path = crate::client_backup::manifest_path(&app)?;
     let backup_root = crate::client_backup::backup_root(&app)?;
 
-    tokio::task::spawn_blocking(move || {
-        let stack = crate::client_stack::inspect_stack(root.path());
-        let already = is_already_managed(&manifest_path, root.path());
-        let plan = plan_adoption_for(&stack, already);
-        adopt_in(&manifest_path, &backup_root, &root, &plan, keep_copies)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || adopt_in(&manifest_path, &backup_root, &root, keep_copies))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Forget the adopted stack. Records only; no file is touched.
@@ -476,13 +501,7 @@ mod tests {
         }
 
         fn adopt(&self, keep_copies: bool) -> Result<AdoptionOutcome, String> {
-            adopt_in(
-                &self.manifest,
-                &self.backups,
-                &self.root(),
-                &self.plan(),
-                keep_copies,
-            )
+            adopt_in(&self.manifest, &self.backups, &self.root(), keep_copies)
         }
 
         fn entries(&self) -> Vec<ManagedFile> {
@@ -798,6 +817,68 @@ mod tests {
         );
     }
 
+    /// Adoption used to inspect and hash before taking the manifest lock. A
+    /// concurrent managed edit could therefore replace a runtime after it was
+    /// inspected but before its stale hash was recorded. Rendezvous channels
+    /// hold adoption at that exact boundary while the edit is started; no
+    /// sleeps or scheduler timing are involved.
+    #[test]
+    fn adoption_and_managed_edit_record_the_bytes_that_remain_on_disk() {
+        let h = Harness::new();
+        let adoption_root = h.root();
+        let edit_root = h.root();
+        let (planned_tx, planned_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (edit_started_tx, edit_started_rx) = std::sync::mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| {
+            let manifest = &h.manifest;
+            let backups = &h.backups;
+            let adoption = scope.spawn(move || {
+                adopt_in_with(manifest, backups, &adoption_root, false, |_| {
+                    planned_tx.send(()).expect("announce adoption plan");
+                    release_rx.recv().expect("release adoption");
+                    Ok(())
+                })
+            });
+
+            planned_rx.recv().expect("adoption reached its plan");
+            let manifest = &h.manifest;
+            let backups = &h.backups;
+            let edit = scope.spawn(move || {
+                edit_started_tx.send(()).expect("announce edit attempt");
+                crate::client_backup::edit_managed_file_in(
+                    manifest,
+                    backups,
+                    &edit_root,
+                    "nvngx_dlss.dll",
+                    ManagedKind::NvidiaRuntime,
+                    b"runtime written after adoption",
+                )
+            });
+
+            edit_started_rx.recv().expect("edit started");
+            release_tx.send(()).expect("let adoption finish");
+            adoption
+                .join()
+                .expect("adoption thread")
+                .expect("adoption succeeds");
+            let edit_outcome = edit.join().expect("edit thread").expect("edit succeeds");
+            assert!(edit_outcome.manifest_updated);
+        });
+
+        let target = h.client.join("nvngx_dlss.dll");
+        assert_eq!(
+            std::fs::read(&target).expect("read final runtime"),
+            b"runtime written after adoption"
+        );
+        assert_eq!(
+            h.entry("nvngx_dlss.dll").sha256,
+            crate::client_backup::hash_file(&target).expect("hash final runtime"),
+            "the manifest must describe the bytes left by the later mutation"
+        );
+    }
+
     /// What is in the folder while a stack is switched off is not the stack.
     /// Recording it would hash the game's own files as the managed ones and
     /// clear the park flags that are the only record of where the user's files
@@ -817,7 +898,7 @@ mod tests {
         let plan = plan_adoption_for(&stack, true);
         assert!(plan.stack_switched_off);
 
-        let error = adopt_in(&h.manifest, &h.backups, &h.root(), &plan, false)
+        let error = adopt_in(&h.manifest, &h.backups, &h.root(), false)
             .expect_err("must refuse while the stack is switched off");
         assert!(error.contains("switched off"), "{error}");
     }
@@ -867,7 +948,7 @@ mod tests {
         let h = Harness::new();
         let active = ApprovedRoot::for_tests(h.client.clone(), std::sync::Arc::new(|| Ok(true)));
 
-        let error = adopt_in(&h.manifest, &h.backups, &active, &h.plan(), true)
+        let error = adopt_in(&h.manifest, &h.backups, &active, true)
             .expect_err("adoption must refuse while the client is active");
         assert!(error.contains("running"), "{error}");
         assert!(h.entries().is_empty());

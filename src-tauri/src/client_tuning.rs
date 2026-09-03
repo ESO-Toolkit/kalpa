@@ -735,20 +735,20 @@ pub async fn apply_client_tuning(
     let root = crate::client_write::begin_write(&state, &client_dir).await?;
 
     tokio::task::spawn_blocking(move || {
-        let ini_path = tuning_file_path(root.path());
-        let contents = std::fs::read_to_string(&ini_path)
-            .map_err(|e| format!("Could not read {TUNING_FILE}: {e}"))?;
-        let updated = apply_edits(&contents, &edits)?;
-        let outcome = crate::client_backup::edit_managed_file(
-            &app,
-            &root,
-            TUNING_FILE,
-            crate::client_write::ManagedKind::ReShadeConfig,
-            updated.as_bytes(),
-        )?;
-        Ok(TuningApplyOutcome {
-            changed: edits.into_iter().map(|edit| edit.key).collect(),
-            backup_id: outcome.backup_id,
+        crate::client_backup::run_managed_transaction(&app, &root, |transaction| {
+            let ini_path = tuning_file_path(transaction.client_root());
+            let contents = std::fs::read_to_string(&ini_path)
+                .map_err(|e| format!("Could not read {TUNING_FILE}: {e}"))?;
+            let updated = apply_edits(&contents, &edits)?;
+            let outcome = transaction.edit_file(
+                TUNING_FILE,
+                crate::client_write::ManagedKind::ReShadeConfig,
+                updated.as_bytes(),
+            )?;
+            Ok(TuningApplyOutcome {
+                changed: edits.into_iter().map(|edit| edit.key).collect(),
+                backup_id: outcome.backup_id,
+            })
         })
     })
     .await
