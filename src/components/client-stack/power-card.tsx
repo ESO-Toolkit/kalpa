@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import {
+  AlertTriangleIcon,
   ArchiveIcon,
   CircleCheckIcon,
   MinusCircleIcon,
@@ -123,7 +124,15 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
 
   if (stack.is_empty) return null;
 
-  const disabled = stack.is_disabled;
+  // Three states, not two. `is_disabled` means the *injector* is parked; a batch
+  // that died part-way, or a runtime parked on its own, leaves files aside while
+  // ReShade still loads. Deriving the header from `is_disabled` alone while the
+  // confirm button follows `plan.action` (which keys off anything being parked)
+  // put "Switched on" above a button reading "Confirm switch on".
+  const parkedCount = stack.parked.length;
+  const state: "on" | "partly" | "off" =
+    parkedCount === 0 ? "on" : stack.is_disabled ? "off" : "partly";
+  const disabled = state !== "on";
 
   return (
     <GlassPanel variant="default" className="space-y-3 p-4">
@@ -131,16 +140,26 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
         <div>
           <SectionHeader>Stack power</SectionHeader>
           <div className="mt-1 flex items-center gap-2">
-            {disabled ? (
+            {state === "on" ? (
+              <PowerIcon aria-hidden className="size-4 text-status-success" />
+            ) : state === "off" ? (
               <PowerOffIcon aria-hidden className="size-4 text-muted-foreground" />
             ) : (
-              <PowerIcon aria-hidden className="size-4 text-status-success" />
+              <AlertTriangleIcon aria-hidden className="size-4 text-status-warning" />
             )}
             <span className="font-heading text-sm font-semibold">
-              {disabled ? "Switched off" : "Switched on"}
+              {state === "on"
+                ? "Switched on"
+                : state === "off"
+                  ? "Switched off"
+                  : "Partly switched off"}
             </span>
-            <InfoPill color={disabled ? "muted" : "emerald"}>
-              {disabled ? "Stock ESO" : "Modded"}
+            <InfoPill color={state === "on" ? "emerald" : state === "off" ? "muted" : "amber"}>
+              {state === "on"
+                ? "Modded"
+                : state === "off"
+                  ? "Stock ESO"
+                  : `${parkedCount} file${parkedCount === 1 ? "" : "s"} parked`}
             </InfoPill>
           </div>
         </div>
@@ -159,15 +178,17 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
             ) : (
               <PowerOffIcon />
             )}
-            {planLoading ? "Working out the plan..." : disabled ? "Switch on" : "Switch off"}
+            {planLoading ? "Working out the plan..." : disabled ? "Switch back on" : "Switch off"}
           </Button>
         )}
       </div>
 
       <p className="text-xs leading-relaxed text-muted-foreground">
-        {disabled
+        {state === "off"
           ? "The stack is parked. ESO is running with nothing from it loaded — the files are still in this folder, untouched."
-          : "Switching off puts ESO back to stock: the injector is parked and the files ESO loads itself are put back to your own originals. Nothing is deleted, and everything else in the stack is left exactly where it is. ESO reads this at its next launch, not immediately."}
+          : state === "partly"
+            ? "Some files are parked but the injector is not, so ReShade still loads. This is what a switch-off that stopped part way leaves behind. Switching back on puts every parked file where it belongs."
+            : "Switching off puts ESO back to stock: the injector is parked and the files ESO loads itself are put back to your own originals. Nothing is deleted, and everything else in the stack is left exactly where it is. ESO reads this at its next launch, not immediately."}
       </p>
 
       {plan && (
