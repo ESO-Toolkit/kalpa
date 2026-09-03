@@ -15,7 +15,13 @@ type CheckboxContextType = {
 
 const [CheckboxProvider, useCheckbox] = getStrictContext<CheckboxContextType>("CheckboxContext");
 
-type CheckboxProps = Omit<React.ComponentProps<typeof CheckboxPrimitive.Root>, "render"> &
+// `render` is fixed to a `motion.button` below, so `nativeButton` is not the
+// caller's to choose — it can only ever be `true` here. Both are omitted from
+// the public props so no consumer can put the two out of sync.
+type CheckboxProps = Omit<
+  React.ComponentProps<typeof CheckboxPrimitive.Root>,
+  "render" | "nativeButton"
+> &
   HTMLMotionProps<"button">;
 
 function Checkbox({
@@ -25,7 +31,6 @@ function Checkbox({
   onCheckedChange,
   indeterminate,
   value,
-  nativeButton,
   parent,
   disabled,
   readOnly,
@@ -49,7 +54,7 @@ function Checkbox({
         onCheckedChange={setIsChecked}
         indeterminate={indeterminate}
         value={value}
-        nativeButton={nativeButton}
+        nativeButton
         parent={parent}
         disabled={disabled}
         readOnly={readOnly}
