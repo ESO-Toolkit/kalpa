@@ -289,7 +289,6 @@ export function SupportDialog({
               </div>
               <label className="flex cursor-pointer items-start gap-2 border-t border-structure-06 pt-3 text-xs">
                 <Checkbox
-                  nativeButton
                   checked={consented}
                   onCheckedChange={(checked) => {
                     setConsentedReportSha256(checked === true ? reportIdentity : null);
