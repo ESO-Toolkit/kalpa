@@ -5,9 +5,7 @@ import {
   AlertTriangleIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  ExternalLinkIcon,
   HardDriveIcon,
-  ScrollTextIcon,
   PackageCheckIcon,
   PowerOffIcon,
   RefreshCwIcon,
@@ -25,17 +23,23 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { StackPowerCard } from "@/components/client-stack/power-card";
-import { TuningPanel } from "@/components/client-stack/tuning-panel";
-import { RuntimeDriftCard } from "@/components/client-stack/runtime-drift-card";
-import { PresetPanel } from "@/components/client-stack/preset-panel";
+import { SlotPane } from "@/components/client-stack/slot-pane";
+import { SlotRail } from "@/components/client-stack/slot-rail";
+import { StatusStrip } from "@/components/client-stack/status-strip";
+import {
+  LEVEL_ORDER,
+  SLOT_ORDER,
+  findingsForSlot,
+  slotFilled,
+  slotLevel,
+} from "@/components/client-stack/slots";
+import type { Slot } from "@/components/client-stack/slots";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type {
@@ -52,17 +56,11 @@ import type {
   EmergencyRemoval,
   EsoClientLocation,
   ForgetOutcome,
-  HealthFinding,
-  HealthLevel,
   ManagedFileState,
   ManagedFileStatus,
-  PresetInfo,
   ManagedInventory,
   ManagedKind,
   OrphanInjector,
-  PreservedOriginal,
-  StackItem,
-  StackRole,
   UninstallOutcome,
 } from "@/components/client-stack/types";
 export * from "@/components/client-stack/types";
@@ -80,70 +78,6 @@ const SOURCE_PILL: Record<
   proton: { color: "amber", label: "Proton" },
   manual: { color: "muted", label: "Manual" },
 };
-
-/** Every level pairs its color with an icon *and* a word, so color is never the
- *  only signal (five built-in themes are light or high-contrast). */
-const LEVEL_META: Record<
-  HealthLevel,
-  {
-    label: string;
-    Icon: typeof ShieldCheckIcon;
-    text: string;
-    border: string;
-    tint: string;
-    line: string;
-  }
-> = {
-  ok: {
-    label: "OK",
-    Icon: ShieldCheckIcon,
-    text: "text-status-success",
-    border: "border-status-success/20 border-l-status-success",
-    tint: "bg-status-success/[0.04]",
-    line: "border-status-success",
-  },
-  info: {
-    label: "Info",
-    Icon: AlertCircleIcon,
-    text: "text-status-info",
-    border: "border-status-info/20 border-l-status-info",
-    tint: "bg-status-info/[0.04]",
-    line: "border-status-info",
-  },
-  warning: {
-    label: "Warning",
-    Icon: AlertTriangleIcon,
-    text: "text-status-warning",
-    border: "border-status-warning/20 border-l-status-warning",
-    tint: "bg-status-warning/[0.04]",
-    line: "border-status-warning",
-  },
-  danger: {
-    label: "Problem",
-    Icon: ShieldAlertIcon,
-    text: "text-status-danger",
-    border: "border-status-danger/20 border-l-status-danger",
-    tint: "bg-status-danger/[0.04]",
-    line: "border-status-danger",
-  },
-};
-
-/** Upstream's own name for each motion-vector provider. Kalpa does not invent
- *  wording for these — they are what DLSS5-Feeder's own table calls them. */
-const MV_PROVIDER_LABEL: Record<NonNullable<PresetInfo["mv_provider"]>["kind"], string> = {
-  shared_texture: "the shared texMotionVectors texture",
-  launchpad: "iMMERSE LaunchPad",
-  vort: "VORT",
-  lumenite_kernel: "LumeniteFX Kernel",
-  lumenite_quant_motion: "LumeniteFX QuantMotion",
-};
-
-/** Worst-first ordering for picking a representative level across findings. */
-const LEVEL_ORDER: Record<HealthLevel, number> = { danger: 0, warning: 1, info: 2, ok: 3 };
-
-function worstLevel(levels: HealthLevel[]): HealthLevel {
-  return levels.reduce((worst, level) => (LEVEL_ORDER[level] < LEVEL_ORDER[worst] ? level : worst));
-}
 
 const KIND_LABEL: Record<ManagedKind, string> = {
   re_shade_core: "ReShade core",
@@ -188,148 +122,42 @@ const FILE_STATE_META: Record<
 };
 
 /* -------------------------------------------------------------------------- */
-/* The pipeline                                                               */
+/* Selection                                                                  */
 /* -------------------------------------------------------------------------- */
-/* Fixed load order — never reorder these by severity, the pipeline shape is   */
-/* the information. Roles that are not their own named layer (companion,       */
-/* frame_generation) fold into the nearest layer they physically ship next to. */
-
-type Stage = "injector" | "nr" | "sr" | "addons" | "shaders" | "compiler" | "preset" | "tuning";
-
-const STAGE_ORDER: Stage[] = [
-  "injector",
-  "nr",
-  "sr",
-  "addons",
-  "shaders",
-  "compiler",
-  "preset",
-  "tuning",
-];
-
-const STAGE_LABEL: Record<Stage, string> = {
-  injector: "Injector",
-  nr: "Neural Rendering runtime",
-  sr: "Super Resolution runtime",
-  addons: "ReShade add-ons",
-  shaders: "Shaders",
-  compiler: "Shader compiler",
-  preset: "Preset",
-  tuning: "Tuning",
-};
-
-const ROLE_TO_STAGE: Record<StackRole, Stage> = {
-  injector: "injector",
-  neural_rendering: "nr",
-  super_sampling: "sr",
-  frame_generation: "sr",
-  shader_compiler: "compiler",
-  addon: "addons",
-  companion: "addons",
-};
-
-const ROLE_LABEL: Record<StackRole, string> = {
-  injector: "Injector",
-  neural_rendering: "Neural Rendering runtime",
-  super_sampling: "Super Resolution runtime",
-  frame_generation: "Frame Generation runtime",
-  shader_compiler: "Shader compiler",
-  addon: "ReShade add-on",
-  companion: "Companion process",
-};
-
-/** Findings internal to one layer, rendered inside that layer's row. */
-const FINDING_STAGE: Record<string, Stage> = {
-  "stack-feed-host-missing": "addons",
-  "stack-addon-disabled": "addons",
-  "stack-preset-missing": "preset",
-  "stack-technique-order": "preset",
-  "stack-feed-technique-off": "preset",
-  "stack-search-path-mismatch": "shaders",
-  "stack-dlss-reverted": "sr",
-  // The preset picks the provider, so this belongs with the preset. It was
-  // missing from both this table and CONNECTOR_FINDING_AFTER, and findings
-  // render only through those two — so "nothing is producing motion vectors",
-  // which means Neural Rendering has nothing to work from, appeared nowhere
-  // in the panel at all.
-  "stack-mv-provider-missing": "preset",
-  // `stack-disabled` is deliberately absent: the power card at the top of the
-  // panel IS that finding, stated more usefully and with the action attached.
-};
-
-/** Findings that are a relationship *between* two layers, rendered on the
- *  connector segment following the given stage. */
-const CONNECTOR_FINDING_AFTER: Record<string, Stage> = {
-  "stack-no-injector": "injector",
-  "stack-nr-runtime-missing": "nr",
-  "stack-technique-source-missing": "shaders",
-};
-
-/** Stages where Kalpa still only reports, and cannot act.
- *
- *  Keep this honest in BOTH directions. It used to list `nr`, `sr`, `preset`
- *  and `tuning` as well, all of which shipped — so the runtime stages rendered
- *  a working "Put your copy back" drift card and then told the user that
- *  editing this "is coming next", and the preset and tuning stages claimed the
- *  same about panels sitting right there. A stale note like that does not just
- *  age badly; it actively tells someone the feature they are looking at is not
- *  there yet.
- *
- *  `addons` stays: enabling a disabled add-on (`DisabledAddons`) is on the
- *  shortlist and is genuinely not built. */
-const STAGE_COMING_NEXT = new Set<Stage>(["addons"]);
-
-function stagePresent(stage: Stage, stack: ClientStack): boolean {
-  switch (stage) {
-    case "shaders":
-      return stack.shaders.present;
-    case "preset":
-      return stack.preset?.exists ?? false;
-    case "tuning":
-      return stack.tuning.length > 0;
-    default:
-      return stack.items.some((item) => ROLE_TO_STAGE[item.role] === stage);
-  }
-}
-
-function stageLevel(stage: Stage, stack: ClientStack): HealthLevel {
-  const findings = stack.findings.filter((f) => FINDING_STAGE[f.id] === stage);
-  if (findings.length > 0) return worstLevel(findings.map((f) => f.level));
-  return stagePresent(stage, stack) ? "ok" : "info";
-}
-
-function firstNonEmptyStage(stack: ClientStack): Stage | null {
-  return STAGE_ORDER.find((stage) => stagePresent(stage, stack)) ?? null;
-}
-
-/** The stage whose row should be auto-selected so its explanation is already
- *  on screen. Internal findings (which render inside a row) take priority;
- *  connector-only problems fall back to the stage the dashed segment follows. */
-function firstIssueStage(stack: ClientStack): Stage | null {
-  const internal = new Set(
-    stack.findings.map((f) => FINDING_STAGE[f.id]).filter((s): s is Stage => Boolean(s))
-  );
-  for (const stage of STAGE_ORDER) if (internal.has(stage)) return stage;
-
-  const connector = new Set(
-    stack.findings.map((f) => CONNECTOR_FINDING_AFTER[f.id]).filter((s): s is Stage => Boolean(s))
-  );
-  for (const stage of STAGE_ORDER) if (connector.has(stage)) return stage;
-
-  return null;
-}
+/* The slot model itself lives in `client-stack/slots.ts`. What stays here is  */
+/* only the panel's own navigation: which slot, or which of the three views    */
+/* that are not slots, is currently open.                                      */
 
 /** A line from ReShade.log or dlss5-feed.log that matched a known failure
  *  signature. These are where a DLSS 5 stack actually announces breakage —
  *  a shader that would not compile, an unsupported parameter — so they stay
- *  in the panel even though they are not a layer of the pipeline. */
+ *  in the panel even though they are not a slot anyone chooses. */
 interface LogExcerpt {
   file: string;
   rule: string;
   line: string;
 }
 
-type SelectionKey = Stage | "adoption" | "records" | "logs";
+/**
+ * What the pane is showing.
+ *
+ * Eight of these are slots. The other three are whole-stack views that are
+ * deliberately *not* slots: adoption is about the folder rather than any one
+ * choice in it, the log check is evidence rather than a diagnosis, and
+ * "What Kalpa tracks" is the recovery path for everything else — which is why
+ * it is reachable from the footer in every state rather than living in a row.
+ */
+type SelectionKey = Slot | "power" | "adoption" | "records" | "logs";
+
+/** The first slot with a problem, worst first, so the pane opens on the thing
+ *  most worth reading. */
+function firstProblemSlot(stack: ClientStack): Slot | null {
+  const withFindings = SLOT_ORDER.filter((slot) => findingsForSlot(slot, stack).length > 0);
+  if (withFindings.length === 0) return null;
+  return withFindings.reduce((worst, slot) =>
+    LEVEL_ORDER[slotLevel(slot, stack)] < LEVEL_ORDER[slotLevel(worst, stack)] ? slot : worst
+  );
+}
 
 function computeDefaultSelection(
   stack: ClientStack | null,
@@ -338,8 +166,10 @@ function computeDefaultSelection(
 ): SelectionKey | null {
   if (!stack || stack.is_empty) return null;
   if (plan && !plan.already_managed && !adoptionDismissed) return "adoption";
-  if (plan?.already_managed) return firstIssueStage(stack) ?? "tuning";
-  return firstNonEmptyStage(stack) ?? "injector";
+  // A healthy stack opens on ReShade: it is the top of the load order and the
+  // one slot every other slot depends on, so it is the most useful thing to be
+  // looking at when there is nothing wrong.
+  return firstProblemSlot(stack) ?? SLOT_ORDER.find((slot) => slotFilled(slot, stack)) ?? "reshade";
 }
 
 const Spinner = ({ className }: { className?: string }) => (
@@ -351,8 +181,6 @@ const Spinner = ({ className }: { className?: string }) => (
     )}
   />
 );
-
-const Divider = () => <div className="border-t border-structure-06" />;
 
 function shortDirName(dir: string): string {
   const parts = dir.split(/[\\/]/).filter(Boolean);
@@ -415,7 +243,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   const [keepCopies, setKeepCopies] = useState(true);
   const [adopting, setAdopting] = useState(false);
   const [adoptError, setAdoptError] = useState<string | null>(null);
-  const [adoptOutcome, setAdoptOutcome] = useState<AdoptionOutcome | null>(null);
   const [forgetConfirming, setForgetConfirming] = useState(false);
   const [forgetting, setForgetting] = useState(false);
   const [forgetError, setForgetError] = useState<string | null>(null);
@@ -493,7 +320,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setKeepCopies(true);
     setAdopting(false);
     setAdoptError(null);
-    setAdoptOutcome(null);
     setForgetConfirming(false);
     setForgetting(false);
     setForgetError(null);
@@ -790,7 +616,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         });
       });
       if (result.status !== "committed") return;
-      setAdoptOutcome(result.value);
       setSelection(null);
     } catch (e) {
       if (!mountedRef.current || !openRef.current || selectedDirRef.current !== selectedDir) return;
@@ -821,7 +646,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       );
       if (result.status !== "committed") return;
       setForgetConfirming(false);
-      setAdoptOutcome(null);
       // Re-listing is what flips the panel back to the unmanaged view, so the
       // adoption card must be offerable again rather than staying dismissed.
       setAdoptionDismissed(false);
@@ -925,11 +749,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [selection, stack, plan, adoptionDismissed]
   );
 
-  const isHealthyManaged = useMemo(
-    () => Boolean(stack && !stack.is_empty && plan?.already_managed && stack.findings.length === 0),
-    [stack, plan]
-  );
-
   // The injector this stack loads is the one that would otherwise be flagged
   // as an "unmanaged orphan" — offering to quarantine the ReShade the user
   // just asked Kalpa to manage was the old panel's worst moment.
@@ -950,9 +769,16 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         showCloseButton={!mutationPending}
       >
         <DialogHeader>
-          <DialogTitle>Client Health</DialogTitle>
+          <DialogTitle>Graphics stack</DialogTitle>
+          {/* "Kalpa downloads nothing here" used to sit in this line as a
+              blanket claim. It is not one: it is true of the NVIDIA runtimes
+              because they are not licensed for redistribution, and false of
+              ReShade and the shader packs, which are fetched from their
+              authors at install time. Each slot now states its own answer,
+              where it is actually checkable. */}
           <DialogDescription>
-            The ReShade and DLSS 5 setup in your ESO game folder. Kalpa downloads nothing here.
+            The ReShade and DLSS 5 setup in your ESO game folder — what is in each slot, and what
+            you can put there instead.
           </DialogDescription>
         </DialogHeader>
 
@@ -1001,45 +827,49 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                     {`Installs (${clients.length})`}
                   </SectionHeader>
                 )}
-                <div
-                  className={cn("space-y-2", clients.length > 1 && "max-h-32 overflow-y-auto pr-1")}
-                >
-                  {clients.map((client) => (
-                    <InstallRow
-                      key={client.client_dir}
-                      client={client}
-                      selected={client.client_dir === selectedDir}
-                      selectable={clients.length > 1}
+                {(() => {
+                  const many = clients.length > 1;
+                  const browseButton = (
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="shrink-0"
                       disabled={browsing || mutationPending}
-                      onSelect={() => handleSelect(client.client_dir)}
-                    />
-                  ))}
-                </div>
-                <div
-                  className={cn(
-                    "flex flex-wrap items-center gap-2",
-                    clients.length > 1 ? "mt-2" : "-mt-7 justify-end"
-                  )}
-                >
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    disabled={browsing || mutationPending}
-                    onClick={() => void handleBrowse()}
-                  >
-                    {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
-                    {browsing
-                      ? "Browsing..."
-                      : clients.length > 1
-                        ? "Browse for eso64.exe"
-                        : "Change"}
-                  </Button>
-                  {browseError && (
-                    <p className="text-xs text-status-danger" role="alert">
-                      {browseError}
-                    </p>
-                  )}
-                </div>
+                      onClick={() => void handleBrowse()}
+                    >
+                      {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
+                      {browsing ? "Browsing..." : many ? "Browse for eso64.exe" : "Change"}
+                    </Button>
+                  );
+                  return (
+                    <>
+                      <div className={cn("space-y-2", many && "max-h-32 overflow-y-auto pr-1")}>
+                        {clients.map((client) => (
+                          <InstallRow
+                            key={client.client_dir}
+                            client={client}
+                            selected={client.client_dir === selectedDir}
+                            selectable={many}
+                            disabled={browsing || mutationPending}
+                            onSelect={() => handleSelect(client.client_dir)}
+                            // One install is one line: name, source, and the
+                            // control that changes it, all in the same flex
+                            // row so they cannot land on top of each other.
+                            trailing={many ? undefined : browseButton}
+                          />
+                        ))}
+                      </div>
+                      {many && (
+                        <div className="mt-2 flex flex-wrap items-center gap-2">{browseButton}</div>
+                      )}
+                      {browseError && (
+                        <p className="mt-1 text-xs text-status-danger" role="alert">
+                          {browseError}
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </section>
 
               {stackLoading && (
@@ -1083,12 +913,10 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                     planError={planError}
                     effectiveSelection={effectiveSelection}
                     onSelect={(key) => setSelection(key)}
-                    isHealthyManaged={isHealthyManaged}
                     keepCopies={keepCopies}
                     onToggleKeepCopies={() => setKeepCopies((v) => !v)}
                     adopting={adopting}
                     adoptError={adoptError}
-                    adoptOutcome={adoptOutcome}
                     onAdopt={() => void handleAdopt()}
                     onDismissAdoption={handleDismissAdoption}
                     managedLoading={managedLoading}
@@ -1135,6 +963,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         </div>
 
         <DialogFooter>
+          {stack && !stack.is_empty && (
+            <TracksButton
+              plan={plan}
+              inventory={managedInventory}
+              active={effectiveSelection === "records"}
+              onSelect={() => setSelection("records")}
+            />
+          )}
           <Button variant="outline" disabled={mutationPending} onClick={handleClose}>
             Close
           </Button>
@@ -1200,12 +1036,21 @@ function InstallRow({
   selectable,
   disabled,
   onSelect,
+  trailing,
 }: {
   client: EsoClientLocation;
   selected: boolean;
   selectable: boolean;
   disabled: boolean;
   onSelect: () => void;
+  /** Rendered at the end of the single-install row.
+   *
+   *  Takes the control as a child rather than letting the caller lay it over
+   *  the row: the browse button used to be a separate block pulled up by
+   *  `-mt-7` to fake one line, which put it straight on top of the source
+   *  pill. A negative margin reserves no space, so nothing could have
+   *  prevented that collision — the row has to actually contain the button. */
+  trailing?: React.ReactNode;
 }) {
   const pill = SOURCE_PILL[client.source];
   const body = (
@@ -1227,11 +1072,15 @@ function InstallRow({
     // title attribute rather than on its own line: on a short window every
     // row above the stack is a row the stack does not get.
     return (
-      <div className="flex items-center gap-2 py-0.5" title={client.exe_path}>
-        <p className="min-w-0 flex-1 truncate font-heading text-[13px] font-semibold">
+      <div className="flex items-center gap-2 py-0.5">
+        <p
+          className="min-w-0 flex-1 truncate font-heading text-[13px] font-semibold"
+          title={client.exe_path}
+        >
           {shortDirName(client.client_dir)}
         </p>
         <InfoPill color={pill.color}>{pill.label}</InfoPill>
+        {trailing}
       </div>
     );
   }
@@ -1275,70 +1124,8 @@ function StockClientCard() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Finding row (shared by in-row findings and the connector gutter)          */
+/* The body                                                                  */
 /* -------------------------------------------------------------------------- */
-
-function FindingRow({
-  finding,
-  onShowInDetails,
-}: {
-  finding: HealthFinding;
-  /** Present on the Overview, where the finding is far from the layer it
-   *  concerns. Absent in the Details pane, which is already there. */
-  onShowInDetails?: () => void;
-}) {
-  const meta = LEVEL_META[finding.level];
-  const { Icon } = meta;
-  const guideUrl = finding.guide_url;
-  return (
-    <li
-      className={cn(
-        "rounded-xl border border-l-[3px] p-3 transition-colors duration-150",
-        meta.border,
-        meta.tint
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <Icon aria-hidden className={cn("mt-0.5 size-4 shrink-0", meta.text)} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h4 className="font-heading text-[13px] font-semibold">{finding.title}</h4>
-            {/* The level word is rendered as text, not encoded in the color
-                alone — the icon and this label carry it on light and
-                high-contrast themes too. */}
-            <span className={cn("text-[11px] font-semibold uppercase tracking-wide", meta.text)}>
-              {meta.label}
-            </span>
-          </div>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{finding.detail}</p>
-          {guideUrl && (
-            <Button
-              variant="link"
-              size="xs"
-              className="mt-1 h-auto px-0"
-              onClick={() => void openGuide(guideUrl)}
-            >
-              Read the guide
-              <ExternalLinkIcon />
-            </Button>
-          )}
-          {onShowInDetails && (
-            <Button variant="ghost" size="xs" className="mt-2 -ml-2" onClick={onShowInDetails}>
-              Show me where
-              <ChevronRightIcon />
-            </Button>
-          )}
-        </div>
-      </div>
-    </li>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Master-detail body                                                        */
-/* -------------------------------------------------------------------------- */
-
-type PanelTab = "overview" | "details";
 
 interface StackBodyProps {
   stack: ClientStack;
@@ -1347,12 +1134,10 @@ interface StackBodyProps {
   planError: string | null;
   effectiveSelection: SelectionKey | null;
   onSelect: (key: SelectionKey) => void;
-  isHealthyManaged: boolean;
   keepCopies: boolean;
   onToggleKeepCopies: () => void;
   adopting: boolean;
   adoptError: string | null;
-  adoptOutcome: AdoptionOutcome | null;
   onAdopt: () => void;
   onDismissAdoption: () => void;
   managedLoading: boolean;
@@ -1389,451 +1174,104 @@ interface StackBodyProps {
   mutation: StackMutationCoordinator;
 }
 
+/**
+ * Strip, rail, pane — one screen, one scroller.
+ *
+ * The Overview/Details tab split is gone. It existed because the rail was a
+ * pipeline diagram with no actions on it, so a second, friendlier surface had
+ * to be built in front. Once each row became a slot that owns its findings and
+ * its controls, the second surface had nothing left to say — and the tab strip
+ * was 36px of a 532px dialog spent on a choice the user should not have to
+ * make.
+ *
+ * The height chain is the fragile part and it is written out deliberately:
+ * `DialogContent` is the only fixed height, and **every** wrapper between it
+ * and the pane's scroller is a flex box with `min-h-0`. Break one link and the
+ * pane stops being bounded — that is how 1870px of content once rendered
+ * inside a 532px dialog. The rail is `shrink-0` and never scrolls: it and the
+ * pane were siblings in one scrollport once, and because the rail is the
+ * taller of the two, scrolling to a low row carried the pane 1372px above the
+ * viewport.
+ */
 export function StackBody(props: StackBodyProps) {
-  const { stack, plan, effectiveSelection, onSelect } = props;
-  const railRef = useRef<HTMLDivElement>(null);
-  const railHadFocus = useRef(false);
-  const detailScrollRef = useRef<HTMLDivElement>(null);
-  const [tab, setTab] = useState<PanelTab>("overview");
+  const { stack, effectiveSelection, onSelect } = props;
+  const paneScrollRef = useRef<HTMLDivElement>(null);
 
-  /** Jump from a finding to the layer it concerns. */
-  const showInDetails = useCallback(
-    (key: SelectionKey) => {
-      onSelect(key);
-      setTab("details");
-    },
-    [onSelect]
-  );
-
-  // A long detail pane (Tuning is 18 controls) would otherwise open at
-  // whatever offset the previous selection left behind.
+  // The pane would otherwise open at whatever offset the previous selection
+  // left behind, which for a long slot reads as a blank pane.
   useEffect(() => {
-    detailScrollRef.current?.scrollTo({ top: 0 });
+    if (paneScrollRef.current) {
+      paneScrollRef.current.scrollTop = 0;
+    }
   }, [effectiveSelection]);
 
-  const otherKept = useMemo(() => stack.preserved_originals.filter((o) => !o.backs_up), [stack]);
-
-  const availableKeys = useMemo<SelectionKey[]>(
-    () => [
-      ...(plan && !plan.already_managed ? ["adoption" as const] : []),
-      ...STAGE_ORDER,
-      "records",
-      ...(props.logExcerpts.length > 0 ? ["logs" as const] : []),
-    ],
-    [plan, props.logExcerpts.length]
+  const attention = useMemo(
+    () => stack.findings.filter((f) => f.level !== "info" && f.level !== "ok").length,
+    [stack.findings]
   );
-  const selectedKey =
-    effectiveSelection && availableKeys.includes(effectiveSelection)
-      ? effectiveSelection
-      : (availableKeys[0] ?? null);
 
-  useEffect(() => {
-    if (selectedKey && selectedKey !== effectiveSelection) onSelect(selectedKey);
-  }, [effectiveSelection, onSelect, selectedKey]);
-
-  useEffect(() => {
-    if (!railHadFocus.current) return;
-    const container = railRef.current;
-    if (!container?.querySelector('[role="option"]:focus')) {
-      container?.querySelector<HTMLElement>('[role="option"][tabindex="0"]')?.focus();
-    }
-  }, [availableKeys, selectedKey]);
-
-  const handleRailKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    const container = railRef.current;
-    if (!container) return;
-
-    if (e.key === "Enter" || e.key === " ") {
-      const active = document.activeElement;
-      if (active instanceof HTMLElement && active.getAttribute("role") === "option") {
-        e.preventDefault();
-        active.click();
-      }
-      return;
-    }
-
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") {
-      return;
-    }
-    const items = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'));
-    if (items.length === 0) return;
-    e.preventDefault();
-    const idx = items.indexOf(document.activeElement as HTMLElement);
-    let nextIdx: number;
-    if (e.key === "Home") nextIdx = 0;
-    else if (e.key === "End") nextIdx = items.length - 1;
-    else if (idx === -1) nextIdx = e.key === "ArrowUp" ? items.length - 1 : 0;
-    else if (e.key === "ArrowDown") nextIdx = Math.min(idx + 1, items.length - 1);
-    else nextIdx = Math.max(idx - 1, 0);
-    const next = items[nextIdx];
-    next?.focus();
-    next?.click();
-  }, []);
+  const selectedSlot = useMemo(
+    () => (SLOT_ORDER.includes(effectiveSelection as Slot) ? (effectiveSelection as Slot) : null),
+    [effectiveSelection]
+  );
 
   return (
-    <Tabs
-      value={tab}
-      onValueChange={(next) => setTab(next as PanelTab)}
-      className="flex min-h-0 flex-1 flex-col gap-3"
-    >
-      <TabsList variant="line" className="shrink-0">
-        <TabsTrigger value="overview">Overview</TabsTrigger>
-        <TabsTrigger value="details">Details</TabsTrigger>
-      </TabsList>
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <StatusStrip
+        stack={stack}
+        attention={attention}
+        isManaged={props.isManaged}
+        logCount={props.logExcerpts.length}
+        onOpenPower={() => onSelect("power")}
+        onOpenAdoption={() => onSelect("adoption")}
+        onOpenLogs={() => onSelect("logs")}
+      />
 
-      {/* One scroller, one column: the state, then what needs doing, then the
-          actions. Everything a non-expert came here for is on this tab. */}
-      <TabsContent value="overview" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-        <StackOverview {...props} onShowInDetails={showInDetails} />
-      </TabsContent>
-
-      {/* The pipeline. Two INDEPENDENT scrollers, which is what the single
-          shared one got wrong: the rail is far taller than the detail, so
-          scrolling down to a lower layer used to carry the detail pane off
-          the top of the screen. */}
-      <TabsContent value="details" className="flex min-h-0 flex-1 gap-4">
-        <div
-          ref={railRef}
-          role="listbox"
-          aria-label="Stack layers"
-          onKeyDown={handleRailKeyDown}
-          onFocusCapture={(e) => {
-            if ((e.target as HTMLElement).getAttribute("role") === "option") {
-              railHadFocus.current = true;
-            }
-          }}
-          onBlurCapture={(e) => {
-            // A null relatedTarget means React removed the focused option
-            // during a refresh; retain the flag so the effect above can
-            // restore focus to the new selected option.
-            if (e.relatedTarget && !railRef.current?.contains(e.relatedTarget as Node)) {
-              railHadFocus.current = false;
-            }
-          }}
-          className="min-h-0 w-[280px] shrink-0 space-y-2 overflow-y-auto pr-1"
-        >
-          {plan && !plan.already_managed && (
-            <button
-              type="button"
-              role="option"
-              aria-selected={selectedKey === "adoption"}
-              tabIndex={selectedKey === "adoption" ? 0 : -1}
-              data-rail-option="adoption"
-              onClick={() => onSelect("adoption")}
-              className={cn(
-                "flex w-full cursor-pointer flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
-                "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-                selectedKey === "adoption"
-                  ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-                  : "border-structure-06 bg-structure-02 hover:border-structure-10"
-              )}
-            >
-              <InfoPill color="gold" className="self-start">
-                Not managed yet
-              </InfoPill>
-              <span className="text-xs text-muted-foreground">Review and manage this stack</span>
-            </button>
-          )}
-
-          <SectionHeader className="pt-1">Load order</SectionHeader>
-          {STAGE_ORDER.map((stage, i) => (
-            <div key={stage}>
-              <StageRow
-                stage={stage}
-                stack={stack}
-                selected={selectedKey === stage}
-                tabIndex={selectedKey === stage ? 0 : -1}
-                onSelect={() => onSelect(stage)}
-              />
-              {i < STAGE_ORDER.length - 1 && (
-                <Connector
-                  findings={stack.findings.filter((f) => CONNECTOR_FINDING_AFTER[f.id] === stage)}
-                />
-              )}
-            </div>
-          ))}
-
-          {otherKept.length > 0 && (
-            <GlassPanel variant="subtle" className="space-y-1 p-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                Other kept files
-              </p>
-              {otherKept.map((o) => (
-                <p
-                  key={o.file_name}
-                  className="truncate font-mono text-[11px] text-muted-foreground"
-                >
-                  {o.file_name}
-                </p>
-              ))}
-            </GlassPanel>
-          )}
-
-          <Divider />
-
-          <button
-            type="button"
-            role="option"
-            aria-selected={selectedKey === "records"}
-            tabIndex={selectedKey === "records" ? 0 : -1}
-            data-rail-option="records"
-            onClick={() => onSelect("records")}
-            className={cn(
-              "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-              selectedKey === "records"
-                ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-                : "border-structure-06 bg-structure-02 hover:border-structure-10"
-            )}
-          >
-            <HardDriveIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 flex-1">
-              <span className="block font-heading text-[13px] font-semibold">
-                Kalpa&apos;s records
-              </span>
-              <span className="block text-xs text-muted-foreground">
-                {props.managedInventory?.files.length ?? 0} tracked file
-                {props.managedInventory?.files.length === 1 ? "" : "s"}
-              </span>
-            </span>
-          </button>
-
-          {props.logExcerpts.length > 0 && (
-            <button
-              type="button"
-              role="option"
-              aria-selected={selectedKey === "logs"}
-              tabIndex={selectedKey === "logs" ? 0 : -1}
-              data-rail-option="logs"
-              onClick={() => onSelect("logs")}
-              className={cn(
-                "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
-                "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-                selectedKey === "logs"
-                  ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-                  : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
-              )}
-            >
-              <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-status-warning" />
-              <span className="min-w-0 flex-1">
-                <span className="block font-heading text-[13px] font-semibold">Log signals</span>
-                <span className="block text-xs text-muted-foreground">
-                  {props.logExcerpts.length} known problem line
-                  {props.logExcerpts.length === 1 ? "" : "s"}
-                </span>
-              </span>
-            </button>
-          )}
+      <div className="flex min-h-0 flex-1 gap-4">
+        <SlotRail stack={stack} selected={selectedSlot} onSelect={onSelect} />
+        <div ref={paneScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+          <DetailPane {...props} />
         </div>
-
-        <div
-          ref={detailScrollRef}
-          className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1"
-        >
-          <DetailPane {...props} effectiveSelection={selectedKey} />
-        </div>
-      </TabsContent>
-    </Tabs>
+      </div>
+    </div>
   );
-}
-
-/** Where a finding's "Show me where" should land. */
-function stageForFinding(id: string): SelectionKey | null {
-  return FINDING_STAGE[id] ?? CONNECTOR_FINDING_AFTER[id] ?? null;
 }
 
 /**
- * The tab a non-expert needs: what state the stack is in, what is wrong, and
- * the things they might want to do — in that order, on one scroll.
+ * Recovery, one click from every state.
  *
- * The eight-layer rail is the backend's model of the stack, and it is the right
- * model for *diagnosis*. It is the wrong front door, because none of the
- * questions someone actually arrives with ("is it on?", "is this why the game
- * looks wrong?", "turn it off so I can check") map to a layer whose name they
- * recognise. So the rail moved one click away, to Details, and nothing was
- * removed: every finding here links straight to the layer it concerns.
+ * Lives in the dialog's own footer rather than in a row of its own above it:
+ * as a separate row it cost 117px of a 532px dialog, measured in the running
+ * app, and the pane is where that height belongs. It used to be collapsed at
+ * the bottom of a scroller, which is the one place a panicking user scrolls
+ * straight past.
  */
-function StackOverview(props: StackBodyProps & { onShowInDetails: (key: SelectionKey) => void }) {
-  const { stack, plan, onShowInDetails } = props;
-
-  // Worst first — the only place severity outranks pipeline order, because
-  // here the list is a to-do list rather than a diagram.
-  const findings = useMemo(
-    () => [...stack.findings].sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]),
-    [stack.findings]
-  );
-  const managedPaths = useMemo(() => stack.items.map((item) => item.file_name), [stack.items]);
-  const notManaged = Boolean(plan && !plan.already_managed);
-
-  return (
-    <>
-      {notManaged && !props.adoptOutcome && (
-        <AdoptionCard
-          plan={plan!}
-          keepCopies={props.keepCopies}
-          onToggleKeepCopies={props.onToggleKeepCopies}
-          adopting={props.adopting}
-          adoptError={props.adoptError}
-          onAdopt={props.onAdopt}
-          onDismiss={props.onDismissAdoption}
-        />
-      )}
-
-      <StackPowerCard clientDir={stack.client_dir} stack={stack} mutation={props.mutation} />
-
-      <section aria-labelledby="client-health-attention">
-        <SectionHeader id="client-health-attention" className="mb-2">
-          {findings.length > 0 ? `Needs attention (${findings.length})` : "Health"}
-        </SectionHeader>
-        {findings.length > 0 ? (
-          <ul className="space-y-2">
-            {findings.map((finding) => {
-              const target = stageForFinding(finding.id);
-              return (
-                <FindingRow
-                  key={finding.id}
-                  finding={finding}
-                  onShowInDetails={target ? () => onShowInDetails(target) : undefined}
-                />
-              );
-            })}
-          </ul>
-        ) : (
-          <GlassPanel variant="subtle" className="flex items-start gap-2 p-3">
-            <ShieldCheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-status-success" />
-            <p className="text-xs text-muted-foreground">
-              Kalpa checked every part of this stack and they agree with each other. Nothing to fix.
-            </p>
-          </GlassPanel>
-        )}
-      </section>
-
-      <RuntimeDriftCard
-        clientDir={stack.client_dir}
-        stack={stack}
-        mutation={props.mutation}
-        filePaths={managedPaths}
-      />
-
-      <PresetPanel clientDir={stack.client_dir} stack={stack} mutation={props.mutation} />
-
-      <TuningPanel clientDir={stack.client_dir} stack={stack} mutation={props.mutation} />
-
-      {/* Collapsed by design: the header keeps it findable, the destructive
-          buttons stay one click deeper. */}
-      <Collapsible>
-        <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-xl border border-structure-06 bg-structure-02 p-3 text-left transition-colors duration-150 hover:border-structure-10">
-          <span className="min-w-0">
-            <span className="block font-heading text-[13px] font-semibold">
-              Remove or stop managing
-            </span>
-            <span className="block text-xs text-muted-foreground">
-              {props.managedInventory?.files.length ?? 0} tracked file
-              {props.managedInventory?.files.length === 1 ? "" : "s"}
-            </span>
-          </span>
-          <ChevronDownIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-        </CollapsibleTrigger>
-        <CollapsiblePanel className="pt-3">
-          <RecordsSection {...props} />
-        </CollapsiblePanel>
-      </Collapsible>
-    </>
-  );
-}
-
-function StageRow({
-  stage,
-  stack,
-  selected,
-  tabIndex,
+function TracksButton({
+  plan,
+  inventory,
+  active,
   onSelect,
 }: {
-  stage: Stage;
-  stack: ClientStack;
-  selected: boolean;
-  tabIndex: number;
+  plan: AdoptionPlan | null;
+  inventory: ManagedInventory | null;
+  active: boolean;
   onSelect: () => void;
 }) {
-  const level = stageLevel(stage, stack);
-  const meta = LEVEL_META[level];
-  const { Icon } = meta;
-  const items = stack.items.filter((item) => ROLE_TO_STAGE[item.role] === stage);
-
-  let summary: string;
-  let fileName: string | null = null;
-  if (stage === "shaders") {
-    summary = stack.shaders.present
-      ? `${stack.shaders.effect_count} effects, ${stack.shaders.texture_count} textures`
-      : "Not present";
-  } else if (stage === "preset") {
-    summary = stack.preset
-      ? stack.preset.exists
-        ? `${stack.preset.techniques.length} technique${stack.preset.techniques.length === 1 ? "" : "s"} enabled`
-        : "Missing file"
-      : "Not configured";
-  } else if (stage === "tuning") {
-    summary = stack.tuning.length > 0 ? `${stack.tuning.length} values` : "Not present";
-  } else if (items.length === 0) {
-    summary = "Not present";
-  } else if (items.length === 1) {
-    summary = items[0]!.display_name ?? "no product name";
-    fileName = items[0]!.file_name;
-  } else {
-    summary = `${items.length} files`;
-  }
-
+  const count = inventory?.files.length;
   return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={selected}
-      tabIndex={tabIndex}
-      data-rail-option={stage}
-      onClick={onSelect}
-      className={cn(
-        "flex w-full cursor-pointer flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left",
-        "transition-colors duration-150",
-        "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-        selected
-          ? "border-primary/30 border-l-primary bg-primary/[0.04]"
-          : cn(meta.border, meta.tint, "hover:border-structure-10 hover:bg-structure-02")
-      )}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-heading text-[13px] font-semibold">{STAGE_LABEL[stage]}</span>
-        <span className="flex items-center gap-1">
-          <Icon aria-hidden className={cn("size-3.5 shrink-0", meta.text)} />
-          <span className={cn("text-[11px] font-semibold uppercase tracking-wide", meta.text)}>
-            {meta.label}
-          </span>
+    <Button variant="ghost" size="xs" className="mr-auto" aria-pressed={active} onClick={onSelect}>
+      <HardDriveIcon />
+      What Kalpa tracks
+      {/* The count is withheld until the inventory has actually loaded — it
+          renders "0 files" otherwise, which for an adopted stack is a false
+          statement rather than a pending one. */}
+      {plan?.already_managed && count !== undefined && (
+        <span className="text-muted-foreground">
+          {" "}
+          &middot; {count} file{count === 1 ? "" : "s"}
         </span>
-      </div>
-      <span className="truncate text-xs text-muted-foreground">{summary}</span>
-      {fileName && (
-        <span className="truncate font-mono text-[11px] text-muted-foreground">{fileName}</span>
       )}
-    </button>
-  );
-}
-
-function Connector({ findings }: { findings: HealthFinding[] }) {
-  if (findings.length === 0) {
-    return <div aria-hidden className="ml-[13px] h-3 w-px bg-structure-10" />;
-  }
-  const level = worstLevel(findings.map((f) => f.level));
-  return (
-    <div className="flex gap-2 py-1">
-      <div
-        aria-hidden
-        className={cn("ml-[9px] w-0 shrink-0 border-l-2 border-dashed", LEVEL_META[level].line)}
-      />
-      <ul className="flex-1 space-y-2">
-        {findings.map((f) => (
-          <FindingRow key={f.id} finding={f} />
-        ))}
-      </ul>
-    </div>
+    </Button>
   );
 }
 
@@ -1887,8 +1325,20 @@ function RecordsSection(props: StackBodyProps) {
   );
 }
 
+/**
+ * What the pane shows for the current selection.
+ *
+ * Eight of the branches are slots and go through one component; the other
+ * three are the whole-stack views that were never slots. There is no
+ * per-slot special-casing left here — that all moved into `SlotPane`, which
+ * is why this reads as navigation rather than as a second layout.
+ */
 function DetailPane(props: StackBodyProps) {
   const { stack, plan, planLoading, planError, effectiveSelection } = props;
+
+  if (effectiveSelection === "power") {
+    return <StackPowerCard clientDir={stack.client_dir} stack={stack} mutation={props.mutation} />;
+  }
 
   if (effectiveSelection === "adoption") {
     if (planLoading) {
@@ -1926,228 +1376,19 @@ function DetailPane(props: StackBodyProps) {
     );
   }
 
-  if (effectiveSelection === "logs") {
-    return <LogSignals excerpts={props.logExcerpts} />;
-  }
-
-  if (effectiveSelection === "records") {
-    return <RecordsSection {...props} />;
-  }
-
+  if (effectiveSelection === "logs") return <LogSignals excerpts={props.logExcerpts} />;
+  if (effectiveSelection === "records") return <RecordsSection {...props} />;
   if (!effectiveSelection) {
-    return <p className="text-xs text-muted-foreground">Select a layer to see its detail.</p>;
+    return <p className="text-xs text-muted-foreground">Pick a slot to see what is in it.</p>;
   }
 
-  const stage = effectiveSelection;
-  if (stage === "shaders") return <ShadersDetail stack={stack} />;
-  if (stage === "preset") return <PresetDetail stack={stack} mutation={props.mutation} />;
-  if (stage === "tuning") return <TuningDetail stack={stack} mutation={props.mutation} />;
-  return <ItemsStageDetail stage={stage} stack={stack} mutation={props.mutation} />;
-}
-
-function ComingNextNote() {
-  return <p className="text-xs text-muted-foreground">Editing this from Kalpa is coming next.</p>;
-}
-
-function StageFindingsList({ stage, stack }: { stage: Stage; stack: ClientStack }) {
-  const findings = stack.findings.filter((f) => FINDING_STAGE[f.id] === stage);
-  if (findings.length === 0) return null;
   return (
-    <ul className="space-y-2">
-      {findings.map((f) => (
-        <FindingRow key={f.id} finding={f} />
-      ))}
-    </ul>
-  );
-}
-
-function ItemCard({ item, preserved }: { item: StackItem; preserved: PreservedOriginal | null }) {
-  const identifiedByHash =
-    !item.display_name && !item.version && !item.company && !item.description;
-  return (
-    <GlassPanel
-      variant="subtle"
-      className="space-y-1 rounded-xl border-l-[3px] border-l-structure-10 p-3"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <h4 className="font-heading text-[13px] font-semibold">{ROLE_LABEL[item.role]}</h4>
-        {identifiedByHash && <InfoPill color="muted">identified by hash</InfoPill>}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        {item.display_name ?? "no product name"} &middot; {item.version ?? "no version info"}
-      </p>
-      <p className="font-mono text-[11px] text-muted-foreground">{item.file_name}</p>
-      {preserved && (
-        <p className="text-xs text-status-info">
-          Original &middot; {preserved.version ?? "no version info"} &middot; kept by you
-        </p>
-      )}
-    </GlassPanel>
-  );
-}
-
-function ItemsStageDetail({
-  stage,
-  stack,
-  mutation,
-}: {
-  stage: Stage;
-  stack: ClientStack;
-  mutation: StackMutationCoordinator;
-}) {
-  const items = stack.items.filter((item) => ROLE_TO_STAGE[item.role] === stage);
-  const findByFileName = (name: string) =>
-    stack.preserved_originals.find((o) => o.backs_up?.toLowerCase() === name.toLowerCase()) ?? null;
-
-  return (
-    <div className="space-y-3">
-      <SectionHeader>{STAGE_LABEL[stage]}</SectionHeader>
-      {items.length === 0 ? (
-        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
-          Not present in this install.
-        </GlassPanel>
-      ) : (
-        <div className="space-y-2">
-          {items.map((item) => (
-            <ItemCard key={item.file_name} item={item} preserved={findByFileName(item.file_name)} />
-          ))}
-        </div>
-      )}
-      <StageFindingsList stage={stage} stack={stack} />
-      <RuntimeDriftCard
-        clientDir={stack.client_dir}
-        stack={stack}
-        mutation={mutation}
-        filePaths={items.map((item) => item.file_name)}
-      />
-      {STAGE_COMING_NEXT.has(stage) && <ComingNextNote />}
-    </div>
-  );
-}
-
-function ShadersDetail({ stack }: { stack: ClientStack }) {
-  const shaders = stack.shaders;
-  return (
-    <div className="space-y-3">
-      <SectionHeader>Shaders</SectionHeader>
-      <GlassPanel variant="subtle" className="space-y-1 p-3 text-xs">
-        <p>
-          <span className="text-muted-foreground">Present:</span> {shaders.present ? "Yes" : "No"}
-        </p>
-        <p>
-          <span className="text-muted-foreground">Effects:</span> {shaders.effect_count}
-        </p>
-        <p>
-          <span className="text-muted-foreground">Textures:</span> {shaders.texture_count}
-        </p>
-        <p className="break-words">
-          <span className="text-muted-foreground">Search paths:</span>{" "}
-          <span className="font-mono">{shaders.effect_search_paths ?? "not configured"}</span>
-        </p>
-      </GlassPanel>
-      <StageFindingsList stage="shaders" stack={stack} />
-    </div>
-  );
-}
-
-function PresetDetail({
-  stack,
-  mutation,
-}: {
-  stack: ClientStack;
-  mutation: StackMutationCoordinator;
-}) {
-  const preset = stack.preset;
-  return (
-    <div className="space-y-3">
-      <SectionHeader>Preset</SectionHeader>
-      {!preset ? (
-        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
-          No preset configured.
-        </GlassPanel>
-      ) : (
-        <GlassPanel variant="subtle" className="space-y-2 p-3 text-xs">
-          <p className="break-words">
-            <span className="text-muted-foreground">Path:</span>{" "}
-            <span className="font-mono">{preset.path}</span>
-          </p>
-          <p>
-            <span className="text-muted-foreground">Exists:</span> {preset.exists ? "Yes" : "No"}
-          </p>
-          <div>
-            <p className="mb-1 text-muted-foreground">Enabled techniques, in run order:</p>
-            {preset.techniques.length === 0 ? (
-              <p className="text-muted-foreground">None enabled.</p>
-            ) : (
-              <ol className="list-decimal space-y-1 pl-4">
-                {preset.techniques.map((t) => (
-                  <li key={t.name} className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono">{t.name}</span>
-                    {!t.source_present && <InfoPill color="red">missing {t.source}</InfoPill>}
-                    {preset.mv_provider?.technique === t.name && (
-                      <InfoPill color="sky">motion vectors</InfoPill>
-                    )}
-                  </li>
-                ))}
-              </ol>
-            )}
-          </div>
-          {preset.mv_provider && (
-            <p className="break-words">
-              <span className="text-muted-foreground">Motion vectors from:</span>{" "}
-              {preset.mv_provider.technique ? (
-                <span className="font-mono">{preset.mv_provider.technique}</span>
-              ) : (
-                <span className="text-status-danger">
-                  nothing enabled ({MV_PROVIDER_LABEL[preset.mv_provider.kind]} is selected)
-                </span>
-              )}
-            </p>
-          )}
-          {preset.available.length > 0 && (
-            <p className="break-words">
-              <span className="text-muted-foreground">All known techniques:</span>{" "}
-              <span className="font-mono">{preset.available.join(", ")}</span>
-            </p>
-          )}
-        </GlassPanel>
-      )}
-      <StageFindingsList stage="preset" stack={stack} />
-      <PresetPanel clientDir={stack.client_dir} stack={stack} mutation={mutation} />
-    </div>
-  );
-}
-
-function TuningDetail({
-  stack,
-  mutation,
-}: {
-  stack: ClientStack;
-  mutation: StackMutationCoordinator;
-}) {
-  return (
-    <div className="space-y-3">
-      <SectionHeader>Tuning</SectionHeader>
-      {stack.tuning.length === 0 ? (
-        <GlassPanel variant="subtle" className="p-3 text-xs text-muted-foreground">
-          No [RenoDX.DLSS5] tuning block found.
-        </GlassPanel>
-      ) : (
-        <GlassPanel variant="subtle" className="p-0">
-          {stack.tuning.map((t) => (
-            <div
-              key={t.key}
-              className="flex items-center justify-between gap-3 border-b border-structure-06 px-3 py-2 last:border-b-0"
-            >
-              <span className="font-mono text-[12px]">{t.key}</span>
-              <span className="font-mono text-[12px] text-muted-foreground">{t.value}</span>
-            </div>
-          ))}
-        </GlassPanel>
-      )}
-      <StageFindingsList stage="tuning" stack={stack} />
-      <TuningPanel clientDir={stack.client_dir} stack={stack} mutation={mutation} />
-    </div>
+    <SlotPane
+      slot={effectiveSelection}
+      stack={stack}
+      mutation={props.mutation}
+      onOpenGuide={(url) => void openGuide(url)}
+    />
   );
 }
 

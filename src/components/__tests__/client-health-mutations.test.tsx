@@ -132,6 +132,7 @@ function installDefaultIpc() {
 
 async function renderReady(onClose = vi.fn()) {
   const view = render(<ClientHealthPanel open onClose={onClose} />);
+  fireEvent.click(await screen.findByRole("button", { name: /^Switch off/ }));
   await screen.findByRole("button", { name: "Switch off" });
   return { ...view, onClose };
 }
@@ -235,7 +236,7 @@ describe("Client Health mutation coordination", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /ESO-B/ })).toHaveAttribute("aria-pressed", "true");
     });
-    await screen.findByRole("button", { name: "Switch off" });
+    await screen.findByRole("button", { name: /^Switch off/ });
 
     await act(async () => {
       stalePlan.resolve(togglePlan("C:\\ESO-A"));
