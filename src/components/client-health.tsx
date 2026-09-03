@@ -9,6 +9,7 @@ import {
   HardDriveIcon,
   ScrollTextIcon,
   PackageCheckIcon,
+  PowerOffIcon,
   RefreshCwIcon,
   SearchIcon,
   ShieldAlertIcon,
@@ -24,189 +25,43 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { StackPowerCard } from "@/components/client-stack/power-card";
+import { TuningPanel } from "@/components/client-stack/tuning-panel";
+import { RuntimeDriftCard } from "@/components/client-stack/runtime-drift-card";
+import { PresetPanel } from "@/components/client-stack/preset-panel";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
-/* -------------------------------------------------------------------------- */
-/* Data contract — install discovery                                         */
-/* -------------------------------------------------------------------------- */
-/* These mirror the Rust structs behind `detect_eso_clients` and                */
-/* `validate_eso_client`.                                                      */
-
-export type ClientSource = "steam" | "zos_registry" | "proton" | "manual";
-
-export interface EsoClientLocation {
-  client_dir: string;
-  exe_path: string;
-  source: ClientSource;
-}
-
-export type HealthLevel = "ok" | "info" | "warning" | "danger";
-
-export interface HealthFinding {
-  id: string;
-  level: HealthLevel;
-  title: string;
-  detail: string;
-  guide_url: string | null;
-}
-
-export interface ClientHealthPanelProps {
-  open: boolean;
-  onClose: () => void;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Data contract — the stack                                                 */
-/* -------------------------------------------------------------------------- */
-/* These mirror `src-tauri/src/client_stack.rs`. A DLSS 5 Neural Rendering     */
-/* setup is a pipeline of layers, not three DLLs — see that file's module      */
-/* doc for why the cross-layer findings below exist.                          */
-
-export type StackRole =
-  | "injector"
-  | "neural_rendering"
-  | "super_sampling"
-  | "frame_generation"
-  | "shader_compiler"
-  | "addon"
-  | "companion";
-
-export interface StackItem {
-  role: StackRole;
-  file_name: string;
-  display_name: string | null;
-  version: string | null;
-  company: string | null;
-  description: string | null;
-  size_bytes: number;
-}
-
-export interface PreservedOriginal {
-  file_name: string;
-  backs_up: string | null;
-  version: string | null;
-  size_bytes: number;
-}
-
-export interface Technique {
-  name: string;
-  source: string;
-  source_present: boolean;
-}
-
-export interface PresetInfo {
-  path: string;
-  exists: boolean;
-  techniques: Technique[];
-  available: string[];
-}
-
-export interface TuningValue {
-  key: string;
-  value: string;
-}
-
-export interface ShaderTree {
-  present: boolean;
-  effect_count: number;
-  texture_count: number;
-  effect_search_paths: string | null;
-}
-
-export interface ClientStack {
-  client_dir: string;
-  items: StackItem[];
-  preserved_originals: PreservedOriginal[];
-  shaders: ShaderTree;
-  preset: PresetInfo | null;
-  tuning: TuningValue[];
-  disabled_addons: string[];
-  is_empty: boolean;
-  findings: HealthFinding[];
-}
-
-/* -------------------------------------------------------------------------- */
-/* Data contract — adoption                                                  */
-/* -------------------------------------------------------------------------- */
-/* These mirror `src-tauri/src/client_adopt.rs`.                               */
-
-export interface AdoptionEntry {
-  relative_path: string;
-  kind: ManagedKind;
-  role: StackRole;
-  display_name: string | null;
-  version: string | null;
-  size_bytes: number;
-  displaced_in_place: string | null;
-  copyable: boolean;
-}
-
-export interface AdoptionPlan {
-  client_dir: string;
-  entries: AdoptionEntry[];
-  copy_bytes: number;
-  already_managed: boolean;
-  is_empty: boolean;
-}
-
-export interface AdoptionOutcome {
-  recorded: string[];
-  copied: string[];
-  skipped: string[];
-}
-
-/* -------------------------------------------------------------------------- */
-/* Data contract — Kalpa's own records                                       */
-/* -------------------------------------------------------------------------- */
-/* These mirror `list_managed_client_files`, `uninstall_managed_client_files`  */
-/* and `emergency_remove_injector` in `src-tauri/src/client_uninstall.rs`.     */
-
-export type ManagedFileState = "present" | "modified" | "missing";
-
-export type ManagedKind =
-  | "re_shade_core"
-  | "re_shade_config"
-  | "shader"
-  | "preset"
-  | "addon"
-  | "nvidia_runtime"
-  | "shader_compiler";
-
-export interface ManagedFileStatus {
-  relative_path: string;
-  kind: ManagedKind;
-  placed_at: string;
-  state: ManagedFileState;
-  restores_backup: boolean;
-}
-
-export interface OrphanInjector {
-  file_name: string;
-  product_name: string;
-  version: string | null;
-}
-
-export interface ManagedInventory {
-  client_dir: string;
-  files: ManagedFileStatus[];
-  orphan_injectors: OrphanInjector[];
-}
-
-export interface UninstallOutcome {
-  removed: string[];
-  skipped: string[];
-}
-
-export interface EmergencyRemoval {
-  file_name: string;
-  quarantine_path: string;
-}
+import type {
+  AdoptionOutcome,
+  AdoptionPlan,
+  ClientHealthPanelProps,
+  ClientSource,
+  ClientStack,
+  EmergencyRemoval,
+  EsoClientLocation,
+  ForgetOutcome,
+  HealthFinding,
+  HealthLevel,
+  ManagedFileState,
+  ManagedFileStatus,
+  PresetInfo,
+  ManagedInventory,
+  ManagedKind,
+  OrphanInjector,
+  PreservedOriginal,
+  StackItem,
+  StackRole,
+  UninstallOutcome,
+} from "@/components/client-stack/types";
+export * from "@/components/client-stack/types";
 
 /* -------------------------------------------------------------------------- */
 /* Presentation tables                                                        */
@@ -269,6 +124,16 @@ const LEVEL_META: Record<
   },
 };
 
+/** Upstream's own name for each motion-vector provider. Kalpa does not invent
+ *  wording for these — they are what DLSS5-Feeder's own table calls them. */
+const MV_PROVIDER_LABEL: Record<NonNullable<PresetInfo["mv_provider"]>["kind"], string> = {
+  shared_texture: "the shared texMotionVectors texture",
+  launchpad: "iMMERSE LaunchPad",
+  vort: "VORT",
+  lumenite_kernel: "LumeniteFX Kernel",
+  lumenite_quant_motion: "LumeniteFX QuantMotion",
+};
+
 /** Worst-first ordering for picking a representative level across findings. */
 const LEVEL_ORDER: Record<HealthLevel, number> = { danger: 0, warning: 1, info: 2, ok: 3 };
 
@@ -309,6 +174,12 @@ const FILE_STATE_META: Record<
     Icon: AlertCircleIcon,
     text: "text-status-info",
     hint: "Already gone. Removing just tidies the record and restores anything it displaced.",
+  },
+  parked: {
+    label: "Switched off",
+    Icon: PowerOffIcon,
+    text: "text-muted-foreground",
+    hint: "Moved aside so ESO does not load it. Switch the stack back on to put it back.",
   },
 };
 
@@ -372,6 +243,14 @@ const FINDING_STAGE: Record<string, Stage> = {
   "stack-feed-technique-off": "preset",
   "stack-search-path-mismatch": "shaders",
   "stack-dlss-reverted": "sr",
+  // The preset picks the provider, so this belongs with the preset. It was
+  // missing from both this table and CONNECTOR_FINDING_AFTER, and findings
+  // render only through those two — so "nothing is producing motion vectors",
+  // which means Neural Rendering has nothing to work from, appeared nowhere
+  // in the panel at all.
+  "stack-mv-provider-missing": "preset",
+  // `stack-disabled` is deliberately absent: the power card at the top of the
+  // panel IS that finding, stated more usefully and with the action attached.
 };
 
 /** Findings that are a relationship *between* two layers, rendered on the
@@ -382,9 +261,19 @@ const CONNECTOR_FINDING_AFTER: Record<string, Stage> = {
   "stack-technique-source-missing": "shaders",
 };
 
-/** Stages where a real feature (tuning controls, disable/re-enable, runtime
- *  swap, preset reordering) is deliberately not built yet. */
-const STAGE_COMING_NEXT = new Set<Stage>(["nr", "sr", "addons", "preset", "tuning"]);
+/** Stages where Kalpa still only reports, and cannot act.
+ *
+ *  Keep this honest in BOTH directions. It used to list `nr`, `sr`, `preset`
+ *  and `tuning` as well, all of which shipped — so the runtime stages rendered
+ *  a working "Put your copy back" drift card and then told the user that
+ *  editing this "is coming next", and the preset and tuning stages claimed the
+ *  same about panels sitting right there. A stale note like that does not just
+ *  age badly; it actively tells someone the feature they are looking at is not
+ *  there yet.
+ *
+ *  `addons` stays: enabling a disabled add-on (`DisabledAddons`) is on the
+ *  shortlist and is genuinely not built. */
+const STAGE_COMING_NEXT = new Set<Stage>(["addons"]);
 
 function stagePresent(stage: Stage, stack: ClientStack): boolean {
   switch (stage) {
@@ -515,7 +404,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   // default is derived live from stack/plan (see `computeDefaultSelection`) so
   // there is never a stale setState racing the data it depends on.
   const [selection, setSelection] = useState<SelectionKey | null>(null);
-  const [railManualExpand, setRailManualExpand] = useState(false);
+
   const [adoptionDismissed, setAdoptionDismissed] = useState(false);
 
   // Adoption flow. Reset per install alongside everything else below.
@@ -559,7 +448,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
    *  folder or a stale content swap. */
   const resetInstallUiState = useCallback(() => {
     setSelection(null);
-    setRailManualExpand(false);
     setAdoptionDismissed(false);
     setKeepCopies(true);
     setAdopting(false);
@@ -666,6 +554,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     },
     [loadLogs, loadManaged, loadPlan]
   );
+
+  /** Re-read the folder after a management action changed it. Every write in
+   *  the panels below alters what `inspect_client_stack` would report, and the
+   *  rail *is* the inventory, so a stale one is a lie about the user's game. */
+  const reloadInstall = useCallback(async () => {
+    if (!selectedDir) return;
+    await loadInstall(selectedDir, ++runToken.current);
+  }, [loadInstall, selectedDir]);
 
   const detect = useCallback(async () => {
     const token = ++runToken.current;
@@ -813,7 +709,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setForgetting(true);
     setForgetError(null);
     try {
-      await invokeOrThrow<string[]>("forget_stack", { clientDir: selectedDir });
+      await invokeOrThrow<ForgetOutcome>("forget_stack", { clientDir: selectedDir });
       if (runToken.current !== token) return;
       setForgetConfirming(false);
       setAdoptOutcome(null);
@@ -920,8 +816,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [stack, plan]
   );
 
-  const railExpanded = isHealthyManaged ? railManualExpand : true;
-
   // The injector this stack loads is the one that would otherwise be flagged
   // as an "unmanaged orphan" — offering to quarantine the ReShade the user
   // just asked Kalpa to manage was the old panel's worst moment.
@@ -938,12 +832,17 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         <DialogHeader>
           <DialogTitle>Client Health</DialogTitle>
           <DialogDescription>
-            The graphics-mod stack in your ESO client folder. Kalpa downloads nothing here — it only
-            records what is already there.
+            The ReShade and DLSS 5 setup in your ESO game folder. Kalpa downloads nothing here.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 min-h-0 space-y-4 overflow-y-auto pr-1">
+        {/* A flex column that does NOT scroll. The Details tab puts its own
+            scroller on each of its two panes, and a pane can only be given a
+            height if every ancestor between it and the fixed-height dialog is
+            a flex box with `min-h-0`. Scrolling here instead would put the
+            rail and the detail back in one scrollport, which is the bug this
+            replaced. */}
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
           {detecting && (
             <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground">
               <Spinner />
@@ -962,11 +861,20 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 
           {!detecting && clients && clients.length > 0 && (
             <>
-              <section aria-labelledby="client-health-install">
-                <SectionHeader id="client-health-install" className="mb-2">
-                  {clients.length > 1 ? `Installs (${clients.length})` : "Install"}
-                </SectionHeader>
-                <div className="space-y-2">
+              {/* Deliberately compact. On a short window the dialog is only
+                  ~530px tall, and a header block plus a full-width install card
+                  used to eat two thirds of it before the stack appeared at
+                  all. One install is one line; several stay a scrollable list
+                  with its own bounded height. */}
+              <section aria-labelledby="client-health-install" className="shrink-0">
+                {clients.length > 1 && (
+                  <SectionHeader id="client-health-install" className="mb-2">
+                    {`Installs (${clients.length})`}
+                  </SectionHeader>
+                )}
+                <div
+                  className={cn("space-y-2", clients.length > 1 && "max-h-32 overflow-y-auto pr-1")}
+                >
                   {clients.map((client) => (
                     <InstallRow
                       key={client.client_dir}
@@ -977,15 +885,24 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                     />
                   ))}
                 </div>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
+                <div
+                  className={cn(
+                    "flex flex-wrap items-center gap-2",
+                    clients.length > 1 ? "mt-2" : "-mt-7 justify-end"
+                  )}
+                >
                   <Button
-                    variant="outline"
-                    size="sm"
+                    variant="ghost"
+                    size="xs"
                     disabled={browsing}
                     onClick={() => void handleBrowse()}
                   >
                     {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
-                    {browsing ? "Browsing..." : "Browse for eso64.exe"}
+                    {browsing
+                      ? "Browsing..."
+                      : clients.length > 1
+                        ? "Browse for eso64.exe"
+                        : "Change"}
                   </Button>
                   {browseError && (
                     <p className="text-xs text-status-danger" role="alert">
@@ -994,8 +911,6 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   )}
                 </div>
               </section>
-
-              <Divider />
 
               {stackLoading && (
                 <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground">
@@ -1023,7 +938,11 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                 </GlassPanel>
               )}
 
-              {!stackLoading && !stackError && stack && stack.is_empty && <StockClientCard />}
+              {!stackLoading && !stackError && stack && stack.is_empty && (
+                <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                  <StockClientCard />
+                </div>
+              )}
 
               {!stackLoading && !stackError && stack && !stack.is_empty && (
                 <StackBody
@@ -1033,9 +952,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   planError={planError}
                   effectiveSelection={effectiveSelection}
                   onSelect={(key) => setSelection(key)}
-                  railExpanded={railExpanded}
                   isHealthyManaged={isHealthyManaged}
-                  onToggleRailExpand={() => setRailManualExpand((v) => !v)}
                   keepCopies={keepCopies}
                   onToggleKeepCopies={() => setKeepCopies((v) => !v)}
                   adopting={adopting}
@@ -1078,6 +995,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   emergencyError={emergencyError}
                   emergencyResult={emergencyResult}
                   onEmergencyRemove={handleEmergencyRemove}
+                  onStackChanged={reloadInstall}
                 />
               )}
             </>
@@ -1171,10 +1089,16 @@ function InstallRow({
   );
 
   if (!selectable) {
+    // One install needs a label, not a card. The full exe path lives in the
+    // title attribute rather than on its own line: on a short window every
+    // row above the stack is a row the stack does not get.
     return (
-      <GlassPanel variant="subtle" className="flex items-center gap-3 p-3">
-        {body}
-      </GlassPanel>
+      <div className="flex items-center gap-2 py-0.5" title={client.exe_path}>
+        <p className="min-w-0 flex-1 truncate font-heading text-[13px] font-semibold">
+          {shortDirName(client.client_dir)}
+        </p>
+        <InfoPill color={pill.color}>{pill.label}</InfoPill>
+      </div>
     );
   }
 
@@ -1219,7 +1143,15 @@ function StockClientCard() {
 /* Finding row (shared by in-row findings and the connector gutter)          */
 /* -------------------------------------------------------------------------- */
 
-function FindingRow({ finding }: { finding: HealthFinding }) {
+function FindingRow({
+  finding,
+  onShowInDetails,
+}: {
+  finding: HealthFinding;
+  /** Present on the Overview, where the finding is far from the layer it
+   *  concerns. Absent in the Details pane, which is already there. */
+  onShowInDetails?: () => void;
+}) {
   const meta = LEVEL_META[finding.level];
   const { Icon } = meta;
   const guideUrl = finding.guide_url;
@@ -1255,6 +1187,12 @@ function FindingRow({ finding }: { finding: HealthFinding }) {
               <ExternalLinkIcon />
             </Button>
           )}
+          {onShowInDetails && (
+            <Button variant="ghost" size="xs" className="mt-2 -ml-2" onClick={onShowInDetails}>
+              Show me where
+              <ChevronRightIcon />
+            </Button>
+          )}
         </div>
       </div>
     </li>
@@ -1265,6 +1203,8 @@ function FindingRow({ finding }: { finding: HealthFinding }) {
 /* Master-detail body                                                        */
 /* -------------------------------------------------------------------------- */
 
+type PanelTab = "overview" | "details";
+
 interface StackBodyProps {
   stack: ClientStack;
   plan: AdoptionPlan | null;
@@ -1272,9 +1212,7 @@ interface StackBodyProps {
   planError: string | null;
   effectiveSelection: SelectionKey | null;
   onSelect: (key: SelectionKey) => void;
-  railExpanded: boolean;
   isHealthyManaged: boolean;
-  onToggleRailExpand: () => void;
   keepCopies: boolean;
   onToggleKeepCopies: () => void;
   adopting: boolean;
@@ -1313,11 +1251,30 @@ interface StackBodyProps {
   emergencyError: string | null;
   emergencyResult: EmergencyRemoval | null;
   onEmergencyRemove: (fileName: string) => void | Promise<void>;
+  /** Re-read the stack after a management action changed the folder. */
+  onStackChanged: () => Promise<void>;
 }
 
 function StackBody(props: StackBodyProps) {
-  const { stack, plan, effectiveSelection, onSelect, railExpanded, isHealthyManaged } = props;
+  const { stack, plan, effectiveSelection, onSelect } = props;
   const railRef = useRef<HTMLDivElement>(null);
+  const detailScrollRef = useRef<HTMLDivElement>(null);
+  const [tab, setTab] = useState<PanelTab>("overview");
+
+  /** Jump from a finding to the layer it concerns. */
+  const showInDetails = useCallback(
+    (key: SelectionKey) => {
+      onSelect(key);
+      setTab("details");
+    },
+    [onSelect]
+  );
+
+  // A long detail pane (Tuning is 18 controls) would otherwise open at
+  // whatever offset the previous selection left behind.
+  useEffect(() => {
+    detailScrollRef.current?.scrollTo({ top: 0 });
+  }, [effectiveSelection]);
 
   const otherKept = useMemo(() => stack.preserved_originals.filter((o) => !o.backs_up), [stack]);
 
@@ -1339,147 +1296,254 @@ function StackBody(props: StackBodyProps) {
   }, []);
 
   return (
-    <div className="flex gap-4">
-      <div
-        ref={railRef}
-        role="listbox"
-        aria-label="Stack layers"
-        onKeyDown={handleRailKeyDown}
-        className="w-[300px] shrink-0 space-y-2"
-      >
-        {plan && !plan.already_managed && (
+    <Tabs
+      value={tab}
+      onValueChange={(next) => setTab(next as PanelTab)}
+      className="flex min-h-0 flex-1 flex-col gap-3"
+    >
+      <TabsList variant="line" className="shrink-0">
+        <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="details">Details</TabsTrigger>
+      </TabsList>
+
+      {/* One scroller, one column: the state, then what needs doing, then the
+          actions. Everything a non-expert came here for is on this tab. */}
+      <TabsContent value="overview" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+        <StackOverview {...props} onShowInDetails={showInDetails} />
+      </TabsContent>
+
+      {/* The pipeline. Two INDEPENDENT scrollers, which is what the single
+          shared one got wrong: the rail is far taller than the detail, so
+          scrolling down to a lower layer used to carry the detail pane off
+          the top of the screen. */}
+      <TabsContent value="details" className="flex min-h-0 flex-1 gap-4">
+        <div
+          ref={railRef}
+          role="listbox"
+          aria-label="Stack layers"
+          onKeyDown={handleRailKeyDown}
+          className="min-h-0 w-[280px] shrink-0 space-y-2 overflow-y-auto pr-1"
+        >
+          {plan && !plan.already_managed && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={effectiveSelection === "adoption"}
+              onClick={() => onSelect("adoption")}
+              className={cn(
+                "flex w-full cursor-pointer flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
+                "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+                effectiveSelection === "adoption"
+                  ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+                  : "border-structure-06 bg-structure-02 hover:border-structure-10"
+              )}
+            >
+              <InfoPill color="gold" className="self-start">
+                Not managed yet
+              </InfoPill>
+              <span className="text-xs text-muted-foreground">Review and manage this stack</span>
+            </button>
+          )}
+
+          <SectionHeader className="pt-1">Load order</SectionHeader>
+          {STAGE_ORDER.map((stage, i) => (
+            <div key={stage}>
+              <StageRow
+                stage={stage}
+                stack={stack}
+                selected={effectiveSelection === stage}
+                onSelect={() => onSelect(stage)}
+              />
+              {i < STAGE_ORDER.length - 1 && (
+                <Connector
+                  findings={stack.findings.filter((f) => CONNECTOR_FINDING_AFTER[f.id] === stage)}
+                />
+              )}
+            </div>
+          ))}
+
+          {otherKept.length > 0 && (
+            <GlassPanel variant="subtle" className="space-y-1 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Other kept files
+              </p>
+              {otherKept.map((o) => (
+                <p
+                  key={o.file_name}
+                  className="truncate font-mono text-[11px] text-muted-foreground"
+                >
+                  {o.file_name}
+                </p>
+              ))}
+            </GlassPanel>
+          )}
+
+          <Divider />
+
           <button
             type="button"
             role="option"
-            aria-selected={effectiveSelection === "adoption"}
-            onClick={() => onSelect("adoption")}
+            aria-selected={effectiveSelection === "records"}
+            onClick={() => onSelect("records")}
             className={cn(
-              "flex w-full flex-col gap-1 rounded-xl border p-3 text-left transition-colors duration-150",
+              "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
               "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-              effectiveSelection === "adoption"
+              effectiveSelection === "records"
                 ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
                 : "border-structure-06 bg-structure-02 hover:border-structure-10"
             )}
           >
-            <InfoPill color="gold" className="self-start">
-              Not managed yet
-            </InfoPill>
-            <span className="text-xs text-muted-foreground">Review and manage this stack</span>
-          </button>
-        )}
-
-        {isHealthyManaged && !railExpanded ? (
-          <GlassPanel variant="subtle" className="flex items-center justify-between gap-2 p-3">
-            <span className="flex min-w-0 items-center gap-2 text-[13px]">
-              <ShieldCheckIcon aria-hidden className="size-4 shrink-0 text-status-success" />
-              <span className="truncate">
-                <span className="text-status-success">●</span> Managed &middot; DLSS 5 Neural
-                Rendering &middot; {STAGE_ORDER.length} layers &middot; all consistent
+            <HardDriveIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1">
+              <span className="block font-heading text-[13px] font-semibold">
+                Kalpa&apos;s records
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {props.managedInventory?.files.length ?? 0} tracked file
+                {props.managedInventory?.files.length === 1 ? "" : "s"}
               </span>
             </span>
-            <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
-              Show layers
-              <ChevronDownIcon />
-            </Button>
-          </GlassPanel>
-        ) : (
-          <>
-            {isHealthyManaged && (
-              <div className="flex justify-end">
-                <Button variant="ghost" size="xs" onClick={props.onToggleRailExpand}>
-                  Hide layers
-                  <ChevronRightIcon />
-                </Button>
-              </div>
-            )}
-            {STAGE_ORDER.map((stage, i) => (
-              <div key={stage}>
-                <StageRow
-                  stage={stage}
-                  stack={stack}
-                  selected={effectiveSelection === stage}
-                  onSelect={() => onSelect(stage)}
-                />
-                {i < STAGE_ORDER.length - 1 && (
-                  <Connector
-                    findings={stack.findings.filter((f) => CONNECTOR_FINDING_AFTER[f.id] === stage)}
-                  />
-                )}
-              </div>
-            ))}
-          </>
-        )}
+          </button>
 
-        {otherKept.length > 0 && (
-          <GlassPanel variant="subtle" className="space-y-1 p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Other kept files
-            </p>
-            {otherKept.map((o) => (
-              <p key={o.file_name} className="truncate font-mono text-[11px] text-muted-foreground">
-                {o.file_name}
-              </p>
-            ))}
-          </GlassPanel>
-        )}
-
-        <Divider />
-
-        <button
-          type="button"
-          role="option"
-          aria-selected={effectiveSelection === "records"}
-          onClick={() => onSelect("records")}
-          className={cn(
-            "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
-            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-            effectiveSelection === "records"
-              ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-              : "border-structure-06 bg-structure-02 hover:border-structure-10"
+          {props.logExcerpts.length > 0 && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={effectiveSelection === "logs"}
+              onClick={() => onSelect("logs")}
+              className={cn(
+                "flex w-full cursor-pointer items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
+                "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
+                effectiveSelection === "logs"
+                  ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
+                  : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
+              )}
+            >
+              <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-status-warning" />
+              <span className="min-w-0 flex-1">
+                <span className="block font-heading text-[13px] font-semibold">Log signals</span>
+                <span className="block text-xs text-muted-foreground">
+                  {props.logExcerpts.length} known problem line
+                  {props.logExcerpts.length === 1 ? "" : "s"}
+                </span>
+              </span>
+            </button>
           )}
+        </div>
+
+        <div
+          ref={detailScrollRef}
+          className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1"
         >
-          <HardDriveIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1">
+          <DetailPane {...props} />
+        </div>
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+/** Where a finding's "Show me where" should land. */
+function stageForFinding(id: string): SelectionKey | null {
+  return FINDING_STAGE[id] ?? CONNECTOR_FINDING_AFTER[id] ?? null;
+}
+
+/**
+ * The tab a non-expert needs: what state the stack is in, what is wrong, and
+ * the things they might want to do — in that order, on one scroll.
+ *
+ * The eight-layer rail is the backend's model of the stack, and it is the right
+ * model for *diagnosis*. It is the wrong front door, because none of the
+ * questions someone actually arrives with ("is it on?", "is this why the game
+ * looks wrong?", "turn it off so I can check") map to a layer whose name they
+ * recognise. So the rail moved one click away, to Details, and nothing was
+ * removed: every finding here links straight to the layer it concerns.
+ */
+function StackOverview(props: StackBodyProps & { onShowInDetails: (key: SelectionKey) => void }) {
+  const { stack, plan, onShowInDetails } = props;
+
+  // Worst first — the only place severity outranks pipeline order, because
+  // here the list is a to-do list rather than a diagram.
+  const findings = useMemo(
+    () => [...stack.findings].sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]),
+    [stack.findings]
+  );
+  const managedPaths = useMemo(() => stack.items.map((item) => item.file_name), [stack.items]);
+  const notManaged = Boolean(plan && !plan.already_managed);
+
+  return (
+    <>
+      {notManaged && !props.adoptOutcome && (
+        <AdoptionCard
+          plan={plan!}
+          keepCopies={props.keepCopies}
+          onToggleKeepCopies={props.onToggleKeepCopies}
+          adopting={props.adopting}
+          adoptError={props.adoptError}
+          onAdopt={props.onAdopt}
+          onDismiss={props.onDismissAdoption}
+        />
+      )}
+
+      <StackPowerCard clientDir={stack.client_dir} stack={stack} onChanged={props.onStackChanged} />
+
+      <section aria-labelledby="client-health-attention">
+        <SectionHeader id="client-health-attention" className="mb-2">
+          {findings.length > 0 ? `Needs attention (${findings.length})` : "Health"}
+        </SectionHeader>
+        {findings.length > 0 ? (
+          <ul className="space-y-2">
+            {findings.map((finding) => {
+              const target = stageForFinding(finding.id);
+              return (
+                <FindingRow
+                  key={finding.id}
+                  finding={finding}
+                  onShowInDetails={target ? () => onShowInDetails(target) : undefined}
+                />
+              );
+            })}
+          </ul>
+        ) : (
+          <GlassPanel variant="subtle" className="flex items-start gap-2 p-3">
+            <ShieldCheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-status-success" />
+            <p className="text-xs text-muted-foreground">
+              Kalpa checked every part of this stack and they agree with each other. Nothing to fix.
+            </p>
+          </GlassPanel>
+        )}
+      </section>
+
+      <RuntimeDriftCard
+        clientDir={stack.client_dir}
+        stack={stack}
+        onChanged={props.onStackChanged}
+        filePaths={managedPaths}
+      />
+
+      <PresetPanel clientDir={stack.client_dir} stack={stack} onChanged={props.onStackChanged} />
+
+      <TuningPanel clientDir={stack.client_dir} stack={stack} onChanged={props.onStackChanged} />
+
+      {/* Collapsed by design: the header keeps it findable, the destructive
+          buttons stay one click deeper. */}
+      <Collapsible>
+        <CollapsibleTrigger className="flex w-full cursor-pointer items-center justify-between gap-2 rounded-xl border border-structure-06 bg-structure-02 p-3 text-left transition-colors duration-150 hover:border-structure-10">
+          <span className="min-w-0">
             <span className="block font-heading text-[13px] font-semibold">
-              Kalpa&apos;s records
+              Remove or stop managing
             </span>
             <span className="block text-xs text-muted-foreground">
               {props.managedInventory?.files.length ?? 0} tracked file
               {props.managedInventory?.files.length === 1 ? "" : "s"}
             </span>
           </span>
-        </button>
-
-        {props.logExcerpts.length > 0 && (
-          <button
-            type="button"
-            role="option"
-            aria-selected={effectiveSelection === "logs"}
-            onClick={() => onSelect("logs")}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-xl border p-3 text-left transition-colors duration-150",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-              effectiveSelection === "logs"
-                ? "border-primary/30 border-l-[3px] border-l-primary bg-primary/[0.04]"
-                : "border-status-warning/20 border-l-[3px] border-l-status-warning bg-structure-02 hover:border-structure-10"
-            )}
-          >
-            <ScrollTextIcon aria-hidden className="size-4 shrink-0 text-status-warning" />
-            <span className="min-w-0 flex-1">
-              <span className="block font-heading text-[13px] font-semibold">Log signals</span>
-              <span className="block text-xs text-muted-foreground">
-                {props.logExcerpts.length} known problem line
-                {props.logExcerpts.length === 1 ? "" : "s"}
-              </span>
-            </span>
-          </button>
-        )}
-      </div>
-
-      <div className="min-w-0 flex-1 space-y-3">
-        <DetailPane {...props} />
-      </div>
-    </div>
+          <ChevronDownIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+        </CollapsibleTrigger>
+        <CollapsiblePanel className="pt-3">
+          <RecordsSection {...props} />
+        </CollapsiblePanel>
+      </Collapsible>
+    </>
   );
 }
 
@@ -1529,11 +1593,12 @@ function StageRow({
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left transition-colors duration-150",
+        "flex w-full cursor-pointer flex-col gap-1 rounded-xl border border-l-[3px] p-3 text-left",
+        "transition-colors duration-150",
         "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         selected
           ? "border-primary/30 border-l-primary bg-primary/[0.04]"
-          : cn(meta.border, meta.tint)
+          : cn(meta.border, meta.tint, "hover:border-structure-10 hover:bg-structure-02")
       )}
     >
       <div className="flex items-center justify-between gap-2">
@@ -1576,6 +1641,52 @@ function Connector({ findings }: { findings: HealthFinding[] }) {
 /* -------------------------------------------------------------------------- */
 /* Detail pane                                                               */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Kalpa's own records for this folder, plus uninstall and the
+ * emergency removal path.
+ *
+ * Its own component because both tabs render it: the Details rail as a
+ * layer, and the Overview inside a collapsed "Remove or stop managing"
+ * section. It is the recovery path for everything the panel can do, so it
+ * has to stay reachable from wherever the user actually is.
+ */
+function RecordsSection(props: StackBodyProps) {
+  return (
+    <ManagedSection
+      loading={props.managedLoading}
+      error={props.managedError}
+      inventory={props.managedInventory}
+      hideEmergency={props.hideEmergency}
+      isManaged={props.isManaged}
+      forgetConfirming={props.forgetConfirming}
+      forgetting={props.forgetting}
+      forgetError={props.forgetError}
+      onRequestForget={props.onRequestForget}
+      onCancelForget={props.onCancelForget}
+      onConfirmForget={props.onConfirmForget}
+      selectedPaths={props.selectedPaths}
+      onToggleSelect={props.onToggleSelect}
+      removeMode={props.removeMode}
+      removing={props.removing}
+      removeOutcome={props.removeOutcome}
+      removeError={props.removeError}
+      onRequestRemove={props.onRequestRemove}
+      onCancelRemove={props.onCancelRemove}
+      onConfirmRemove={props.onConfirmRemove}
+      emergencyOpen={props.emergencyOpen}
+      onToggleEmergencyOpen={props.onToggleEmergencyOpen}
+      emergencyTarget={props.emergencyTarget}
+      onSetEmergencyTarget={props.onSetEmergencyTarget}
+      emergencyConfirmInput={props.emergencyConfirmInput}
+      onEmergencyConfirmInputChange={props.onEmergencyConfirmInputChange}
+      emergencyBusy={props.emergencyBusy}
+      emergencyError={props.emergencyError}
+      emergencyResult={props.emergencyResult}
+      onEmergencyRemove={props.onEmergencyRemove}
+    />
+  );
+}
 
 function DetailPane(props: StackBodyProps) {
   const { stack, plan, planLoading, planError, effectiveSelection } = props;
@@ -1621,40 +1732,7 @@ function DetailPane(props: StackBodyProps) {
   }
 
   if (effectiveSelection === "records") {
-    return (
-      <ManagedSection
-        loading={props.managedLoading}
-        error={props.managedError}
-        inventory={props.managedInventory}
-        hideEmergency={props.hideEmergency}
-        isManaged={props.isManaged}
-        forgetConfirming={props.forgetConfirming}
-        forgetting={props.forgetting}
-        forgetError={props.forgetError}
-        onRequestForget={props.onRequestForget}
-        onCancelForget={props.onCancelForget}
-        onConfirmForget={props.onConfirmForget}
-        selectedPaths={props.selectedPaths}
-        onToggleSelect={props.onToggleSelect}
-        removeMode={props.removeMode}
-        removing={props.removing}
-        removeOutcome={props.removeOutcome}
-        removeError={props.removeError}
-        onRequestRemove={props.onRequestRemove}
-        onCancelRemove={props.onCancelRemove}
-        onConfirmRemove={props.onConfirmRemove}
-        emergencyOpen={props.emergencyOpen}
-        onToggleEmergencyOpen={props.onToggleEmergencyOpen}
-        emergencyTarget={props.emergencyTarget}
-        onSetEmergencyTarget={props.onSetEmergencyTarget}
-        emergencyConfirmInput={props.emergencyConfirmInput}
-        onEmergencyConfirmInputChange={props.onEmergencyConfirmInputChange}
-        emergencyBusy={props.emergencyBusy}
-        emergencyError={props.emergencyError}
-        emergencyResult={props.emergencyResult}
-        onEmergencyRemove={props.onEmergencyRemove}
-      />
-    );
+    return <RecordsSection {...props} />;
   }
 
   if (!effectiveSelection) {
@@ -1663,9 +1741,11 @@ function DetailPane(props: StackBodyProps) {
 
   const stage = effectiveSelection;
   if (stage === "shaders") return <ShadersDetail stack={stack} />;
-  if (stage === "preset") return <PresetDetail stack={stack} />;
-  if (stage === "tuning") return <TuningDetail stack={stack} />;
-  return <ItemsStageDetail stage={stage} stack={stack} />;
+  if (stage === "preset")
+    return <PresetDetail stack={stack} onStackChanged={props.onStackChanged} />;
+  if (stage === "tuning")
+    return <TuningDetail stack={stack} onStackChanged={props.onStackChanged} />;
+  return <ItemsStageDetail stage={stage} stack={stack} onStackChanged={props.onStackChanged} />;
 }
 
 function ComingNextNote() {
@@ -1709,7 +1789,15 @@ function ItemCard({ item, preserved }: { item: StackItem; preserved: PreservedOr
   );
 }
 
-function ItemsStageDetail({ stage, stack }: { stage: Stage; stack: ClientStack }) {
+function ItemsStageDetail({
+  stage,
+  stack,
+  onStackChanged,
+}: {
+  stage: Stage;
+  stack: ClientStack;
+  onStackChanged: () => Promise<void>;
+}) {
   const items = stack.items.filter((item) => ROLE_TO_STAGE[item.role] === stage);
   const findByFileName = (name: string) =>
     stack.preserved_originals.find((o) => o.backs_up?.toLowerCase() === name.toLowerCase()) ?? null;
@@ -1729,6 +1817,12 @@ function ItemsStageDetail({ stage, stack }: { stage: Stage; stack: ClientStack }
         </div>
       )}
       <StageFindingsList stage={stage} stack={stack} />
+      <RuntimeDriftCard
+        clientDir={stack.client_dir}
+        stack={stack}
+        onChanged={onStackChanged}
+        filePaths={items.map((item) => item.file_name)}
+      />
       {STAGE_COMING_NEXT.has(stage) && <ComingNextNote />}
     </div>
   );
@@ -1759,7 +1853,13 @@ function ShadersDetail({ stack }: { stack: ClientStack }) {
   );
 }
 
-function PresetDetail({ stack }: { stack: ClientStack }) {
+function PresetDetail({
+  stack,
+  onStackChanged,
+}: {
+  stack: ClientStack;
+  onStackChanged: () => Promise<void>;
+}) {
   const preset = stack.preset;
   return (
     <div className="space-y-3">
@@ -1787,11 +1887,26 @@ function PresetDetail({ stack }: { stack: ClientStack }) {
                   <li key={t.name} className="flex flex-wrap items-center gap-2">
                     <span className="font-mono">{t.name}</span>
                     {!t.source_present && <InfoPill color="red">missing {t.source}</InfoPill>}
+                    {preset.mv_provider?.technique === t.name && (
+                      <InfoPill color="sky">motion vectors</InfoPill>
+                    )}
                   </li>
                 ))}
               </ol>
             )}
           </div>
+          {preset.mv_provider && (
+            <p className="break-words">
+              <span className="text-muted-foreground">Motion vectors from:</span>{" "}
+              {preset.mv_provider.technique ? (
+                <span className="font-mono">{preset.mv_provider.technique}</span>
+              ) : (
+                <span className="text-status-danger">
+                  nothing enabled ({MV_PROVIDER_LABEL[preset.mv_provider.kind]} is selected)
+                </span>
+              )}
+            </p>
+          )}
           {preset.available.length > 0 && (
             <p className="break-words">
               <span className="text-muted-foreground">All known techniques:</span>{" "}
@@ -1801,12 +1916,18 @@ function PresetDetail({ stack }: { stack: ClientStack }) {
         </GlassPanel>
       )}
       <StageFindingsList stage="preset" stack={stack} />
-      <ComingNextNote />
+      <PresetPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />
     </div>
   );
 }
 
-function TuningDetail({ stack }: { stack: ClientStack }) {
+function TuningDetail({
+  stack,
+  onStackChanged,
+}: {
+  stack: ClientStack;
+  onStackChanged: () => Promise<void>;
+}) {
   return (
     <div className="space-y-3">
       <SectionHeader>Tuning</SectionHeader>
@@ -1828,7 +1949,7 @@ function TuningDetail({ stack }: { stack: ClientStack }) {
         </GlassPanel>
       )}
       <StageFindingsList stage="tuning" stack={stack} />
-      <ComingNextNote />
+      <TuningPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />
     </div>
   );
 }
@@ -1893,13 +2014,19 @@ function AdoptionCard({
           back after a game update.
         </span>
       </label>
+      {plan.stack_switched_off && (
+        <p className="text-xs text-status-warning" role="status">
+          This stack is switched off, so what is in the folder right now is the game&apos;s own
+          files rather than yours. Switch it back on before managing it.
+        </p>
+      )}
       {adoptError && (
         <p className="text-xs text-status-danger" role="alert">
           {adoptError}
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={adopting} onClick={onAdopt}>
+        <Button size="sm" disabled={adopting || plan.stack_switched_off} onClick={onAdopt}>
           {adopting ? <Spinner className="size-3.5" /> : <PackageCheckIcon />}
           {adopting ? "Managing..." : "Manage this stack"}
         </Button>
@@ -2028,6 +2155,12 @@ function ManagedSection({
   const files = useMemo(() => inventory?.files ?? [], [inventory]);
   const orphans = hideEmergency ? [] : (inventory?.orphan_injectors ?? []);
 
+  /** Both derived from the inventory rather than passed down: a parked file is
+   *  one the backend already reports as `parked`, and a kept copy is exactly an
+   *  entry that has a displaced backup behind it. */
+  const switchedOff = files.some((file) => file.state === "parked");
+  const keptCopies = files.filter((file) => file.restores_backup).length;
+
   const pendingPaths = useMemo(() => {
     if (removeMode === "all") return files.map((f) => f.relative_path);
     if (removeMode === "selected") return Array.from(selectedPaths);
@@ -2044,20 +2177,40 @@ function ManagedSection({
         <GlassPanel variant="subtle" className="mb-3 space-y-2 p-3">
           <p className="text-xs leading-relaxed text-muted-foreground">
             Kalpa is managing this stack: it has a record of what is here, so it can tell you if a
-            game update changes something. It has not modified any of it.
+            game update changes something.{" "}
+            {switchedOff
+              ? "You have switched it off, so some of these files are currently parked."
+              : "It has not modified any of it."}
           </p>
-          {!forgetConfirming && (
-            <Button variant="outline" size="sm" onClick={onRequestForget}>
-              Stop managing
-            </Button>
-          )}
+          {!forgetConfirming &&
+            (switchedOff ? (
+              /* The records being dropped are the ones that say which parked
+                 file belongs to which original. Kalpa can still put them back
+                 from the folder alone, but telling the user "your stack keeps
+                 working" while it is switched off would be a lie. */
+              <p className="text-xs leading-relaxed text-status-warning">
+                Switch the stack back on before asking Kalpa to stop managing it — right now some of
+                its files are parked, and these records are what describe them.
+              </p>
+            ) : (
+              <Button variant="outline" size="sm" onClick={onRequestForget}>
+                Stop managing
+              </Button>
+            ))}
           {forgetConfirming && (
             <div className="space-y-2">
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Kalpa will delete its records for this folder and nothing else. Every file stays
-                exactly where it is, your stack keeps working, and you can ask Kalpa to manage it
-                again at any time.
+                Kalpa will delete its records for this folder. Every file stays exactly where it is,
+                your stack keeps working, and you can ask Kalpa to manage it again at any time.
               </p>
+              {keptCopies > 0 && (
+                <p className="text-xs leading-relaxed text-status-warning">
+                  One caveat: the {keptCopies} kept {keptCopies === 1 ? "copy" : "copies"} of your
+                  swapped runtimes stop being protected from Kalpa&apos;s own cleanup, so a later
+                  install may reclaim that space. Your files in the game folder are untouched either
+                  way.
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" disabled={forgetting} onClick={onConfirmForget}>
                   {forgetting ? <Spinner className="size-3.5" /> : null}

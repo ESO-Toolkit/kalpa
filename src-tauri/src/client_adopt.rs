@@ -81,6 +81,16 @@ pub struct AdoptionPlan {
     pub already_managed: bool,
     /// True when there is nothing recognisable to adopt.
     pub is_empty: bool,
+    /// True when some of the stack is parked — switched off by Kalpa.
+    ///
+    /// Adoption is refused in that state, and the reason is not tidiness. What
+    /// is in the folder while a stack is switched off is not the stack: the
+    /// live `nvngx_dlss.dll` is the game's own file, and the user's is sitting
+    /// under a `.kalpa-off` name. Recording that would hash the wrong bytes as
+    /// the managed ones and overwrite the `parked` flags that are the only
+    /// record of where the real files went — stranding them in the folder with
+    /// nothing able to put them back.
+    pub stack_switched_off: bool,
 }
 
 /// The result of adopting.
@@ -194,6 +204,7 @@ pub fn plan_adoption_for(stack: &ClientStack, already_managed: bool) -> Adoption
         entries,
         copy_bytes,
         already_managed,
+        stack_switched_off: stack.is_disabled || !stack.parked.is_empty(),
     }
 }
 
@@ -217,6 +228,18 @@ pub fn adopt_in(
     // part-way through rewriting would preserve torn bytes as if they were
     // the user's good copy. The gate costs nothing and rules that out.
     root.reassert_idle()?;
+
+    // See `AdoptionPlan::stack_switched_off`. Recording a switched-off stack
+    // would hash the game's own files as the managed ones and clear the park
+    // flags that are the only record of where the user's files went.
+    if plan.stack_switched_off {
+        return Err(
+            "This stack is switched off, so what is in the folder right now is not the \
+                    stack. Switch it back on before managing it."
+                .to_string(),
+        );
+    }
+
     let client_root = root.path();
 
     let copy_id = crate::client_backup::new_backup_id();
@@ -284,6 +307,7 @@ pub fn adopt_in(
             displaced_backup,
             origin: FileOrigin::Adopted,
             displaced_in_place: entry.displaced_in_place.clone(),
+            parked: false,
         });
         outcome.recorded.push(entry.relative_path.clone());
     }
@@ -327,7 +351,10 @@ fn copy_into_backup(
 
 /// Drop every adopted record for this install. Touches no file in the client
 /// directory, and leaves files Kalpa actually placed alone.
-pub fn forget_in(manifest_path: &Path, client_root: &Path) -> Result<Vec<String>, String> {
+pub fn forget_in(
+    manifest_path: &Path,
+    client_root: &Path,
+) -> Result<crate::client_backup::ForgetOutcome, String> {
     crate::client_backup::forget_adopted(manifest_path, client_root)
 }
 
@@ -347,7 +374,7 @@ fn is_already_managed(manifest_path: &Path, client_root: &Path) -> bool {
 // ── Commands ─────────────────────────────────────────────────────────────
 
 /// Read-only: what adopting this client directory would record.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn plan_adoption(app: tauri::AppHandle, client_dir: String) -> Result<AdoptionPlan, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let manifest_path = crate::client_backup::manifest_path(&app)?;
@@ -383,8 +410,11 @@ pub async fn adopt_stack(
 }
 
 /// Forget the adopted stack. Records only; no file is touched.
-#[tauri::command]
-pub fn forget_stack(app: tauri::AppHandle, client_dir: String) -> Result<Vec<String>, String> {
+#[tauri::command(async)]
+pub fn forget_stack(
+    app: tauri::AppHandle,
+    client_dir: String,
+) -> Result<crate::client_backup::ForgetOutcome, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let manifest_path = crate::client_backup::manifest_path(&app)?;
     forget_in(&manifest_path, &location.client_dir)
@@ -669,9 +699,13 @@ mod tests {
         h.adopt(true).expect("adoption should succeed");
         let before = snapshot(&h.client);
 
-        let forgotten = forget_in(&h.manifest, &h.client).expect("forget should succeed");
+        let outcome = forget_in(&h.manifest, &h.client).expect("forget should succeed");
 
-        assert!(!forgotten.is_empty());
+        assert!(!outcome.forgotten.is_empty());
+        assert!(
+            outcome.released_copies > 0,
+            "the kept copies stop being referenced, and the user has to be told"
+        );
         assert!(
             h.entries().is_empty(),
             "every adopted record should be gone"
@@ -680,6 +714,33 @@ mod tests {
             before,
             snapshot(&h.client),
             "forgetting is Kalpa giving up its records, not undoing anything"
+        );
+    }
+
+    /// Forgetting is safe only because it changes nothing on disk — which stops
+    /// being true once files are displaced. With the stack switched off, the
+    /// records being dropped are the ones saying which `.kalpa-off` file belongs
+    /// to which original, and the UI's promise that the stack "keeps working" is
+    /// simply false.
+    #[test]
+    fn forgetting_a_switched_off_stack_is_refused() {
+        let h = Harness::new();
+        h.adopt(false).expect("adopt");
+        crate::client_backup::run_file_ops_in(
+            &h.manifest,
+            &h.backups,
+            &h.root(),
+            &[crate::client_backup::FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            }],
+        )
+        .expect("park");
+
+        let error = forget_in(&h.manifest, &h.client).expect_err("must refuse while switched off");
+        assert!(error.contains("switched off"), "{error}");
+        assert!(
+            !h.entries().is_empty(),
+            "the records must survive a refused forget"
         );
     }
 
@@ -700,6 +761,7 @@ mod tests {
                 displaced_backup: None,
                 origin: FileOrigin::Placed,
                 displaced_in_place: None,
+                parked: false,
             }],
         )
         .expect("record placed entry");
@@ -733,6 +795,62 @@ mod tests {
             h.entry("nvngx_dlss.dll").sha256,
             expected,
             "re-adopting should refresh the hash to what is on disk now"
+        );
+    }
+
+    /// What is in the folder while a stack is switched off is not the stack.
+    /// Recording it would hash the game's own files as the managed ones and
+    /// clear the park flags that are the only record of where the user's files
+    /// went — leaving them in the folder with nothing able to put them back.
+    #[test]
+    fn adopting_a_switched_off_stack_is_refused() {
+        let h = Harness::new();
+        h.adopt(false).expect("adopt while switched on");
+        std::fs::rename(
+            h.client.join("dxgi.dll"),
+            h.client.join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(&h.client);
+        assert!(stack.is_disabled);
+        let plan = plan_adoption_for(&stack, true);
+        assert!(plan.stack_switched_off);
+
+        let error = adopt_in(&h.manifest, &h.backups, &h.root(), &plan, false)
+            .expect_err("must refuse while the stack is switched off");
+        assert!(error.contains("switched off"), "{error}");
+    }
+
+    /// Belt and braces for the same failure: a record that replaces an entry
+    /// must not silently clear its park flag.
+    #[test]
+    fn re_recording_an_entry_keeps_its_park_flag() {
+        let h = Harness::new();
+        h.adopt(false).expect("adopt");
+
+        // Park it the way disable does, which is the only thing that sets the
+        // flag.
+        crate::client_backup::run_file_ops_in(
+            &h.manifest,
+            &h.backups,
+            &h.root(),
+            &[crate::client_backup::FileOp::Park {
+                relative_path: "nvngx_dlss.dll".to_string(),
+            }],
+        )
+        .expect("park");
+        assert!(h.entry("nvngx_dlss.dll").parked);
+
+        let mut refreshed = h.entry("nvngx_dlss.dll");
+        refreshed.parked = false;
+        refreshed.sha256 = "c".repeat(64);
+        crate::client_backup::record_adopted(&h.manifest, &h.client, vec![refreshed])
+            .expect("re-record");
+
+        assert!(
+            h.entry("nvngx_dlss.dll").parked,
+            "the park flag says where the file is; a record must not clear it"
         );
     }
 
