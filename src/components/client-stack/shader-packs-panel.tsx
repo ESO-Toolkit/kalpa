@@ -57,6 +57,27 @@ function shortCommit(commit: string): string {
  * boolean, because a boolean consent latch surviving a swap to a different
  * pack's row is the exact defect class this panel has shipped before.
  */
+/**
+ * One row in the shader-pack library.
+ *
+ * A **divided list row**, not a card. Five `GlassPanel`s each carried a 2px
+ * border, 8px of gap and their own inset shadow — 50px of pure box before a
+ * word of content, in a pane that had 267px to give. One panel with dividers
+ * says the same thing and leaves the height for the packs.
+ *
+ * The rule that lets installed, fetchable and link-only read as one list rather
+ * than three visual languages: every row is
+ * `[glyph] [name · author / one qualifying line] [licence] [action]`, and only
+ * the glyph and the action change. Line two is whichever sentence you most need
+ * before pressing the button on the right — the summary usually, but for a
+ * link-only pack the *reason* it cannot be fetched, because that is the sentence
+ * that stops someone filing "the Install button is missing" as a bug.
+ *
+ * Gold is reserved. The left border was `primary/40` for fetchable, which is
+ * what the rail uses for *selected* — so "Kalpa can fetch this" looked like
+ * "you have this highlighted". Only installed gets a status colour; the glyph
+ * and the button carry the rest.
+ */
 function PackRow({
   pack,
   armed,
@@ -76,129 +97,94 @@ function PackRow({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const isFetchable = pack.source.kind === "fetchable";
+  const linkOnly = pack.source.kind === "link_only";
+  const Glyph = pack.installed ? CheckCircle2Icon : linkOnly ? ExternalLinkIcon : DownloadIcon;
+  const glyphTone = pack.installed
+    ? "text-status-success"
+    : linkOnly
+      ? "text-muted-foreground"
+      : "text-primary";
+  const line2 = linkOnly && pack.source.kind === "link_only" ? pack.source.reason : pack.summary;
+  const expanded = armed || Boolean(outcome) || Boolean(installError);
 
   return (
-    <li>
-      <GlassPanel
-        variant="subtle"
-        className={cn(
-          "space-y-1.5 border-l-[3px] p-2.5",
-          pack.installed
-            ? "border-l-status-success"
-            : isFetchable
-              ? "border-l-primary/40"
-              : "border-l-structure-10"
-        )}
-      >
-        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="truncate font-heading text-[13px] font-semibold">{pack.name}</span>
-              <span className="shrink-0 text-[11px] text-muted-foreground">by {pack.author}</span>
-            </div>
-            <p className="truncate text-xs text-muted-foreground" title={pack.summary}>
-              {pack.summary}
-            </p>
+    <li
+      className={cn(
+        "border-t border-l-[3px] border-structure-06 first:border-t-0",
+        pack.installed ? "border-l-status-success" : "border-l-structure-10"
+      )}
+    >
+      <div className="flex h-12 items-center gap-2 px-2.5">
+        <Glyph aria-hidden className={cn("size-3.5 shrink-0", glyphTone)} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-1.5">
+            <span className="truncate font-heading text-[13px] font-semibold">{pack.name}</span>
+            <span className="shrink-0 text-[11px] text-muted-foreground">by {pack.author}</span>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            {pack.installed && (
-              <InfoPill color="emerald">
-                <CheckCircle2Icon aria-hidden className="size-3" />
-                Installed
-              </InfoPill>
-            )}
-            <InfoPill color="muted">{pack.licence}</InfoPill>
-          </div>
+          <p className="truncate text-xs text-muted-foreground" title={line2}>
+            {line2}
+          </p>
         </div>
-
-        {pack.installed && pack.found.length > 0 && (
-          <p
-            className="truncate font-mono text-[11px] text-muted-foreground"
-            title={pack.found.join(", ")}
+        <InfoPill color="muted" className="shrink-0">
+          {pack.licence}
+        </InfoPill>
+        {pack.installed ? (
+          <InfoPill color="emerald" className="shrink-0">
+            Installed
+          </InfoPill>
+        ) : linkOnly && pack.source.kind === "link_only" ? (
+          <Button
+            size="xs"
+            variant="outline"
+            className="shrink-0"
+            onClick={() => void openExternal((pack.source as { url: string }).url)}
           >
-            Found: {pack.found.join(", ")}
-          </p>
+            Open page
+          </Button>
+        ) : (
+          !armed && (
+            <Button size="xs" variant="outline" className="shrink-0" onClick={onArm}>
+              Install
+            </Button>
+          )
         )}
+      </div>
 
-        {!pack.installed &&
-          pack.source.kind === "link_only" &&
-          (() => {
-            const source = pack.source;
-            return (
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs text-muted-foreground" title={source.reason}>
-                    {source.reason}
-                  </p>
-                  {/* The URL on screen, not only behind the button. `openExternal`
-                      swallows an opener-scope rejection so a failure cannot take
-                      down the panel — which means that without this line a failed
-                      open is completely silent and leaves the user nothing to go
-                      on. It doubles as the provenance column: where a pack comes
-                      from is the thing that makes this a directory. */}
-                  <p className="truncate font-mono text-[11px] text-muted-foreground">
-                    {source.url.replace(/^https:\/\//, "")}
-                  </p>
-                </div>
-                <Button size="sm" variant="outline" onClick={() => void openExternal(source.url)}>
-                  <ExternalLinkIcon />
-                  Open page
+      {expanded && (
+        <div className="space-y-1.5 border-t border-structure-06 bg-structure-02 px-2.5 py-2 text-xs">
+          {armed && pack.source.kind === "fetchable" && (
+            <>
+              <p className="leading-relaxed text-muted-foreground">
+                Downloads from{" "}
+                <span className="font-mono text-[11px]">
+                  github.com/{pack.source.owner}/{pack.source.repo}
+                </span>{" "}
+                and writes shader files into reshade-shaders.
+              </p>
+              <div className="flex items-center gap-2">
+                <Button size="xs" disabled={installing} onClick={onConfirm}>
+                  {installing ? <Spinner className="size-3.5" /> : <DownloadIcon />}
+                  {installing ? "Installing..." : "Confirm install"}
+                </Button>
+                <Button size="xs" variant="outline" disabled={installing} onClick={onCancel}>
+                  Cancel
                 </Button>
               </div>
-            );
-          })()}
-
-        {!pack.installed && pack.source.kind === "fetchable" && !outcome && (
-          <>
-            {!armed ? (
-              <div className="flex justify-end">
-                <Button size="sm" variant="outline" onClick={onArm}>
-                  <DownloadIcon />
-                  Install
-                </Button>
-              </div>
-            ) : (
-              <div className="space-y-1.5 border-t border-structure-06 pt-1.5">
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                  Downloads from{" "}
-                  <span className="font-mono text-[11px]">
-                    github.com/{pack.source.owner}/{pack.source.repo}
-                  </span>{" "}
-                  and writes shader files into reshade-shaders.
-                </p>
-                <div className="flex items-center gap-2">
-                  <Button size="sm" disabled={installing} onClick={onConfirm}>
-                    {installing ? <Spinner className="size-3.5" /> : <DownloadIcon />}
-                    {installing ? "Installing..." : "Confirm install"}
-                  </Button>
-                  <Button size="sm" variant="outline" disabled={installing} onClick={onCancel}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {installError && (
-          <p className="text-xs text-status-danger" role="alert">
-            {installError}
-          </p>
-        )}
-
-        {outcome && (
-          <div className="space-y-0.5 border-t border-structure-06 pt-1.5 text-xs">
+            </>
+          )}
+          {installError && (
+            <p className="text-status-danger" role="alert">
+              {installError}
+            </p>
+          )}
+          {outcome && (
             <p className="text-status-success">
-              Installed {outcome.pack_name} — {outcome.files.length} file
-              {outcome.files.length === 1 ? "" : "s"}.
+              Installed {outcome.files.length} file{outcome.files.length === 1 ? "" : "s"} · commit{" "}
+              <span className="font-mono text-[11px]">{shortCommit(outcome.commit)}</span>
             </p>
-            <p className="text-muted-foreground">
-              Commit <span className="font-mono text-[11px]">{shortCommit(outcome.commit)}</span>
-            </p>
-          </div>
-        )}
-      </GlassPanel>
+          )}
+        </div>
+      )}
     </li>
   );
 }
@@ -329,8 +315,8 @@ export function ShaderPacksPanel({ clientDir, onChanged }: StackPanelProps) {
   // and a second identical header inside it is 24px of the ~274px pane spent
   // saying the same thing twice.
   return (
-    <div className="space-y-2">
-      <ul className="space-y-2">
+    <GlassPanel variant="subtle" className="overflow-hidden p-0">
+      <ul>
         {ordered.map((pack) => (
           <PackRow
             key={pack.id}
@@ -345,6 +331,6 @@ export function ShaderPacksPanel({ clientDir, onChanged }: StackPanelProps) {
           />
         ))}
       </ul>
-    </div>
+    </GlassPanel>
   );
 }
