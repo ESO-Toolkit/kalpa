@@ -7,7 +7,6 @@ import {
   PackageIcon,
 } from "lucide-react";
 import { GlassPanel } from "@/components/ui/glass-panel";
-import { InfoPill } from "@/components/ui/info-pill";
 import { Button } from "@/components/ui/button";
 import { approveClientWrites } from "@/components/client-stack/approve";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
@@ -116,48 +115,85 @@ function PackRow({
   return (
     <li
       className={cn(
-        "border-t border-l-[3px] border-structure-06 first:border-t-0",
-        pack.installed ? "border-l-status-success" : "border-l-structure-10"
+        "border-t border-structure-06 first:border-t-0",
+        // Severity owns the left bar, and "installed" is the one state on this
+        // list that is a status rather than a provenance. Fetchable used to
+        // draw a gold bar, which is what the rail uses for *selected* — so
+        // "Kalpa can fetch this" read as "you have this highlighted".
+        pack.installed && "border-l-[3px] border-l-status-success"
       )}
     >
-      <div className="flex h-12 items-center gap-2 px-2.5">
-        <Glyph aria-hidden className={cn("size-3.5 shrink-0", glyphTone)} />
-        <div className="min-w-0 flex-1">
+      {/* A fixed action column is what gives the list its spine. Two
+          variable-width pills were competing for the right edge, and because
+          the licence pill was the same height, radius and border as the button
+          beside it, the licence read as something you could press. */}
+      <div
+        className={cn(
+          "grid h-12 items-center gap-3 px-3",
+          "grid-cols-[20px_minmax(0,1fr)_104px]",
+          pack.installed && "pl-2.5"
+        )}
+      >
+        {/* The same node ring the rail uses, so the two columns rhyme. */}
+        <span className="grid size-5 place-items-center rounded-full bg-card ring-1 ring-structure-12">
+          <Glyph aria-hidden className={cn("size-3", glyphTone)} />
+        </span>
+
+        <div className="min-w-0">
           <div className="flex items-baseline gap-1.5">
-            <span className="truncate font-heading text-[13px] font-semibold">{pack.name}</span>
+            <span
+              className={cn(
+                "truncate font-heading text-sm",
+                pack.installed ? "font-semibold" : "font-medium"
+              )}
+            >
+              {pack.name}
+            </span>
             <span className="shrink-0 text-[11px] text-muted-foreground">by {pack.author}</span>
           </div>
-          <p className="truncate text-xs text-muted-foreground" title={line2}>
-            {line2}
+          {/* The licence leads line two rather than sitting in the right
+              margin: it qualifies the pack, it is not an action. */}
+          <p className="truncate text-[11px] text-muted-foreground" title={line2}>
+            <span className="font-medium">{pack.licence}</span> &middot; {line2}
           </p>
         </div>
-        <InfoPill color="muted" className="shrink-0">
-          {pack.licence}
-        </InfoPill>
-        {pack.installed ? (
-          <InfoPill color="emerald" className="shrink-0">
-            Installed
-          </InfoPill>
-        ) : linkOnly && pack.source.kind === "link_only" ? (
-          <Button
-            size="xs"
-            variant="outline"
-            className="shrink-0"
-            onClick={() => void openExternal((pack.source as { url: string }).url)}
-          >
-            Open page
-          </Button>
-        ) : (
-          !armed && (
-            <Button size="xs" variant="outline" className="shrink-0" onClick={onArm}>
-              Install
+
+        {/* Done / do / go elsewhere, encoded in shape as well as in the word:
+            plain text, outline button, ghost button. */}
+        <div className="justify-self-end">
+          {pack.installed ? (
+            <span className="inline-flex items-center gap-1 text-[12px] font-medium text-status-success">
+              <CheckCircle2Icon aria-hidden className="size-3.5" />
+              Installed
+            </span>
+          ) : linkOnly && pack.source.kind === "link_only" ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => void openExternal((pack.source as { url: string }).url)}
+            >
+              Open page
+              <ExternalLinkIcon />
             </Button>
-          )
-        )}
+          ) : (
+            !armed && (
+              <Button size="xs" variant="outline" onClick={onArm}>
+                Install
+              </Button>
+            )
+          )}
+        </div>
       </div>
 
       {expanded && (
-        <div className="space-y-1.5 border-t border-structure-06 bg-structure-02 px-2.5 py-2 text-xs">
+        <div
+          className={cn(
+            "space-y-1.5 border-t border-structure-06 bg-structure-02 px-3 py-2 text-xs",
+            // The only gold bar in the panel, and it exists only while
+            // Kalpa is about to put bytes in the game folder.
+            armed && "border-l-[3px] border-l-primary"
+          )}
+        >
           {armed && pack.source.kind === "fetchable" && (
             <>
               <p className="leading-relaxed text-muted-foreground">

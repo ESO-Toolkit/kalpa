@@ -23,6 +23,8 @@ import {
   POWER_COPY,
   SLOT_LABEL,
   SLOT_ORDER,
+  SLOT_SOURCE,
+  SOURCE_META,
   findingsForSlot,
   powerState,
   slotLevel,
@@ -50,6 +52,16 @@ const SLOT_ICON: Record<Slot, typeof LayersIcon> = {
   preset: SlidersHorizontalIcon,
   tuning: Settings2Icon,
 };
+
+/**
+ * Where a visual group begins.
+ *
+ * The stack is three kinds of thing: binaries the game loads, content ReShade
+ * runs, and configuration. Spacing says so. There are no group headings — three
+ * more labels in a 200px column would cost more than they explain, and the
+ * spine already carries the ordering.
+ */
+const SLOT_GROUP_START = new Set<Slot>(["shaders", "preset"]);
 
 /** The three views that are about the whole folder rather than one slot. */
 export type StackView = "power" | "records" | "logs";
@@ -113,20 +125,33 @@ export function SlotRail({
 
   return (
     <div ref={railRef} onKeyDown={handleKeyDown} className="flex w-[200px] shrink-0 flex-col">
-      <div
-        role="listbox"
-        aria-label="Stack slots"
-        className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-1"
-      >
-        {SLOT_ORDER.map((slot) => (
-          <SlotRow
-            key={slot}
-            slot={slot}
-            stack={stack}
-            selected={selected === slot}
-            onSelect={() => onSelect(slot)}
-          />
-        ))}
+      {/* The spine: a hairline behind the glyph nodes, so eight rows read as an
+          ordered route rather than eight equal options — which is what the
+          stack actually is. ReShade loads first, the preset picks the
+          motion-vector provider, the feed consumes it. It says "ordered"
+          without redrawing the pipeline diagram the redesign retired.
+
+          Grouping is rhythm, not labels: binaries the game loads, then content
+          ReShade runs, then configuration. Three more headings in a 200px
+          column would cost more than they explain. */}
+      <div role="listbox" aria-label="Stack slots" className="min-h-0 flex-1 overflow-y-auto pr-1">
+        {/* The spine hangs off this inner wrapper rather than the scroll
+            container. On the container it stretched to the full flex height and
+            ran on past the last node into empty space, which reads as a route
+            that goes somewhere Kalpa is not showing you. Here it spans exactly
+            first node to last. */}
+        <div className="relative before:absolute before:top-4 before:bottom-4 before:left-[17px] before:w-px before:bg-structure-10">
+          {SLOT_ORDER.map((slot, i) => (
+            <div key={slot} className={i > 0 && SLOT_GROUP_START.has(slot) ? "mt-2" : "mt-0.5"}>
+              <SlotRow
+                slot={slot}
+                stack={stack}
+                selected={selected === slot}
+                onSelect={() => onSelect(slot)}
+              />
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="my-2 shrink-0 border-t border-structure-06" />
@@ -142,7 +167,7 @@ export function SlotRail({
                 : "text-status-warning"
           }
           label="Power"
-          sub={POWER_COPY[power].state}
+          id={POWER_COPY[power].state}
           selected={selected === "power"}
           onSelect={() => onSelect("power")}
         />
@@ -152,14 +177,15 @@ export function SlotRail({
           label="Kalpa's records"
           // The count is withheld until the inventory has loaded: "0 files" for
           // an adopted stack is a false statement, not a pending one.
-          sub={
-            isManaged
-              ? trackedCount === null
-                ? "Managed"
-                : `Managed · ${trackedCount} file${trackedCount === 1 ? "" : "s"}`
-              : "Not managed yet"
+          id={isManaged ? "Managed" : "Not managed yet"}
+          meta={
+            isManaged && trackedCount !== null
+              ? `${trackedCount} file${trackedCount === 1 ? "" : "s"}`
+              : undefined
           }
-          pill={isManaged ? null : <InfoPill color="gold">!</InfoPill>}
+          // Amber and a word, not a gold "!". Gold means Kalpa's own hand in
+          // this panel, and a bare glyph would make colour the only signal.
+          pill={isManaged ? null : <InfoPill color="amber">Not managed</InfoPill>}
           selected={selected === "records"}
           onSelect={() => onSelect("records")}
         />
@@ -167,7 +193,7 @@ export function SlotRail({
           Icon={ScrollTextIcon}
           tone={logCount > 0 ? "text-status-warning" : "text-muted-foreground"}
           label="Log check"
-          sub={
+          id={
             logCount > 0
               ? `${logCount} line${logCount === 1 ? "" : "s"} matched`
               : "Nothing matched"
@@ -180,25 +206,46 @@ export function SlotRail({
   );
 }
 
-/** Shared row chrome. 32px: a 16px label line over a 12px mono sub-line. */
+/**
+ * Shared row chrome. 32px: a 16px label line over a 12px sub-line.
+ *
+ * Rows have **no box.** Eight bordered, filled pills said "eight equal
+ * options" and gave the eye nothing to travel along; without them the only
+ * bordered row is one carrying a finding, which is therefore the row you look
+ * at.
+ *
+ * Selection is a fill and a weight, never a colour. It used to paint the row
+ * gold *in place of* the severity border, so selecting a slot with a problem
+ * hid the red while you were looking at it. Severity owns the left border
+ * unconditionally now, and gold is reserved for Kalpa's own hand.
+ */
 function RailRow({
   Icon,
   tone,
   label,
-  sub,
+  id,
+  meta,
   pill,
   selected,
   accent,
+  node,
   onSelect,
 }: {
   Icon: typeof LayersIcon;
   tone: string;
   label: string;
-  sub: string;
+  /** A string that exists on disk or in an INI file. Set in mono. */
+  id: string;
+  /** Counts, versions, states. Set in the sans face. */
+  meta?: string;
   pill?: React.ReactNode;
   selected: boolean;
-  /** Border/tint for a slot carrying a finding. Absent means neutral. */
+  /** Severity border and tint, when this row carries a finding. */
   accent?: { border: string; tint: string };
+  /** Whether the glyph sits on the pipeline spine. The pinned whole-stack rows
+   *  deliberately do not — that absence is what says they are about the folder
+   *  rather than stations on the route. */
+  node?: boolean;
   onSelect: () => void;
 }) {
   return (
@@ -208,24 +255,42 @@ function RailRow({
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg border border-l-[3px] px-2 text-left",
+        "flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left",
         "transition-colors duration-150 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
-        selected
-          ? "border-primary/30 border-l-primary bg-primary/[0.04]"
-          : accent
-            ? cn(accent.border, accent.tint, "hover:border-structure-10")
-            : "border-structure-06 border-l-structure-10 bg-structure-02 hover:border-structure-10"
+        accent && cn("border-l-[3px] pl-1.5", accent.border, accent.tint),
+        selected ? "bg-structure-08" : "hover:bg-structure-04"
       )}
     >
-      <Icon aria-hidden className={cn("size-3.5 shrink-0", tone)} />
+      {node ? (
+        // The node punches through the spine, so the row reads as a station on
+        // an ordered route. `bg-card` is what makes the line stop at the ring.
+        <span
+          className={cn(
+            "relative z-10 grid size-5 shrink-0 place-items-center rounded-full bg-card ring-1",
+            selected ? "ring-structure-30" : "ring-structure-12"
+          )}
+        >
+          <Icon aria-hidden className={cn("size-3", tone)} />
+        </span>
+      ) : (
+        <Icon aria-hidden className={cn("size-3.5 shrink-0", tone)} />
+      )}
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-heading text-[12px] font-semibold leading-4">
+        <span
+          className={cn(
+            "block truncate font-heading text-[13px] leading-4",
+            selected ? "font-semibold text-foreground" : "font-medium"
+          )}
+        >
           {label}
         </span>
-        {/* The real filename, mono, beneath the friendly name — so a guide that
-            says "rename dxgi.dll" still matches something on this screen. */}
-        <span className="block truncate font-mono text-[10px] leading-3 text-muted-foreground">
-          {sub}
+        {/* Mono is only for the identifier. It earns that face because a forum
+            guide says "rename dxgi.dll" and the two should match on screen; a
+            count does not, and setting everything in mono drains the signal
+            out of it. */}
+        <span className="block truncate text-[11px] leading-3 text-muted-foreground">
+          <span className="font-mono">{id}</span>
+          {meta && <span className="font-sans"> &middot; {meta}</span>}
         </span>
       </span>
       {pill}
@@ -248,15 +313,19 @@ function SlotRow({
   const meta = LEVEL_META[level];
   const attention = findingsForSlot(slot, stack).filter((f) => f.level !== "info").length;
   const hasProblem = attention > 0;
+  const sub = slotSubLine(slot, stack);
+  const source = SOURCE_META[SLOT_SOURCE[slot]];
 
   return (
     <RailRow
       Icon={SLOT_ICON[slot]}
-      // The glyph says what the slot is; it only takes the level's colour when
-      // there is a level worth reporting.
-      tone={hasProblem ? meta.text : "text-muted-foreground"}
+      // Resting, the glyph carries provenance — whose hand is on this slot. It
+      // only takes the severity colour when there is severity to report.
+      tone={hasProblem ? meta.text : source.glyph}
       label={SLOT_LABEL[slot]}
-      sub={slotSubLine(slot, stack) ?? "nothing here"}
+      id={sub?.id ?? "nothing here"}
+      meta={sub?.meta}
+      node
       accent={hasProblem ? { border: meta.border, tint: meta.tint } : undefined}
       pill={
         <>

@@ -1,9 +1,8 @@
-import { ExternalLinkIcon } from "lucide-react";
+import { DownloadIcon, ExternalLinkIcon, HandIcon, SlidersHorizontalIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { InfoPill } from "@/components/ui/info-pill";
-import { SectionHeader } from "@/components/ui/section-header";
 import { cn } from "@/lib/utils";
 
 import { PresetPanel } from "./preset-panel";
@@ -19,10 +18,10 @@ import {
   SLOT_LABEL,
   SLOT_SOURCE,
   SOURCE_LABEL,
-  SOURCE_PILL_COLOR,
+  SOURCE_META,
   findingsForSlot,
 } from "./slots";
-import type { Slot } from "./slots";
+import type { Slot, SlotSource } from "./slots";
 import type { ClientStack, HealthFinding, PreservedOriginal, StackItem } from "./types";
 
 /**
@@ -57,29 +56,77 @@ export function SlotPane({
   const source = SLOT_SOURCE[slot];
   const sourceLabel = SOURCE_LABEL[source];
 
+  const meta = SOURCE_META[source];
+
   return (
-    <section aria-labelledby={`slot-${slot}`} className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <SectionHeader id={`slot-${slot}`}>{SLOT_LABEL[slot]}</SectionHeader>
-        {sourceLabel && <InfoPill color={SOURCE_PILL_COLOR[source]}>{sourceLabel}</InfoPill>}
+    // The pane is an *object*, not a region.
+    //
+    // It used to be two floating cards above 500px of nothing, which reads as
+    // unfinished rather than spacious. Given a titled top edge and a bounded
+    // bottom edge, the same empty space becomes the interior of a designed
+    // container — composure instead of abandonment — and it costs no content
+    // Kalpa does not already have.
+    <section
+      aria-labelledby={`slot-${slot}`}
+      className="flex min-h-full flex-col overflow-hidden rounded-xl border border-structure-06 bg-glass-bg-light shadow-[0_4px_16px_var(--scrim-20)]"
+    >
+      {/* The dialog's own header recipe, reused once. A 4% structural fade is
+          the house way of saying "this strip is a header"; it is not
+          decoration, and it appears exactly twice in the panel. */}
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-structure-06 bg-gradient-to-b from-structure-04 to-transparent px-4 py-3">
+        {/* A pane title, not an eyebrow. This was an 11px uppercase
+            SectionHeader — the *least* important type style in the system used
+            for the most important text in the pane, so the card headings below
+            outranked it and nothing anchored the column. SectionHeader is still
+            right one level down, labelling sub-sections. */}
+        <h3
+          id={`slot-${slot}`}
+          className="truncate font-heading text-lg font-semibold tracking-[-0.01em]"
+        >
+          {SLOT_LABEL[slot]}
+        </h3>
+        {sourceLabel && (
+          // Provenance: whose hand is on this thing. The word is mandatory —
+          // on the light themes the status hues collapse towards one near-black
+          // and the label is what actually carries it.
+          <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+            <SourceGlyph source={source} className={cn("size-3.5", meta.glyph)} />
+            {sourceLabel}
+          </span>
+        )}
+      </header>
+
+      <div className="flex-1 space-y-4 p-4">
+        <SlotContents slot={slot} stack={stack} />
+
+        {findings.length > 0 && (
+          <ul className="space-y-2">
+            {findings.map((finding) => (
+              <SlotFinding key={finding.id} finding={finding} onOpenGuide={onOpenGuide} />
+            ))}
+          </ul>
+        )}
+
+        {/* The controls that act on this slot, mounted in the slot they act on —
+            once each. They used to render on both tabs, which meant two copies
+            fetching the same state independently. */}
+        <SlotActions slot={slot} stack={stack} onStackChanged={onStackChanged} />
       </div>
-
-      <SlotContents slot={slot} stack={stack} />
-
-      {findings.length > 0 && (
-        <ul className="space-y-2">
-          {findings.map((finding) => (
-            <SlotFinding key={finding.id} finding={finding} onOpenGuide={onOpenGuide} />
-          ))}
-        </ul>
-      )}
-
-      {/* The controls that act on this slot, mounted in the slot they act on —
-          once each. They used to render on both tabs, which meant two copies
-          fetching the same state independently. */}
-      <SlotActions slot={slot} stack={stack} onStackChanged={onStackChanged} />
     </section>
   );
+}
+
+/** The provenance glyph: what kind of hand is on this slot. */
+function SourceGlyph({ source, className }: { source: SlotSource; className?: string }) {
+  const Icon =
+    source === "fetchable"
+      ? DownloadIcon
+      : source === "link_only"
+        ? ExternalLinkIcon
+        : source === "derived"
+          ? SlidersHorizontalIcon
+          : HandIcon;
+  return <Icon aria-hidden className={className} />;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -209,31 +256,77 @@ function ItemsContents({ slot, stack }: { slot: Slot; stack: ClientStack }) {
   );
 }
 
+/** Bytes as the user would say them. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
 function ItemCard({ item, original }: { item: StackItem; original: PreservedOriginal | null }) {
   // No product name, no version, no company and no description means the PE
   // carried no version resource at all — so all Kalpa knows is the bytes.
   const identifiedByHash =
     !item.display_name && !item.version && !item.company && !item.description;
 
+  // A flat plate inside the pane container, not a card floating on the dialog.
+  // Depth is three steps and only three: dialog surface, pane container with
+  // one drop shadow, flat item plates. A glass panel inside a glass panel reads
+  // as no elevation at all, because both carry the same inset highlight.
+  //
+  // The left border is gone: severity owns that device, and a healthy file drew
+  // a 3px bar that said nothing.
   return (
-    <GlassPanel
-      variant="subtle"
-      className="space-y-1 rounded-xl border-l-[3px] border-l-structure-10 p-3"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <h4 className="font-heading text-[13px] font-semibold">{ROLE_LABEL[item.role]}</h4>
-        {identifiedByHash && <InfoPill color="muted">identified by hash</InfoPill>}
+    <article className="rounded-lg bg-structure-03 p-4">
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <h4 className="truncate font-heading text-sm font-medium">{ROLE_LABEL[item.role]}</h4>
+        <span className="shrink-0 font-mono text-[12px] text-muted-foreground">
+          {item.file_name}
+        </span>
       </div>
-      <p className="text-xs text-muted-foreground">
-        {item.display_name ?? "no product name"} &middot; {item.version ?? "no version info"}
-      </p>
-      <p className="font-mono text-[11px] text-muted-foreground">{item.file_name}</p>
+      {/* A label/value grid rather than a middot-joined string. Most of this
+          came off the PE version resource and was being fetched and thrown
+          away — `company`, `description` and `size_bytes` were read by the
+          backend and rendered nowhere. */}
+      <dl className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+        <dt className="text-muted-foreground">Product</dt>
+        <dd className="truncate">{item.display_name ?? "no product name"}</dd>
+        <dt className="text-muted-foreground">Version</dt>
+        <dd className="tabular-nums">{item.version ?? "no version info"}</dd>
+        {item.company && (
+          <>
+            <dt className="text-muted-foreground">Publisher</dt>
+            <dd className="truncate">{item.company}</dd>
+          </>
+        )}
+        {item.description && (
+          <>
+            <dt className="text-muted-foreground">Description</dt>
+            <dd className="truncate" title={item.description}>
+              {item.description}
+            </dd>
+          </>
+        )}
+        <dt className="text-muted-foreground">Size</dt>
+        <dd className="tabular-nums">{formatBytes(item.size_bytes)}</dd>
+        {identifiedByHash && (
+          <>
+            <dt className="text-muted-foreground">Identified</dt>
+            <dd>by hash — this file carries no version resource</dd>
+          </>
+        )}
+      </dl>
       {original && (
-        <p className="text-xs text-status-info">
-          Your original &middot; {original.version ?? "no version info"} &middot; kept by you
-        </p>
+        <div className="mt-3 border-t border-structure-06 pt-3">
+          <dl className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+            <dt className="text-accent-sky">Your original</dt>
+            <dd className="tabular-nums">{original.version ?? "no version info"}</dd>
+            <dt className="text-muted-foreground">Kept</dt>
+            <dd className="tabular-nums">{formatBytes(original.size_bytes)}</dd>
+          </dl>
+        </div>
       )}
-    </GlassPanel>
+    </article>
   );
 }
 
