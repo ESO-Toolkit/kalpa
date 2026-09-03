@@ -376,3 +376,66 @@ export interface PresetChangeOutcome {
   backup_id: string | null;
   summary: string;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Data contract — the shader-pack library                                   */
+/* -------------------------------------------------------------------------- */
+/* Mirrors `src-tauri/src/client_shaders.rs`. Kalpa fetches every pack from    */
+/* its author's own repository and mirrors nothing, so whether a pack can be   */
+/* installed at all is a licensing fact rather than a UI state — which is why  */
+/* `PackSource` is part of the data and not a rendering decision.              */
+
+export type ArchiveLayout = "shaders_and_textures" | "flat_root";
+
+/** Kalpa may fetch this pack from the author's own repository. */
+export interface PackSourceFetchable {
+  kind: "fetchable";
+  owner: string;
+  repo: string;
+  branch: string;
+}
+
+/** Named and linked, never downloaded. `reason` is shown verbatim: "Kalpa
+ *  can't install this" without a why reads as a missing feature rather than a
+ *  deliberate limit. */
+export interface PackSourceLinkOnly {
+  kind: "link_only";
+  url: string;
+  reason: string;
+}
+
+export type PackSource = PackSourceFetchable | PackSourceLinkOnly;
+
+/** A catalogue entry flattened together with whether it is actually here —
+ *  the Rust side uses `#[serde(flatten)]`, so these are one object. */
+export interface PackStatus {
+  id: string;
+  name: string;
+  author: string;
+  summary: string;
+  licence: string;
+  source: PackSource;
+  layout: ArchiveLayout;
+  /** Technique identifiers, never `ui_label`s — a preset stores identifiers. */
+  techniques: string[];
+  markers: string[];
+  installed: boolean;
+  /** The marker files actually found, so the panel can say what it matched on
+   *  rather than asserting "installed" with nothing to show for it. */
+  found: string[];
+}
+
+export interface ShaderLibrary {
+  client_dir: string;
+  shader_tree_present: boolean;
+  packs: PackStatus[];
+}
+
+export interface PackInstallOutcome {
+  pack_id: string;
+  pack_name: string;
+  /** The commit the archive was pinned to. These repositories publish no tags,
+   *  so this is the only thing identifying which bytes were installed. */
+  commit: string;
+  files: string[];
+}
