@@ -19,8 +19,8 @@
 //!
 //! It also means **licensing decides what can be listed and what can be
 //! fetched, and those are different questions.** [`PackSource::LinkOnly`]
-//! exists because two of the packs a real DLSS 5 stack uses cannot be fetched
-//! at all:
+//! exists because several of the shaders a real DLSS 5 stack uses cannot be
+//! fetched at all:
 //!
 //! * **iMMERSE** is `All rights reserved` plus a prohibition — *"Public
 //!   propagation of this project or parts of it is strictly forbidden"* —
@@ -84,7 +84,8 @@ use std::path::Path;
 #[serde(rename_all = "snake_case")]
 pub enum ArchiveLayout {
     /// `Shaders/` and `Textures/` at the archive root, mapping onto the same
-    /// names under `reshade-shaders/`. Five of the six packs look like this.
+    /// names under `reshade-shaders/`. Every catalogued pack but DRME is this
+    /// shape.
     ShadersAndTextures,
     /// No `Shaders/` directory: the `.fx` and `.fxh` files sit at the archive
     /// root and all map into `reshade-shaders/Shaders/`. DRME is like this, and
