@@ -303,7 +303,14 @@ export interface TuningApplyOutcome {
 /* user's own kept copy is the only thing a re-apply can restore from.         */
 
 export type DriftState =
-  "unchanged" | "drifted_recoverable" | "drifted_unrecoverable" | "missing" | "parked";
+  | "unchanged"
+  | "drifted_recoverable"
+  | "drifted_unrecoverable"
+  | "missing"
+  | "parked"
+  /** Changed, but ESO does not ship this file, so no update can have reverted
+   *  it — the user replaced it. There is nothing to put back. */
+  | "changed_not_by_update";
 
 export interface RuntimeStatus {
   relative_path: string;
@@ -321,6 +328,14 @@ export interface RuntimeReport {
   runtimes: RuntimeStatus[];
   recoverable: string[];
   unrecoverable: string[];
+}
+
+/** What dropping an install's records did. */
+export interface ForgetOutcome {
+  forgotten: string[];
+  /** Kept copies that stopped being referenced, and so become candidates for
+   *  cleanup. Non-zero means "records and nothing else" is not the whole story. */
+  released_copies: number;
 }
 
 export interface ReapplyOutcome {

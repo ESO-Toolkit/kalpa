@@ -351,7 +351,10 @@ fn copy_into_backup(
 
 /// Drop every adopted record for this install. Touches no file in the client
 /// directory, and leaves files Kalpa actually placed alone.
-pub fn forget_in(manifest_path: &Path, client_root: &Path) -> Result<Vec<String>, String> {
+pub fn forget_in(
+    manifest_path: &Path,
+    client_root: &Path,
+) -> Result<crate::client_backup::ForgetOutcome, String> {
     crate::client_backup::forget_adopted(manifest_path, client_root)
 }
 
@@ -408,7 +411,10 @@ pub async fn adopt_stack(
 
 /// Forget the adopted stack. Records only; no file is touched.
 #[tauri::command]
-pub fn forget_stack(app: tauri::AppHandle, client_dir: String) -> Result<Vec<String>, String> {
+pub fn forget_stack(
+    app: tauri::AppHandle,
+    client_dir: String,
+) -> Result<crate::client_backup::ForgetOutcome, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let manifest_path = crate::client_backup::manifest_path(&app)?;
     forget_in(&manifest_path, &location.client_dir)
@@ -693,9 +699,13 @@ mod tests {
         h.adopt(true).expect("adoption should succeed");
         let before = snapshot(&h.client);
 
-        let forgotten = forget_in(&h.manifest, &h.client).expect("forget should succeed");
+        let outcome = forget_in(&h.manifest, &h.client).expect("forget should succeed");
 
-        assert!(!forgotten.is_empty());
+        assert!(!outcome.forgotten.is_empty());
+        assert!(
+            outcome.released_copies > 0,
+            "the kept copies stop being referenced, and the user has to be told"
+        );
         assert!(
             h.entries().is_empty(),
             "every adopted record should be gone"
@@ -704,6 +714,33 @@ mod tests {
             before,
             snapshot(&h.client),
             "forgetting is Kalpa giving up its records, not undoing anything"
+        );
+    }
+
+    /// Forgetting is safe only because it changes nothing on disk — which stops
+    /// being true once files are displaced. With the stack switched off, the
+    /// records being dropped are the ones saying which `.kalpa-off` file belongs
+    /// to which original, and the UI's promise that the stack "keeps working" is
+    /// simply false.
+    #[test]
+    fn forgetting_a_switched_off_stack_is_refused() {
+        let h = Harness::new();
+        h.adopt(false).expect("adopt");
+        crate::client_backup::run_file_ops_in(
+            &h.manifest,
+            &h.backups,
+            &h.root(),
+            &[crate::client_backup::FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            }],
+        )
+        .expect("park");
+
+        let error = forget_in(&h.manifest, &h.client).expect_err("must refuse while switched off");
+        assert!(error.contains("switched off"), "{error}");
+        assert!(
+            !h.entries().is_empty(),
+            "the records must survive a refused forget"
         );
     }
 

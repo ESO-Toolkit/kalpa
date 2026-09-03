@@ -47,6 +47,16 @@ pub enum DriftState {
     /// Parked by "switch this stack off". Not drift: the live file under this
     /// name is supposed to be the game's own.
     Parked,
+    /// The bytes differ from the manifest, but **ESO does not ship this file**,
+    /// so no game update can have put anything back over it. Somebody changed
+    /// it deliberately, and the overwhelmingly likely somebody is the user
+    /// installing a newer runtime.
+    ///
+    /// This is a separate state from the drifted ones because the action is
+    /// different — there is nothing to "put back", and offering to overwrite it
+    /// with Kalpa's older kept copy would destroy a newer runtime that has no
+    /// redistributable source and cannot be fetched again.
+    ChangedNotByUpdate,
 }
 
 /// One managed runtime and what has become of it.
@@ -118,6 +128,39 @@ pub fn is_drift_prone(role: StackRole) -> bool {
             | StackRole::FrameGeneration
             | StackRole::ShaderCompiler
     )
+}
+
+/// Does **ESO itself ship a file in this role**, such that the launcher's
+/// patcher can put its own build back over the user's swap?
+///
+/// This is not the same question as [`is_drift_prone`], and conflating the two
+/// is how the re-apply action came to offer to overwrite a user's newer Neural
+/// Rendering runtime with Kalpa's older copy. Two distinct predicates:
+///
+/// * `client_adopt::is_copyable` — *worth keeping a copy of*. True for the NR
+///   runtime: 165 MB, user-supplied, no redistributable source, so losing it
+///   costs the user a hunt. Keeping a copy is right.
+/// * `eso_ships` — *a game update can revert this*. **False** for the NR
+///   runtime. ESO has never shipped `nvngx_dlssnr.dll`, so nothing the patcher
+///   does can put "ESO's own build" back over it, and a hash change there can
+///   only be a deliberate replacement — almost always the user installing a
+///   newer runtime.
+///
+/// Treating a change to a file ESO does not ship as an update to be undone
+/// means offering to overwrite the newer file with the older one, and filing the
+/// newer one somewhere `prune_unreferenced_backups` can reach. It is exactly the
+/// wrong way round.
+///
+/// `nvngx_dlssg.dll` ([`StackRole::FrameGeneration`]) is deliberately absent,
+/// and the call is a judgement rather than a certainty: it is not in the primary
+/// user's install, and ESO is not known to ship or request frame generation. The
+/// two ways of being wrong are not symmetric. Treating it as shipped when it is
+/// not **blocks disable outright** for anyone holding one, with no way past;
+/// treating it as not shipped when it is means disable leaves that one file
+/// modded instead of stock, which is a smaller and visible miss. If a stock
+/// install is ever confirmed to contain it, move it here.
+pub fn eso_ships(role: StackRole) -> bool {
+    matches!(role, StackRole::SuperSampling | StackRole::ShaderCompiler)
 }
 
 /// Resolve the [`StackRole`] a managed relative path corresponds to, the same
@@ -225,6 +268,11 @@ pub fn inspect_runtimes(
         } else {
             match crate::client_backup::hash_file(&resolved) {
                 Ok(hash) if hash == file.sha256 => DriftState::Unchanged,
+                // The bytes changed. Whether that is *drift* depends entirely on
+                // whether ESO ships this file — see `eso_ships`. For one it does
+                // not, there is no update to undo and nothing to put back, and
+                // offering to would overwrite a newer runtime with an older one.
+                _ if !eso_ships(role) => DriftState::ChangedNotByUpdate,
                 _ => {
                     let has_kept_copy = file
                         .displaced_backup
@@ -609,6 +657,55 @@ mod tests {
         let plan = plan_reapply(&report, &["nvngx_dlss.dll".to_string()]);
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].relative_path, "nvngx_dlss.dll");
+    }
+
+    /// ESO does not ship `nvngx_dlssnr.dll`, so a change to it cannot be a game
+    /// update. Calling it drift and offering to "put your copy back" would
+    /// overwrite a newer 165 MB runtime — one with no redistributable source —
+    /// with Kalpa's older copy, and file the newer one somewhere prunable.
+    #[test]
+    fn a_changed_nr_runtime_is_not_treated_as_a_reverted_update() {
+        let h = Harness::new();
+        h.adopt();
+        std::fs::write(h.client.join("nvngx_dlssnr.dll"), "a newer NR runtime").unwrap();
+
+        let report = h.report();
+        let nr = report
+            .runtimes
+            .iter()
+            .find(|r| r.relative_path == "nvngx_dlssnr.dll")
+            .expect("the NR runtime is still reported");
+
+        assert_eq!(nr.state, DriftState::ChangedNotByUpdate);
+        assert!(
+            !report.recoverable.contains(&"nvngx_dlssnr.dll".to_string()),
+            "there must be no offer to overwrite it"
+        );
+        assert!(
+            !report
+                .unrecoverable
+                .contains(&"nvngx_dlssnr.dll".to_string()),
+            "nor is it a failure — the user changed it on purpose"
+        );
+        assert!(
+            plan_reapply(&report, &["nvngx_dlssnr.dll".to_string()]).is_empty(),
+            "and no plan can be built for it even if asked directly"
+        );
+    }
+
+    /// The predicates that were conflated, kept apart by a test rather than by
+    /// memory: *worth keeping a copy of* is not *a game update can revert this*.
+    #[test]
+    fn keeping_a_copy_and_being_revertible_are_different_questions() {
+        assert!(is_drift_prone(StackRole::NeuralRendering));
+        assert!(
+            !eso_ships(StackRole::NeuralRendering),
+            "ESO has never shipped nvngx_dlssnr.dll, so no patch puts its build back"
+        );
+        for role in [StackRole::SuperSampling, StackRole::ShaderCompiler] {
+            assert!(eso_ships(role), "{role:?}");
+            assert!(is_drift_prone(role), "{role:?}");
+        }
     }
 
     #[test]

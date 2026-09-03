@@ -232,11 +232,23 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
             </p>
           )}
           {outcome.preserved.length > 0 && (
-            <p className="text-status-warning">
-              Kept {outcome.preserved.length} file{outcome.preserved.length === 1 ? "" : "s"} in a
-              backup instead of overwriting them — their bytes did not match what Kalpa expected, so
-              nothing was assumed and nothing was lost.
-            </p>
+            <div className="space-y-1 text-status-warning">
+              <p>
+                Moved {outcome.preserved.length} file
+                {outcome.preserved.length === 1 ? "" : "s"} out of the game folder into a backup
+                rather than deleting {outcome.preserved.length === 1 ? "it" : "them"} — the bytes
+                did not match what Kalpa expected, so it would not assume they were its own.
+              </p>
+              {outcome.preserved.map((line) => (
+                <p key={line} className="font-mono text-[11px]">
+                  {line}
+                </p>
+              ))}
+              <p className="text-muted-foreground">
+                Those backups are not tied to a file Kalpa tracks, so its own cleanup may reclaim
+                them later. Copy anything you want to keep out of that folder.
+              </p>
+            </div>
           )}
         </GlassPanel>
       )}

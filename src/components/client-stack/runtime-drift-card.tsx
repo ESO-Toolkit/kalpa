@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  InfoIcon,
   AlertTriangleIcon,
   PowerOffIcon,
   RefreshCwIcon,
@@ -58,6 +59,11 @@ const STATE_META: Record<
     Icon: PowerOffIcon,
     text: "text-muted-foreground",
   },
+  changed_not_by_update: {
+    label: "Changed",
+    Icon: InfoIcon,
+    text: "text-status-info",
+  },
 };
 
 function RuntimeRow({
@@ -80,7 +86,15 @@ function RuntimeRow({
           <meta.Icon aria-hidden className={cn("size-4 shrink-0", meta.text)} />
           <span className="font-heading text-sm font-semibold">{runtime.relative_path}</span>
         </div>
-        <InfoPill color={state === "parked" ? "muted" : state === "missing" ? "sky" : "amber"}>
+        <InfoPill
+          color={
+            state === "parked"
+              ? "muted"
+              : state === "missing" || state === "changed_not_by_update"
+                ? "sky"
+                : "amber"
+          }
+        >
           {meta.label}
         </InfoPill>
       </div>
@@ -127,6 +141,37 @@ function RuntimeRow({
           yourself, then use &quot;Stop managing&quot; in Kalpa&apos;s records and manage the stack
           again with &quot;keep copies&quot; turned on.
         </p>
+      )}
+
+      {state === "changed_not_by_update" && (
+        <>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            This file has changed since Kalpa recorded it. ESO does not ship it, so no game update
+            can have put its own build back — something replaced it deliberately, and the usual
+            reason is that you installed a newer runtime.
+          </p>
+          {(runtime.current_version || runtime.kept_version) && (
+            <div className="flex flex-wrap gap-4 text-xs">
+              <span>
+                <span className="text-muted-foreground">On disk now: </span>
+                <span className="font-medium text-foreground">
+                  {runtime.current_version ?? "unknown version"}
+                </span>
+              </span>
+              <span>
+                <span className="text-muted-foreground">Kalpa recorded: </span>
+                <span className="font-medium text-foreground">
+                  {runtime.kept_version ?? "unknown version"}
+                </span>
+              </span>
+            </div>
+          )}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Kalpa offers nothing here on purpose: putting its older copy back would overwrite the
+            file you are using, and these runtimes have no source it could fetch a replacement from.
+            Manage the stack again if you want Kalpa to record the new one.
+          </p>
+        </>
       )}
 
       {state === "missing" && (

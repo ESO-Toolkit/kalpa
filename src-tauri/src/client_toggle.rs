@@ -146,44 +146,46 @@ pub struct TogglePlan {
 ///   file under that name at all. Name the file.
 /// * Enable where a parked file is no longer in the folder. Name it.
 pub fn plan_toggle(stack: &ClientStack, managed: &[ManagedFile], client_dir: &str) -> TogglePlan {
-    let action = if stack.is_disabled {
-        ToggleAction::Enable
-    } else {
+    // **Disk decides, not the manifest.** Any `.kalpa-off` file at all means there
+    // is parking to undo, even one — a batch that died between parking a runtime
+    // and restoring the original leaves exactly that, and treating it as "still
+    // switched on" would plan a fresh disable that skips the half-parked file and
+    // leaves ESO with no file under a name it loads itself.
+    let action = if stack.parked.is_empty() {
         ToggleAction::Disable
+    } else {
+        ToggleAction::Enable
     };
 
     let mut operations = Vec::new();
     let mut blockers = Vec::new();
 
-    if managed.is_empty() {
-        blockers.push(
-            "This install has nothing managed yet, so there is nothing for Kalpa to switch off."
-                .to_string(),
-        );
-    } else {
-        match action {
-            ToggleAction::Disable => plan_disable(stack, managed, &mut operations, &mut blockers),
-            ToggleAction::Enable => plan_enable(stack, managed, &mut operations, &mut blockers),
+    match action {
+        ToggleAction::Disable if managed.is_empty() => {
+            blockers.push(
+                "This install has nothing managed yet, so there is nothing for Kalpa to switch \
+                 off."
+                    .to_string(),
+            );
         }
+        ToggleAction::Disable => plan_disable(stack, managed, &mut operations, &mut blockers),
+        // Deliberately not gated on `managed`: putting parked files back must
+        // work from the folder alone. See `plan_enable`.
+        ToggleAction::Enable => plan_enable(stack, managed, &mut operations, &mut blockers),
     }
 
     // A plan with nothing to do and nothing to say would render as an empty
     // confirmation with a live button, and applying it would report success
-    // having changed nothing. The commonest way to get here is a stack whose
-    // `.kalpa-off` files are on disk but whose manifest was lost, so the entries
-    // that would have been unparked are simply not there to find.
-    if operations
-        .iter()
-        .all(|op| op.kind == ToggleOpKind::LeaveInPlace)
+    // having changed nothing. Enable cannot reach this: it is only chosen when
+    // something is parked, and every parked file produces an operation or a
+    // blocker.
+    if action == ToggleAction::Disable
         && blockers.is_empty()
+        && operations
+            .iter()
+            .all(|op| op.kind == ToggleOpKind::LeaveInPlace)
     {
-        blockers.push(match action {
-            ToggleAction::Disable => "There is nothing here for Kalpa to switch off.".to_string(),
-            ToggleAction::Enable => "This stack has files parked as switched off, but Kalpa has \
-                                     no record of parking them, so it cannot say what putting \
-                                     them back would mean."
-                .to_string(),
-        });
+        blockers.push("There is nothing here for Kalpa to switch off.".to_string());
     }
 
     TogglePlan {
@@ -222,6 +224,22 @@ fn plan_disable(
     }
 
     for entry in managed {
+        // Recorded as parked, but disk says nothing is parked under that name —
+        // so the file is neither live nor in its `.kalpa-off` copy. Planning a
+        // disable around it would quietly omit a managed file; say so instead.
+        if entry.parked
+            && !stack
+                .parked
+                .iter()
+                .any(|file| file.restores.eq_ignore_ascii_case(&entry.relative_path))
+        {
+            blockers.push(format!(
+                "{} is recorded as switched off, but neither it nor its parked copy is in the \
+                 folder.",
+                entry.relative_path
+            ));
+            continue;
+        }
         // Already off, or is the injector itself — the injector gets its own
         // step below, parked last.
         if entry.parked || entry.kind == ManagedKind::ReShadeCore {
@@ -311,83 +329,118 @@ fn plan_disable(
 }
 
 /// Build the enable half of [`plan_toggle`]: the exact reverse of disable.
+/// Build the enable half of [`plan_toggle`] **from the folder, not the manifest**.
+///
+/// This is deliberately the one operation in the client layer that does not need
+/// Kalpa's records. Every other action can reasonably say "manage this stack
+/// first"; putting parked files back cannot, because the states that most need it
+/// are exactly the states where the records are gone or wrong:
+///
+/// * the manifest was lost, or the app-data folder wiped, while the stack was off
+/// * a batch died between moving the files and recording that it had
+/// * the user pressed "Stop managing" while switched off
+///
+/// In all three the folder still holds the whole truth. `.kalpa-off` is Kalpa's
+/// own suffix — nothing else writes it — so a file carrying it is one Kalpa
+/// parked, `restores` says what it goes back to, and `target_present` says
+/// whether something has to come out of the way first. The manifest is consulted
+/// only for `displaced_in_place`, and the shape of the folder answers that too
+/// when it is missing.
 fn plan_enable(
     stack: &ClientStack,
     managed: &[ManagedFile],
     operations: &mut Vec<PlannedOp>,
     blockers: &mut Vec<String>,
 ) {
-    let parked_present = |relative_path: &str| {
-        stack
-            .parked
+    // Which preserved original a live name belongs to: the manifest's record if
+    // there is one, else the user's own `.disabled-bak` sitting next to it,
+    // which is where the manifest got it from in the first place.
+    let original_for = |live: &str| -> Option<String> {
+        managed
             .iter()
-            .any(|file| file.restores.eq_ignore_ascii_case(relative_path))
+            .find(|entry| entry.relative_path.eq_ignore_ascii_case(live))
+            .and_then(|entry| entry.displaced_in_place.clone())
+            .or_else(|| {
+                stack
+                    .preserved_originals
+                    .iter()
+                    .find(|original| {
+                        original
+                            .backs_up
+                            .as_deref()
+                            .is_some_and(|target| target.eq_ignore_ascii_case(live))
+                    })
+                    .map(|original| original.file_name.clone())
+            })
     };
 
-    let parked: Vec<&ManagedFile> = managed.iter().filter(|entry| entry.parked).collect();
-
-    // The injector first, so ReShade can start loading the rest of the stack
-    // again before anything else moves.
-    if let Some(injector) = parked
-        .iter()
-        .find(|entry| entry.kind == ManagedKind::ReShadeCore)
-    {
-        if parked_present(&injector.relative_path) {
-            operations.push(PlannedOp {
-                kind: ToggleOpKind::Unpark,
-                file_name: injector.relative_path.clone(),
-                partner: None,
-                summary: format!(
-                    "Put {} back from {}{PARKED_SUFFIX}",
-                    injector.relative_path, injector.relative_path
-                ),
-                detail: "Unparking the injector first means ReShade can start loading the rest \
-                         of the stack again."
-                    .to_string(),
-            });
-        } else {
+    // Records that claim a park the folder does not have. The parked copy has
+    // been deleted or renamed by hand, so the file it held is simply gone —
+    // enable cannot conjure it back, and proceeding silently would restore the
+    // rest and leave the user to discover this one later.
+    for entry in managed.iter().filter(|entry| entry.parked) {
+        if !stack
+            .parked
+            .iter()
+            .any(|file| file.restores.eq_ignore_ascii_case(&entry.relative_path))
+        {
             blockers.push(format!(
-                "{} is marked as switched off, but its parked copy is no longer in the folder.",
-                injector.relative_path
+                "{} is recorded as switched off, but its parked copy is no longer in the folder, \
+                 so Kalpa has nothing to put back.",
+                entry.relative_path
             ));
         }
     }
 
-    for entry in parked
-        .iter()
-        .filter(|entry| entry.kind != ManagedKind::ReShadeCore)
-    {
-        if !parked_present(&entry.relative_path) {
-            blockers.push(format!(
-                "{} is marked as switched off, but its parked copy is no longer in the folder.",
-                entry.relative_path
-            ));
-            continue;
-        }
+    // The injector first, so ReShade is loading the stack again before anything
+    // else moves. Sorted order otherwise, so the plan is stable between reads.
+    let mut parked: Vec<&crate::client_stack::ParkedFile> = stack.parked.iter().collect();
+    parked.sort_by_key(|file| {
+        (
+            !crate::client_uninstall::INJECTOR_NAMES.contains(&file.restores.as_str()),
+            file.restores.clone(),
+        )
+    });
 
-        if let Some(original) = &entry.displaced_in_place {
+    for file in parked {
+        let live = &file.restores;
+
+        // Something occupies the name. For a file ESO loads itself that is the
+        // stock build disable put there, and it has to come out first — but only
+        // once Kalpa can prove it is not about to delete something else.
+        if file.target_present {
+            let Some(original) = original_for(live) else {
+                blockers.push(format!(
+                    "{live} is parked, but something already occupies that name and Kalpa has no \
+                     preserved original to check it against, so it will not remove it. Move it \
+                     aside yourself, then switch the stack back on."
+                ));
+                continue;
+            };
             operations.push(PlannedOp {
                 kind: ToggleOpKind::RemoveRestored,
                 file_name: original.clone(),
-                partner: Some(entry.relative_path.clone()),
-                summary: format!("Remove the stock {}", entry.relative_path),
+                partner: Some(live.clone()),
+                summary: format!("Remove the stock {live}"),
                 detail: format!(
-                    "Disable put ESO's own {} live under this name; it has to come out before \
-                     your own copy can go back.",
-                    entry.relative_path
+                    "Disable put ESO's own {live} live under this name; it has to come out \
+                     before your own copy can go back. Kalpa checks it still matches {original} \
+                     first, and keeps a copy if it does not."
                 ),
             });
         }
 
         operations.push(PlannedOp {
             kind: ToggleOpKind::Unpark,
-            file_name: entry.relative_path.clone(),
+            file_name: live.clone(),
             partner: None,
-            summary: format!(
-                "Put {} back from {}{PARKED_SUFFIX}",
-                entry.relative_path, entry.relative_path
-            ),
-            detail: "Putting your own file back where the modded one was.".to_string(),
+            summary: format!("Put {live} back from {}", file.file_name),
+            detail: if crate::client_uninstall::INJECTOR_NAMES.contains(&live.as_str()) {
+                "Putting the injector back is what starts ReShade loading the stack again."
+                    .to_string()
+            } else {
+                "Putting your own file back where the modded one was.".to_string()
+            },
         });
     }
 }
@@ -412,10 +465,11 @@ pub fn role_of(stack: &ClientStack, relative_path: &str) -> Option<StackRole> {
 /// `nvngx_dlssnr.dll` is deliberately absent: ESO does not ship or load it, so
 /// with the injector parked it is simply inert.
 pub fn game_loads_itself(role: StackRole) -> bool {
-    matches!(
-        role,
-        StackRole::SuperSampling | StackRole::ShaderCompiler | StackRole::FrameGeneration
-    )
+    // The same predicate as "a game update can revert this", and deliberately
+    // the same function: both are asking whether ESO ships a file under this
+    // name. Keeping two lists in step by hand is how `nvngx_dlssnr.dll` — which
+    // ESO does not ship — ended up being treated as reverted by an update.
+    crate::client_runtime::eso_ships(role)
 }
 
 /// Translate the plan into the batch [`crate::client_backup::run_file_ops`]
@@ -652,7 +706,7 @@ mod tests {
     /// plan has nothing to do, and must say so rather than render an empty
     /// confirmation whose button reports success having changed nothing.
     #[test]
-    fn a_parked_stack_kalpa_has_no_record_of_blocks_rather_than_doing_nothing() {
+    fn a_parked_stack_kalpa_has_no_record_of_is_recovered_from_the_folder() {
         let tmp = tempfile::tempdir().unwrap();
         real_install(tmp.path());
         std::fs::rename(
@@ -674,10 +728,59 @@ mod tests {
         let plan = plan_toggle(&stack, &managed, "client");
 
         assert_eq!(plan.action, ToggleAction::Enable);
-        assert!(plan.operations.is_empty());
         assert!(
-            !plan.blockers.is_empty(),
-            "an empty plan must explain itself"
+            plan.blockers.is_empty(),
+            "the folder holds the whole truth, so this must not block: {:?}",
+            plan.blockers
+        );
+        assert_eq!(
+            to_file_ops(&plan).expect("plan is complete"),
+            vec![FileOp::Unpark {
+                relative_path: "dxgi.dll".to_string(),
+            }],
+            "putting parked files back must work from the folder alone"
+        );
+    }
+
+    /// The same recovery with no manifest at all — a wiped app-data folder.
+    #[test]
+    fn a_parked_stack_with_no_manifest_at_all_is_still_recoverable() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        for name in ["dxgi.dll", "nvngx_dlss.dll"] {
+            std::fs::rename(
+                tmp.path().join(name),
+                tmp.path().join(format!("{name}.kalpa-off")),
+            )
+            .unwrap();
+        }
+        std::fs::copy(
+            tmp.path().join("nvngx_dlss.dll.disabled-bak"),
+            tmp.path().join("nvngx_dlss.dll"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(tmp.path());
+        let plan = plan_toggle(&stack, &[], "client");
+
+        assert_eq!(plan.action, ToggleAction::Enable);
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert_eq!(
+            to_file_ops(&plan).expect("plan is complete"),
+            vec![
+                FileOp::Unpark {
+                    relative_path: "dxgi.dll".to_string(),
+                },
+                // The original to check against came from the folder, not the
+                // manifest: it is the user's own `.disabled-bak` sitting there.
+                FileOp::RemoveRestored {
+                    relative_path: "nvngx_dlss.dll".to_string(),
+                    must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
+                },
+                FileOp::Unpark {
+                    relative_path: "nvngx_dlss.dll".to_string(),
+                },
+            ]
         );
     }
 
@@ -697,10 +800,12 @@ mod tests {
     }
 
     #[test]
-    fn game_loads_itself_excludes_neural_rendering_addons_and_the_injector() {
+    fn game_loads_itself_covers_exactly_the_files_eso_ships() {
         assert!(game_loads_itself(StackRole::SuperSampling));
         assert!(game_loads_itself(StackRole::ShaderCompiler));
-        assert!(game_loads_itself(StackRole::FrameGeneration));
+        // ESO ships neither of these, so parking them leaves no gap — and a
+        // change to one of them is not a game update undoing a swap.
+        assert!(!game_loads_itself(StackRole::FrameGeneration));
         assert!(!game_loads_itself(StackRole::NeuralRendering));
         assert!(!game_loads_itself(StackRole::Injector));
         assert!(!game_loads_itself(StackRole::Addon));
@@ -896,19 +1001,22 @@ mod tests {
                 FileOp::Unpark {
                     relative_path: "dxgi.dll".to_string(),
                 },
-                FileOp::RemoveRestored {
-                    relative_path: "nvngx_dlss.dll".to_string(),
-                    must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
-                },
-                FileOp::Unpark {
-                    relative_path: "nvngx_dlss.dll".to_string(),
-                },
+                // Injector first; everything else in name order, so the plan
+                // the user approves is stable between reads rather than
+                // following whatever order the manifest happened to be in.
                 FileOp::RemoveRestored {
                     relative_path: "d3dcompiler_47.dll".to_string(),
                     must_match: "d3dcompiler_47.dll.eso-orig-bak".to_string(),
                 },
                 FileOp::Unpark {
                     relative_path: "d3dcompiler_47.dll".to_string(),
+                },
+                FileOp::RemoveRestored {
+                    relative_path: "nvngx_dlss.dll".to_string(),
+                    must_match: "nvngx_dlss.dll.disabled-bak".to_string(),
+                },
+                FileOp::Unpark {
+                    relative_path: "nvngx_dlss.dll".to_string(),
                 },
             ]
         );

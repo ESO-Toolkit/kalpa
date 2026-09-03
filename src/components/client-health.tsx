@@ -45,6 +45,7 @@ import type {
   ClientStack,
   EmergencyRemoval,
   EsoClientLocation,
+  ForgetOutcome,
   HealthFinding,
   HealthLevel,
   ManagedFileState,
@@ -678,7 +679,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setForgetting(true);
     setForgetError(null);
     try {
-      await invokeOrThrow<string[]>("forget_stack", { clientDir: selectedDir });
+      await invokeOrThrow<ForgetOutcome>("forget_stack", { clientDir: selectedDir });
       if (runToken.current !== token) return;
       setForgetConfirming(false);
       setAdoptOutcome(null);
@@ -1960,6 +1961,12 @@ function ManagedSection({
   const files = useMemo(() => inventory?.files ?? [], [inventory]);
   const orphans = hideEmergency ? [] : (inventory?.orphan_injectors ?? []);
 
+  /** Both derived from the inventory rather than passed down: a parked file is
+   *  one the backend already reports as `parked`, and a kept copy is exactly an
+   *  entry that has a displaced backup behind it. */
+  const switchedOff = files.some((file) => file.state === "parked");
+  const keptCopies = files.filter((file) => file.restores_backup).length;
+
   const pendingPaths = useMemo(() => {
     if (removeMode === "all") return files.map((f) => f.relative_path);
     if (removeMode === "selected") return Array.from(selectedPaths);
@@ -1976,20 +1983,40 @@ function ManagedSection({
         <GlassPanel variant="subtle" className="mb-3 space-y-2 p-3">
           <p className="text-xs leading-relaxed text-muted-foreground">
             Kalpa is managing this stack: it has a record of what is here, so it can tell you if a
-            game update changes something. It has not modified any of it.
+            game update changes something.{" "}
+            {switchedOff
+              ? "You have switched it off, so some of these files are currently parked."
+              : "It has not modified any of it."}
           </p>
-          {!forgetConfirming && (
-            <Button variant="outline" size="sm" onClick={onRequestForget}>
-              Stop managing
-            </Button>
-          )}
+          {!forgetConfirming &&
+            (switchedOff ? (
+              /* The records being dropped are the ones that say which parked
+                 file belongs to which original. Kalpa can still put them back
+                 from the folder alone, but telling the user "your stack keeps
+                 working" while it is switched off would be a lie. */
+              <p className="text-xs leading-relaxed text-status-warning">
+                Switch the stack back on before asking Kalpa to stop managing it — right now some of
+                its files are parked, and these records are what describe them.
+              </p>
+            ) : (
+              <Button variant="outline" size="sm" onClick={onRequestForget}>
+                Stop managing
+              </Button>
+            ))}
           {forgetConfirming && (
             <div className="space-y-2">
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Kalpa will delete its records for this folder and nothing else. Every file stays
-                exactly where it is, your stack keeps working, and you can ask Kalpa to manage it
-                again at any time.
+                Kalpa will delete its records for this folder. Every file stays exactly where it is,
+                your stack keeps working, and you can ask Kalpa to manage it again at any time.
               </p>
+              {keptCopies > 0 && (
+                <p className="text-xs leading-relaxed text-status-warning">
+                  One caveat: the {keptCopies} kept {keptCopies === 1 ? "copy" : "copies"} of your
+                  swapped runtimes stop being protected from Kalpa&apos;s own cleanup, so a later
+                  install may reclaim that space. Your files in the game folder are untouched either
+                  way.
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" disabled={forgetting} onClick={onConfirmForget}>
                   {forgetting ? <Spinner className="size-3.5" /> : null}

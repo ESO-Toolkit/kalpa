@@ -846,6 +846,17 @@ pub fn record_adopted(
     save_manifest_at(manifest_path, &manifest)
 }
 
+/// What forgetting an install's records did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ForgetOutcome {
+    /// Paths whose records were dropped.
+    pub forgotten: Vec<String>,
+    /// How many kept copies stopped being referenced, and are therefore now
+    /// candidates for `prune_unreferenced_backups`. Surfaced because "records
+    /// and nothing else" is not true when this is non-zero.
+    pub released_copies: usize,
+}
+
 /// Drop every [`FileOrigin::Adopted`] entry for one install, returning the
 /// paths forgotten.
 ///
@@ -853,13 +864,31 @@ pub fn record_adopted(
 /// records, not undoing anything. Entries Kalpa actually placed are left
 /// alone, because those still describe real writes that uninstall must be able
 /// to reverse.
-pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<Vec<String>, String> {
+pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<ForgetOutcome, String> {
     let _guard = lock_manifest();
     let mut manifest = load_manifest_at(manifest_path);
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get_mut(&key) else {
-        return Ok(Vec::new());
+        return Ok(ForgetOutcome::default());
     };
+
+    // Forgetting is safe because it changes nothing on disk — but that is only
+    // true while nothing on disk is displaced. With files parked, the records
+    // being dropped are the ones that say a `.kalpa-off` file is Kalpa's doing
+    // and which original belongs to it, and the UI's promise that "your stack
+    // keeps working" is simply false: it is switched off.
+    let parked: Vec<String> = bucket
+        .iter()
+        .filter(|file| file.parked)
+        .map(|file| file.relative_path.clone())
+        .collect();
+    if !parked.is_empty() {
+        return Err(format!(
+            "This stack is switched off — {} is parked. Switch it back on before Kalpa gives up \
+             its records for this folder.",
+            parked.join(", ")
+        ));
+    }
 
     let forgotten: Vec<String> = bucket
         .iter()
@@ -867,14 +896,28 @@ pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<Vec<St
         .map(|file| file.relative_path.clone())
         .collect();
     if forgotten.is_empty() {
-        return Ok(forgotten);
+        return Ok(ForgetOutcome::default());
     }
+
+    // Every kept copy is referenced only by the entry about to be dropped, so
+    // forgetting puts them all on `prune_unreferenced_backups`'s countdown. That
+    // is the right behaviour — Kalpa is giving up its records, and it does not
+    // get to keep 165 MB of the user's bytes it no longer claims to manage — but
+    // it is not "records and nothing else", so the caller is told the count and
+    // says so.
+    let released_copies = bucket
+        .iter()
+        .filter(|file| file.origin == FileOrigin::Adopted && file.displaced_backup.is_some())
+        .count();
     bucket.retain(|file| file.origin != FileOrigin::Adopted);
     if bucket.is_empty() {
         manifest.installs.remove(&key);
     }
     save_manifest_at(manifest_path, &manifest)?;
-    Ok(forgotten)
+    Ok(ForgetOutcome {
+        forgotten,
+        released_copies,
+    })
 }
 
 // ── Revert ───────────────────────────────────────────────────────────────
@@ -1143,7 +1186,25 @@ fn run_file_ops_locked(
         }
     }
 
-    apply_parked_flags(manifest_path, client_root, ops)?;
+    // The files have moved; the manifest has not. A save that fails here — an
+    // unwritable app-data folder, a full disk, the same conditions that fail the
+    // move itself — would leave the folder switched off with nothing recording
+    // it. `plan_enable` reads the folder rather than the manifest precisely so
+    // that state is still recoverable, but leaving it is still the wrong
+    // outcome when the whole batch is undoable, so undo it, exactly as the
+    // placement path does.
+    if let Err(error) = apply_parked_flags(manifest_path, client_root, ops) {
+        let stuck = undo_ops(client_root, &done);
+        return Err(if stuck.is_empty() {
+            format!("{error}\n\nNothing was changed — every step was undone.")
+        } else {
+            format!(
+                "{error}\n\nThe client folder is in a mixed state: these steps could not be \
+                 undone — {}.",
+                stuck.join("; ")
+            )
+        });
+    }
     Ok(outcome)
 }
 
@@ -2701,6 +2762,36 @@ mod tests {
         assert!(
             h.entry("dxgi.dll").parked,
             "the record of the parked file must survive"
+        );
+    }
+
+    /// The files move first and the manifest is written after. A save that
+    /// fails there would otherwise leave the folder switched off with nothing
+    /// recording it — the same conditions that fail the move (unwritable
+    /// app-data, a full disk) are exactly when this happens.
+    #[test]
+    fn a_batch_whose_manifest_save_fails_is_undone() {
+        let h = ParkHarness::new();
+        h.record("dxgi.dll", None);
+        let before = snapshot_dir(&h.client);
+
+        // Read-only, so the load still succeeds and finds the entry to flag but
+        // the save that follows cannot land.
+        let mut perms = std::fs::metadata(&h.manifest).expect("stat").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&h.manifest, perms).expect("make the manifest read-only");
+
+        let error = h
+            .run(&[FileOp::Park {
+                relative_path: "dxgi.dll".to_string(),
+            }])
+            .expect_err("an unwritable manifest must fail the batch");
+
+        assert!(error.contains("Nothing was changed"), "{error}");
+        assert_eq!(
+            before,
+            snapshot_dir(&h.client),
+            "the park must be undone, not left with no record of it"
         );
     }
 
