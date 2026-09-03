@@ -2177,15 +2177,26 @@ function App() {
     [dismissUploaderIntro, srAnnounce]
   );
 
-  const handleOpenDialog = useCallback(
-    (dialog: DialogId) => {
-      if (dialog === "log-upload") {
-        setLogUploaderMounted(true);
-        dismissUploaderIntro();
-      }
-      setActiveDialog(dialog);
+  // Deliberately does NOT dismiss the uploader intro. This is the generic
+  // "open a dialog" path, used by AppDialogs' onShowDialog — which covers
+  // Settings > Account's "Upload a log" and UploaderWorkspace's own onOpen.
+  // Neither of those dismissed the intro before the registry refactor, and
+  // dismissal is persisted to settings.json, so folding it in here would
+  // silently retire the intro card for good from surfaces that never did that.
+  const handleOpenDialog = useCallback((dialog: DialogId) => {
+    if (dialog === "log-upload") setLogUploaderMounted(true);
+    setActiveDialog(dialog);
+  }, []);
+
+  // The toolbar/AccountChip/intro-card path. Opening the uploader from one of
+  // these IS the deliberate act the intro card was asking for, so it retires
+  // the card — matching the pre-refactor handleOpenLogUpload.
+  const handleOpenFeature = useCallback(
+    (feature: FeatureId) => {
+      if (feature === "log-upload") dismissUploaderIntro();
+      handleOpenDialog(feature);
     },
-    [dismissUploaderIntro]
+    [dismissUploaderIntro, handleOpenDialog]
   );
 
   const handleOpenSettingsDialog = useCallback(
@@ -2193,8 +2204,8 @@ function App() {
     [handleOpenDialog]
   );
   const handleOpenLogUploadDialog = useCallback(
-    () => handleOpenDialog("log-upload"),
-    [handleOpenDialog]
+    () => handleOpenFeature("log-upload"),
+    [handleOpenFeature]
   );
 
   const handleCloseDialog = useCallback(() => {
@@ -2483,7 +2494,7 @@ function App() {
             onBatchTag={handleBatchTag}
             onBatchUpdate={handleBatchUpdateClick}
             toolbarFeatures={toolbarFeatures}
-            onOpenFeature={handleOpenDialog}
+            onOpenFeature={handleOpenFeature}
             onOpenSettings={handleOpenSettingsDialog}
             onOpenSupport={handleOpenSupportDialog}
             onAuthChange={handleAuthChange}
