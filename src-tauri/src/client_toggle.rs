@@ -561,7 +561,7 @@ pub fn to_file_ops(plan: &TogglePlan) -> Result<Vec<FileOp>, String> {
 // ── Commands ─────────────────────────────────────────────────────────────
 
 /// Read-only: what switching this stack would do.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn plan_client_toggle(app: tauri::AppHandle, client_dir: String) -> Result<TogglePlan, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let stack = crate::client_stack::inspect_stack(&location.client_dir);

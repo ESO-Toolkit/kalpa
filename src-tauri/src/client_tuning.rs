@@ -345,16 +345,15 @@ pub const FIELDS: &[FieldSpec] = &[
         decimals: 2,
         help: "",
     },
-    FieldSpec {
-        key: "EnableHooks",
-        label: "EnableHooks",
-        control: TuningControl::Toggle,
-        group: TuningGroup::Advanced,
-        choices: &[],
-        decimals: 0,
-        help: "Applies to Streamline titles only.",
-    },
 ];
+
+// `EnableHooks` is deliberately NOT in this table. It only does anything in a
+// Streamline title, and ESO ships no `sl.*.dll` modules at all — RenoDX itself
+// logs `EnableHooks=2 (Streamline modules left unpatched)` against this game.
+// Offering a switch whose own help text has to say "applies to other games"
+// is the general-settings-screen failure mode: every setting Kalpa can edit
+// exists because a finding points at it. The key still appears, read-only,
+// under the unknown-settings list if the user's file carries it.
 
 /// Look up a field by key, case-insensitively — ReShade does not preserve case.
 pub fn field_for(key: &str) -> Option<&'static FieldSpec> {
@@ -710,7 +709,7 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
 // ── Commands ─────────────────────────────────────────────────────────────
 
 /// Read-only: the current tuning values.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_client_tuning(client_dir: String) -> Result<TuningForm, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let ini_path = tuning_file_path(&location.client_dir);
@@ -860,6 +859,44 @@ mod tests {
     }
 
     // ── validate_edit ───────────────────────────────────────────────────
+
+    /// `EnableHooks` only does anything in a Streamline title and ESO ships no
+    /// `sl.*.dll` modules at all, so Kalpa offering a switch for it was
+    /// offering a control that provably cannot do anything here. The key still
+    /// belongs to the user, so it has to keep showing up — read-only, under
+    /// the unknown list — rather than disappear from a file that contains it.
+    #[test]
+    fn enable_hooks_is_shown_but_not_offered_as_a_control() {
+        assert!(
+            field_for("EnableHooks").is_none(),
+            "EnableHooks must not be an editable field"
+        );
+
+        let form = read_form(
+            "[RenoDX.DLSS5]\nNeuralUplift=1\nEnableHooks=2\n",
+            "C:/game/client",
+        );
+        assert!(
+            !form.fields.iter().any(|f| f.key == "EnableHooks"),
+            "it must not appear among the controls"
+        );
+        assert!(
+            form.unknown
+                .iter()
+                .any(|(key, value)| key == "EnableHooks" && value == "2"),
+            "it must still be reported, with the user's own value: {:?}",
+            form.unknown
+        );
+
+        let edit = TuningEdit {
+            key: "EnableHooks".to_string(),
+            value: "1".to_string(),
+        };
+        assert!(
+            validate_edit(&edit).is_err(),
+            "and writing it must be refused"
+        );
+    }
 
     #[test]
     fn validate_edit_refuses_an_unknown_key() {
@@ -1018,12 +1055,15 @@ mod tests {
     fn apply_edits_appends_missing_keys_with_canonical_spelling() {
         let original = "[RenoDX.DLSS5]\nneuraluplift=1\n";
         let edits = vec![TuningEdit {
-            key: "EnableHooks".to_string(),
+            key: "nruicorrection".to_string(),
             value: "1".to_string(),
         }];
 
         let updated = apply_edits(original, &edits).expect("section exists");
-        assert_eq!(updated, "[RenoDX.DLSS5]\nneuraluplift=1\nEnableHooks=1\n");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nneuraluplift=1\nNRUICorrection=1\n",
+            "an appended key takes the table's spelling, not the caller's"
+        );
     }
 
     #[test]
@@ -1046,12 +1086,15 @@ mod tests {
         // No trailing newline on the last line of the file.
         let original = "[RenoDX.DLSS5]\nNeuralUplift=1";
         let edits = vec![TuningEdit {
-            key: "EnableHooks".to_string(),
+            key: "NRUICorrection".to_string(),
             value: "1".to_string(),
         }];
 
         let updated = apply_edits(original, &edits).expect("section exists");
-        assert_eq!(updated, "[RenoDX.DLSS5]\nNeuralUplift=1\nEnableHooks=1\n");
+        assert_eq!(
+            updated,
+            "[RenoDX.DLSS5]\nNeuralUplift=1\nNRUICorrection=1\n"
+        );
     }
 
     /// ReShade resolves a duplicated key to the last occurrence, and

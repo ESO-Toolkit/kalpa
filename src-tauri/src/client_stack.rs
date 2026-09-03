@@ -1036,7 +1036,7 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
 // ── Command ──────────────────────────────────────────────────────────────
 
 /// Read-only inventory of the mod stack in a client directory.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_client_stack(client_dir: String) -> Result<ClientStack, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     Ok(inspect_stack(&location.client_dir))

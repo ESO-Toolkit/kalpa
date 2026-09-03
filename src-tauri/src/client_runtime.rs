@@ -373,7 +373,7 @@ pub fn kept_copy_path(
 /// Never calls [`crate::client_write::begin_write`] — this reads the client
 /// directory and the manifest, and writes nothing, so none of the write gates
 /// apply.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_client_runtimes(
     app: tauri::AppHandle,
     client_dir: String,

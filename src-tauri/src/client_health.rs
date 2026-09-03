@@ -729,7 +729,7 @@ pub fn validate_eso_client(path: String) -> Result<EsoClientLocation, String> {
 ///
 /// The path is re-validated rather than trusted, so a stale or hand-edited
 /// value from the frontend cannot aim the probe at an arbitrary directory.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_eso_client(client_dir: String) -> Result<ClientHealthReport, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     Ok(inspect_client(&location))

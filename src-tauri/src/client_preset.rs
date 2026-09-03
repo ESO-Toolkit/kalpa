@@ -337,7 +337,7 @@ pub fn replace_ini_value(
 // ── Commands ─────────────────────────────────────────────────────────────
 
 /// Read-only: the presets available and whether the active one is misordered.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_client_presets(client_dir: String) -> Result<PresetOptions, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let stack = crate::client_stack::inspect_stack(&location.client_dir);

@@ -51,6 +51,7 @@ use crate::client_backup;
 use crate::client_write::{
     self, AllowedGameInstallPath, ApprovedRoot, ManagedFile, ManagedKind, ManagedManifest,
 };
+use rayon::prelude::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -167,11 +168,13 @@ pub fn inventory_in(
     let manifest = client_backup::load_manifest_at(manifest_path);
     let key = install_key(client_root);
 
-    let mut files: Vec<ManagedFileStatus> = manifest
-        .installs
-        .get(&key)
-        .into_iter()
-        .flatten()
+    // Hashed in parallel: `status_for` reads every managed file end to end to
+    // tell Present from Modified, and the real stack is ~215 MB of it, most in
+    // one 165 MB neural-rendering runtime. Sequentially that is seconds of
+    // wall clock on the panel's critical path.
+    let entries: Vec<&ManagedFile> = manifest.installs.get(&key).into_iter().flatten().collect();
+    let mut files: Vec<ManagedFileStatus> = entries
+        .par_iter()
         .map(|entry| status_for(client_root, entry))
         .collect();
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
@@ -425,7 +428,7 @@ pub fn quarantine_file(
 
 /// List what Kalpa has placed in a client directory, and any orphan injector
 /// it can positively identify. Read-only; needs no write approval.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_managed_client_files(
     app: tauri::AppHandle,
     client_dir: String,

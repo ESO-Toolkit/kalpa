@@ -374,7 +374,7 @@ fn is_already_managed(manifest_path: &Path, client_root: &Path) -> bool {
 // ── Commands ─────────────────────────────────────────────────────────────
 
 /// Read-only: what adopting this client directory would record.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn plan_adoption(app: tauri::AppHandle, client_dir: String) -> Result<AdoptionPlan, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let manifest_path = crate::client_backup::manifest_path(&app)?;
@@ -410,7 +410,7 @@ pub async fn adopt_stack(
 }
 
 /// Forget the adopted stack. Records only; no file is touched.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn forget_stack(
     app: tauri::AppHandle,
     client_dir: String,
