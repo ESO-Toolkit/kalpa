@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AddonManifest, ViewMode } from "@/types";
 import { AddonList } from "@/components/addon-list";
@@ -131,10 +132,18 @@ function Harness({
   children,
   onRemoveAddon,
   removalBlockedReason,
+  onSelect,
+  onToggleSelect,
+  selectedFolders,
+  selectedAddon,
 }: {
   children?: ReactNode;
   onRemoveAddon?: (folderName: string) => void;
   removalBlockedReason?: string;
+  onSelect?: (addon: AddonManifest) => void;
+  onToggleSelect?: (folderName: string) => void;
+  selectedFolders?: Set<string>;
+  selectedAddon?: AddonManifest | null;
 }) {
   const [viewMode, setViewMode] = useState<ViewMode>("installed");
 
@@ -143,8 +152,8 @@ function Harness({
       <AddonList
         addons={[addon]}
         allAddons={[addon]}
-        selectedAddon={null}
-        onSelect={vi.fn()}
+        selectedAddon={selectedAddon ?? null}
+        onSelect={onSelect ?? vi.fn()}
         searchQuery=""
         onSearchChange={vi.fn()}
         loading={false}
@@ -155,8 +164,8 @@ function Harness({
         onFilterChange={vi.fn()}
         activeTagFilter={null}
         onActiveTagFilterChange={vi.fn()}
-        selectedFolders={new Set()}
-        onToggleSelect={vi.fn()}
+        selectedFolders={selectedFolders ?? new Set()}
+        onToggleSelect={onToggleSelect ?? vi.fn()}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         discoverTab="search"
@@ -205,5 +214,136 @@ describe("AddonList", () => {
     expect(enabledRemove).toBeEnabled();
     fireEvent.click(enabledRemove);
     expect(onRemoveAddon).toHaveBeenCalledWith(addon.folderName);
+  });
+  it("exposes exactly one checkbox per row, with no nested interactive elements", async () => {
+    const { container } = render(<Harness />);
+    const row = await screen.findByRole("option");
+
+    expect(within(row).getAllByRole("checkbox")).toHaveLength(1);
+    expect(container.querySelectorAll("button button")).toHaveLength(0);
+  });
+
+  it("keeps the row checkbox out of the tab order until batch mode is active", async () => {
+    const { rerender } = render(<Harness />);
+    expect(await screen.findByRole("checkbox", { name: `Select ${addon.title}` })).toHaveAttribute(
+      "tabindex",
+      "-1"
+    );
+
+    rerender(<Harness selectedFolders={new Set([addon.folderName])} />);
+    expect(screen.getByRole("checkbox", { name: `Select ${addon.title}` })).toHaveAttribute(
+      "tabindex",
+      "0"
+    );
+  });
+
+  it("toggles selection by pointer without opening the addon", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onToggleSelect = vi.fn();
+    render(<Harness onSelect={onSelect} onToggleSelect={onToggleSelect} />);
+
+    await user.click(await screen.findByRole("checkbox", { name: `Select ${addon.title}` }));
+
+    expect(onToggleSelect).toHaveBeenCalledTimes(1);
+    expect(onToggleSelect).toHaveBeenCalledWith(addon.folderName);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("toggles selection from the keyboard once batch mode is active", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onToggleSelect = vi.fn();
+    render(
+      <Harness
+        onSelect={onSelect}
+        onToggleSelect={onToggleSelect}
+        selectedFolders={new Set([addon.folderName])}
+      />
+    );
+
+    const checkbox = await screen.findByRole("checkbox", { name: `Select ${addon.title}` });
+    expect(checkbox).toHaveAttribute("aria-checked", "true");
+
+    checkbox.focus();
+    expect(checkbox).toHaveFocus();
+    await user.keyboard("[Space]");
+
+    expect(onToggleSelect).toHaveBeenCalledTimes(1);
+    expect(onToggleSelect).toHaveBeenCalledWith(addon.folderName);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("drives batch-select mode end to end from the row checkbox", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+
+    function BatchHarness() {
+      const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+      return (
+        <Harness
+          onSelect={onSelect}
+          selectedFolders={selectedFolders}
+          onToggleSelect={(folderName) =>
+            setSelectedFolders((prev) => {
+              const next = new Set(prev);
+              if (next.has(folderName)) next.delete(folderName);
+              else next.add(folderName);
+              return next;
+            })
+          }
+        />
+      );
+    }
+
+    render(<BatchHarness />);
+
+    const checkbox = await screen.findByRole("checkbox", { name: `Select ${addon.title}` });
+    expect(checkbox).toHaveAttribute("aria-checked", "false");
+    expect(checkbox).toHaveAttribute("tabindex", "-1");
+
+    // Entering batch mode checks the row and pulls the checkbox into the tab order.
+    await user.click(checkbox);
+    expect(checkbox).toHaveAttribute("aria-checked", "true");
+    expect(checkbox).toHaveAttribute("tabindex", "0");
+    expect(await screen.findByText("· 1 selected")).toBeInTheDocument();
+
+    // Leaving it again clears the row and drops the checkbox back out.
+    await user.click(checkbox);
+    expect(checkbox).toHaveAttribute("aria-checked", "false");
+    expect(checkbox).toHaveAttribute("tabindex", "-1");
+    expect(screen.queryByText("· 1 selected")).not.toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("still navigates the list from the keyboard when the listbox holds focus", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+
+    // Space only re-selects the current row, so the harness has to track which
+    // row ArrowDown landed on.
+    function NavHarness() {
+      const [selected, setSelected] = useState<AddonManifest | null>(null);
+      return (
+        <Harness
+          selectedAddon={selected}
+          onSelect={(next) => {
+            setSelected(next);
+            onSelect(next);
+          }}
+        />
+      );
+    }
+
+    render(<NavHarness />);
+
+    const listbox = await screen.findByRole("listbox");
+    listbox.focus();
+    expect(listbox).toHaveFocus();
+
+    await user.keyboard("{ArrowDown}");
+    expect(onSelect).toHaveBeenCalledWith(addon);
+
+    onSelect.mockClear();
+    await user.keyboard("[Space]");
+    expect(onSelect).toHaveBeenCalledWith(addon);
   });
 });

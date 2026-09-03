@@ -51,6 +51,7 @@ use crate::client_backup;
 use crate::client_write::{
     self, AllowedGameInstallPath, ApprovedRoot, ManagedFile, ManagedKind, ManagedManifest,
 };
+use rayon::prelude::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -74,6 +75,15 @@ pub enum ManagedFileState {
     /// Recorded in the manifest but no longer on disk. Uninstall drops the
     /// entry and restores any displaced original.
     Missing,
+    /// Moved aside by "switch this stack off" and still there under its
+    /// `.kalpa-off` name.
+    ///
+    /// A distinct state because the alternative is worse than untidy: without
+    /// it a parked file reads as [`Missing`](Self::Missing), and uninstall
+    /// treats missing as "drop the entry and put the displaced original back" —
+    /// which for a stack the user only switched off would quietly discard the
+    /// record of files still sitting in their folder.
+    Parked,
 }
 
 /// One managed file, as the panel shows it.
@@ -158,11 +168,13 @@ pub fn inventory_in(
     let manifest = client_backup::load_manifest_at(manifest_path);
     let key = install_key(client_root);
 
-    let mut files: Vec<ManagedFileStatus> = manifest
-        .installs
-        .get(&key)
-        .into_iter()
-        .flatten()
+    // Hashed in parallel: `status_for` reads every managed file end to end to
+    // tell Present from Modified, and the real stack is ~215 MB of it, most in
+    // one 165 MB neural-rendering runtime. Sequentially that is seconds of
+    // wall clock on the panel's critical path.
+    let entries: Vec<&ManagedFile> = manifest.installs.get(&key).into_iter().flatten().collect();
+    let mut files: Vec<ManagedFileStatus> = entries
+        .par_iter()
         .map(|entry| status_for(client_root, entry))
         .collect();
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
@@ -190,10 +202,27 @@ fn install_key(client_root: &Path) -> String {
 
 /// Classify one manifest entry against what is on disk.
 fn status_for(client_root: &Path, entry: &ManagedFile) -> ManagedFileStatus {
-    let state = match client_write::safe_relative_join(client_root, &entry.relative_path) {
+    // A parked entry describes a file under its `.kalpa-off` name, so resolve
+    // there rather than at the live path the manifest still records.
+    let lookup = if entry.parked {
+        format!(
+            "{}{}",
+            entry.relative_path,
+            crate::client_stack::PARKED_SUFFIX
+        )
+    } else {
+        entry.relative_path.clone()
+    };
+    let state = match client_write::safe_relative_join(client_root, &lookup) {
         Err(_) => ManagedFileState::Modified,
         Ok(resolved) => {
-            if !resolved.is_file() {
+            if entry.parked {
+                if resolved.is_file() {
+                    ManagedFileState::Parked
+                } else {
+                    ManagedFileState::Missing
+                }
+            } else if !resolved.is_file() {
                 ManagedFileState::Missing
             } else {
                 match client_backup::hash_file(&resolved) {
@@ -399,7 +428,7 @@ pub fn quarantine_file(
 
 /// List what Kalpa has placed in a client directory, and any orphan injector
 /// it can positively identify. Read-only; needs no write approval.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_managed_client_files(
     app: tauri::AppHandle,
     client_dir: String,
@@ -535,6 +564,7 @@ mod tests {
                 displaced_backup,
                 origin: crate::client_write::FileOrigin::Placed,
                 displaced_in_place: None,
+                parked: false,
             }
         }
 

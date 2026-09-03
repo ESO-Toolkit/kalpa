@@ -94,6 +94,19 @@ pub struct PreservedOriginal {
     pub size_bytes: u64,
 }
 
+/// A file Kalpa has parked so the stack does not load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ParkedFile {
+    /// Name on disk, ending in [`PARKED_SUFFIX`].
+    pub file_name: String,
+    /// The live name it goes back to.
+    pub restores: String,
+    pub size_bytes: u64,
+    /// True when something already occupies the name it would restore, which
+    /// means re-enabling has to displace it rather than just rename.
+    pub target_present: bool,
+}
+
 /// One technique in a preset's ordered list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Technique {
@@ -103,6 +116,85 @@ pub struct Technique {
     pub source: String,
     /// Whether that source file was found under the shader search path.
     pub source_present: bool,
+}
+
+/// Which motion-vector provider `DLSS5_Feed.fx` is configured to read.
+///
+/// The effect chooses on two levels, and both have to be read to get the
+/// answer right. `DLSS5_MV_SOURCE` is a *preprocessor* definition: at `1` the
+/// LaunchPad code path is not compiled in at all, so the `MV_PROVIDER`
+/// dropdown does not exist and the shared-texture convention is the only
+/// option. At `0` (the default) `MV_PROVIDER` picks between them at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MvProviderKind {
+    /// Anything writing the shared `texMotionVectors` texture — qUINT,
+    /// `dh_uber_motion`, DRME, ReshadeMotionEstimation. There is no name to
+    /// match on, so which effect it is can only be answered by looking at which
+    /// enabled one declares that texture.
+    SharedTexture,
+    /// iMMERSE LaunchPad (MartysMods).
+    Launchpad,
+    /// VORT.
+    Vort,
+    /// LumeniteFX Kernel — upstream's current recommendation.
+    LumeniteKernel,
+    /// LumeniteFX QuantMotion.
+    LumeniteQuantMotion,
+}
+
+impl MvProviderKind {
+    /// The technique name upstream says to enable for this provider, plus the
+    /// spellings older presets use for the same effect.
+    ///
+    /// Matching is by name because that is what upstream documents per provider.
+    /// [`MvProviderKind::SharedTexture`] has no entry: it is a convention rather
+    /// than a named effect, and is resolved by reading the shader sources.
+    fn technique_names(self) -> &'static [&'static str] {
+        match self {
+            MvProviderKind::SharedTexture => &[],
+            // `Launchpad` is what current DLSS5-Feeder documents;
+            // `MartysMods_Launchpad` is what iMMERSE presets of the 0.4.x era
+            // actually contain, including the primary user's.
+            MvProviderKind::Launchpad => &["Launchpad", "MartysMods_Launchpad"],
+            MvProviderKind::Vort => &["vort_Motion"],
+            MvProviderKind::LumeniteKernel => &["LUMENITE: Kernel 2.0"],
+            MvProviderKind::LumeniteQuantMotion => &["LUMENITE: QuantMotion"],
+        }
+    }
+
+    /// Upstream's own name for the provider, for use in a sentence.
+    fn label(self) -> &'static str {
+        match self {
+            MvProviderKind::SharedTexture => "the shared texMotionVectors texture",
+            MvProviderKind::Launchpad => "iMMERSE LaunchPad",
+            MvProviderKind::Vort => "VORT",
+            MvProviderKind::LumeniteKernel => "LumeniteFX Kernel",
+            MvProviderKind::LumeniteQuantMotion => "LumeniteFX QuantMotion",
+        }
+    }
+
+    /// `DLSS5_MV_PROVIDER`'s value, in current DLSS5-Feeder.
+    fn from_mv_provider_definition(value: i64) -> Option<Self> {
+        match value {
+            0 => Some(MvProviderKind::SharedTexture),
+            1 => Some(MvProviderKind::Launchpad),
+            2 => Some(MvProviderKind::Vort),
+            3 => Some(MvProviderKind::LumeniteKernel),
+            4 => Some(MvProviderKind::LumeniteQuantMotion),
+            _ => None,
+        }
+    }
+}
+
+/// The resolved provider, plus the enabled technique that actually supplies
+/// the vectors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MvProvider {
+    pub kind: MvProviderKind,
+    /// The enabled technique producing the vectors, when one was found. `None`
+    /// means nothing in the preset feeds the runtime — the feed reads zeros.
+    pub technique: Option<String>,
 }
 
 /// The active preset.
@@ -116,6 +208,9 @@ pub struct PresetInfo {
     pub techniques: Vec<Technique>,
     /// Everything the preset knows about, enabled or not.
     pub available: Vec<String>,
+    /// Resolved motion-vector provider. `None` when the preset does not enable
+    /// the feed technique at all, so the question does not arise.
+    pub mv_provider: Option<MvProvider>,
 }
 
 /// One tunable from the `[RenoDX.DLSS5]` block.
@@ -144,6 +239,11 @@ pub struct ClientStack {
     /// re-deriving the order.
     pub items: Vec<StackItem>,
     pub preserved_originals: Vec<PreservedOriginal>,
+    /// Files Kalpa parked when the stack was switched off.
+    pub parked: Vec<ParkedFile>,
+    /// True when the injector itself is parked, i.e. ESO is back to stock and
+    /// loads none of this.
+    pub is_disabled: bool,
     pub shaders: ShaderTree,
     pub preset: Option<PresetInfo>,
     pub tuning: Vec<TuningValue>,
@@ -163,6 +263,15 @@ const ADDON_EXTENSIONS: [&str; 3] = ["addon64", "addon32", "addon"];
 /// two are the primary user's own hand-rolled convention.
 const BACKUP_SUFFIXES: [&str; 4] = [".disabled-bak", ".eso-orig-bak", ".bak", ".orig"];
 
+/// The suffix Kalpa parks a live file under when the stack is switched off.
+///
+/// Deliberately **not** one of [`BACKUP_SUFFIXES`]. Those are the user's own
+/// names for their own originals: in a real install `nvngx_dlss.dll.disabled-bak`
+/// *is* the stock DLL the fallback depends on, so parking a live file under that
+/// name would overwrite the one thing disable exists to restore. Kalpa only ever
+/// writes this suffix, and only ever removes files carrying it.
+pub const PARKED_SUFFIX: &str = ".kalpa-off";
+
 /// Files that are companions to a known addon: not loaded by the game, but the
 /// stack does not work without them.
 const COMPANION_NAMES: [&str; 3] = [
@@ -171,10 +280,21 @@ const COMPANION_NAMES: [&str; 3] = [
     "dlss5-feed-host32.exe",
 ];
 
-/// The technique that must run *before* `DLSS5_Feed`, because it produces the
-/// motion vectors and normals the feed consumes.
-const FEED_PREREQUISITE: &str = "martysmods_launchpad";
+/// The technique that consumes the motion vectors, and the effect file it
+/// lives in.
 const FEED_TECHNIQUE: &str = "dlss5_feed";
+const FEED_SOURCE: &str = "dlss5_feed.fx";
+
+/// LaunchPad's effect file. Its *technique* names live in
+/// [`MvProviderKind::technique_names`] alongside every other provider's; the
+/// source is matched as well because a preset can rename a technique but not
+/// the file it comes from.
+const LAUNCHPAD_SOURCE: &str = "martysmods_launchpad.fx";
+
+/// The shared texture every non-LaunchPad provider writes. `DLSS5_Feed.fx`
+/// declares it too, which is why the feed's own source is excluded when
+/// searching for who supplies it.
+const SHARED_MV_TEXTURE: &str = "texmotionvectors";
 
 // ── INI parsing ──────────────────────────────────────────────────────────
 
@@ -189,6 +309,12 @@ const FEED_TECHNIQUE: &str = "dlss5_feed";
 fn parse_ini(contents: &str) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut section = String::new();
+
+    // `str::trim` does not remove `U+FEFF` — it is a format character, not
+    // whitespace — so a file saved with a BOM opens with `\u{feff}[GENERAL]`,
+    // whose header match fails and whose keys then land in the headerless
+    // section. Every reading of that file would be silently wrong.
+    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
 
     for raw in contents.lines() {
         let line = raw.trim();
@@ -304,6 +430,7 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
 
     // Addons and preserved originals both come from one directory walk.
     let mut preserved_originals: Vec<PreservedOriginal> = Vec::new();
+    let mut parked: Vec<ParkedFile> = Vec::new();
     let mut live_names: Vec<String> = Vec::new();
     let mut addon_files: Vec<String> = Vec::new();
 
@@ -316,6 +443,15 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
             let lower = name.to_ascii_lowercase();
             live_names.push(lower.clone());
 
+            if let Some(restores) = lower.strip_suffix(PARKED_SUFFIX) {
+                parked.push(ParkedFile {
+                    file_name: name.clone(),
+                    restores: restores.to_string(),
+                    size_bytes: size_of(&entry.path()),
+                    target_present: false,
+                });
+                continue;
+            }
             if let Some(target) = backup_target(&lower) {
                 preserved_originals.push(PreservedOriginal {
                     file_name: name.clone(),
@@ -367,6 +503,14 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     }
     preserved_originals.sort_by(|a, b| a.file_name.cmp(&b.file_name));
 
+    for file in &mut parked {
+        file.target_present = live_names.contains(&file.restores);
+    }
+    parked.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    let is_disabled = parked
+        .iter()
+        .any(|file| INJECTOR_NAMES.contains(&file.restores.as_str()));
+
     let shaders = read_shader_tree(client_dir, &ini);
     let preset = read_preset(client_dir, &ini);
 
@@ -392,12 +536,15 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
 
     items.sort_by(|a, b| a.role.cmp(&b.role).then(a.file_name.cmp(&b.file_name)));
 
-    let is_empty = items.is_empty() && preserved_originals.is_empty() && !shaders.present;
+    let is_empty =
+        items.is_empty() && preserved_originals.is_empty() && parked.is_empty() && !shaders.present;
 
     let mut stack = ClientStack {
         client_dir: client_dir.to_string_lossy().to_string(),
         items,
         preserved_originals,
+        parked,
+        is_disabled,
         shaders,
         preset,
         tuning,
@@ -454,19 +601,26 @@ fn read_preset(
     if relative.is_empty() {
         return None;
     }
-    // Presets are written relative to the client dir as `.\Name.ini`.
-    let path = client_dir.join(relative.trim_start_matches(r".\").trim_start_matches("./"));
-    let exists = path.is_file();
-    let contents = if exists {
-        std::fs::read_to_string(&path).unwrap_or_default()
-    } else {
-        String::new()
+    // Presets are written relative to the client dir as `.\Name.ini`. The value
+    // is text out of someone else's config file, so it goes through the
+    // containment check rather than a bare `join`: `..\..\elsewhere.ini` and
+    // `C:elsewhere.ini` both escape a plain join, and this module would then
+    // read and report a file outside the game folder as if it were the preset.
+    let path = crate::client_write::safe_relative_join(
+        client_dir,
+        relative.trim_start_matches(r".\").trim_start_matches("./"),
+    )
+    .ok();
+    let exists = path.as_ref().is_some_and(|p| p.is_file());
+    let contents = match &path {
+        Some(path) if exists => std::fs::read_to_string(path).unwrap_or_default(),
+        _ => String::new(),
     };
     let preset_ini = parse_ini(&contents);
 
     let shader_dir = client_dir.join("reshade-shaders").join("Shaders");
     let technique_entries = ini_get(&preset_ini, "", "Techniques").unwrap_or_default();
-    let techniques = technique_entries
+    let techniques: Vec<Technique> = technique_entries
         .split(',')
         .filter_map(split_technique)
         .map(|(name, source)| Technique {
@@ -483,26 +637,162 @@ fn read_preset(
         .map(|(name, _)| name)
         .collect();
 
+    let mv_provider = resolve_mv_provider(&preset_ini, ini, &shader_dir, &techniques);
+
     Some(PresetInfo {
         path: raw.to_string(),
         exists,
         techniques,
         available,
+        mv_provider,
     })
 }
 
 /// Shader packs nest one level (`Shaders/MartysMods/...`), so look in the root
 /// and in immediate subdirectories.
-fn shader_source_exists(shader_dir: &Path, source: &str) -> bool {
-    if shader_dir.join(source).is_file() {
-        return true;
+///
+/// `source` is the right-hand side of a `Technique@Source.fx` entry in a preset
+/// file, which the user or ReShade owns and Kalpa does not validate on the way
+/// in. A bare `Path::join` with a segment like `C:pwned.fx` is drive-relative on
+/// Windows: it discards `shader_dir` entirely and resolves against the process
+/// cwd. Nothing here writes, so the worst case today is reporting a shader as
+/// present because an unrelated file exists elsewhere — but it is the same
+/// class as the two joins already fixed in this module, and the answer feeds
+/// findings the user acts on. `safe_relative_join` refusing reads as "not
+/// found", which is the safe direction for a presence test.
+fn find_shader_source(shader_dir: &Path, source: &str) -> Option<std::path::PathBuf> {
+    let direct = crate::client_write::safe_relative_join(shader_dir, source).ok()?;
+    if direct.is_file() {
+        return Some(direct);
     }
-    let Ok(entries) = std::fs::read_dir(shader_dir) else {
+    std::fs::read_dir(shader_dir).ok()?.flatten().find_map(|e| {
+        let dir = e.path();
+        if !dir.is_dir() {
+            return None;
+        }
+        let nested = crate::client_write::safe_relative_join(&dir, source).ok()?;
+        nested.is_file().then_some(nested)
+    })
+}
+
+fn shader_source_exists(shader_dir: &Path, source: &str) -> bool {
+    find_shader_source(shader_dir, source).is_some()
+}
+
+/// Read one entry out of a ReShade `PreprocessorDefinitions=A=1,B=2` list.
+fn preprocessor_definition<'a>(
+    ini: &'a BTreeMap<String, BTreeMap<String, String>>,
+    section: &str,
+    name: &str,
+) -> Option<&'a str> {
+    let list = ini_get(ini, section, "PreprocessorDefinitions")?;
+    list.split(',').find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Work out who feeds `DLSS5_Feed`.
+///
+/// Kalpa used to assume LaunchPad. It is only ever one option, and which
+/// options exist depends on which generation of `DLSS5_Feed.fx` is installed —
+/// so both are read, newest first:
+///
+/// * **Current DLSS5-Feeder** uses one preprocessor definition,
+///   `DLSS5_MV_PROVIDER`, taking `0`–`4`: shared `texMotionVectors`, iMMERSE
+///   LaunchPad, VORT, LumeniteFX Kernel (upstream's recommendation), LumeniteFX
+///   QuantMotion. Each names the technique to enable, so the provider is matched
+///   by name.
+/// * **0.4.x**, which is what the primary user runs, uses two levels instead:
+///   `DLSS5_MV_SOURCE` decides at compile time whether the LaunchPad path is
+///   linked in at all — its headers cannot coexist with `ReShade.fxh` — and the
+///   runtime `MV_PROVIDER` uniform picks between LaunchPad (`0`) and the shared
+///   texture (`1`).
+///
+/// Assuming LaunchPad did not produce a wrong answer, it produced *no* answer:
+/// the ordering check looked for a technique that was not in the preset and
+/// silently never ran. Reading only the 0.4.x scheme would do the same thing
+/// again to anyone on a current build.
+fn resolve_mv_provider(
+    preset_ini: &BTreeMap<String, BTreeMap<String, String>>,
+    reshade_ini: &BTreeMap<String, BTreeMap<String, String>>,
+    shader_dir: &Path,
+    techniques: &[Technique],
+) -> Option<MvProvider> {
+    if !techniques.iter().any(is_feed_technique) {
+        return None;
+    }
+
+    // Per-effect definitions win over the global list; absent both, the effect's
+    // own `#ifndef` default applies.
+    let definition = |name: &str| {
+        preprocessor_definition(preset_ini, FEED_SOURCE, name)
+            .or_else(|| preprocessor_definition(reshade_ini, "GENERAL", name))
+    };
+
+    let kind = match definition("DLSS5_MV_PROVIDER") {
+        // Current scheme. An unrecognised value is a build newer than this
+        // table, and guessing which provider it means is exactly the mistake
+        // this function exists to stop making — fall back to the convention
+        // that needs no name.
+        Some(value) => value
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .and_then(MvProviderKind::from_mv_provider_definition)
+            .unwrap_or(MvProviderKind::SharedTexture),
+        None => {
+            let launchpad_compiled_in = definition("DLSS5_MV_SOURCE").unwrap_or("0").trim() == "0";
+            let selected = ini_get(preset_ini, FEED_SOURCE, "MV_PROVIDER")
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+            if launchpad_compiled_in && selected == 0 {
+                MvProviderKind::Launchpad
+            } else {
+                MvProviderKind::SharedTexture
+            }
+        }
+    };
+
+    let names = kind.technique_names();
+    let technique = techniques
+        .iter()
+        .find(|t| {
+            if names.is_empty() {
+                // A convention, not a named effect: ask the shader files
+                // themselves which enabled one deals in the shared texture. The
+                // feed declares it too — as the consumer — so its own source is
+                // excluded.
+                !t.source.eq_ignore_ascii_case(FEED_SOURCE)
+                    && source_mentions_shared_mv(shader_dir, &t.source)
+            } else {
+                names.iter().any(|name| t.name.eq_ignore_ascii_case(name))
+                    || (kind == MvProviderKind::Launchpad
+                        && t.source.eq_ignore_ascii_case(LAUNCHPAD_SOURCE))
+            }
+        })
+        .map(|t| t.name.clone());
+
+    Some(MvProvider { kind, technique })
+}
+
+/// Does this effect file deal in `texMotionVectors` at all?
+///
+/// A declaration is not proof the effect *writes* the texture — a second
+/// consumer would match too. It is the strongest signal available without
+/// parsing HLSL, and naming the wrong enabled effect is a far smaller error
+/// than the check not running.
+fn source_mentions_shared_mv(shader_dir: &Path, source: &str) -> bool {
+    let Some(path) = find_shader_source(shader_dir, source) else {
         return false;
     };
-    entries
-        .flatten()
-        .any(|entry| entry.path().is_dir() && entry.path().join(source).is_file())
+    std::fs::read_to_string(&path)
+        .map(|text| text.to_ascii_lowercase().contains(SHARED_MV_TEXTURE))
+        .unwrap_or(false)
+}
+
+fn is_feed_technique(t: &Technique) -> bool {
+    t.name.eq_ignore_ascii_case(FEED_TECHNIQUE)
 }
 
 // ── Findings ─────────────────────────────────────────────────────────────
@@ -533,6 +823,31 @@ fn has_file(stack: &ClientStack, name: &str) -> bool {
 pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
     let mut out = Vec::new();
     if stack.is_empty {
+        return out;
+    }
+
+    // A switched-off stack loads nothing, so every cross-layer check below
+    // would be describing a configuration that is not running. Reporting a
+    // missing injector — which disable deliberately created — or a DLSS that
+    // has "reverted" — which is disable putting the stock file back — would be
+    // Kalpa alarming the user about its own work. Say the one true thing and
+    // stop; the rest becomes relevant again on re-enable.
+    if stack.is_disabled {
+        out.push(finding(
+            "stack-disabled",
+            HealthLevel::Info,
+            "This stack is switched off",
+            format!(
+                "Kalpa has parked {} so ESO loads none of it, and put the game's own files \
+                 back. Re-enable to reverse that.",
+                stack
+                    .parked
+                    .iter()
+                    .map(|file| file.restores.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
         return out;
     }
 
@@ -614,37 +929,57 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
         }
 
         // The ordering rule. This is the failure worth catching: everything
-        // loads, nothing errors, and the output is quietly wrong.
+        // loads, nothing errors, and the output is quietly wrong. Which
+        // technique has to be above the feed depends on MV_PROVIDER, so the
+        // check is driven by the resolved provider rather than by a name.
         let position = |needle: &str| {
             preset
                 .techniques
                 .iter()
-                .position(|t| t.name.to_ascii_lowercase() == needle)
+                .position(|t| t.name.eq_ignore_ascii_case(needle))
         };
-        if let (Some(feed), Some(launchpad)) =
-            (position(FEED_TECHNIQUE), position(FEED_PREREQUISITE))
-        {
-            if launchpad > feed {
-                out.push(finding(
-                    "stack-technique-order",
+        match (position(FEED_TECHNIQUE), preset.mv_provider.as_ref()) {
+            (Some(feed), Some(provider)) => match &provider.technique {
+                Some(name) if position(name).is_some_and(|at| at > feed) => {
+                    out.push(finding(
+                        "stack-technique-order",
+                        HealthLevel::Danger,
+                        "Effects are in the wrong order",
+                        format!(
+                            "DLSS5_Feed runs before {name} in this preset. {name} produces the \
+                             motion vectors the feed consumes, so with this order the feed reads \
+                             last frame's data. Nothing errors — the image is just quietly wrong."
+                        ),
+                    ));
+                }
+                Some(_) => {}
+                None => out.push(finding(
+                    "stack-mv-provider-missing",
                     HealthLevel::Danger,
-                    "Effects are in the wrong order",
-                    "DLSS5_Feed runs before MartysMods_Launchpad in this preset. Launchpad \
-                     produces the motion vectors and normals the feed consumes, so with this \
-                     order the feed reads last frame's data. Nothing errors — the image is \
-                     just quietly wrong."
-                        .to_string(),
-                ));
-            }
-        } else if feed_addon && position(FEED_TECHNIQUE).is_none() {
-            out.push(finding(
+                    "Nothing is producing motion vectors",
+                    match provider.kind.technique_names().first() {
+                        Some(technique) => format!(
+                            "DLSS5_Feed is set to read motion vectors from {}, but this preset \
+                             does not enable its technique ({technique}). The feed reads zeros, \
+                             so DLSS sees a still image.",
+                            provider.kind.label()
+                        ),
+                        None => "DLSS5_Feed is set to read motion vectors from the shared \
+                             texMotionVectors texture, but no enabled effect in this preset \
+                             writes it. The feed reads zeros, so DLSS sees a still image."
+                            .to_string(),
+                    },
+                )),
+            },
+            _ if feed_addon => out.push(finding(
                 "stack-feed-technique-off",
                 HealthLevel::Warning,
                 "DLSS 5 Feed is installed but not enabled",
                 "The feed addon is present, but the active preset does not enable the \
                  DLSS5_Feed technique, so nothing feeds the runtime."
                     .to_string(),
-            ));
+            )),
+            _ => {}
         }
     }
 
@@ -701,7 +1036,7 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
 // ── Command ──────────────────────────────────────────────────────────────
 
 /// Read-only inventory of the mod stack in a client directory.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_client_stack(client_dir: String) -> Result<ClientStack, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     Ok(inspect_stack(&location.client_dir))
@@ -807,6 +1142,227 @@ DEBUG_VIEW=1
         );
     }
 
+    /// Write a `texMotionVectors` provider effect into the shader tree and
+    /// point the preset at it with `MV_PROVIDER=1`.
+    fn shared_texture_preset(dir: &Path, techniques: &str) {
+        std::fs::write(
+            dir.join("reshade-shaders")
+                .join("Shaders")
+                .join("MotionEstimation.fx"),
+            "texture texMotionVectors { Format = RG16F; };\n",
+        )
+        .unwrap();
+        write(
+            dir,
+            "ReShadePreset.ini",
+            &format!("Techniques={techniques}\n\n[DLSS5_Feed.fx]\nMV_PROVIDER=1\n"),
+        );
+    }
+
+    /// The bug this fixes: with a non-LaunchPad provider the ordering check
+    /// used to look for a technique that is not in the preset, so it never ran.
+    #[test]
+    fn a_shared_texture_provider_below_the_feed_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        shared_texture_preset(
+            tmp.path(),
+            "DLSS5_Feed@DLSS5_Feed.fx,MotionEstimation@MotionEstimation.fx",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            ids(&stack).contains(&"stack-technique-order"),
+            "expected the ordering finding, got {:?}",
+            ids(&stack)
+        );
+        let detail = &stack
+            .findings
+            .iter()
+            .find(|f| f.id == "stack-technique-order")
+            .unwrap()
+            .detail;
+        assert!(
+            detail.contains("MotionEstimation"),
+            "the finding must name the real provider, got {detail}"
+        );
+    }
+
+    /// Current DLSS5-Feeder replaced the two-level `DLSS5_MV_SOURCE` +
+    /// `MV_PROVIDER` scheme with a single `DLSS5_MV_PROVIDER` definition taking
+    /// 0–4, and recommends LumeniteFX Kernel (3). Reading only the older scheme
+    /// would leave the ordering check looking for a technique that is not in
+    /// the preset — the exact silent no-op this whole resolver exists to stop.
+    #[test]
+    fn the_current_mv_provider_definition_is_understood() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,LUMENITE: Kernel 2.0@lumenite_kernel.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=3\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        let provider = stack
+            .preset
+            .as_ref()
+            .and_then(|preset| preset.mv_provider.as_ref())
+            .expect("provider");
+        assert_eq!(provider.kind, MvProviderKind::LumeniteKernel);
+        assert_eq!(provider.technique.as_deref(), Some("LUMENITE: Kernel 2.0"));
+
+        let detail = &stack
+            .findings
+            .iter()
+            .find(|f| f.id == "stack-technique-order")
+            .expect("the ordering check must run for this provider too")
+            .detail;
+        assert!(detail.contains("LUMENITE: Kernel 2.0"), "{detail}");
+    }
+
+    /// The numbering is not the same as the old runtime combo: `1` is LaunchPad
+    /// under `DLSS5_MV_PROVIDER`, where `0` was LaunchPad under `MV_PROVIDER`.
+    /// Getting that backwards would name the wrong effect.
+    #[test]
+    fn the_two_provider_schemes_number_launchpad_differently() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=1\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+
+        assert_eq!(provider.kind, MvProviderKind::Launchpad);
+        assert_eq!(
+            provider.technique.as_deref(),
+            Some("MartysMods_Launchpad"),
+            "the preset's own spelling is matched, not just upstream's"
+        );
+    }
+
+    /// A build newer than this table must not be guessed at. Falling back to the
+    /// convention that needs no name is the honest answer.
+    #[test]
+    fn an_unknown_provider_value_falls_back_rather_than_guessing() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=9\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+
+        assert_eq!(provider.kind, MvProviderKind::SharedTexture);
+    }
+
+    #[test]
+    fn a_shared_texture_provider_above_the_feed_is_quiet() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        shared_texture_preset(
+            tmp.path(),
+            "MotionEstimation@MotionEstimation.fx,DLSS5_Feed@DLSS5_Feed.fx",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(stack.findings.is_empty(), "got {:?}", ids(&stack));
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+        assert_eq!(provider.kind, MvProviderKind::SharedTexture);
+        assert_eq!(provider.technique.as_deref(), Some("MotionEstimation"));
+    }
+
+    /// Selecting the shared texture with nothing enabled to write it is the
+    /// silent still-image case the effect's own tooltip warns about.
+    #[test]
+    fn a_provider_nobody_supplies_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nMV_PROVIDER=1\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            ids(&stack).contains(&"stack-mv-provider-missing"),
+            "got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// LaunchPad selected but not enabled is the same failure from the other
+    /// side, and also used to go unreported.
+    #[test]
+    fn launchpad_selected_but_not_enabled_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            ids(&stack).contains(&"stack-mv-provider-missing"),
+            "got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// `DLSS5_MV_SOURCE=1` means LaunchPad is not compiled into the effect at
+    /// all, so a stale `MV_PROVIDER=0` in the preset must not be believed.
+    #[test]
+    fn mv_source_one_forces_the_shared_texture_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &REAL_RESHADE_INI.replace(
+                "[GENERAL]",
+                "[GENERAL]\nPreprocessorDefinitions=DLSS5_MV_SOURCE=1,RESHADE_DEPTH_INPUT_IS_REVERSED=0",
+            ),
+        );
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nMV_PROVIDER=0\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+        assert_eq!(provider.kind, MvProviderKind::SharedTexture);
+        assert_eq!(provider.technique, None);
+    }
+
+    #[test]
+    fn a_preset_without_the_feed_has_no_provider_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.preset.as_ref().unwrap().mv_provider, None);
+        assert!(ids(&stack).contains(&"stack-feed-technique-off"));
+    }
+
     #[test]
     fn correct_order_is_not_reported() {
         let tmp = tempfile::tempdir().unwrap();
@@ -822,6 +1378,46 @@ DEBUG_VIEW=1
         std::fs::remove_file(tmp.path().join("nvngx_dlssnr.dll")).unwrap();
         let stack = inspect_stack(tmp.path());
         assert!(ids(&stack).contains(&"stack-nr-runtime-missing"));
+    }
+
+    /// A preset names its own shader sources, and `C:evil.fx` is
+    /// drive-relative on Windows: a bare join would discard the shader
+    /// directory and answer from the process cwd instead.
+    #[test]
+    fn a_drive_relative_shader_source_is_not_resolved_outside_the_shader_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shaders = dir.path().join("reshade-shaders").join("Shaders");
+        std::fs::create_dir_all(&shaders).expect("create shader dir");
+        std::fs::write(shaders.join("Real.fx"), "technique").expect("write shader");
+        // A real file outside the shader tree, so the escaping forms have
+        // something to reach and the assertion is about the refusal rather
+        // than about the target happening not to exist.
+        std::fs::write(dir.path().join("Outside.fx"), "technique").expect("write outside");
+
+        assert!(
+            shader_source_exists(&shaders, "Real.fx"),
+            "an ordinary source must still resolve"
+        );
+        assert!(
+            dir.path().join("Outside.fx").is_file(),
+            "the escape target must exist for this test to mean anything"
+        );
+        for source in ["../../Outside.fx", "C:Outside.fx", "/Outside.fx"] {
+            assert!(
+                !shader_source_exists(&shaders, source),
+                "{source} must not resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_first_section() {
+        let ini = parse_ini("\u{feff}[GENERAL]\nPresetPath=.\\a.ini\n");
+        assert_eq!(
+            ini_get(&ini, "GENERAL", "PresetPath"),
+            Some(".\\a.ini"),
+            "a BOM must not push the first section's keys into the headerless bucket"
+        );
     }
 
     #[test]
@@ -966,6 +1562,103 @@ DEBUG_VIEW=1
             .find(|o| o.file_name == "nvngx_dlssg.dll.bak")
             .expect("backup should be listed");
         assert_eq!(orphan.backs_up, None);
+    }
+
+    /// `PresetPath` is text out of a config file Kalpa does not own. A value
+    /// pointing outside the client folder must read as "no preset there",
+    /// never as a preset whose contents get reported — and later edited.
+    #[test]
+    fn a_preset_path_pointing_outside_the_client_folder_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = tmp.path().join("client");
+        std::fs::create_dir_all(&client).unwrap();
+        healthy_stack(&client);
+        std::fs::write(
+            tmp.path().join("outside.ini"),
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx\n",
+        )
+        .unwrap();
+
+        for escape in ["..\\outside.ini", "../outside.ini", "C:outside.ini"] {
+            write(
+                &client,
+                "ReShade.ini",
+                &REAL_RESHADE_INI.replace(
+                    "PresetPath=.\\ReShadePreset.ini",
+                    &format!("PresetPath={escape}"),
+                ),
+            );
+            let stack = inspect_stack(&client);
+            let preset = stack.preset.expect("the key is still reported");
+            assert!(
+                !preset.exists,
+                "{escape} must not resolve to a file outside the client folder"
+            );
+            assert!(preset.techniques.is_empty(), "{escape}");
+        }
+    }
+
+    #[test]
+    fn a_parked_injector_reads_as_a_switched_off_stack() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        std::fs::rename(
+            tmp.path().join("dxgi.dll"),
+            tmp.path().join("dxgi.dll.kalpa-off"),
+        )
+        .unwrap();
+        let stack = inspect_stack(tmp.path());
+
+        assert!(stack.is_disabled);
+        assert!(!stack.is_empty);
+        assert_eq!(ids(&stack), vec!["stack-disabled"]);
+
+        let parked = stack.parked.first().expect("the parked injector");
+        assert_eq!(parked.file_name, "dxgi.dll.kalpa-off");
+        assert_eq!(parked.restores, "dxgi.dll");
+        assert!(!parked.target_present, "disable freed the live name");
+
+        // A parked file is neither a live stack item nor one of the user's own
+        // originals.
+        assert!(!stack
+            .items
+            .iter()
+            .any(|i| i.file_name.contains("kalpa-off")));
+        assert!(!stack
+            .preserved_originals
+            .iter()
+            .any(|o| o.file_name.contains("kalpa-off")));
+    }
+
+    #[test]
+    fn a_parked_file_whose_name_is_occupied_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(tmp.path(), "nvngx_dlss.dll.kalpa-off", "the modded one");
+        let stack = inspect_stack(tmp.path());
+
+        let parked = stack
+            .parked
+            .iter()
+            .find(|p| p.restores == "nvngx_dlss.dll")
+            .expect("parked runtime");
+        assert!(
+            parked.target_present,
+            "the stock file is live under that name, so re-enable must displace it"
+        );
+        // Parking a runtime is not parking the injector.
+        assert!(!stack.is_disabled);
+    }
+
+    /// The trap this suffix exists to avoid: Kalpa must never write, and never
+    /// treat as its own, any of the names a user uses for their originals.
+    #[test]
+    fn kalpas_parking_suffix_is_not_one_of_the_users_own() {
+        for suffix in BACKUP_SUFFIXES {
+            assert_ne!(PARKED_SUFFIX, suffix);
+            assert!(!PARKED_SUFFIX.ends_with(suffix));
+        }
+        assert_eq!(backup_target("dxgi.dll.kalpa-off"), None);
     }
 
     #[test]

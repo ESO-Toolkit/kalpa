@@ -37,26 +37,22 @@ import {
   Database,
   FolderSearch,
   RefreshCw,
-  Archive,
-  Users,
-  ShieldCheck,
   ArrowDownToLine,
   ClipboardCopy,
   ClipboardPaste,
   ChevronRight,
   Monitor,
   Gauge,
-  Shield,
   Sparkles,
   Trash2,
   Palette,
   MessageSquareText,
   Bug,
   MessageCircle,
-  Stethoscope,
 } from "lucide-react";
 import { AccountSettings } from "./account-settings";
 import { AppearanceSettings } from "./appearance-settings";
+import { FEATURES, toolsMenuFeatures, type FeatureId, type ToolsGroup } from "@/lib/features";
 
 type SettingsTab = "general" | "appearance" | "tools" | "data";
 type PerformanceMode = "webview" | "native-slint";
@@ -72,14 +68,13 @@ interface SettingsProps {
   onClose: () => void;
   onRefresh: () => void;
   onOpenLogUpload: () => void;
-  onShowBackups: () => void;
-  onShowApiCompat: () => void;
-  onShowCharacters: () => void;
-  onShowMigrationWizard: () => void;
-  onShowSafetyCenter: () => void;
-  onShowClientHealth: () => void;
+  onOpenFeature: (id: FeatureId) => void;
+  minionDetected: boolean;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
+  toolbarHidden: FeatureId[];
+  /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
 }
 
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
@@ -100,14 +95,12 @@ export function Settings({
   onClose,
   onRefresh,
   onOpenLogUpload,
-  onShowBackups,
-  onShowApiCompat,
-  onShowCharacters,
-  onShowMigrationWizard,
-  onShowSafetyCenter,
-  onShowClientHealth,
+  onOpenFeature,
+  minionDetected,
   onShowShortcuts,
   onCheckForAppUpdate,
+  toolbarHidden,
+  onToolbarHiddenChange,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [path, setPath] = useState(addonsPath);
@@ -135,7 +128,6 @@ export function Settings({
     "Couldn't save performance mode."
   );
   const [switchingPerformanceMode, setSwitchingPerformanceMode] = useState(false);
-  const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
   const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
@@ -216,11 +208,6 @@ export function Settings({
     void getDependencyPolicy().then(hydrateDependencyPolicy);
     void getSkippedDependencies().then(setSkippedDependencies);
     void getAskRequiredDependenciesOnly().then(hydrateAskRequiredOnly);
-    void invokeResult<boolean>("detect_minion").then((result) => {
-      if (result.ok) {
-        setMinionDetected(result.data);
-      }
-    });
     // Hydrators are stable callbacks, so listing them keeps this a mount-only
     // load while documenting every setting seeded by the effect.
   }, [
@@ -446,6 +433,20 @@ export function Settings({
   };
 
   const pathDirty = path.trim() !== addonsPath;
+
+  const toolsCtx = { minionDetected };
+  const toolFeatures = (group: ToolsGroup) =>
+    FEATURES.filter(
+      (f) =>
+        f.placement === "tools" && f.toolsGroup === group && (f.visibleWhen?.(toolsCtx) ?? true)
+    );
+  // Pinnable features the user has unpinned from the header toolbar. Without
+  // this block they would appear in NEITHER surface — `toolFeatures` only ever
+  // matches `placement: "tools"` — leaving an unpinned Pack Hub reachable only
+  // by deep link. This tab is the catalog, so it lists them first.
+  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, toolsCtx).filter(
+    (f) => f.pinnableToToolbar
+  );
 
   return (
     <>
@@ -933,7 +934,11 @@ export function Settings({
                   exit={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.08 }}
                 >
-                  <AppearanceSettings onShowShortcuts={onShowShortcuts} />
+                  <AppearanceSettings
+                    onShowShortcuts={onShowShortcuts}
+                    toolbarHidden={toolbarHidden}
+                    onToolbarHiddenChange={onToolbarHiddenChange}
+                  />
                 </motion.div>
               )}
 
@@ -946,24 +951,27 @@ export function Settings({
                   transition={{ duration: 0.08 }}
                   className="space-y-2"
                 >
-                  <ToolItem
-                    icon={Archive}
-                    label="Backup & Restore"
-                    description="Save and recover your addon settings"
-                    onClick={onShowBackups}
-                  />
-                  <ToolItem
-                    icon={Users}
-                    label="Characters"
-                    description="View and manage your ESO characters"
-                    onClick={onShowCharacters}
-                  />
-                  <ToolItem
-                    icon={ShieldCheck}
-                    label="API Compatibility"
-                    description="Check addons against current API version"
-                    onClick={onShowApiCompat}
-                  />
+                  {unpinnedFeatures.map((f) => (
+                    <ToolItem
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
+                    />
+                  ))}
+                  {unpinnedFeatures.length > 0 && <div className="border-t border-structure-06" />}
+                  {toolFeatures("primary").map((f) => (
+                    <ToolItem
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
+                    />
+                  ))}
                   <ToolItem
                     icon={ArrowDownToLine}
                     label="Check for App Updates"
@@ -971,27 +979,16 @@ export function Settings({
                     onClick={onCheckForAppUpdate}
                   />
                   <FeedbackToolGroup />
-                  {minionDetected && (
+                  {toolFeatures("secondary").map((f) => (
                     <ToolItem
-                      icon={Sparkles}
-                      label="Minion Migration"
-                      description="Import tracking data from Minion with backup and preview"
-                      onClick={onShowMigrationWizard}
-                      accent="gold"
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
                     />
-                  )}
-                  <ToolItem
-                    icon={Shield}
-                    label="Safety Center"
-                    description="Snapshots, integrity checks, and operation log"
-                    onClick={onShowSafetyCenter}
-                  />
-                  <ToolItem
-                    icon={Stethoscope}
-                    label="Client Health"
-                    description="Check the ESO game client and injected DLLs, and remove what Kalpa placed"
-                    onClick={onShowClientHealth}
-                  />
+                  ))}
                 </motion.div>
               )}
 

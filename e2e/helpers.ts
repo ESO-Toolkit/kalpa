@@ -230,6 +230,14 @@ export async function readFilterTabCount(page: Page, label: string): Promise<num
 /**
  * Dismiss any open dialogs/modals and return the app to its base state.
  * Call this at the start of each test to prevent state leaks.
+ *
+ * NOTE: this only closes dialogs and blurs focus — it does NOT reset persisted
+ * settings. The sandbox runner's isolation is partial: only the AddOns folder
+ * is throwaway, while `settings.json` is the developer's REAL file (Tauri
+ * resolves the app-data dir from the bundle identifier, not from any env var —
+ * see CLAUDE.md). Any future spec that touches the `toolbarHidden` preference
+ * must normalise it itself, or it will mutate the developer's real toolbar
+ * layout and leak state into later runs.
  */
 export async function resetAppState(page: Page): Promise<void> {
   // Press Escape a few times to close any open dialogs/menus/popovers
