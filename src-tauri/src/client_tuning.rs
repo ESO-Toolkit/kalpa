@@ -374,7 +374,6 @@ fn split_terminator(raw: &str) -> (&str, &str) {
     }
 }
 
-/// Is this trimmed line a `[Section]` header, and if so, its name (trimmed)?
 /// A UTF-8 BOM, if the file opens with one.
 ///
 /// `str::trim` does not remove `U+FEFF` — it is a format character, not
@@ -388,6 +387,7 @@ fn without_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
+/// Is this trimmed line a `[Section]` header, and if so, its name (trimmed)?
 fn section_header(trimmed: &str) -> Option<&str> {
     trimmed
         .strip_prefix('[')
@@ -619,6 +619,20 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
         .copied()
         .find(|&i| i > section_start)
         .unwrap_or(lines.len());
+
+    // A key named twice in one edit list has no meaningful answer once every
+    // occurrence is rewritten: the first edit would claim all the lines and the
+    // second would be appended below them, which is the value ReShade would
+    // then read. The panel sends one edit per field and cannot produce this,
+    // so refusing costs nothing and keeps the rule below unambiguous.
+    for (index, edit) in edits.iter().enumerate() {
+        if edits[..index]
+            .iter()
+            .any(|earlier| earlier.key.eq_ignore_ascii_case(&edit.key))
+        {
+            return Err(format!("{} was given two values in one change.", edit.key));
+        }
+    }
 
     // Every occurrence of the key inside the section is rewritten, not just
     // the first. A section naming a key twice is not something ReShade writes,
@@ -1111,6 +1125,23 @@ mod tests {
                 "{value} was refused with an unhelpful message: {err}"
             );
         }
+    }
+
+    #[test]
+    fn apply_edits_refuses_a_key_named_twice_in_one_change() {
+        let edits = vec![
+            TuningEdit {
+                key: "NRStyle".to_string(),
+                value: "0".to_string(),
+            },
+            TuningEdit {
+                key: "nrstyle".to_string(),
+                value: "1".to_string(),
+            },
+        ];
+        let err = apply_edits("[RenoDX.DLSS5]\nNRStyle=0\n", &edits)
+            .expect_err("two values for one key has no answer");
+        assert!(err.contains("two values"), "{err}");
     }
 
     #[test]
