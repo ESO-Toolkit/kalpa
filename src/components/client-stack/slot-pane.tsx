@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 
 import { PresetPanel } from "./preset-panel";
 import { RuntimeDriftCard } from "./runtime-drift-card";
+import { ShaderPacksPanel } from "./shader-packs-panel";
 import { TuningPanel } from "./tuning-panel";
 import {
   FINDING_IMPACT,
@@ -387,6 +388,11 @@ function SlotActions({
         onChanged={onStackChanged}
         filePaths={filePaths}
       />
+    );
+  }
+  if (slot === "shaders") {
+    return (
+      <ShaderPacksPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />
     );
   }
   if (slot === "preset") {
