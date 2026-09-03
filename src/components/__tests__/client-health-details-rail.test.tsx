@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { SlotRail } from "../client-stack/slot-rail";
+import type { StackView } from "../client-stack/slot-rail";
 import type { Slot } from "../client-stack/slots";
 import type { ClientStack } from "../client-stack/types";
 
@@ -22,15 +23,24 @@ const stack: ClientStack = {
 };
 
 function ControlledRail({ value = stack }: { value?: ClientStack }) {
-  const [selection, setSelection] = React.useState<Slot | null>("reshade");
-  return <SlotRail stack={value} selected={selection} onSelect={setSelection} />;
+  const [selection, setSelection] = React.useState<Slot | StackView | null>("reshade");
+  return (
+    <SlotRail
+      stack={value}
+      selected={selection}
+      onSelect={setSelection}
+      isManaged={false}
+      trackedCount={null}
+      logCount={0}
+    />
+  );
 }
 
 describe("Client Health details rail", () => {
   it("uses one tab stop and keeps focus, selection, and aria-selected synchronized", async () => {
     const user = userEvent.setup();
     render(<ControlledRail />);
-    const rail = screen.getByRole("listbox", { name: "Stack slots" });
+    const rail = screen.getByRole("listbox", { name: "Graphics stack views" });
     const options = within(rail).getAllByRole("option");
 
     expect(options.filter((option) => option.tabIndex === 0)).toHaveLength(1);
@@ -50,9 +60,9 @@ describe("Client Health details rail", () => {
     expect(addons).toHaveAttribute("tabindex", "0");
 
     await user.keyboard("{End}");
-    const tuning = within(rail).getByRole("option", { name: /Tuning/ });
-    expect(document.activeElement).toBe(tuning);
-    expect(tuning).toHaveAttribute("aria-selected", "true");
+    const logs = within(rail).getByRole("option", { name: /Log check/ });
+    expect(document.activeElement).toBe(logs);
+    expect(logs).toHaveAttribute("aria-selected", "true");
 
     await user.keyboard("{Home}");
     expect(document.activeElement).toBe(reshade);
@@ -62,7 +72,7 @@ describe("Client Health details rail", () => {
   it("supports native Enter and Space activation and preserves focus across refresh", async () => {
     const user = userEvent.setup();
     const view = render(<ControlledRail />);
-    const rail = screen.getByRole("listbox", { name: "Stack slots" });
+    const rail = screen.getByRole("listbox", { name: "Graphics stack views" });
     const neural = within(rail).getByRole("option", { name: /Neural Rendering/ });
 
     expect(neural).toHaveAttribute("tabindex", "-1");
@@ -91,7 +101,7 @@ describe("Client Health details rail", () => {
       />
     );
 
-    const refreshedRail = screen.getByRole("listbox", { name: "Stack slots" });
+    const refreshedRail = screen.getByRole("listbox", { name: "Graphics stack views" });
     const refreshedNeural = within(refreshedRail).getByRole("option", {
       name: /Neural Rendering/,
     });

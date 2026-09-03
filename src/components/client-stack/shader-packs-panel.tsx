@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2Icon,
   DownloadIcon,
@@ -81,6 +81,7 @@ function PackRow({
   pack,
   armed,
   installing,
+  mutationPending,
   installError,
   outcome,
   onArm,
@@ -90,6 +91,7 @@ function PackRow({
   pack: PackStatus;
   armed: boolean;
   installing: boolean;
+  mutationPending: boolean;
   installError: string | null;
   outcome: PackInstallOutcome | null;
   onArm: () => void;
@@ -177,7 +179,7 @@ function PackRow({
             </Button>
           ) : (
             !armed && (
-              <Button size="xs" variant="outline" onClick={onArm}>
+              <Button size="xs" variant="outline" disabled={mutationPending} onClick={onArm}>
                 Install
               </Button>
             )
@@ -204,11 +206,16 @@ function PackRow({
                 and writes shader files into reshade-shaders.
               </p>
               <div className="flex items-center gap-2">
-                <Button size="xs" disabled={installing} onClick={onConfirm}>
+                <Button size="xs" disabled={installing || mutationPending} onClick={onConfirm}>
                   {installing ? <Spinner className="size-3.5" /> : <DownloadIcon />}
                   {installing ? "Installing..." : "Confirm install"}
                 </Button>
-                <Button size="xs" variant="outline" disabled={installing} onClick={onCancel}>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={installing || mutationPending}
+                  onClick={onCancel}
+                >
                   Cancel
                 </Button>
               </div>
@@ -248,18 +255,23 @@ export function ShaderPacksPanel({ clientDir, mutation }: StackPanelProps) {
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<PackInstallOutcome | null>(null);
+  const requestToken = useRef(0);
+  const mutationToken = useRef(0);
 
   const load = useCallback(async () => {
+    const token = ++requestToken.current;
     setLoading(true);
     setLoadError(null);
     try {
       const next = await invokeOrThrow<ShaderLibrary>("list_shader_packs", { clientDir });
+      if (requestToken.current !== token) return;
       setLibrary(next);
     } catch (e) {
+      if (requestToken.current !== token) return;
       setLibrary(null);
       setLoadError(getTauriErrorMessage(e));
     } finally {
-      setLoading(false);
+      if (requestToken.current === token) setLoading(false);
     }
   }, [clientDir]);
 
@@ -275,6 +287,10 @@ export function ShaderPacksPanel({ clientDir, mutation }: StackPanelProps) {
     setInstallError(null);
     setOutcome(null);
     void load();
+    return () => {
+      requestToken.current += 1;
+      mutationToken.current += 1;
+    };
   }, [load]);
 
   const handleArm = useCallback((packId: string) => {
@@ -290,6 +306,7 @@ export function ShaderPacksPanel({ clientDir, mutation }: StackPanelProps) {
 
   const handleConfirm = useCallback(
     async (packId: string) => {
+      const token = ++mutationToken.current;
       setInstallingId(packId);
       setInstallError(null);
       try {
@@ -300,15 +317,16 @@ export function ShaderPacksPanel({ clientDir, mutation }: StackPanelProps) {
             packId,
           });
         });
-        if (result.status !== "committed") return;
+        if (mutationToken.current !== token || result.status !== "committed") return;
 
         setOutcome(result.value);
         setArmedId(null);
         await load();
       } catch (e) {
+        if (mutationToken.current !== token) return;
         setInstallError(getTauriErrorMessage(e));
       } finally {
-        setInstallingId(null);
+        if (mutationToken.current === token) setInstallingId(null);
       }
     },
     [clientDir, load, mutation]
@@ -368,6 +386,7 @@ export function ShaderPacksPanel({ clientDir, mutation }: StackPanelProps) {
             pack={pack}
             armed={armedId === pack.id}
             installing={installingId === pack.id}
+            mutationPending={mutation.pending}
             installError={installingId === pack.id || armedId === pack.id ? installError : null}
             outcome={outcome?.pack_id === pack.id ? outcome : null}
             onArm={() => handleArm(pack.id)}

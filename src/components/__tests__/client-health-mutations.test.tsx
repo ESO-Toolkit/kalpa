@@ -132,7 +132,7 @@ function installDefaultIpc() {
 
 async function renderReady(onClose = vi.fn()) {
   const view = render(<ClientHealthPanel open onClose={onClose} />);
-  fireEvent.click(await screen.findByRole("button", { name: /^Switch off/ }));
+  fireEvent.click(await screen.findByRole("option", { name: /^Power/ }));
   await screen.findByRole("button", { name: "Switch off" });
   return { ...view, onClose };
 }
@@ -188,17 +188,19 @@ describe("Client Health mutation coordination", () => {
       mocks.invokeOrThrow.mock.calls.filter(([command]) => command === "apply_client_toggle")
     ).toHaveLength(1);
 
-    const installButtons = screen.getAllByRole("button", { name: /ESO-[AB]/ });
-    expect(installButtons).toHaveLength(2);
-    expect(installButtons.every((button) => button.hasAttribute("disabled"))).toBe(true);
-    expect(screen.getByRole("button", { name: /Browse for eso64\.exe/ })).toBeDisabled();
+    const installSelect = screen.getByRole("combobox");
+    expect(installSelect).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
 
-    fireEvent.click(installButtons[1]!);
+    fireEvent.click(installSelect);
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    for (const close of screen.getAllByRole("button", { name: "Close" })) fireEvent.click(close);
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
     expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Graphics stack" })).toBeInTheDocument();
     expect(
       mocks.invokeOrThrow.mock.calls.filter(([command]) => command === "detect_eso_clients")
     ).toHaveLength(1);
@@ -232,10 +234,13 @@ describe("Client Health mutation coordination", () => {
 
     await user.click(screen.getByRole("button", { name: "Switch off" }));
     await screen.findByText("Working out the plan...");
-    await user.click(screen.getByRole("button", { name: /ESO-B/ }));
+    const installSelect = screen.getByRole("combobox");
+    await user.click(installSelect);
+    await user.click(await screen.findByRole("option", { name: "ESO-B" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /ESO-B/ })).toHaveAttribute("aria-pressed", "true");
+      expect(installSelect).toHaveTextContent("ESO-B");
     });
+    fireEvent.click(await screen.findByRole("option", { name: /^Power/ }));
     await screen.findByRole("button", { name: /^Switch off/ });
 
     await act(async () => {
@@ -244,7 +249,7 @@ describe("Client Health mutation coordination", () => {
     });
 
     expect(screen.queryByRole("button", { name: "Confirm switch off" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /ESO-B/ })).toHaveAttribute("aria-pressed", "true");
+    expect(installSelect).toHaveTextContent("ESO-B");
   });
 
   it("does not reload or publish a completion after unmount", async () => {
