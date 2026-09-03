@@ -18,7 +18,6 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { SearchResultListSkeleton } from "@/components/ui/skeletons";
 import { toast } from "sonner";
-import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import {
   SearchIcon,
@@ -300,28 +299,9 @@ export function PackCreateView({
       toast.error("Add at least one addon.");
       return;
     }
-    const safeName = title
-      .trim()
-      .replace(/[^a-zA-Z0-9-_ ]/g, "")
-      .trim()
-      .replace(/\s+/g, "-");
-    // Inside try/catch: a denied dialog permission rejects here, and an
-    // unhandled rejection from the click handler would look like a dead button.
-    let path: string | null;
-    try {
-      path = await saveFileDialog({
-        defaultPath: `${safeName}.esopack`,
-        filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-      });
-    } catch (e) {
-      toast.error(`Couldn't open the save dialog: ${getTauriErrorMessage(e)}`);
-      return;
-    }
-    if (!path) return;
-
     setSavingToFile(true);
     try {
-      await invokeOrThrow("export_pack_file", {
+      const exported = await invokeOrThrow<boolean>("export_pack_file", {
         pack: {
           format: "esopack",
           version: 1,
@@ -335,8 +315,8 @@ export function PackCreateView({
           sharedAt: new Date().toISOString(),
           sharedBy: authUser?.userName ?? "Anonymous",
         },
-        path,
       });
+      if (!exported) return;
       toast.success("Pack saved to file");
     } catch (e) {
       toast.error(`Failed to save pack: ${getTauriErrorMessage(e)}`);

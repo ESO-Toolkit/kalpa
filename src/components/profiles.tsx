@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
 import { Check, ChevronRight, Pencil, RefreshCw, X } from "lucide-react";
-import type { ActivateProfileResult, AddonProfile, ProfilePlan } from "../types";
+import type { ActivateProfileOutcome, AddonProfile, ProfilePlan } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -49,6 +49,12 @@ function PreviewNameList({ names }: { names: string[] }) {
   );
 }
 
+type ProfilePreview = {
+  name: string;
+  plan: ProfilePlan;
+  notice?: string;
+};
+
 export function Profiles({
   addonsPath,
   instanceLabel,
@@ -61,7 +67,7 @@ export function Profiles({
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [previewing, setPreviewing] = useState<string | null>(null);
-  const [preview, setPreview] = useState<{ name: string; plan: ProfilePlan } | null>(null);
+  const [preview, setPreview] = useState<ProfilePreview | null>(null);
   const [activating, setActivating] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [confirmUpdate, setConfirmUpdate] = useState<string | null>(null);
@@ -135,7 +141,7 @@ export function Profiles({
       } else {
         // Nothing to rename — activate directly so the profile still becomes
         // the recorded active one, without a pointless confirmation step.
-        await runActivation(name);
+        await runActivation(name, plan.digest);
       }
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
@@ -144,7 +150,7 @@ export function Profiles({
     }
   };
 
-  const runActivation = async (name: string) => {
+  const runActivation = async (name: string, expectedPlanDigest?: string) => {
     // Re-entry guard + busy state must land BEFORE the first await: a second
     // click during the async ESO check below would otherwise start a
     // concurrent activation with interleaved renames.
@@ -154,10 +160,22 @@ export function Profiles({
       // Same gate as install/update/remove: renaming addon folders while ESO
       // runs desyncs disk state from what the game loaded, so warn first.
       if (!(await ensureEsoNotBlocking())) return;
-      const result = await invokeOrThrow<ActivateProfileResult>("activate_profile", {
+      const outcome = await invokeOrThrow<ActivateProfileOutcome>("activate_profile", {
         addonsPath,
         profileName: name,
+        expectedPlanDigest,
       });
+      if (outcome.status === "planChanged") {
+        setPreview({
+          name,
+          plan: outcome.plan,
+          notice:
+            "The plan changed since you reviewed it - review the updated plan and activate again.",
+        });
+        return;
+      }
+
+      const result = outcome.result;
       const parts: string[] = [];
       if (result.enabled.length > 0) parts.push(`${result.enabled.length} enabled`);
       if (result.disabled.length > 0) parts.push(`${result.disabled.length} disabled`);
@@ -272,6 +290,11 @@ export function Profiles({
               <p className="text-sm font-medium">
                 Activate <span className="text-primary">{preview.name}</span>?
               </p>
+              {preview.notice && (
+                <p className="rounded-lg border border-status-warning/30 bg-status-warning/[0.08] px-2 py-1.5 text-xs text-status-warning">
+                  {preview.notice}
+                </p>
+              )}
               {preview.plan.toEnable.length > 0 && (
                 <div className="text-xs text-status-success">
                   {preview.plan.toEnable.length} addon
@@ -319,7 +342,7 @@ export function Profiles({
                 <Button
                   size="sm"
                   disabled={activating !== null}
-                  onClick={() => void runActivation(preview.name)}
+                  onClick={() => void runActivation(preview.name, preview.plan.digest)}
                 >
                   {activating ? "Activating..." : "Activate"}
                 </Button>

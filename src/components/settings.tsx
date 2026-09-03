@@ -18,6 +18,7 @@ import {
   type DependencyPolicy,
 } from "@/lib/dependency-policy";
 import { useConfirmedSetting } from "@/hooks/use-confirmed-setting";
+import { useOptimisticSetting } from "@/hooks/use-optimistic-setting";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -52,6 +53,7 @@ import {
   MessageSquareText,
   Bug,
   MessageCircle,
+  Stethoscope,
 } from "lucide-react";
 import { AccountSettings } from "./account-settings";
 import { AppearanceSettings } from "./appearance-settings";
@@ -75,6 +77,7 @@ interface SettingsProps {
   onShowCharacters: () => void;
   onShowMigrationWizard: () => void;
   onShowSafetyCenter: () => void;
+  onShowClientHealth: () => void;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
 }
@@ -102,6 +105,7 @@ export function Settings({
   onShowCharacters,
   onShowMigrationWizard,
   onShowSafetyCenter,
+  onShowClientHealth,
   onShowShortcuts,
   onCheckForAppUpdate,
 }: SettingsProps) {
@@ -111,16 +115,38 @@ export function Settings({
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
-  const [autoUpdate, setAutoUpdate] = useState(false);
-  const [warnEsoRunning, setWarnEsoRunning] = useState(true);
-  const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("webview");
+  const {
+    value: autoUpdate,
+    commit: commitAutoUpdate,
+    hydrate: hydrateAutoUpdate,
+  } = useOptimisticSetting(false, (value) => setSetting("autoUpdate", value));
+  const {
+    value: warnEsoRunning,
+    commit: commitWarnEsoRunning,
+    hydrate: hydrateWarnEsoRunning,
+  } = useOptimisticSetting(true, (value) => setSetting("suppressEsoRunningWarning", !value));
+  const {
+    value: performanceMode,
+    commit: commitPerformanceMode,
+    hydrate: hydratePerformanceMode,
+  } = useOptimisticSetting<PerformanceMode>(
+    "webview",
+    (value) => setSetting("performanceMode", value),
+    "Couldn't save performance mode."
+  );
   const [switchingPerformanceMode, setSwitchingPerformanceMode] = useState(false);
   const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
   const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
   const [copying, setCopying] = useState(false);
-  const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
+  const {
+    value: conflictPolicy,
+    commit: commitConflictPolicy,
+    hydrate: hydrateConflictPolicy,
+  } = useOptimisticSetting<"ask" | "keep_mine" | "take_update">("ask", (value) =>
+    setSetting("conflictPolicy", value)
+  );
   const {
     value: dependencyPolicy,
     commit: commitDependencyPolicy,
@@ -148,14 +174,29 @@ export function Settings({
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
   // `manualUseOfficialUploader` key the uploader workspace reads; the toggle writes
   // both manual + live opt-out keys.
-  const [useOfficialUploader, setUseOfficialUploader] = useState(false);
-  const [autoOpenAnalysis, setAutoOpenAnalysis] = useState(false);
+  const {
+    value: useOfficialUploader,
+    commit: commitUseOfficialUploader,
+    hydrate: hydrateUseOfficialUploader,
+  } = useOptimisticSetting(false, (value) =>
+    setSettings({
+      manualUseOfficialUploader: value,
+      liveUseOfficialUploader: value,
+    })
+  );
+  const {
+    value: autoOpenAnalysis,
+    commit: commitAutoOpenAnalysis,
+    hydrate: hydrateAutoOpenAnalysis,
+  } = useOptimisticSetting(false, (value) => setSetting("autoOpenAnalysis", value));
 
   useEffect(() => {
-    void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
-    void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
+    void getSetting<boolean>("autoUpdate", false).then(hydrateAutoUpdate);
+    void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) =>
+      hydrateWarnEsoRunning(!s)
+    );
     void getSetting<string>("performanceMode", "webview").then((mode) =>
-      setPerformanceMode(mode === "native-slint" ? "native-slint" : "webview")
+      hydratePerformanceMode(mode === "native-slint" ? "native-slint" : "webview")
     );
     // The toggle WRITES both opt-out keys, so its checked state must REFLECT both: a
     // pre-existing user who opted out of LIVE direct upload (liveUseOfficialUploader)
@@ -164,10 +205,10 @@ export function Settings({
     void Promise.all([
       getSetting<boolean>("manualUseOfficialUploader", false),
       getSetting<boolean>("liveUseOfficialUploader", false),
-    ]).then(([manual, live]) => setUseOfficialUploader(manual || live));
-    void getSetting<boolean>("autoOpenAnalysis", false).then(setAutoOpenAnalysis);
+    ]).then(([manual, live]) => hydrateUseOfficialUploader(manual || live));
+    void getSetting<boolean>("autoOpenAnalysis", false).then(hydrateAutoOpenAnalysis);
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
-      setConflictPolicy
+      hydrateConflictPolicy
     );
     // Via the module's reader, which narrows: settings.json is user-editable and
     // survives downgrades, so a bad value must fall back rather than leave every
@@ -180,9 +221,18 @@ export function Settings({
         setMinionDetected(result.data);
       }
     });
-    // Both hydrators are useCallback([]) inside the hook, so listing them keeps
-    // this a mount-only load rather than re-running it.
-  }, [hydrateDependencyPolicy, hydrateAskRequiredOnly]);
+    // Hydrators are stable callbacks, so listing them keeps this a mount-only
+    // load while documenting every setting seeded by the effect.
+  }, [
+    hydrateAskRequiredOnly,
+    hydrateAutoOpenAnalysis,
+    hydrateAutoUpdate,
+    hydrateConflictPolicy,
+    hydrateDependencyPolicy,
+    hydratePerformanceMode,
+    hydrateUseOfficialUploader,
+    hydrateWarnEsoRunning,
+  ]);
 
   // Silently refresh the detected-instance list every time Settings opens, so
   // a PTS install created after app startup shows up in the switcher without
@@ -372,14 +422,11 @@ export function Settings({
 
     const next: PerformanceMode = checked ? "native-slint" : "webview";
     const previous = performanceMode;
-    setPerformanceMode(next);
     setSwitchingPerformanceMode(true);
 
-    const saved = await setSetting("performanceMode", next);
+    const saved = await commitPerformanceMode(next);
     if (!saved) {
-      setPerformanceMode(previous);
       setSwitchingPerformanceMode(false);
-      toast.error("Couldn't save performance mode.");
       return;
     }
 
@@ -392,8 +439,7 @@ export function Settings({
       await invokeOrThrow<{ exePath: string }>("launch_native_performance_mode");
       toast.success("Switching to native performance mode...");
     } catch (e) {
-      setPerformanceMode(previous);
-      void setSetting("performanceMode", previous);
+      void commitPerformanceMode(previous);
       toast.error(`Native performance mode is not available: ${getTauriErrorMessage(e)}`);
       setSwitchingPerformanceMode(false);
     }
@@ -621,13 +667,7 @@ export function Settings({
                         checked={autoUpdate}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setAutoUpdate(value);
-                          void setSetting("autoUpdate", value).then((ok) => {
-                            if (!ok) {
-                              setAutoUpdate(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitAutoUpdate(value);
                         }}
                       />
                       <div>
@@ -679,13 +719,7 @@ export function Settings({
                         checked={warnEsoRunning}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setWarnEsoRunning(value);
-                          void setSetting("suppressEsoRunningWarning", !value).then((ok) => {
-                            if (!ok) {
-                              setWarnEsoRunning(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitWarnEsoRunning(value);
                         }}
                       />
                       <div>
@@ -709,21 +743,12 @@ export function Settings({
                         checked={useOfficialUploader}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setUseOfficialUploader(value);
                           // Mirror live's opt-out model for manual too. Write both keys
                           // ATOMICALLY (one flush, all-or-nothing) so a failed/crashed
                           // write can't leave one mode opted out and the other native —
                           // the exact split-brain this unified toggle exists to prevent.
                           // On failure, revert the optimistic UI and surface it.
-                          void setSettings({
-                            manualUseOfficialUploader: value,
-                            liveUseOfficialUploader: value,
-                          }).then((ok) => {
-                            if (!ok) {
-                              setUseOfficialUploader(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitUseOfficialUploader(value);
                         }}
                       />
                       <div>
@@ -748,13 +773,7 @@ export function Settings({
                         checked={autoOpenAnalysis}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setAutoOpenAnalysis(value);
-                          void setSetting("autoOpenAnalysis", value).then((ok) => {
-                            if (!ok) {
-                              setAutoOpenAnalysis(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitAutoOpenAnalysis(value);
                         }}
                       />
                       <div>
@@ -785,14 +804,7 @@ export function Settings({
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
                         onClick={() => {
-                          const previous = conflictPolicy;
-                          setConflictPolicy(value);
-                          void setSetting("conflictPolicy", value).then((ok) => {
-                            if (!ok) {
-                              setConflictPolicy(previous);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitConflictPolicy(value);
                         }}
                       >
                         <span
@@ -973,6 +985,12 @@ export function Settings({
                     label="Safety Center"
                     description="Snapshots, integrity checks, and operation log"
                     onClick={onShowSafetyCenter}
+                  />
+                  <ToolItem
+                    icon={Stethoscope}
+                    label="Client Health"
+                    description="Check the ESO game client and injected DLLs, and remove what Kalpa placed"
+                    onClick={onShowClientHealth}
                   />
                 </motion.div>
               )}

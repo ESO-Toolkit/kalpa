@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useState } from "react";
-import type { AddonManifest, AuthUser, GameInstance } from "@/types";
+import type { AddonManifest, AuthUser, GameInstance, UpdateCheckResult } from "@/types";
 import {
   Dialog,
   DialogContent,
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Loader2Icon } from "lucide-react";
+import { sameAddonsFolder } from "@/lib/removal-queue";
 
 const Packs = lazy(() => import("./packs").then((m) => ({ default: m.Packs })));
 const Profiles = lazy(() => import("./profiles").then((m) => ({ default: m.Profiles })));
@@ -28,6 +29,10 @@ const MigrationWizard = lazy(() =>
 const SafetyCenter = lazy(() =>
   import("./safety-center").then((m) => ({ default: m.SafetyCenter }))
 );
+const ClientHealthPanel = lazy(() => import("./client-health"));
+const SupportDialog = lazy(() =>
+  import("./support-dialog").then((m) => ({ default: m.SupportDialog }))
+);
 const UploaderWorkspace = lazy(() =>
   import("./uploader/uploader-workspace").then((m) => ({ default: m.UploaderWorkspace }))
 );
@@ -42,8 +47,10 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "support"
   | "shortcuts"
   | "log-upload"
+  | "client-health"
   | null;
 
 const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
@@ -56,8 +63,10 @@ const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
   "saved-variables": "Saved Variables",
   "migration-wizard": "Migration",
   "safety-center": "Safety Center",
+  support: "Help",
   shortcuts: "Keyboard Shortcuts",
   "log-upload": "Log Uploader",
+  "client-health": "Client Health",
 };
 
 interface AppDialogsProps {
@@ -69,6 +78,9 @@ interface AppDialogsProps {
   deepLinkPackId: string | null;
   deepLinkShareCode: string | null;
   knownInstances: GameInstance[];
+  checkingUpdates: boolean;
+  isOffline: boolean;
+  lastError: string | null;
   logUploaderMounted: boolean;
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
@@ -77,6 +89,7 @@ interface AppDialogsProps {
   onPathChange: (path: string) => void;
   onRefresh: () => void;
   onShowDialog: (dialog: Exclude<ActiveDialog, null>) => void;
+  updateResults: UpdateCheckResult[];
 }
 
 function DialogLoadingFallback({ title, onClose }: { title: string; onClose: () => void }) {
@@ -112,6 +125,9 @@ function AppDialogsBase({
   deepLinkPackId,
   deepLinkShareCode,
   knownInstances,
+  checkingUpdates,
+  isOffline,
+  lastError,
   logUploaderMounted,
   onAuthChange,
   onCheckForAppUpdate,
@@ -120,6 +136,7 @@ function AppDialogsBase({
   onPathChange,
   onRefresh,
   onShowDialog,
+  updateResults,
 }: AppDialogsProps) {
   // Shared across the Backups and Characters dialogs so a create/restore/delete
   // (or character backup) started in one surface still gates the destructive
@@ -209,6 +226,7 @@ function AppDialogsBase({
               onShowCharacters={() => onShowDialog("characters")}
               onShowMigrationWizard={() => onShowDialog("migration-wizard")}
               onShowSafetyCenter={() => onShowDialog("safety-center")}
+              onShowClientHealth={() => onShowDialog("client-health")}
               onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}
               onOpenLogUpload={() => {
@@ -229,6 +247,24 @@ function AppDialogsBase({
           {activeDialog === "safety-center" && (
             <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
           )}
+
+          {activeDialog === "support" && (
+            <SupportDialog
+              addons={addons}
+              addonsPath={addonsPath}
+              checkingUpdates={checkingUpdates}
+              instanceLabel={
+                knownInstances.find((inst) => sameAddonsFolder(inst.addonsPath, addonsPath))
+                  ?.displayLabel ?? null
+              }
+              isOffline={isOffline}
+              lastError={lastError}
+              onClose={onCloseDialog}
+              updateResults={updateResults}
+            />
+          )}
+
+          {activeDialog === "client-health" && <ClientHealthPanel open onClose={onCloseDialog} />}
 
           {activeDialog === "shortcuts" && <KeyboardShortcuts onClose={onCloseDialog} />}
         </Suspense>

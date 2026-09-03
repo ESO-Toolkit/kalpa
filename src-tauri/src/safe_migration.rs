@@ -80,10 +80,70 @@ pub struct DryRunAddon {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DryRunResult {
+    pub plan_digest: String,
     pub will_track: Vec<DryRunAddon>,
     pub already_tracked: Vec<DryRunAddon>,
     pub missing_on_disk: Vec<DryRunAddon>,
     pub unmanaged_on_disk: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MigrationTrackAction {
+    folder_name: String,
+    esoui_id: u32,
+    installed_version: String,
+    download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct MigrationPlan {
+    dry_run: DryRunResult,
+    actions: Vec<MigrationTrackAction>,
+    addon_count: u32,
+}
+
+fn migration_download_url(esoui_id: u32) -> String {
+    format!("https://www.esoui.com/downloads/landing.php?fileid={esoui_id}")
+}
+
+fn update_plan_digest_str(hasher: &mut Sha256, field: &str, value: &str) {
+    hasher.update(field.as_bytes());
+    hasher.update([0]);
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn update_plan_digest_u32(hasher: &mut Sha256, field: &str, value: u32) {
+    hasher.update(field.as_bytes());
+    hasher.update([0]);
+    hasher.update(4u64.to_le_bytes());
+    hasher.update(value.to_le_bytes());
+}
+
+fn migration_plan_digest(actions: &[MigrationTrackAction]) -> String {
+    let mut sorted: Vec<&MigrationTrackAction> = actions.iter().collect();
+    sorted.sort_unstable_by(|left, right| {
+        left.folder_name
+            .cmp(&right.folder_name)
+            .then(left.esoui_id.cmp(&right.esoui_id))
+            .then(left.installed_version.cmp(&right.installed_version))
+            .then(left.download_url.cmp(&right.download_url))
+    });
+
+    let mut hasher = Sha256::new();
+    update_plan_digest_str(&mut hasher, "schema", "kalpa.minion-migration.plan.v1");
+    hasher.update(b"actions");
+    hasher.update([0]);
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for action in sorted {
+        hasher.update(b"action");
+        hasher.update([0]);
+        update_plan_digest_str(&mut hasher, "folderName", &action.folder_name);
+        update_plan_digest_u32(&mut hasher, "esouiId", action.esoui_id);
+        update_plan_digest_str(&mut hasher, "installedVersion", &action.installed_version);
+        update_plan_digest_str(&mut hasher, "downloadUrl", &action.download_url);
+    }
+    crate::file_hashes::to_hex(&hasher.finalize())
 }
 
 // ─── Integrity check types ──────────────────────────────────────────────────
@@ -277,13 +337,12 @@ fn create_zip_snapshot(
 
     let id = snapshot_id(label);
     let archive_path = root.join(format!("{id}.zip"));
-    let tmp_path = root.join(format!("{id}.zip.tmp"));
-
-    let file = fs::File::create(&tmp_path)
+    let file = crate::atomic_file::AtomicFile::create(&archive_path)
         .map_err(|e| format!("Failed to create snapshot archive: {e}"))?;
 
-    // Use a closure so we can clean up tmp_path on any failure
-    let build_zip = || -> Result<(Vec<String>, u32, u64, Vec<String>), String> {
+    // AtomicFile owns its unique staging path and cleans it if ZIP creation is
+    // abandoned, without touching another process's in-flight snapshot.
+    let build_zip = || -> Result<_, String> {
         let mut zip = zip::ZipWriter::new(file);
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -333,41 +392,24 @@ fn create_zip_snapshot(
             }
         }
 
-        // Take the archive file back from the writer and fsync it. These snapshots
-        // guard destructive operations that start immediately afterwards, so the
-        // rename must not be able to land ahead of the archive's data blocks — a
-        // power loss would otherwise leave a zero-length "safety net" whose
-        // recorded SHA-256 was computed from page cache.
+        // Take the owned staging file back from the ZIP writer. commit_with below
+        // flushes and fsyncs it before hashing and publishing.
         let out = zip
             .finish()
             .map_err(|e| format!("Failed to finalize snapshot archive: {e}"))?;
-        out.sync_all()
-            .map_err(|e| format!("Failed to flush snapshot archive to disk: {e}"))?;
 
-        Ok((source_paths, file_count, total_size, skipped))
+        Ok((source_paths, file_count, total_size, skipped, out))
     };
 
-    let (source_paths, file_count, total_size, skipped) = match build_zip() {
-        Ok(result) => result,
-        Err(e) => {
-            // Clean up the .tmp file on failure
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-    };
-
-    // Compute SHA-256 of the archive
-    let sha256 = match sha256_file(&tmp_path) {
-        Ok(h) => h,
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-    };
-
-    // Atomic rename
-    fs::rename(&tmp_path, &archive_path)
+    let (source_paths, file_count, total_size, skipped, staged) = build_zip()?;
+    let mut sha256 = None;
+    staged
+        .commit_with(|staging| {
+            sha256 = Some(sha256_file(staging).map_err(std::io::Error::other)?);
+            Ok(())
+        })
         .map_err(|e| format!("Failed to finalize snapshot: {e}"))?;
+    let sha256 = sha256.expect("snapshot hash callback runs before publication");
 
     // Record in snapshot store
     let skipped_count = skipped.len() as u32;
@@ -401,8 +443,8 @@ fn create_zip_snapshot(
 /// Files that cannot be opened are skipped and their archive-relative paths are
 /// pushed onto `skipped`; the caller records them so a snapshot whose contents
 /// are incomplete never presents itself as a complete rollback point.
-fn add_dir_to_zip(
-    zip: &mut zip::ZipWriter<fs::File>,
+fn add_dir_to_zip<W: Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
     dir: &Path,
     prefix: &str,
     options: &SimpleFileOptions,
@@ -562,21 +604,44 @@ pub fn create_pre_migration_snapshot(
     Ok(manifest)
 }
 
-/// Phase 2: Dry-run migration — compare Minion data with disk state.
-pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
+fn minion_addons_for_migration<'a>(
+    minion_addons: &'a [crate::commands::MinionAddon],
+    addons_dir: &Path,
+) -> Vec<&'a crate::commands::MinionAddon> {
+    let has_scoped_entries = minion_addons
+        .iter()
+        .any(|addon| addon.addons_path.is_some());
+    minion_addons
+        .iter()
+        .filter(|addon| {
+            crate::commands::minion_addon_is_for_root(addon, addons_dir, has_scoped_entries)
+        })
+        .collect()
+}
+
+fn load_minion_addons_for_migration() -> Result<Vec<crate::commands::MinionAddon>, String> {
     let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
     let content =
         fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
-    let minion_addons = crate::commands::parse_minion_addons(&content);
+    Ok(crate::commands::parse_minion_addons(&content))
+}
 
-    let store = metadata::load_metadata(addons_dir);
+fn build_migration_plan_from_addons(
+    minion_addons: &[crate::commands::MinionAddon],
+    addons_dir: &Path,
+    store: &metadata::MetadataStore,
+) -> MigrationPlan {
+    let minion_addons = minion_addons_for_migration(minion_addons, addons_dir);
 
     let mut will_track: Vec<DryRunAddon> = Vec::new();
     let mut already_tracked: Vec<DryRunAddon> = Vec::new();
     let mut missing_on_disk: Vec<DryRunAddon> = Vec::new();
+    let mut actions: Vec<MigrationTrackAction> = Vec::new();
 
-    // Track which disk folders are referenced by Minion
+    // Track which disk folders are referenced by Minion.
     let mut minion_folders: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut effectively_tracked: std::collections::HashSet<String> =
+        store.addons.keys().cloned().collect();
 
     for addon in &minion_addons {
         for folder in &addon.folders {
@@ -589,12 +654,20 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
                 status: String::new(),
             };
 
-            if store.addons.contains_key(folder) {
+            if effectively_tracked.contains(folder) {
                 already_tracked.push(DryRunAddon {
                     status: "already_tracked".to_string(),
                     ..entry
                 });
             } else if addons_dir.join(folder).is_dir() {
+                let action = MigrationTrackAction {
+                    folder_name: folder.clone(),
+                    esoui_id: addon.uid,
+                    installed_version: addon.version.clone(),
+                    download_url: migration_download_url(addon.uid),
+                };
+                actions.push(action);
+                effectively_tracked.insert(folder.clone());
                 will_track.push(DryRunAddon {
                     status: "will_track".to_string(),
                     ..entry
@@ -608,7 +681,7 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
         }
     }
 
-    // Find addons on disk that Minion doesn't know about
+    // Find addons on disk that Minion doesn't know about.
     let mut unmanaged_on_disk: Vec<String> = Vec::new();
     if let Ok(entries) = fs::read_dir(addons_dir) {
         for entry in entries.flatten() {
@@ -620,12 +693,11 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            // Skip Kalpa internal folders
+            // Skip Kalpa internal folders.
             if name.starts_with("kalpa") {
                 continue;
             }
             if !minion_folders.contains(&name) && !store.addons.contains_key(&name) {
-                // Has a manifest? Then it's a real addon
                 let manifest_path = addons_dir.join(&name).join(format!("{name}.txt"));
                 let addon_manifest = addons_dir.join(&name).join(format!("{name}.addon"));
                 if manifest_path.exists() || addon_manifest.exists() {
@@ -636,61 +708,75 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
     }
     unmanaged_on_disk.sort();
 
-    Ok(DryRunResult {
-        will_track,
-        already_tracked,
-        missing_on_disk,
-        unmanaged_on_disk,
-    })
+    let plan_digest = migration_plan_digest(&actions);
+    MigrationPlan {
+        dry_run: DryRunResult {
+            plan_digest,
+            will_track,
+            already_tracked,
+            missing_on_disk,
+            unmanaged_on_disk,
+        },
+        actions,
+        addon_count: minion_addons.len() as u32,
+    }
+}
+
+/// Phase 2: Dry-run migration — compare Minion data with disk state.
+pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
+    let minion_addons = load_minion_addons_for_migration()?;
+    let store = metadata::load_metadata(addons_dir);
+    Ok(build_migration_plan_from_addons(&minion_addons, addons_dir, &store).dry_run)
 }
 
 /// Phase 3: Execute the metadata-only migration.
 /// Only writes kalpa.json — does NOT move/delete any addon folders or SavedVariables.
-pub fn execute_migration(addons_dir: &Path) -> Result<MigrationResult, String> {
+pub fn execute_migration(
+    addons_dir: &Path,
+    expected_plan_digest: Option<&str>,
+) -> Result<MigrationExecuteOutcome, String> {
+    let minion_addons = load_minion_addons_for_migration()?;
+    execute_migration_from_addons(addons_dir, &minion_addons, expected_plan_digest)
+}
+
+fn execute_migration_from_addons(
+    addons_dir: &Path,
+    minion_addons: &[crate::commands::MinionAddon],
+    expected_plan_digest: Option<&str>,
+) -> Result<MigrationExecuteOutcome, String> {
     let start = now_timestamp();
 
-    let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
-    let content =
-        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
-    let minion_addons = crate::commands::parse_minion_addons(&content);
-
     let mut store = metadata::load_metadata(addons_dir);
-    let mut imported: u32 = 0;
-    let mut already_tracked: u32 = 0;
-    let mut skipped_missing: u32 = 0;
+    let plan = build_migration_plan_from_addons(minion_addons, addons_dir, &store);
 
-    for addon in &minion_addons {
-        for folder in &addon.folders {
-            if store.addons.contains_key(folder) {
-                already_tracked += 1;
-                continue;
-            }
-            if addons_dir.join(folder).is_dir() {
-                metadata::record_install(
-                    &mut store,
-                    folder,
-                    addon.uid,
-                    &addon.version,
-                    &format!(
-                        "https://www.esoui.com/downloads/landing.php?fileid={}",
-                        addon.uid
-                    ),
-                );
-                imported += 1;
-            } else {
-                skipped_missing += 1;
-            }
+    if let Some(expected_digest) = expected_plan_digest {
+        if expected_digest != plan.dry_run.plan_digest {
+            return Ok(MigrationExecuteOutcome::PlanChanged {
+                expected_digest: expected_digest.to_string(),
+                actual_digest: plan.dry_run.plan_digest.clone(),
+                fresh_plan: plan.dry_run,
+            });
         }
+    }
+
+    for action in &plan.actions {
+        metadata::record_install(
+            &mut store,
+            &action.folder_name,
+            action.esoui_id,
+            &action.installed_version,
+            &action.download_url,
+        );
     }
 
     // Atomic write of kalpa.json only
     metadata::save_metadata(addons_dir, &store)?;
 
     let result = MigrationResult {
-        imported,
-        already_tracked,
-        skipped_missing,
-        addon_count: minion_addons.len() as u32,
+        imported: plan.actions.len() as u32,
+        already_tracked: plan.dry_run.already_tracked.len() as u32,
+        skipped_missing: plan.dry_run.missing_on_disk.len() as u32,
+        addon_count: plan.addon_count,
     };
 
     // Log the operation
@@ -711,7 +797,7 @@ pub fn execute_migration(addons_dir: &Path) -> Result<MigrationResult, String> {
         },
     );
 
-    Ok(result)
+    Ok(MigrationExecuteOutcome::Applied { result })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -721,6 +807,27 @@ pub struct MigrationResult {
     pub already_tracked: u32,
     pub skipped_missing: u32,
     pub addon_count: u32,
+}
+
+// `rename_all` camelCases only the variant tags; `rename_all_fields` is what
+// camelCases the struct-variant FIELDS (`fresh_plan` → `freshPlan`). Without it
+// the wizard reads undefined and the fresh plan never renders — same trap as
+// uploader::watcher::LiveEvent.
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MigrationExecuteOutcome {
+    Applied {
+        result: MigrationResult,
+    },
+    PlanChanged {
+        expected_digest: String,
+        actual_digest: String,
+        fresh_plan: DryRunResult,
+    },
 }
 
 /// Create a pre-operation snapshot (for bulk operations like update-all, pack install).
@@ -868,23 +975,12 @@ fn extract_archive_entries(archive_path: &Path, parent: &Path) -> Result<u32, St
             if let Some(parent_dir) = dest.parent() {
                 let _ = fs::create_dir_all(parent_dir);
             }
-            // Atomic write: write to .tmp then rename
-            let mut tmp_name = dest.file_name().unwrap_or_default().to_os_string();
-            tmp_name.push(".restore-tmp");
-            let tmp_dest = dest.with_file_name(tmp_name);
-            let mut out = fs::File::create(&tmp_dest)
+            let mut out = crate::atomic_file::AtomicFile::create(&dest)
                 .map_err(|e| format!("Failed to create restore file: {e}"))?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("Failed to write restore file: {e}"))?;
-            // `std::fs::rename` replaces the destination atomically on Windows
-            // (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`) — same guarantee used
-            // by saved_variables/io.rs::write_raw_bytes — so no separate remove is
-            // needed. Removing first would leave a gap where `dest` doesn't exist at
-            // all if the rename that follows then failed.
-            fs::rename(&tmp_dest, &dest).map_err(|e| {
-                let _ = fs::remove_file(&tmp_dest);
-                format!("Failed to finalize restored file: {e}")
-            })?;
+            out.commit()
+                .map_err(|e| format!("Failed to finalize restored file: {e}"))?;
             restored += 1;
         }
     }
@@ -1123,6 +1219,186 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_minion_addon(
+        uid: u32,
+        version: &str,
+        folders: &[&str],
+        addons_path: &Path,
+    ) -> crate::commands::MinionAddon {
+        crate::commands::MinionAddon {
+            uid,
+            version: version.to_string(),
+            folders: folders.iter().map(|folder| (*folder).to_string()).collect(),
+            addons_path: Some(addons_path.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn minion_migration_uses_only_the_selected_addons_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_addons_dir = tmp.path().join("live").join("AddOns");
+        let pts_addons_dir = tmp.path().join("pts").join("AddOns");
+        fs::create_dir_all(&live_addons_dir).unwrap();
+        fs::create_dir_all(&pts_addons_dir).unwrap();
+
+        let minion_addons = vec![
+            crate::commands::MinionAddon {
+                uid: 123,
+                version: "1.0".to_string(),
+                folders: vec!["MyAddon".to_string()],
+                addons_path: Some(pts_addons_dir),
+            },
+            crate::commands::MinionAddon {
+                uid: 123,
+                version: "2.0".to_string(),
+                folders: vec!["MyAddon".to_string()],
+                addons_path: Some(live_addons_dir.clone()),
+            },
+        ];
+
+        let selected = minion_addons_for_migration(&minion_addons, &live_addons_dir);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].version, "2.0");
+    }
+
+    #[test]
+    fn migration_execute_outcome_serializes_camel_case_fields() {
+        let outcome = MigrationExecuteOutcome::PlanChanged {
+            expected_digest: "aa".to_string(),
+            actual_digest: "bb".to_string(),
+            fresh_plan: DryRunResult {
+                plan_digest: "bb".to_string(),
+                will_track: vec![],
+                already_tracked: vec![],
+                missing_on_disk: vec![],
+                unmanaged_on_disk: vec![],
+            },
+        };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["status"], "planChanged");
+        // The TS contract (MigrationExecuteOutcome in src/types.ts) reads these
+        // exact keys; snake_case here renders the fresh plan as undefined.
+        assert!(value.get("expectedDigest").is_some());
+        assert!(value.get("actualDigest").is_some());
+        assert!(value["freshPlan"].get("planDigest").is_some());
+    }
+
+    #[test]
+    fn migration_plan_digest_is_deterministic_and_order_independent_over_actions() {
+        let actions = vec![
+            MigrationTrackAction {
+                folder_name: "AddonB".to_string(),
+                esoui_id: 20,
+                installed_version: "2.0".to_string(),
+                download_url: migration_download_url(20),
+            },
+            MigrationTrackAction {
+                folder_name: "AddonA".to_string(),
+                esoui_id: 10,
+                installed_version: "1.0".to_string(),
+                download_url: migration_download_url(10),
+            },
+        ];
+        let reversed = vec![actions[1].clone(), actions[0].clone()];
+
+        let digest = migration_plan_digest(&actions);
+
+        assert_eq!(digest, migration_plan_digest(&actions));
+        assert_eq!(digest, migration_plan_digest(&reversed));
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let mut changed = actions.clone();
+        changed[0].installed_version = "2.1".to_string();
+        assert_ne!(digest, migration_plan_digest(&changed));
+    }
+
+    #[test]
+    fn execute_migration_with_stale_digest_refuses_and_writes_nothing_to_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("AddonA")).unwrap();
+        fs::create_dir_all(addons_dir.join("AddonB")).unwrap();
+
+        let reviewed_addons = vec![test_minion_addon(1, "1.0", &["AddonA"], &addons_dir)];
+        let fresh_addons = vec![
+            test_minion_addon(1, "1.0", &["AddonA"], &addons_dir),
+            test_minion_addon(2, "2.0", &["AddonB"], &addons_dir),
+        ];
+        let reviewed_plan = build_migration_plan_from_addons(
+            &reviewed_addons,
+            &addons_dir,
+            &metadata::MetadataStore::default(),
+        );
+
+        let outcome = execute_migration_from_addons(
+            &addons_dir,
+            &fresh_addons,
+            Some(&reviewed_plan.dry_run.plan_digest),
+        )
+        .unwrap();
+
+        match outcome {
+            MigrationExecuteOutcome::PlanChanged {
+                expected_digest,
+                actual_digest,
+                fresh_plan,
+            } => {
+                assert_eq!(expected_digest, reviewed_plan.dry_run.plan_digest);
+                assert_ne!(actual_digest, expected_digest);
+                assert_eq!(fresh_plan.will_track.len(), 2);
+                assert_eq!(fresh_plan.plan_digest, actual_digest);
+            }
+            MigrationExecuteOutcome::Applied { .. } => panic!("stale digest should be refused"),
+        }
+        assert!(!addons_dir.join("kalpa.json").exists());
+        assert!(metadata::load_metadata(&addons_dir).addons.is_empty());
+        assert!(read_ops_log(&addons_dir).is_empty());
+    }
+
+    #[test]
+    fn execute_migration_with_matching_digest_applies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("AddonA")).unwrap();
+
+        let minion_addons = vec![test_minion_addon(
+            1,
+            "1.0",
+            &["AddonA", "MissingAddon"],
+            &addons_dir,
+        )];
+        let reviewed_plan = build_migration_plan_from_addons(
+            &minion_addons,
+            &addons_dir,
+            &metadata::MetadataStore::default(),
+        );
+
+        let outcome = execute_migration_from_addons(
+            &addons_dir,
+            &minion_addons,
+            Some(&reviewed_plan.dry_run.plan_digest),
+        )
+        .unwrap();
+
+        let MigrationExecuteOutcome::Applied { result } = outcome else {
+            panic!("matching digest should apply");
+        };
+        assert_eq!(result.imported, 1);
+        assert_eq!(result.already_tracked, 0);
+        assert_eq!(result.skipped_missing, 1);
+        assert_eq!(result.addon_count, 1);
+
+        let store = metadata::load_metadata(&addons_dir);
+        let imported = store.addons.get("AddonA").unwrap();
+        assert_eq!(imported.esoui_id, 1);
+        assert_eq!(imported.installed_version, "1.0");
+        assert_eq!(imported.download_url, migration_download_url(1));
+        assert!(!store.addons.contains_key("MissingAddon"));
+    }
 
     #[test]
     fn snapshot_id_is_unique() {

@@ -7,11 +7,33 @@
 //! library parser, `open_url`) or specific to macOS/Linux (Steam root
 //! candidates, Proton prefixes).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// ESO's Steam App ID — names `appmanifest_306130.acf` and the Proton
 /// compatdata prefix directory.
 pub const ESO_STEAM_APP_ID: &str = "306130";
+
+/// Reject Windows UNC and device-namespace path prefixes, which can trigger
+/// outbound SMB auth (NetNTLM credential theft) or reach raw devices. The
+/// dangerous forms are `\\server\share` (`UNC`), `\\?\UNC\…` (`VerbatimUNC`),
+/// `\\?\GLOBALROOT\…` (`Verbatim`), and the entire `\\.\…` device namespace
+/// (`DeviceNS`: `\\.\UNC\…`, `\\.\C:\…`, `\\.\PhysicalDrive0`, `\\.\pipe\…`).
+/// These must be blocked at the prefix, before any `is_dir`/`canonicalize`
+/// touches the path — those calls perform SMB name resolution themselves.
+///
+/// `VerbatimDisk` (`\\?\C:\…`) is deliberately *allowed*: it is a harmless
+/// drive-rooted form and is exactly what `std::fs::canonicalize` emits on
+/// Windows. On non-Windows targets `Component::Prefix` never occurs, so this is
+/// always `false`.
+pub fn has_unc_or_verbatim_prefix(p: &Path) -> bool {
+    matches!(p.components().next(), Some(Component::Prefix(prefix)) if {
+        use std::path::Prefix::*;
+        matches!(
+            prefix.kind(),
+            Verbatim(_) | VerbatimUNC(_, _) | UNC(_, _) | DeviceNS(_)
+        )
+    })
+}
 
 // ── Steam library discovery ──────────────────────────────────────────────
 
@@ -215,6 +237,45 @@ mod tests {
 
     fn touch_dir(path: &Path) {
         std::fs::create_dir_all(path).expect("create test dir");
+    }
+
+    // Rust only parses Windows path prefixes on Windows targets; on Unix these
+    // strings are ordinary components, so the reject cases are Windows-only.
+    #[cfg(windows)]
+    #[test]
+    fn unc_and_device_prefixes_are_rejected() {
+        // The dangerous forms: plain UNC, verbatim UNC, verbatim/GLOBALROOT, and
+        // the whole `\\.\` device namespace. All trigger SMB/device access on a
+        // bare is_dir/canonicalize.
+        assert!(has_unc_or_verbatim_prefix(Path::new(
+            r"\\attacker.example\share\AddOns"
+        )));
+        assert!(has_unc_or_verbatim_prefix(Path::new(
+            r"\\?\UNC\attacker.example\share"
+        )));
+        assert!(has_unc_or_verbatim_prefix(Path::new(
+            r"\\?\GLOBALROOT\Device\X"
+        )));
+        assert!(has_unc_or_verbatim_prefix(Path::new(r"\\.\UNC\host\share")));
+        assert!(has_unc_or_verbatim_prefix(Path::new(r"\\.\C:\Windows")));
+        assert!(has_unc_or_verbatim_prefix(Path::new(r"\\.\pipe\evil")));
+    }
+
+    #[test]
+    fn ordinary_and_verbatim_disk_paths_are_allowed() {
+        // Drive-letter paths and the verbatim-disk form canonicalize emits must
+        // pass, or every real AddOns selection would be rejected. On non-Windows
+        // these strings have no Prefix component and are trivially allowed.
+        assert!(!has_unc_or_verbatim_prefix(Path::new(
+            r"C:\Users\me\Documents\Elder Scrolls Online\live\AddOns"
+        )));
+        assert!(!has_unc_or_verbatim_prefix(Path::new(
+            r"\\?\C:\Users\me\Documents\live\AddOns"
+        )));
+        assert!(!has_unc_or_verbatim_prefix(Path::new(
+            "/home/me/.local/share/Elder Scrolls Online/live/AddOns"
+        )));
+        assert!(!has_unc_or_verbatim_prefix(Path::new("relative/AddOns")));
     }
 
     #[test]

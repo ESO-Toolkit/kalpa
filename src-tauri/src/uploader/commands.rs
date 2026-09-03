@@ -8,7 +8,7 @@
 //! target arbitrary files or trigger outbound UNC/SMB connections.
 
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -260,21 +260,10 @@ impl super::native::live::OrphanSink for OneShotOrphanSink {
 /// attempt SMB name resolution *before* the containment check can reject it, so
 /// it must be blocked here at the prefix.
 ///
-/// `VerbatimDisk` (`\\?\C:\…`) is deliberately *allowed*: it is a harmless
-/// drive-rooted form and is exactly what `std::fs::canonicalize` emits on
-/// Windows. We canonicalize with `dunce` below so confined paths stay in
-/// drive-letter form, but a stray verbatim-disk prefix arriving from the
-/// frontend must not be rejected — that was the bug that broke every log
-/// selection.
-fn has_unc_or_verbatim_prefix(p: &Path) -> bool {
-    matches!(p.components().next(), Some(Component::Prefix(prefix)) if {
-        use std::path::Prefix::*;
-        matches!(
-            prefix.kind(),
-            Verbatim(_) | VerbatimUNC(_, _) | UNC(_, _) | DeviceNS(_)
-        )
-    })
-}
+/// Shared with `commands.rs::validate_addons_path` — the same guard protects the
+/// AddOns root of trust that this module's `logs_root` derives from. `VerbatimDisk`
+/// (`\\?\C:\…`) is deliberately allowed there for the same reason it is here.
+use crate::platform::has_unc_or_verbatim_prefix;
 
 /// Resolve the ESO `Logs` directory (the sibling of the approved AddOns dir).
 fn logs_root(allowed: &State<'_, AllowedAddonsPath>) -> Result<PathBuf, String> {
@@ -1432,8 +1421,8 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
-            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
-            // blocking thread instead of the async executor. build_evidence stays
+            // Extraction re-parses the vetted prefix (up to the native size cap), so run
+            // it on a blocking thread instead of the async executor. build_evidence stays
             // synchronous here so it can still ride back in the record + UploadDispatch.
             let build_evidence = if use_native {
                 match report.as_ref() {
@@ -1441,19 +1430,22 @@ pub async fn uploader_upload_log(
                         let safe = safe.clone();
                         let code = report.code.clone();
                         match tokio::task::spawn_blocking(move || {
-                            super::native::build_evidence::extract_from_file(&safe, Some(code)).map(
-                                |mut evidence| {
-                                    if !evidence.players.is_empty() {
-                                        // Best-effort: attach the logging player's ESOTK
-                                        // Companion snapshots (read from SavedVariables).
-                                        // Never blocks the sidecar; stays on this blocking
-                                        // thread because it reads files too.
-                                        evidence.companion =
-                                            super::native::companion::read_for_upload(&evidence);
-                                    }
-                                    evidence
-                                },
+                            super::native::build_evidence::extract_from_file(
+                                &safe,
+                                scanned_len,
+                                Some(code),
                             )
+                            .map(|mut evidence| {
+                                if !evidence.players.is_empty() {
+                                    // Best-effort: attach the logging player's ESOTK
+                                    // Companion snapshots (read from SavedVariables).
+                                    // Never blocks the sidecar; stays on this blocking
+                                    // thread because it reads files too.
+                                    evidence.companion =
+                                        super::native::companion::read_for_upload(&evidence);
+                                }
+                                evidence
+                            })
                         })
                         .await
                         {

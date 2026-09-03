@@ -15,8 +15,8 @@ import type {
   SvImportResult,
 } from "../types";
 import { runBatchPackInstall } from "@/lib/pack-install";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { getSetting, setSetting } from "@/lib/store";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { PackTypeFilter, SortOption, TabMode } from "./pack-constants";
 
 interface VoteResponse {
@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
+import { useOptimisticSetting } from "@/hooks/use-optimistic-setting";
 import {
   ESO_RUNNING_SETTINGS_REFUSAL,
   esoIsRunningForSettingsWrite,
@@ -128,6 +129,7 @@ export function Packs({
     AddonSettings
   > | null>(null);
   const [applyingSettings, setApplyingSettings] = useState(false);
+  const importOperationSeqRef = useRef(0);
 
   // Export state
   const [exportIncludeSettings, setExportIncludeSettings] = useState(false);
@@ -150,6 +152,32 @@ export function Packs({
   const [myPacksPage, setMyPacksPage] = useState(1);
   const [myPacksHasMore, setMyPacksHasMore] = useState(false);
   const [duplicatingPackId, setDuplicatingPackId] = useState<string | null>(null);
+  const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
+
+  const loadMyPacksSeqRef = useRef(0);
+  const authIdentity = authUser?.userId ?? null;
+  const authIdentityRef = useRef(authIdentity);
+  const authUserRef = useRef(authUser);
+  /* eslint-disable react-hooks/refs */
+  // Keep the request guards current as soon as props render, before a stale
+  // promise continuation can run ahead of the transition effect below.
+  authIdentityRef.current = authIdentity;
+  authUserRef.current = authUser;
+  /* eslint-enable react-hooks/refs */
+
+  useEffect(() => {
+    // Auth can change outside the local logout handler (for example after a
+    // child request receives a 401). Clear all private state for both logout
+    // and account switches, while the sequence bump here rejects old loads.
+    loadMyPacksSeqRef.current++;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMyPacks([]);
+    setMyPacksPage(1);
+    setMyPacksHasMore(false);
+    setMyPacksLoading(false);
+    setMyPacksLoadingMore(false);
+    setVotingPacks(new Set());
+  }, [authIdentity]);
 
   // Delete state
   const [deletingPack, setDeletingPack] = useState(false);
@@ -159,11 +187,19 @@ export function Packs({
   const [installSucceeded, setInstallSucceeded] = useState(false);
 
   // Installed packs library (persisted locally)
-  const [installedPackRefs, setInstalledPackRefs] = useState<InstalledPackRef[]>([]);
+  const {
+    value: installedPackRefs,
+    commit: commitInstalledPackRefs,
+    hydrate: hydrateInstalledPackRefs,
+  } = useOptimisticSetting<InstalledPackRef[]>(
+    [],
+    (refs) => setSetting("installed_packs", refs),
+    "Couldn't update your installed pack library."
+  );
 
   useEffect(() => {
-    getSetting<InstalledPackRef[]>("installed_packs", []).then(setInstalledPackRefs);
-  }, []);
+    void getSetting<InstalledPackRef[]>("installed_packs", []).then(hydrateInstalledPackRefs);
+  }, [hydrateInstalledPackRefs]);
 
   // When a pack is selected, pre-select all required addons
   useEffect(() => {
@@ -252,6 +288,10 @@ export function Packs({
   const selectPackSeqRef = useRef(0);
   const handleSelectPack = useCallback(async (id: string) => {
     const seq = ++selectPackSeqRef.current;
+    // Disarm before the await, not after: an armed "Install N addons?" bar must
+    // not stay clickable while the newly selected pack is still loading, nor
+    // survive a load failure.
+    setConfirmInstall(false);
     setLoadingDetail(true);
     try {
       const pack = await invokeOrThrow<Pack>("get_pack", { id });
@@ -268,11 +308,6 @@ export function Packs({
   }, []);
 
   // ── My Packs loader ──────────────────────────────────────────────
-  const loadMyPacksSeqRef = useRef(0);
-  const authUserRef = useRef(authUser);
-  // eslint-disable-next-line react-hooks/refs
-  authUserRef.current = authUser;
-
   const loadMyPacks = useCallback(
     async (page: number = 1) => {
       const currentUser = authUserRef.current;
@@ -293,7 +328,8 @@ export function Packs({
           author: currentUser.userId,
           status: "all",
         });
-        if (seq !== loadMyPacksSeqRef.current) return;
+        if (seq !== loadMyPacksSeqRef.current || authIdentityRef.current !== currentUser.userId)
+          return;
         if (page === 1) {
           setMyPacks(result.packs);
         } else {
@@ -303,10 +339,11 @@ export function Packs({
         const PAGE_SIZE = 10;
         setMyPacksHasMore(result.packs.length >= PAGE_SIZE);
       } catch (e) {
-        if (seq !== loadMyPacksSeqRef.current) return;
+        if (seq !== loadMyPacksSeqRef.current || authIdentityRef.current !== currentUser.userId)
+          return;
         toast.error(`Failed to load your packs: ${getTauriErrorMessage(e)}`);
       } finally {
-        if (seq === loadMyPacksSeqRef.current) {
+        if (seq === loadMyPacksSeqRef.current && authIdentityRef.current === currentUser.userId) {
           setMyPacksLoading(false);
           setMyPacksLoadingMore(false);
         }
@@ -423,24 +460,6 @@ export function Packs({
   };
 
   const handleExportPackFile = async (pack: Pack) => {
-    const safeName = pack.title
-      .replace(/[^a-zA-Z0-9-_ ]/g, "")
-      .trim()
-      .replace(/\s+/g, "-");
-    // Inside try/catch: a denied dialog permission rejects here, and an
-    // unhandled rejection from the click handler would look like a dead button.
-    let path: string | null;
-    try {
-      path = await saveFileDialog({
-        defaultPath: `${safeName}.esopack`,
-        filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-      });
-    } catch (e) {
-      toast.error(`Couldn't open the save dialog: ${getTauriErrorMessage(e)}`);
-      return;
-    }
-    if (!path) return;
-
     let settings: Record<string, AddonSettings> | undefined;
     if (exportIncludeSettings) {
       try {
@@ -478,7 +497,7 @@ export function Packs({
     }
 
     try {
-      await invokeOrThrow("export_pack_file", {
+      const exported = await invokeOrThrow<boolean>("export_pack_file", {
         pack: {
           format: "esopack",
           version: settings ? 2 : 1,
@@ -493,8 +512,8 @@ export function Packs({
           sharedBy: authUser?.userName ?? "Anonymous",
           ...(settings ? { settings } : {}),
         },
-        path,
       });
+      if (!exported) return;
       if (settings) {
         const addonCount = Object.keys(settings).length;
         const totalDrops = Object.values(settings).reduce(
@@ -529,32 +548,35 @@ export function Packs({
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return;
 
+    const operationId = ++importOperationSeqRef.current;
     setResolvingCode(true);
     setImportError(null);
     setImportedPack(null);
     setImportedFileSettings(null);
     try {
       const pack = await invokeOrThrow<SharedPack>("resolve_share_code", { code: trimmed });
+      if (operationId !== importOperationSeqRef.current) return;
       setImportedPack(pack);
     } catch (e) {
+      if (operationId !== importOperationSeqRef.current) return;
       setImportError(getTauriErrorMessage(e));
     } finally {
-      setResolvingCode(false);
+      if (operationId === importOperationSeqRef.current) {
+        setResolvingCode(false);
+      }
     }
   }, []);
 
   const handleImportFile = async () => {
-    const path = await openFileDialog({
-      filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-      multiple: false,
-    });
-    if (!path) return;
-
-    setImportError(null);
-    setImportedPack(null);
-    setImportedFileSettings(null);
+    const operationId = ++importOperationSeqRef.current;
+    setResolvingCode(false);
     try {
-      const result = await invokeOrThrow<EsoPackFile>("import_pack_file", { path });
+      const result = await invokeOrThrow<EsoPackFile | null>("import_pack_file");
+      if (!result || operationId !== importOperationSeqRef.current) return;
+
+      setImportError(null);
+      setImportedPack(null);
+      setImportedFileSettings(null);
       setImportedPack({
         title: result.pack.title,
         description: result.pack.description,
@@ -565,13 +587,20 @@ export function Packs({
         sharedAt: result.sharedAt,
         expiresAt: "",
       });
-      if (result.settings && Object.keys(result.settings).length > 0) {
-        setImportedFileSettings(result.settings);
-      }
+      setImportedFileSettings(
+        result.settings && Object.keys(result.settings).length > 0 ? result.settings : null
+      );
     } catch (e) {
+      if (operationId !== importOperationSeqRef.current) return;
       setImportError(getTauriErrorMessage(e));
     }
   };
+
+  const handleImportModeChange = useCallback(() => {
+    ++importOperationSeqRef.current;
+    setResolvingCode(false);
+    setImportError(null);
+  }, []);
 
   // Auto-resolve share code from deep link
   useEffect(() => {
@@ -637,7 +666,10 @@ export function Packs({
     }
 
     // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
+    if (result) {
+      reportDependencyFailures(result.failedDeps);
+      void resolvePendingDeps(result.pendingDeps, addonsPath);
+    }
 
     // Apply SV settings from a v2 .esopack file after addons are installed
     if (importedFileSettings && Object.keys(importedFileSettings).length > 0) {
@@ -824,30 +856,33 @@ export function Packs({
         addonCount: selectedPack.addons.length,
         installedAt: new Date().toISOString(),
       };
-      // Build the next list outside the updater: setSetting is a side effect and
-      // the updater must stay pure, and its result decides whether the library
-      // entry actually survives a restart.
-      const updated = [ref, ...installedPackRefs.filter((r) => r.packId !== ref.packId)];
-      setInstalledPackRefs(updated);
-      if (!(await setSetting("installed_packs", updated))) {
-        toast.warning("Couldn't save this pack to your installed library.");
-      }
+      // Functional sequencing composes with any still-pending library change;
+      // the persistence hook owns the side effect and confirmed rollback state.
+      void commitInstalledPackRefs((current) => [
+        ref,
+        ...current.filter((installed) => installed.packId !== ref.packId),
+      ]);
     }
 
     onRefresh();
 
     // One prompt for the whole pack; empty unless the policy is "ask".
-    if (result) void resolvePendingDeps(result.pendingDeps, addonsPath);
+    if (result) {
+      reportDependencyFailures(result.failedDeps);
+      void resolvePendingDeps(result.pendingDeps, addonsPath);
+    }
   };
 
   // ── Voting ──────────────────────────────────────────────────────────
-  const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
-
   const handleLogout = useCallback(async () => {
     if (loggingOut) return;
     setLoggingOut(true);
     try {
       await invokeOrThrow("auth_logout");
+      // A private list request may still resolve after the authenticated session
+      // is gone. Invalidate every page load before clearing signed-in state so
+      // neither its result nor its cleanup can publish into the signed-out view.
+      loadMyPacksSeqRef.current++;
       onAuthChange(null);
       setMyPacks([]);
       setMyPacksPage(1);
@@ -1109,12 +1144,15 @@ export function Packs({
                           importedPackAddonsToInstall={importedPackAddonsToInstall}
                           onResolveCode={handleResolveShareCode}
                           onImportFile={handleImportFile}
+                          onImportModeChange={handleImportModeChange}
                           onInstall={handleInstallImportedPack}
                           hasSettings={
                             !!importedFileSettings && Object.keys(importedFileSettings).length > 0
                           }
                           applyingSettings={applyingSettings}
                           onClear={() => {
+                            ++importOperationSeqRef.current;
+                            setResolvingCode(false);
                             setImportedPack(null);
                             setImportedFileSettings(null);
                             setImportError(null);
@@ -1213,14 +1251,9 @@ export function Packs({
                     onLoadMore={() => loadMyPacks(myPacksPage + 1)}
                     installedPackRefs={installedPackRefs}
                     onRemoveInstalledRef={(packId) => {
-                      const updated = installedPackRefs.filter((r) => r.packId !== packId);
-                      setInstalledPackRefs(updated);
-                      void setSetting("installed_packs", updated).then((ok) => {
-                        if (!ok) {
-                          setInstalledPackRefs(installedPackRefs);
-                          toast.error("Couldn't update your installed pack library.");
-                        }
-                      });
+                      void commitInstalledPackRefs((current) =>
+                        current.filter((installed) => installed.packId !== packId)
+                      );
                     }}
                     onEdit={(pack) => {
                       handleStartEditing(pack);

@@ -167,6 +167,43 @@ describe("sameAddonsFolder", () => {
   });
 });
 
+describe("successful-removal epochs", () => {
+  it("invalidates a pre-removal request only after the backend confirms success", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const requestEpoch = queue.captureRemovalEpoch(LIVE);
+
+    // Undo leaves the request valid: the optimistic removal never reached disk.
+    queue.add("Undone", entry("Undone", { addonsPath: LIVE }));
+    queue.drop("Undone");
+    expect(queue.isRemovalEpochCurrent(LIVE, requestEpoch)).toBe(true);
+
+    // A failed backend call also leaves it valid: begin/end only manage the
+    // temporary visibility mask; failure does not change filesystem history.
+    queue.beginCommit("Failed", LIVE);
+    queue.endCommit("Failed", LIVE);
+    expect(queue.isRemovalEpochCurrent(LIVE, requestEpoch)).toBe(true);
+
+    queue.beginCommit("Removed", LIVE);
+    queue.recordSuccessfulRemoval(LIVE);
+    queue.endCommit("Removed", LIVE);
+
+    expect(queue.isRemovalEpochCurrent(LIVE, requestEpoch)).toBe(false);
+    expect(queue.isRemovalEpochCurrent(LIVE, queue.captureRemovalEpoch(LIVE))).toBe(true);
+  });
+
+  it("normalizes equivalent paths while isolating different game instances", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const liveEpoch = queue.captureRemovalEpoch("  C:/Games/ESO/LIVE/AddOns/  ");
+    const ptsEpoch = queue.captureRemovalEpoch(PTS);
+
+    queue.recordSuccessfulRemoval("c:/games/eso/live/addons/");
+
+    expect(queue.isRemovalEpochCurrent(LIVE, liveEpoch)).toBe(false);
+    expect(queue.isRemovalEpochCurrent("C:/GAMES/ESO/live/AddOns/", liveEpoch)).toBe(false);
+    expect(queue.isRemovalEpochCurrent(PTS, ptsEpoch)).toBe(true);
+  });
+});
+
 describe("restore reducers", () => {
   it("restores the update row alongside the addon", () => {
     // Regression: undo put the addon back but dropped its UpdateCheckResult, so
@@ -276,124 +313,6 @@ describe("hidePendingRemovals", () => {
     expect(hidePendingRemovals([addon("Shared")], queue, PTS).map((a) => a.folderName)).toEqual([
       "Shared",
     ]);
-  });
-});
-
-describe("completed-removal masking (the phantom-row race)", () => {
-  it("masks a row a scan enumerated before the delete and delivered after it", () => {
-    // t=0.0  the scan is issued            -> stamp
-    // t=0.1  the backend enumerates Foo, still on disk
-    // t=0.2  user removes Foo              -> queued
-    // t=3.2  timer fires                   -> drop + beginCommit
-    // t=3.3  delete confirmed              -> markRemoved, endCommit
-    // t=3.4  the scan resolves             -> nothing queued, nothing committing
-    const queue = new RemovalQueue(vi.fn());
-    const since = queue.stamp();
-
-    queue.add("Foo", entry("Foo", { addonsPath: LIVE }));
-    queue.drop("Foo");
-    queue.beginCommit("Foo", LIVE);
-    queue.markRemoved("Foo", LIVE);
-    queue.endCommit("Foo", LIVE);
-
-    // The queue-only answer is the bug: visible.
-    expect(queue.isHidden("Foo", LIVE)).toBe(false);
-    // Stamped against the in-flight request, it stays hidden.
-    expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
-    expect(hidePendingRemovals([addon("Foo")], queue, LIVE, since)).toEqual([]);
-  });
-
-  it("stops masking once a request is issued after the removal landed", () => {
-    const queue = new RemovalQueue(vi.fn());
-    queue.markRemoved("Foo", LIVE);
-
-    const since = queue.stamp();
-    expect(queue.isHidden("Foo", LIVE, since)).toBe(false);
-    // So a reinstall shows through on the very next scan.
-    const scanned = [addon("Foo")];
-    expect(hidePendingRemovals(scanned, queue, LIVE, since)).toBe(scanned);
-  });
-
-  it("scopes completed removals to the instance they happened in", () => {
-    const queue = new RemovalQueue(vi.fn());
-    const since = queue.stamp();
-    queue.markRemoved("Shared", LIVE);
-
-    expect(queue.isHidden("Shared", LIVE, since)).toBe(true);
-    expect(queue.isHidden("Shared", PTS, since)).toBe(false);
-  });
-
-  it("does not mask when the caller passes no stamp", () => {
-    // `runBatchUpdates` re-masks a list it already holds rather than applying an
-    // in-flight result, so it must keep the queue-only answer.
-    const queue = new RemovalQueue(vi.fn());
-    queue.markRemoved("Foo", LIVE);
-    const scanned = [addon("Foo")];
-    expect(hidePendingRemovals(scanned, queue, LIVE)).toBe(scanned);
-  });
-
-  it("keeps every removal a batch bigger than any fixed window produces", () => {
-    // A count-capped log would evict the earliest of these while the scan that
-    // needs them masked was still in flight — the phantom rows come straight
-    // back for the addons removed first.
-    const queue = new RemovalQueue(vi.fn());
-    const since = queue.stamp();
-    for (let i = 0; i < 1000; i++) queue.markRemoved(`Addon${i}`, LIVE);
-
-    expect(queue.isHidden("Addon0", LIVE, since)).toBe(true);
-    expect(queue.isHidden("Addon500", LIVE, since)).toBe(true);
-    expect(queue.isHidden("Addon999", LIVE, since)).toBe(true);
-  });
-
-  it("forgets the log once nothing is in flight", () => {
-    const queue = new RemovalQueue(vi.fn());
-    const since = queue.stamp();
-    queue.markRemoved("Foo", LIVE);
-    expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
-
-    queue.release(since);
-
-    // The stale stamp is now meaningless, and a fresh request sees the folder
-    // exactly as the backend reports it.
-    expect(queue.isHidden("Foo", LIVE, queue.stamp())).toBe(false);
-  });
-
-  it("holds entries the OLDEST in-flight request still needs", () => {
-    const queue = new RemovalQueue(vi.fn());
-    const early = queue.stamp();
-    queue.markRemoved("Foo", LIVE);
-    const late = queue.stamp();
-
-    // Releasing the later request must not drop what the earlier one needs.
-    queue.release(late);
-    expect(queue.isHidden("Foo", LIVE, early)).toBe(true);
-    expect(queue.isHidden("Foo", LIVE, late)).toBe(false);
-  });
-
-  it("refcounts concurrent requests that share a stamp", () => {
-    // Two scans issued back to back with no removal between them take the same
-    // generation; the first to settle must not free the second's history.
-    const queue = new RemovalQueue(vi.fn());
-    const a = queue.stamp();
-    const b = queue.stamp();
-    expect(a).toBe(b);
-
-    queue.markRemoved("Foo", LIVE);
-    queue.release(a);
-    expect(queue.isHidden("Foo", LIVE, b)).toBe(true);
-
-    queue.release(b);
-    expect(queue.isHidden("Foo", LIVE, queue.stamp())).toBe(false);
-  });
-
-  it("ignores a release for a stamp it never issued", () => {
-    const queue = new RemovalQueue(vi.fn());
-    const since = queue.stamp();
-    queue.markRemoved("Foo", LIVE);
-
-    queue.release(9999);
-
-    expect(queue.isHidden("Foo", LIVE, since)).toBe(true);
   });
 });
 

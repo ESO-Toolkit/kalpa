@@ -1,8 +1,8 @@
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { putPack, putVote } from "../src/kv";
-import type { Env, Pack } from "../src/types";
+import type { Env, Pack, VoteRecord } from "../src/types";
 import { makePack } from "./helpers";
 
 const e = env as unknown as Env;
@@ -11,10 +11,37 @@ function packIndex() {
   return e.PACK_INDEX.get(e.PACK_INDEX.idFromName("singleton"));
 }
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function restoreTokenHash(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return bytesToBase64Url(new Uint8Array(digest));
+}
+
+interface BackupForTest {
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: Record<string, VoteRecord>;
+  created_at: string;
+}
+
 describe("PackIndexDO authoritative mutations", () => {
   beforeEach(async () => {
-    await packIndex().setAuthority("kv", []);
-    await packIndex().replaceIndex({ packs: [] });
+    const index = packIndex();
+    await index.cancelActiveRestoreJob();
+    await runInDurableObject(index, async (_instance, state) => {
+      const restoreKeys = [...(await state.storage.list({ prefix: "restore:" })).keys()];
+      const deletedAuthorKeys = [...(await state.storage.list({ prefix: "deleted-author:" })).keys()];
+      await Promise.all([...restoreKeys, ...deletedAuthorKeys].map((key) => state.storage.delete(key)));
+    });
+    await index.setAuthority("kv", []);
+    await index.replaceIndex({ packs: [] });
   });
 
   it("accepts only one concurrent create for the same id", async () => {
@@ -245,6 +272,179 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await e.ESO_PACKS.get(`pack:${pack.id}`)).toBeNull();
   });
 
+  it("counts concurrent installs from one identity only once", async () => {
+    const pack = makePack("w3-idempotent-install");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+
+    const results = await Promise.all([
+      index.recordInstall(pack.id, "same-identity", pack.created_at, 1_000),
+      index.recordInstall(pack.id, "same-identity", pack.created_at, 1_000),
+    ]);
+
+    expect(results.map((result) => result?.install_count)).toEqual([1, 1]);
+    expect(await index.getPack(pack.id)).toMatchObject({ install_count: 1 });
+  });
+
+  it("allows the same install identity after the one-hour window", async () => {
+    const pack = makePack("w3-install-window");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+
+    await index.recordInstall(pack.id, "repeat-identity", pack.created_at, 1_000);
+    const result = await index.recordInstall(
+      pack.id,
+      "repeat-identity",
+      pack.created_at,
+      1_000 + 3_600_001,
+    );
+
+    expect(result).toMatchObject({ install_count: 2 });
+  });
+
+  it("expires persisted install identity data after one hour", async () => {
+    const pack = makePack("w3-install-expiry");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "expiring-identity", pack.created_at, 1_000);
+
+    expect(await index.cleanupInstallClaims(1_000 + 3_600_001)).toBe(1);
+    const keys = await runInDurableObject(index, async (_instance, state) =>
+      [...(await state.storage.list({ prefix: "install-" })).keys()]);
+    expect(keys).toEqual([]);
+  });
+
+  it("expires install identities across durable-list page boundaries", async () => {
+    const index = packIndex();
+    await runInDurableObject(index, async (_instance, state) => {
+      const entries: Record<string, { markerKey: string; recordedAt: number }> = {};
+      for (let i = 0; i < 1_001; i++) {
+        const slotKey = `install-slot:${String(i).padStart(4, "0")}`;
+        entries[slotKey] = { markerKey: `missing-marker:${i}`, recordedAt: 1_000 };
+      }
+      await state.storage.put(entries);
+    });
+
+    expect(await index.cleanupInstallClaims(1_000 + 3_600_001)).toBe(1_001);
+    const remaining = await runInDurableObject(index, async (_instance, state) =>
+      state.storage.list({ prefix: "install-slot:" }));
+    expect(remaining.size).toBe(0);
+  });
+
+  it("evicts the oldest claim at the exact 5,001st ring slot", async () => {
+    const pack = makePack("w3-install-ring-boundary");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    const oldMarker = `install-marker:${pack.id}:${pack.created_at}:oldest`;
+    await runInDurableObject(index, async (_instance, state) => {
+      await state.storage.put("meta:install-sequence", 5_000);
+      await state.storage.put("install-slot:0", { markerKey: oldMarker, recordedAt: 1_000 });
+      await state.storage.put(oldMarker, {
+        markerKey: oldMarker,
+        recordedAt: 1_000,
+        slotKey: "install-slot:0",
+      });
+    });
+
+    await index.recordInstall(pack.id, "newest", pack.created_at, 2_000);
+    const claims = await runInDurableObject(index, async (_instance, state) => ({
+      old: await state.storage.get(oldMarker),
+      slot: await state.storage.get<{ markerKey: string }>("install-slot:0"),
+    }));
+    expect(claims.old).toBeUndefined();
+    expect(claims.slot?.markerKey).toContain(":newest");
+  });
+
+  it("does not rewrite the KV mirror for a duplicate claim", async () => {
+    const pack = makePack("w3-install-duplicate");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "duplicate-identity", pack.created_at, 1_000);
+    const put = vi.spyOn(e.ESO_PACKS, "put");
+
+    const retry = await index.recordInstall(pack.id, "duplicate-identity", pack.created_at, 2_000);
+
+    expect(retry).toMatchObject({ install_count: 1 });
+    expect(put).not.toHaveBeenCalled();
+    put.mockRestore();
+  });
+
+  it("heals the KV detail when a duplicate claim retries after mirror loss", async () => {
+    const pack = makePack("w3-install-heal");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "healing-identity", pack.created_at, 1_000);
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+
+    const retry = await index.recordInstall(pack.id, "healing-identity", pack.created_at, 2_000);
+
+    expect(retry).toMatchObject({ install_count: 1 });
+    expect(await e.ESO_PACKS.get<Pack>(`pack:${pack.id}`, "json"))
+      .toMatchObject({ install_count: 1 });
+  });
+
+  it("deletes install claims in bounded batches during pack cleanup", async () => {
+    const pack = makePack("w3-install-cleanup-batches");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await runInDurableObject(index, async (_instance, state) => {
+      for (let i = 0; i < 201; i++) {
+        const markerKey = `install-marker:${pack.id}:${pack.created_at}:identity-${i}`;
+        const slotKey = `install-slot:cleanup-${i}`;
+        await state.storage.put(markerKey, { markerKey, slotKey, recordedAt: 1_000 });
+        await state.storage.put(slotKey, { markerKey, recordedAt: 1_000 });
+      }
+    });
+
+    await index.removePack(pack.id);
+
+    const remaining = await runInDurableObject(index, async (_instance, state) => ({
+      markers: await state.storage.list({ prefix: `install-marker:${pack.id}:` }),
+      slots: await state.storage.list({ prefix: "install-slot:cleanup-" }),
+    }));
+    expect(remaining.markers.size).toBe(0);
+    expect(remaining.slots.size).toBe(0);
+  });
+
+  it("persists an expiry alarm with the install claim", async () => {
+    const pack = makePack("w3-install-alarm-atomic");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [pack] });
+    await index.recordInstall(pack.id, "alarm-identity", pack.created_at);
+    const state = await runInDurableObject(index, async (_instance, durableState) => ({
+      alarm: await durableState.storage.getAlarm(),
+      markerCount: (await durableState.storage.list({ prefix: "install-marker:" })).size,
+    }));
+
+    expect(state.alarm).not.toBeNull();
+    expect(state.markerCount).toBe(1);
+  });
+
+  it("does not carry install suppression into a recreated slug", async () => {
+    const oldPack = makePack("w3-install-reuse");
+    const newPack = makePack(oldPack.id, {
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [oldPack] });
+    await index.recordInstall(oldPack.id, "same-identity", oldPack.created_at, 1_000);
+    await index.removePack(oldPack.id);
+    await index.addPack(newPack);
+
+    const result = await index.recordInstall(
+      newPack.id,
+      "same-identity",
+      newPack.created_at,
+      2_000,
+    );
+
+    expect(result).toMatchObject({ install_count: 1 });
+    const oldClaims = await runInDurableObject(index, async (_instance, state) =>
+      state.storage.list({ prefix: `install-marker:${oldPack.id}:${oldPack.created_at}:` }));
+    expect(oldClaims.size).toBe(0);
+  });
+
   it.each(["vote_count", "install_count"] as const)(
     "preserves a fresh %s when an update carries stale counters",
     async (field) => {
@@ -290,6 +490,42 @@ describe("PackIndexDO authoritative mutations", () => {
     },
   );
 
+  it("rejects a reconciliation write from an earlier slug lifecycle", async () => {
+    const oldPack = makePack("w2-reused-write");
+    const newPack = makePack(oldPack.id, {
+      created_at: "2026-08-27T00:00:00.000Z",
+      updated_at: "2026-08-27T00:00:00.000Z",
+    });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [oldPack] });
+    await index.removePack(oldPack.id);
+    await index.addPack(newPack);
+
+    expect(await index.reconcileWriteD1(oldPack.id, oldPack.created_at, true, true)).toEqual({
+      upserted: false,
+      tags_replaced: false,
+    });
+    expect(await index.getPack(oldPack.id)).toMatchObject({ created_at: newPack.created_at });
+  });
+
+  it("allows only one reconciliation lease and ignores a stale release", async () => {
+    const index = packIndex();
+    expect(await index.beginReconciliation("first")).toBe(true);
+    expect(await index.beginReconciliation("second")).toBe(false);
+    await index.endReconciliation("second");
+    expect(await index.beginReconciliation("third")).toBe(false);
+    await index.endReconciliation("first");
+    expect(await index.beginReconciliation("third")).toBe(true);
+    await index.endReconciliation("third");
+  });
+
+  it("reports whether reconciliation authority is shadow or DO", async () => {
+    const index = packIndex();
+    expect((await index.getReconciliationState()).authority).toBe("kv");
+    expect((await index.setAuthority("do", [])).ok).toBe(true);
+    expect((await index.getReconciliationState()).authority).toBe("do");
+  });
+
   it("preserves packs created while a restore page is being applied", async () => {
     const restored = makePack("w1-restored", { title: "Old title" });
     const concurrent = makePack("w1-concurrent");
@@ -308,6 +544,241 @@ describe("PackIndexDO authoritative mutations", () => {
         expect.objectContaining({ id: concurrent.id }),
       ]),
     );
+  });
+
+  // Restore-job tests anchor their injected clocks to the real Date.now():
+  // job/claim expiries derived from a synthetic epoch land in the past on the
+  // real clock, so the alarm the DO schedules fires immediately and its
+  // cleanup (which runs on real time) deletes the job mid-test.
+  it("allows only one active restore job", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const first = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "first",
+      total: 2,
+      now: T0,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error("first restore job did not start");
+
+    const second = await index.beginRestoreJob({
+      backupKey: "backup:2026-01-02",
+      snapshotCreatedAt: "2026-01-02T00:00:00.000Z",
+      snapshotFingerprint: "second",
+      total: 1,
+      now: T0 + 1_000,
+    });
+    expect(second).toMatchObject({
+      ok: false,
+      reason: "active",
+      job: { jobId: first.job.jobId },
+    });
+  });
+
+  it("rejects a concurrent restore page claim while one is in flight", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "claim",
+      total: 4,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+
+    const claims = await Promise.all([
+      index.claimRestorePage({ tokenHash, limit: 2, now: T0 + 1_000 }),
+      index.claimRestorePage({ tokenHash, limit: 2, now: T0 + 1_000 }),
+    ]);
+
+    expect(claims.filter((claim) => claim.ok)).toHaveLength(1);
+    expect(claims.find((claim) => !claim.ok)).toMatchObject({ ok: false, reason: "in-flight" });
+  });
+
+  it("allows an expired restore page claim to be retried", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "retry",
+      total: 4,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+
+    const firstClaim = await index.claimRestorePage({ tokenHash, limit: 2, now: T0 + 1_000 });
+    expect(firstClaim).toMatchObject({ ok: true, start: 0, end: 2, final: false });
+
+    const retry = await index.claimRestorePage({
+      tokenHash,
+      limit: 2,
+      now: T0 + 1_000 + 5 * 60 * 1_000 + 1,
+    });
+    expect(retry).toMatchObject({ ok: true, start: 0, end: 2, final: false });
+  });
+
+  it("atomically promotes the final restore page while preserving concurrent packs", async () => {
+    const preserved = makePack("w1-restore-preserved");
+    const restored = makePack("w1-restore-final");
+    const index = packIndex();
+    await index.replaceIndex({ packs: [preserved] });
+    const T0 = Date.now();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "final",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim).toMatchObject({ ok: true, start: 0, end: 1, final: true });
+    if (!claim.ok) throw new Error("restore page was not claimed");
+
+    const completed = await index.completeRestorePage({
+      tokenHash,
+      claimId: claim.claimId,
+      end: claim.end,
+      finalReplacement: { packs: [restored], restoredIds: [restored.id] },
+      now: T0 + 2_000,
+    });
+
+    expect(completed).toMatchObject({ ok: true, job: { status: "done", nextCursor: 1 } });
+    const active = await runInDurableObject(index, async (_instance, state) => state.storage.get("restore:active"));
+    expect(active).toBeUndefined();
+    expect((await index.getIndex()).packs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: preserved.id }),
+        expect.objectContaining({ id: restored.id }),
+      ]),
+    );
+  });
+
+  it("removes expired restore jobs from alarm cleanup", async () => {
+    const index = packIndex();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "expired",
+      total: 2,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+
+    // Age the job in place, then schedule the alarm in the near future so
+    // runDurableObjectAlarm (not an auto-fired past-dated alarm) runs cleanup.
+    await runInDurableObject(index, async (_instance, state) => {
+      const key = `restore:job:${started.job.jobId}`;
+      const job = await state.storage.get<Record<string, unknown>>(key);
+      expect(job).toBeTruthy();
+      await state.storage.put(key, { ...(job ?? {}), expiresAt: Date.now() - 1 });
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    const remaining = await runInDurableObject(index, async (_instance, state) => ({
+      active: await state.storage.get("restore:active"),
+      jobCount: (await state.storage.list({ prefix: "restore:job:" })).size,
+    }));
+    expect(remaining.active).toBeUndefined();
+    expect(remaining.jobCount).toBe(0);
+  });
+
+  it("filters deleted authors while writing backups", async () => {
+    const kept = makePack("w1-backup-kept", { author_id: "backup-kept-author" });
+    const doomed = makePack("w1-backup-deleted", { author_id: "backup-deleted-author" });
+    const index = packIndex();
+    await index.replaceIndex({ packs: [kept, doomed] });
+    await index.removePacksByAuthor(doomed.author_id);
+
+    const keptVote: VoteRecord = {
+      packId: kept.id,
+      userId: "backup-voter",
+      votedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const droppedVoter: VoteRecord = {
+      packId: kept.id,
+      userId: doomed.author_id,
+      votedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const droppedPackVote: VoteRecord = {
+      packId: doomed.id,
+      userId: "backup-voter",
+      votedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const incoming: BackupForTest = {
+      packs: [kept, doomed],
+      created_at: "2026-01-03T00:00:00.000Z",
+      packBodies: { [kept.id]: kept, [doomed.id]: doomed },
+      votes: {
+        [`${kept.id}:backup-voter`]: keptVote,
+        [`${kept.id}:${doomed.author_id}`]: droppedVoter,
+        [`${doomed.id}:backup-voter`]: droppedPackVote,
+      },
+    };
+
+    await index.writeBackup("backup:2026-01-03", incoming);
+
+    const latest = await e.ESO_PACKS.get<BackupForTest>("backup:latest", "json");
+    const dated = await e.ESO_PACKS.get<BackupForTest>("backup:2026-01-03", "json");
+    for (const snapshot of [latest, dated]) {
+      expect(snapshot!.packs.map((pack) => pack.id)).toEqual([kept.id]);
+      expect(Object.keys(snapshot!.packBodies)).toEqual([kept.id]);
+      expect(Object.keys(snapshot!.votes)).toEqual([`${kept.id}:backup-voter`]);
+    }
+  });
+
+  it("filters a stale backup snapshot after an author deletion", async () => {
+    const kept = makePack("w1-stale-backup-kept", { author_id: "stale-kept-author" });
+    const doomed = makePack("w1-stale-backup-deleted", { author_id: "stale-deleted-author" });
+    const stale: BackupForTest = {
+      packs: [kept, doomed],
+      created_at: "2026-01-03T00:00:00.000Z",
+      packBodies: { [kept.id]: kept, [doomed.id]: doomed },
+      votes: {},
+    };
+    const index = packIndex();
+    await index.replaceIndex({ packs: [kept, doomed] });
+    await index.writeBackup("backup:2026-01-03", stale);
+    expect((await e.ESO_PACKS.get<BackupForTest>("backup:latest", "json"))!.packs.map((pack) => pack.id).sort())
+      .toEqual([doomed.id, kept.id].sort());
+
+    await index.removePacksByAuthor(doomed.author_id);
+    await index.writeBackup("backup:2026-01-04", stale);
+
+    const latest = await e.ESO_PACKS.get<BackupForTest>("backup:latest", "json");
+    const dated = await e.ESO_PACKS.get<BackupForTest>("backup:2026-01-04", "json");
+    expect(latest!.packs.map((pack) => pack.id)).toEqual([kept.id]);
+    expect(dated!.packs.map((pack) => pack.id)).toEqual([kept.id]);
+  });
+
+  it("expires deleted-author markers from alarm cleanup", async () => {
+    const index = packIndex();
+    await index.removePacksByAuthor("old-author");
+    await runInDurableObject(index, async (_instance, state) => {
+      const marker = await state.storage.get<Record<string, unknown>>("deleted-author:old-author");
+      expect(marker).toBeTruthy();
+      await state.storage.put("deleted-author:old-author", { ...(marker ?? {}), expiresAt: 1 });
+      // Near-future alarm: a past-dated one auto-fires before
+      // runDurableObjectAlarm gets to run it, making the assertion racy.
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    const marker = await runInDurableObject(index, async (_instance, state) =>
+      state.storage.get("deleted-author:old-author"),
+    );
+    expect(marker).toBeUndefined();
   });
 
   it("backfills repeatedly, keeps DO mutations, and flips only after parity", async () => {
@@ -394,3 +865,4 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await e.ESO_PACKS.get(`vote:${newPack.id}:same-voter`)).not.toBeNull();
   });
 });
+

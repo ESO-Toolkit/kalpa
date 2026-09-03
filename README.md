@@ -29,7 +29,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea on a native stack:
 
 - **No bundled runtime.** A Rust backend instead of Minion's Java: 17 MB to install on Windows, 10 MB from the Linux `.deb`/`.rpm`. (The AppImage is 84 MB because it carries its own GTK and WebKit.)
-- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 135 MB with the window open. Task Manager figures on a 119-addon profile.
+- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 250 MB with the window open. Task Manager figures on a 119-addon profile.
 - **Dependency resolution that actually resolves**, including transitive dependencies, embedded libraries, and version checks.
 - **Pack Hub**, for publishing and installing shared addon collections. Minion has no equivalent.
 
@@ -139,7 +139,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 - **ZIP extraction** rejects absolute paths, drive prefixes, and `..` components, skips symlink entries, and caps total extraction at 500 MB. That is what stops path traversal and zip bombs.
 - **Content-Security-Policy** — strict, with `frame-ancestors 'none'` to block clickjacking and embedding.
 - **Pack Hub worker** rate-limits requests and serializes pack-index mutations through a Durable Object.
-- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies, `cargo audit` over the Rust lockfile. Advisories with no upstream fix are assessed one at a time and recorded in [`ci.yml`](.github/workflows/ci.yml). Today that's two quick-xml DoS advisories that none of Kalpa's code paths can reach.
+- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies and `cargo audit` over the main Rust lockfile. The Slint sidecar also rejects any resolved `quick-xml` version below the patched 0.41.0 release. Advisories without an upstream fix are assessed individually and recorded beside their CI gate.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
 
 When you export account-wide settings in a `.esopack` v2, Kalpa strips personal data before writing the file: account handles, character names and IDs, chat logs, mail, friends and roster lists, trade history. Placeholders are mapped back to your own identity on import. [What's scrubbed in `.esopack` v2](docs/settings-export.md) has the full list, including what is deliberately kept.
@@ -366,12 +366,21 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 
 ```
 src/                        # React frontend
+  __mocks__/                # Shared frontend test mocks
+  __tests__/                # Frontend setup and source-hygiene tests
   components/               # Feature components (addon list, packs, settings)
+  components/__tests__/     # Feature-component tests
+  components/animate-ui/    # Motion primitives grouped by animate/base/buttons/effects/texts
   components/ui/            # shadcn-ui primitives
   components/uploader/      # ESO Logs uploader workspace
+  components/uploader/__tests__/ # Uploader component and reducer tests
   hooks/                    # Shared React hooks
+  hooks/__tests__/          # Shared hook tests
   lib/                      # Utilities, Tauri bindings, store, theme presets
+  lib/__tests__/            # Frontend utility and contract tests
   types.ts                  # Shared TypeScript interfaces
+
+e2e/                       # Windows WebView2 read-only and sandbox Playwright specs
 
 src-tauri/src/              # Rust backend
   commands.rs               # All Tauri command handlers
@@ -399,6 +408,7 @@ backend/eso-packs-worker/   # Pack Hub API (packs, votes, shares)
   src/validate.ts           # Input validation
   src/shares.ts             # Share code generation and resolution
   src/pack-index-do.ts      # Durable Object for atomic index mutations
+  test/                     # Worker unit, route, Durable Object, and scheduled tests
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar
 context/                    # Architecture and design documentation

@@ -6,6 +6,226 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.22] — 2026-08-31
+
+Every confirmation in Kalpa now means exactly what it says. This release
+closes a whole class of subtle bugs where you approved one thing and the app
+quietly acted on another — a consent box that stayed ticked while the report
+behind it changed, a file editor that could save your edits into the wrong
+file, a profile that activated a different plan than the one you previewed.
+
+### Bug Fixes
+
+- **The support dialog's consent is now bound to the exact report you
+  reviewed.** If anything in the report changes after you tick the box — an
+  update check finishing, a new error arriving — the box unticks itself, the
+  change is announced to screen readers, and you're asked to review again.
+  The dependency-warning count in the report also now agrees with the
+  addons-needing-attention list it summarizes.
+  ([#405](https://github.com/ESO-Toolkit/kalpa/pull/405))
+- **The addon file editor can no longer save one file's text into another.**
+  Switching files while an edit was loading kept the previous file's contents
+  and its "Enable Editing" unlock; the editor now fully re-locks and reloads
+  per file, and re-locks when an open file returns to stock — without ever
+  discarding unsaved edits. Batch-update conflict dismissals are now scoped
+  to the specific conflict you saw, so a fresh conflict for the same addon
+  can't be hidden by an old dismissal or inherit your previous keep/replace
+  choices. An armed pack-install confirmation now disarms the moment a
+  different pack loads. ([#406](https://github.com/ESO-Toolkit/kalpa/pull/406))
+- **Profile activation and Minion migration now verify the plan you approved
+  is still the plan being applied.** Both previews carry a fingerprint of the
+  reviewed plan; if your disk changed in between, Kalpa refuses, shows you the
+  updated plan, and asks you to confirm again — instead of silently doing
+  something different from what you read.
+  ([#407](https://github.com/ESO-Toolkit/kalpa/pull/407))
+- **Dependency badges no longer go stale after enabling or disabling an addon
+  whose folder name differs in letter case from how other addons declare it.**
+  ([#409](https://github.com/ESO-Toolkit/kalpa/pull/409))
+- **Pack Hub housekeeping (server-side).** Admin restore operations now use
+  tamper-proof server-issued continuation state, and account deletion is
+  guarded so that no backup or restore — however unluckily timed — can
+  republish data a deleted account asked to erase, while a returning user can
+  publish again immediately.
+  ([#408](https://github.com/ESO-Toolkit/kalpa/pull/408))
+
+## [0.1.0-beta.21] — 2026-08-30
+
+This release closes out a month-long safety audit of how Kalpa touches your
+files. The short version: nothing Kalpa writes — an installed addon, an update,
+your settings, your metadata — can be left half-applied by a crash or silently
+overwritten by a race anymore. It also adds a way to get help from inside the
+app: a guided handoff that opens a private Discord ticket with a redacted
+report you review first.
+
+### Features
+
+- **You can now hand a problem to support without leaving Kalpa.** The new Help
+  dialog assembles a support report — recent errors, addon counts, environment
+  details — redacts everything personal before it leaves your machine (account
+  names in file paths, including on removable drives and secondary Steam
+  libraries), and shows you the exact text that will be sent. Submitting opens
+  a private ticket in the Kalpa Discord via esotk.com. The report is sealed
+  with a hash of the text you reviewed, so what support receives is provably
+  the same report you approved — if the server's copy of the rules ever drifts
+  from the app's, the mismatch is caught at ticket time instead of leaking.
+  ([#396](https://github.com/ESO-Toolkit/kalpa/pull/396),
+  [#403](https://github.com/ESO-Toolkit/kalpa/pull/403))
+
+### Bug Fixes
+
+- **An install, update or removal interrupted by a crash can no longer leave an
+  addon half-applied.** Previously an archive was extracted directly over the
+  live AddOns folder, and every settings and metadata file was written in
+  place — a crash or power loss at the wrong moment could leave an addon as a
+  mix of old and new files, or truncate the metadata that tracks what you have
+  installed. Installs now stage a complete copy and swap it in through a
+  journal that finishes or rolls back automatically on the next launch, and
+  every file Kalpa persists goes through one shared crash-safe writer that
+  never exposes a partial file.
+  ([#380](https://github.com/ESO-Toolkit/kalpa/pull/380),
+  [#399](https://github.com/ESO-Toolkit/kalpa/pull/399))
+- **The main window and the native performance UI can no longer overwrite each
+  other's saved state.** Both processes could read the same settings or
+  metadata, change different things, and publish independently — the slower
+  writer silently discarded the faster one's work, which is how a settings
+  toggle could quietly unmake itself. Every store update now goes through an
+  OS-level cross-process lock, and the performance UI writes only the fields
+  it actually changed. ([#388](https://github.com/ESO-Toolkit/kalpa/pull/388))
+- **Switching to the native performance UI no longer gambles on a timer.** The
+  main process used to wait 300 ms and exit, so a slow start could leave you
+  with no window at all. The handoff now requires proof the native UI is live
+  and owns the window before the old one lets go — and if anything goes wrong,
+  Kalpa starts in the standard window with performance mode switched off
+  instead of vanishing.
+  ([#389](https://github.com/ESO-Toolkit/kalpa/pull/389))
+- **Updates are now honest about every file they are about to touch.** Conflict
+  review previously classified only an archive's primary folder: files a
+  multi-folder archive wrote elsewhere — including loose files at the AddOns
+  root — could overwrite your edits without ever appearing in the review, a
+  decision you made could be applied to a download that had changed since you
+  made it, and a missing Protected Edits baseline was passed over silently
+  instead of being disclosed. All of those paths now surface in the review,
+  pending decisions are re-validated against the actual artifact, updates
+  install exactly the version they advertised, archives can no longer write
+  into Kalpa's own state folders, and reconciling an addon as "updated by
+  Minion" requires actual Minion evidence. After upgrading you may see a
+  one-time wave of update prompts: Kalpa re-verifies version provenance it
+  previously took on trust.
+  ([#376](https://github.com/ESO-Toolkit/kalpa/pull/376),
+  [#381](https://github.com/ESO-Toolkit/kalpa/pull/381),
+  [#391](https://github.com/ESO-Toolkit/kalpa/pull/391),
+  [#392](https://github.com/ESO-Toolkit/kalpa/pull/392),
+  [#402](https://github.com/ESO-Toolkit/kalpa/pull/402))
+- **A slow response can no longer overwrite what you are looking at.** Across
+  pack imports, the uploader's log-directory picker, character loads and
+  settings toggles, a late reply from an earlier request could land after a
+  newer one and put stale data on screen — and signing out did not clear
+  privately loaded pack data. Requests are now sequenced so only the latest
+  wins, and logout invalidates private loads immediately.
+  ([#370](https://github.com/ESO-Toolkit/kalpa/pull/370),
+  [#371](https://github.com/ESO-Toolkit/kalpa/pull/371),
+  [#373](https://github.com/ESO-Toolkit/kalpa/pull/373),
+  [#374](https://github.com/ESO-Toolkit/kalpa/pull/374),
+  [#375](https://github.com/ESO-Toolkit/kalpa/pull/375),
+  [#377](https://github.com/ESO-Toolkit/kalpa/pull/377))
+- **The title bar now holds up at small window sizes.** At the 800 px minimum
+  width the batch-action buttons could jam into the window controls and badge
+  text wrapped to two lines. Batch buttons collapse to icons below 960 px
+  (with tooltips and screen-reader labels), the instance badge truncates
+  instead of wrapping, and Cancel keeps its text at every width so it cannot
+  be mistaken for the window-close button beside it.
+  ([#401](https://github.com/ESO-Toolkit/kalpa/pull/401))
+
+### Security
+
+- **Updated `quick-xml` to resolve two RUSTSEC advisories** in both the desktop
+  app and the native performance UI.
+  ([#387](https://github.com/ESO-Toolkit/kalpa/pull/387))
+
+### Maintenance
+
+- The Pack Hub worker now reconciles its D1 mirror against the authoritative
+  index, repairing drift instead of letting esotk.com show stale pack data,
+  and several low-risk edge paths were hardened.
+  ([#378](https://github.com/ESO-Toolkit/kalpa/pull/378),
+  [#379](https://github.com/ESO-Toolkit/kalpa/pull/379))
+- GitHub release notes are now generated from this changelog, so a release can
+  no longer ship with the previous release's description.
+  ([#384](https://github.com/ESO-Toolkit/kalpa/pull/384))
+- Routine dependency updates across the frontend, the Pack Hub worker, and
+  GitHub Actions.
+  ([#365](https://github.com/ESO-Toolkit/kalpa/pull/365),
+  [#366](https://github.com/ESO-Toolkit/kalpa/pull/366),
+  [#367](https://github.com/ESO-Toolkit/kalpa/pull/367),
+  [#368](https://github.com/ESO-Toolkit/kalpa/pull/368))
+
+## [0.1.0-beta.20] — 2026-08-28
+
+Two changes from beta feedback: you can now read an addon's changelog without
+leaving Kalpa, and the addon list no longer comes back empty after a visit to
+Discover.
+
+### Features
+
+- **My Addons now has an ESOUI tab, and changelogs are readable in-app.** The
+  tab shows the same rich remote view Discover does — screenshots, the full
+  description and download stats — and both panes now read through a cached
+  lookup, so Discover also stops refetching on every selection. Changelogs come
+  from ESOUI's own file data, reachable from a "What's new" button in the update
+  panel and in each Update All row. The tab is hidden for side-loaded addons
+  with no ESOUI ID, and only fetches once you open it.
+  ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+- **Changelogs render as a scannable version list rather than one flat dump.**
+  A long changelog could be tens of thousands of characters with no hierarchy
+  and no way to find a given version — on AwesomeGuildStore it was 87% of the
+  panel's text. Versions are now hairline-separated rows with the latest
+  expanded, behind a "Show all N versions" affordance, and each row carries its
+  release date taken from ESOUI's archived-files table (no extra request). Your
+  installed version is marked but never used to hide older entries. When an
+  author's changelog has no reliable structure, the previous plain view is used
+  instead. ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+
+### Bug Fixes
+
+- **The addon list no longer renders empty after returning from Discover.**
+  Switching to Discover unmounts the installed list, but its virtualizer lived
+  further up the tree and outlived the scroll container it measured — so coming
+  back mounted a fresh container that nothing was ever told about, leaving a
+  correctly-sized but blank list until something forced a re-render. The
+  virtualizer now shares a lifecycle with the element it observes.
+  ([#398](https://github.com/ESO-Toolkit/kalpa/pull/398))
+- **Fixed the wrong changelog entry being marked as installed.** Version
+  matching used containment, so an installed version that is a numeric prefix of
+  a newer one — 1.7 inside 1.7.8 — marked the newest entry as installed and
+  collapsed the update delta to nothing. Matching is now exact on the version
+  token. Versions written as "v2.5.49" also now match their archived release
+  date, and entries with no notes no longer render at half strength as though
+  broken. ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+- **The per-row changelog button in the update chooser is now disabled while
+  offline**, matching the update actions beside it, instead of opening a dialog
+  that could only show a network error.
+  ([#397](https://github.com/ESO-Toolkit/kalpa/pull/397))
+
+### Maintenance
+
+- Pack Hub's index is now authoritative for pack lifecycles, with mutations
+  journaled through the Durable Object to close races between concurrent
+  create, update and delete requests.
+  ([#398](https://github.com/ESO-Toolkit/kalpa/pull/398))
+
+## [0.1.0-beta.19] — 2026-08-28
+
+A focused fix for addons updated outside Kalpa.
+
+### Bug Fixes
+
+- **Kalpa now recognizes addons updated by Minion or another external manager.**
+  Refreshing reconciles Kalpa's stored version when the selected live or PTS
+  AddOns folder contains the current ESOUI release. Minion records are matched
+  by addon ID, folder, and selected game root, preventing stale, duplicate, or
+  cross-root data from rewriting unrelated addon metadata.
+  ([#394](https://github.com/ESO-Toolkit/kalpa/pull/394))
+
 ## [0.1.0-beta.18] — 2026-08-23
 
 A focused security and dependency release. There are no feature changes.
@@ -599,7 +819,11 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...HEAD
+[0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
+[0.1.0-beta.21]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...v0.1.0-beta.21
+[0.1.0-beta.20]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...v0.1.0-beta.20
+[0.1.0-beta.19]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.18...v0.1.0-beta.19
 [0.1.0-beta.18]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.17...v0.1.0-beta.18
 [0.1.0-beta.17]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.16...v0.1.0-beta.17
 [0.1.0-beta.16]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.15...v0.1.0-beta.16

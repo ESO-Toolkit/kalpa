@@ -12,6 +12,7 @@ import type {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
+import { ProgressBar } from "@/components/ui/progress-bar";
 import {
   Select,
   SelectContent,
@@ -21,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
@@ -36,6 +38,8 @@ import {
   WifiOff,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
+import { useInstallProgress } from "@/hooks/use-install-progress";
+import { formatInstallProgress, type InstallProgress } from "@/lib/install-progress";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
 import { motion, AnimatePresence } from "motion/react";
@@ -64,13 +68,14 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
+  const { progress, beginOperation, endOperation } = useInstallProgress();
 
   /**
    * Ids installed this session that the scan behind `persistedIds` has not
-   * reported yet, tagged with the `persistedIds` identity they were recorded
+   * reported yet, tagged with the `persistedIds` contents they were recorded
    * against.
    *
-   * The overlay exists only to bridge install-success → rescan-lands, so it has
+   * The overlay exists only to bridge install-success -> rescan-lands, so it has
    * to expire when the rescan lands. It used to be a plain set that was only
    * ever added to, which meant an addon installed and then UNINSTALLED in the
    * same session kept rendering as "Installed" — the merged answer could never
@@ -120,6 +125,9 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           esouiTitle: info.title,
           esouiVersion: info.version,
           dependencyPolicy: await getDependencyPolicy(),
+          // Correlates the download/extract/dependency events streamed back on
+          // `update-progress` with this row.
+          operationId: beginOperation(),
         });
         const basis = persistedRef.current;
         setSessionInstalled((prev) => {
@@ -128,6 +136,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           return { ids, basis };
         });
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
+        reportDependencyFailures(res.failedDeps);
         onInstalled();
         // Empty unless the policy is "ask"; the app-level picker owns the rest.
         void resolvePendingDeps(res.pendingDeps, addonsPath);
@@ -135,18 +144,27 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         toast.error(getTauriErrorMessage(e));
       } finally {
         setInstallingId(null);
+        endOperation();
       }
     },
-    [addonsPath, onInstalled, ensureEsoNotBlocking, resolvePendingDeps]
+    [
+      addonsPath,
+      onInstalled,
+      ensureEsoNotBlocking,
+      resolvePendingDeps,
+      beginOperation,
+      endOperation,
+    ]
   );
 
-  return { installingId, installedIds, install };
+  return { installingId, installProgress: progress, installedIds, install };
 }
 
 const DiscoverResultRow = memo(function DiscoverResultRow({
   result,
   selected,
   isInstalling,
+  progress,
   anyInstalling,
   installed,
   onSelect,
@@ -157,6 +175,8 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   result: EsouiSearchResult;
   selected: boolean;
   isInstalling: boolean;
+  /** Live phase/counts for THIS row's install; null until the first event. */
+  progress: InstallProgress | null;
   anyInstalling: boolean;
   installed: boolean;
   onSelect: (result: EsouiSearchResult) => void;
@@ -165,6 +185,9 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   rank?: number;
 }) {
   const isInstalled = installed;
+  // Until the first event lands the backend is still resolving the addon, so
+  // there is genuinely nothing to measure — say so rather than show 0%.
+  const progressLabel = progress ? formatInstallProgress(progress) : "Preparing…";
 
   return (
     <div
@@ -217,6 +240,18 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
           )}
         </Button>
       </div>
+      {isInstalling && (
+        <div className="mt-2 space-y-1">
+          <ProgressBar
+            value={progress?.done ?? 0}
+            max={progress?.determinate ? progress.total : 100}
+            indeterminate={!progress?.determinate}
+            label={`${result.title}: ${progressLabel}`}
+            className="h-1.5"
+          />
+          <div className="text-[11px] tabular-nums text-muted-foreground">{progressLabel}</div>
+        </div>
+      )}
       <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {result.author && <span className="truncate">by {result.author}</span>}
         {result.category && <InfoPill color="muted">{result.category}</InfoPill>}
@@ -251,6 +286,7 @@ function VirtualResultRows({
   results,
   selectedResultId,
   installingId,
+  installProgress,
   installedIds,
   onSelectResult,
   onInstall,
@@ -260,6 +296,7 @@ function VirtualResultRows({
   results: EsouiSearchResult[];
   selectedResultId: number | null;
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   onInstall: (id: number) => void;
@@ -294,6 +331,7 @@ function VirtualResultRows({
               result={r}
               selected={selectedResultId === r.id}
               isInstalling={installingId === r.id}
+              progress={installingId === r.id ? installProgress : null}
               anyInstalling={installingId !== null}
               installed={installedIds.has(r.id)}
               onSelect={onSelectResult}
@@ -327,6 +365,7 @@ export function DiscoverPanel({
 }: DiscoverPanelProps) {
   const {
     installingId,
+    installProgress,
     installedIds,
     install: handleInstall,
   } = useAddonInstall(addonsPath, onInstalled, installedEsouiIds);
@@ -402,6 +441,7 @@ export function DiscoverPanel({
           >
             <SearchContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -420,6 +460,7 @@ export function DiscoverPanel({
           >
             <PopularContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -438,6 +479,7 @@ export function DiscoverPanel({
           >
             <CategoryContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -470,12 +512,14 @@ export function DiscoverPanel({
 
 function SearchContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -599,6 +643,7 @@ function SearchContent({
             results={results}
             selectedResultId={selectedResultId}
             installingId={installingId}
+            installProgress={installProgress}
             installedIds={installedIds}
             onSelectResult={onSelectResult}
             onInstall={onInstall}
@@ -615,12 +660,14 @@ type PopularSort = "downloads" | "newest";
 
 function PopularContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -732,6 +779,7 @@ function PopularContent({
               results={results}
               selectedResultId={selectedResultId}
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onSelectResult={onSelectResult}
               onInstall={onInstall}
@@ -750,12 +798,14 @@ function PopularContent({
 
 function CategoryContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -938,6 +988,7 @@ function CategoryContent({
               results={filteredResults}
               selectedResultId={selectedResultId}
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onSelectResult={onSelectResult}
               onInstall={onInstall}
@@ -971,6 +1022,7 @@ function UrlContent({
   const [addonInfo, setAddonInfo] = useState<EsouiAddonInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<InstallResult | null>(null);
+  const { progress, beginOperation, endOperation } = useInstallProgress();
 
   const handleResolve = async () => {
     if (!input.trim()) return;
@@ -1004,16 +1056,20 @@ function UrlContent({
         esouiTitle: addonInfo.title,
         esouiVersion: addonInfo.version,
         dependencyPolicy: await getDependencyPolicy(),
+        operationId: beginOperation(),
       });
       setResult(installResult);
       setState("installed");
       toast.success(`Installed ${installResult.installedFolders.join(", ")}`);
+      reportDependencyFailures(installResult.failedDeps);
       onInstalled();
       // Empty unless the policy is "ask"; the app-level picker owns the rest.
       void resolvePendingDeps(installResult.pendingDeps, addonsPath);
     } catch (e) {
       setError(getTauriErrorMessage(e));
       setState("error");
+    } finally {
+      endOperation();
     }
   };
 
@@ -1105,10 +1161,22 @@ function UrlContent({
       )}
 
       {state === "installing" && (
-        <Button disabled className="w-full" size="sm">
-          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
-          Installing...
-        </Button>
+        <div className="space-y-2">
+          <Button disabled className="w-full" size="sm">
+            <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
+            Installing...
+          </Button>
+          <ProgressBar
+            value={progress?.done ?? 0}
+            max={progress?.determinate ? progress.total : 100}
+            indeterminate={!progress?.determinate}
+            label={progress ? formatInstallProgress(progress) : "Preparing…"}
+            className="h-1.5"
+          />
+          <div className="text-[11px] tabular-nums text-muted-foreground text-center">
+            {progress ? formatInstallProgress(progress) : "Preparing…"}
+          </div>
+        </div>
       )}
 
       {state === "installed" && result && (

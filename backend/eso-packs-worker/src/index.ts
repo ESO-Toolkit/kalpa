@@ -1,40 +1,40 @@
 import type { Env, Pack, PackType, PackStatus, PackView, VoteRecord, VoteResponse } from "./types";
 import {
   getPackIndex,
+  getPack,
   putPack,
   getVotedPackIds,
   getVote,
+  deleteVote,
   restoreVote,
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
-import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
+import { redactAnonymousPack } from "./redact";
 import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+import { reconcileD1, recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
+import type { RestoreJobState } from "./pack-index-do";
 export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
-// directly to roster-hub-db (D1) so every KV mutation is atomically
-// mirrored — no async sync, no reconciliation, no deployment ordering.
+// directly to roster-hub-db (D1), mirrors live mutations through the Pack
+// Index Durable Object, and runs a guarded scheduled reconciliation for drift.
 
-async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
+export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;
   const isPublished = (pack.status ?? "published") === "published";
   try {
     if (isPublished) {
-      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
-        esouiId: a.esouiId,
-        name: a.name,
-        required: a.required,
-        note: a.note,
-      })));
+      const row = toD1PackRow(pack);
       await env.ROSTER_HUB_DB
         .prepare(
           `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
+             author_id = excluded.author_id,
              title = excluded.title,
              description = excluded.description,
              pack_type = excluded.pack_type,
@@ -45,21 +45,21 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
              updated_at = datetime('now')`,
         )
         .bind(
-          pack.id,
-          pack.author_id,
+          row.id,
+          row.author_id,
           // The D1 mirror feeds the ESO Toolkit website; never hand it the
           // real display name of an anonymous pack's author. author_id stays
           // for ownership joins but is not rendered there.
-          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
-          pack.is_anonymous ? 1 : 0,
-          pack.title,
-          pack.description,
-          pack.pack_type,
-          addonsJson,
+          row.author_name,
+          row.is_anonymous,
+          row.title,
+          row.description,
+          row.pack_type,
+          row.addons,
           // Inserting a literal 0 here (and omitting vote_count from the
           // upsert) froze the website's counters at zero and reset them on
           // every author edit.
-          pack.vote_count ?? 0,
+          row.vote_count,
         )
         .run();
 
@@ -79,23 +79,21 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
     }
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
+    await recordD1MirrorFailure(env, isPublished ? "upsert" : "delete", pack.id, err);
   }
 }
 
-/**
- * Mirror a counter bump into D1. The vote endpoint goes through the DO rather
- * than d1UpsertPack, so without this the website's vote counts never move.
- * Best-effort, like the other D1 writes.
- */
-async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promise<void> {
+async function d1DeletePack(env: Env, id: string): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;
   try {
-    await env.ROSTER_HUB_DB
-      .prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
-      .bind(voteCount, id)
-      .run();
+    await env.ROSTER_HUB_DB.batch([
+      env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+      env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+    ]);
   } catch (err) {
-    console.error(`D1 vote_count sync failed [${id}]:`, err);
+    console.error(`D1 delete failed [${id}]:`, err);
+    if (err instanceof Error && err.message.includes("no such table")) return;
+    await recordD1MirrorFailure(env, "delete", id, err);
   }
 }
 
@@ -105,14 +103,14 @@ function json(
   request: Request,
   data: unknown,
   status = 200,
-  cacheMaxAge = 0,
+  cacheMaxAge?: number,
   cacheScope: "public" | "private" = "public",
 ): Response {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...corsHeaders(request),
   };
-  if (cacheMaxAge > 0) {
+  if (cacheMaxAge !== undefined) {
     headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
   }
   return new Response(JSON.stringify(data), { status, headers });
@@ -145,23 +143,10 @@ function requireAuth(request: Request, env: Env): boolean {
   return crypto.subtle.timingSafeEqual(keyBytes, expectedBytes);
 }
 
-/**
- * The single cache key the default landing view is stored under.
- *
- * The incoming URL for that view varies (`sort` and `page` may be omitted, or
- * spelled in either order) but the Cache API matches on the full URL including
- * the query string, so caching under the request URL and deleting a bare
- * "/packs" never lined up — mutations silently failed to invalidate. Every
- * match/put/delete goes through this one canonical key instead.
- */
-function defaultViewCacheKey(url: URL): Request {
-  return new Request(new URL("/packs?default=1", url.origin));
-}
-
-/** Purge the CDN-cached pack list after a mutation. Exported so tests can
- *  reset the shared cache between cases. */
-export async function invalidatePackListCache(url: URL): Promise<void> {
-  await caches.default.delete(defaultViewCacheKey(url));
+/** Manual Cache API entries cannot be invalidated safely across Worker
+ * isolates. Keep only bounded response Cache-Control below. */
+export async function invalidatePackListCache(_url: URL): Promise<void> {
+  // Compatibility hook for mutation callers; there is no manual list cache.
 }
 
 /** Get the singleton PackIndexDO stub for atomic index mutations. */
@@ -181,18 +166,16 @@ function slugify(title: string): string {
 
 // ── GET /packs ─────────────────────────────────────────────────────
 async function handleListPacks(request: Request, env: Env, url: URL): Promise<Response> {
+  const hasAuthorization = request.headers.has("Authorization");
   const hasFilters =
     url.searchParams.has("type") ||
     url.searchParams.has("tag") ||
     url.searchParams.has("q") ||
     url.searchParams.has("status") ||
     url.searchParams.has("author");
-  const cache = caches.default;
 
-  // Only the default landing view is cacheable: no filters, page 1, and the
-  // client's default sort (pack-constants.ts sends sort=votes&page=1). Every
-  // spelling of that view shares one canonical cache key — see
-  // defaultViewCacheKey.
+  // Only the default landing view receives a short public Cache-Control TTL.
+  // Manual Cache API storage is avoided because cross-isolate invalidation is unsafe.
   const sortParam = url.searchParams.get("sort");
   const pageParam = url.searchParams.get("page");
   const isDefaultView =
@@ -201,24 +184,10 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     (sortParam === null || sortParam === "votes");
 
   // Resolve the viewer up front: draft/all filtering, the author filter,
-  // anonymity redaction and user_voted all key off it, and whether the shared
-  // cache may be used depends on it. Free when no Authorization header is
+  // anonymity redaction and user_voted all key off it. Free when no Authorization header is
   // present (validateBearerToken returns null without an upstream call).
   const viewer = await validateBearerToken(request);
   const viewerId = viewer ? String(viewer.id) : undefined;
-
-  // Only an anonymous, origin-less request may read or populate the shared
-  // entry: an authed response carries that viewer's user_voted (and possibly
-  // their own anonymous packs), and corsHeaders echoes the caller's Origin, so
-  // either would be replayed to the wrong caller. The desktop client — the
-  // only consumer today — sends neither.
-  const isSharedCacheable =
-    isDefaultView && viewerId === undefined && request.headers.get("Origin") === null;
-
-  if (isSharedCacheable) {
-    const cached = await cache.match(defaultViewCacheKey(url));
-    if (cached) return cached;
-  }
 
   const index = await getPackIndexDO(env).getIndex();
 
@@ -291,12 +260,8 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const start = (page - 1) * PACKS_PER_PAGE;
   const paginated = packs.slice(start, start + PACKS_PER_PAGE);
 
-  // Enforce anonymity at the edge. A shared-cacheable response is always fully
-  // redacted regardless of who populated the cache; the owner exception only
-  // applies to responses served to one identified viewer.
-  const redacted = paginated.map((p) =>
-    redactAnonymousPack(p, isSharedCacheable ? undefined : viewerId),
-  );
+  // Enforce anonymity at the edge; only an identified owner gets the exception.
+  const redacted = paginated.map((p) => redactAnonymousPack(p, viewerId));
 
   // Tell the viewer which of these they have already voted on. Without it the
   // client renders every pack as unvoted and its toggle deletes real votes.
@@ -308,17 +273,17 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
 
-  const response = json(request, { packs: visible, page, sort }, 200, 30);
-
-  if (isSharedCacheable && request.method === "GET") {
-    cache.put(defaultViewCacheKey(url), response.clone()).catch(console.error);
-  }
-
-  return response;
+  return json(
+    request,
+    { packs: visible, page, sort },
+    200,
+    isDefaultView && !hasAuthorization ? 30 : 0,
+  );
 }
 
 // ── GET /packs/:id ─────────────────────────────────────────────────
 async function handleGetPack(request: Request, env: Env, id: string): Promise<Response> {
+  const hasAuthorization = request.headers.has("Authorization");
   const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
@@ -340,9 +305,16 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     return json(request, { pack: view }, 200, 0);
   }
 
-  // Anonymous viewer: the redacted pack is identical for everyone, so it stays
-  // safe to cache.
-  return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
+  // Only a request that did not attempt authentication is safely anonymous.
+  // A transient identity-provider failure must not cache a redacted fallback
+  // for a bearer token that may validate on its next request.
+  return json(
+    request,
+    { pack: redactAnonymousPack(pack) },
+    200,
+    hasAuthorization ? 0 : 300,
+    "public",
+  );
 }
 
 // ── POST /packs ────────────────────────────────────────────────────
@@ -421,8 +393,13 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     );
   }
 
+  // Deliberately NOT clearing the deletion tombstone here: it is scoped by
+  // timestamp, so this brand-new pack (created after deletedAt) passes every
+  // filter while the user's pre-deletion records stay excluded from backups
+  // and restores for the full retention window. Deleting the tombstone would
+  // let an admin restore of a pre-deletion dated backup republish the corpus
+  // the user asked to erase.
   await invalidatePackListCache(url);
-
   return json(request, { pack: added.pack }, 201);
 }
 
@@ -486,8 +463,6 @@ async function handleUpdatePack(
   const updated = result.pack;
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, updated);
-
   return json(request, { pack: updated });
 }
 
@@ -587,7 +562,6 @@ async function handleVotePack(
   await invalidatePackListCache(url);
 
   const voteCount = updated.vote_count;
-  await d1UpdateVoteCount(env, id, voteCount);
 
   const response: VoteResponse = { voted, voteCount };
   return json(request, response);
@@ -600,7 +574,9 @@ async function handleInstallPack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  const pack = await getPackIndexDO(env).getPack(id);
+  const detail = await getPack(env, id);
+  const index = getPackIndexDO(env);
+  const pack = await index.getPack(id);
   if (!pack) {
     return notFound(request);
   }
@@ -612,27 +588,38 @@ async function handleInstallPack(
     return notFound(request);
   }
 
-  // Rate limit: one install track per IP per pack per hour
+  // Honor limiter records written by the previous release until their KV TTL
+  // expires, avoiding a one-time rollout double count.
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  const rateLimitKey = `install-rate:${id}:${ip}`;
-  const existing = await env.ESO_PACKS.get(rateLimitKey);
-  if (existing) {
-    return json(request, { installCount: pack.install_count ?? 0 });
+  if (
+    detail?.created_at === pack.created_at &&
+    await env.ESO_PACKS.get(`install-rate:${id}:${ip}`)
+  ) {
+    return json(request, { installCount: pack.install_count });
   }
-  // Increment inside the DO (fresh, single-threaded) instead of writing back a
-  // possibly-stale cached snapshot, which would lose concurrent installs and
-  // revert recent author edits. The DO also syncs the per-pack KV detail.
-  const updated = await getPackIndexDO(env).bumpPackCounter(
+
+  // Atomically count one install per IP+pack per hour inside the DO. A keyed
+  // identifier prevents offline IPv4 enumeration and public cross-user lookup.
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(env.ADMIN_API_KEY),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign("HMAC", key, encoder.encode(ip));
+  const identity = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const updated = await index.recordInstall(
     id,
-    "install_count",
-    1,
+    identity,
     pack.created_at,
   );
   if (!updated) {
     return notFound(request);
   }
-  await env.ESO_PACKS.put(rateLimitKey, "1", { expirationTtl: 3600 });
-
   await invalidatePackListCache(url);
 
   const installCount = updated.install_count;
@@ -649,31 +636,9 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
     // KV read failed
   }
 
-  const index = await getPackIndex(env);
-  const packCount = index?.packs.length ?? 0;
-
-  // Surface scheduled-backup health so monitoring can detect a silently
-  // failing cron even with Workers observability disabled.
-  let lastBackupAt: string | null = null;
-  let lastBackupOk = false;
-  try {
-    const meta = await env.ESO_PACKS.get<BackupMeta>("backup:meta", "json");
-    if (meta?.last_success) {
-      lastBackupAt = new Date(meta.last_success).toISOString();
-      // Cron runs daily; allow slack for a missed/delayed run before flagging
-      // the backup as stale.
-      lastBackupOk = Date.now() - meta.last_success < 36 * 3600 * 1000;
-    }
-  } catch {
-    // backup:meta read failed — leave last_backup_at null / last_backup_ok false
-  }
-
   return json(request, {
     status: kvOk ? "ok" : "degraded",
     kv: kvOk,
-    packCount,
-    last_backup_at: lastBackupAt,
-    last_backup_ok: lastBackupOk,
     timestamp: new Date().toISOString(),
   });
 }
@@ -692,12 +657,17 @@ async function packDetailWitnessIds(env: Env): Promise<string[]> {
   return ids;
 }
 
-async function migrationWitnessIds(env: Env): Promise<string[]> {
+export async function migrationWitnessIds(
+  env: Env,
+  unownedD1Ids: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
   const ids = new Set(await packDetailWitnessIds(env));
 
   if (env.ROSTER_HUB_DB) {
     const rows = await env.ROSTER_HUB_DB.prepare("SELECT id FROM packs").all<{ id: string }>();
-    for (const row of rows.results) if (row.id) ids.add(row.id);
+    for (const row of rows.results) {
+      if (row.id && !unownedD1Ids.has(row.id)) ids.add(row.id);
+    }
   }
 
   // Dated snapshots deliberately retain deleted data for 90 days, so treating
@@ -727,12 +697,37 @@ async function handleMigrationParity(request: Request, env: Env): Promise<Respon
 async function handleMigrationAuthority(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) return unauthorized(request);
   let authority: "kv" | "do";
+  let unownedD1Ids = new Set<string>();
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    if (parsed.reason === "too-large") {
+      return json(request, { error: "Request body is too large" }, 413);
+    }
+    return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
+  }
   try {
-    const body = (await request.json()) as { authority?: unknown };
+    const body = parsed.body as {
+      authority?: unknown;
+      unowned_d1_ids?: unknown;
+    };
     if (body.authority !== "kv" && body.authority !== "do") {
       return badRequest(request, [{ field: "authority", message: 'authority must be "kv" or "do"' }]);
     }
+    if (
+      body.unowned_d1_ids !== undefined &&
+      (!Array.isArray(body.unowned_d1_ids) ||
+        body.unowned_d1_ids.length > 100 ||
+        body.unowned_d1_ids.some(
+          (id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id),
+        ))
+    ) {
+      return badRequest(request, [{
+        field: "unowned_d1_ids",
+        message: "unowned_d1_ids must contain at most 100 valid, manually adjudicated ids",
+      }]);
+    }
     authority = body.authority;
+    unownedD1Ids = new Set((body.unowned_d1_ids ?? []) as string[]);
   } catch {
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
@@ -740,7 +735,7 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
   try {
     const result = await getPackIndexDO(env).setAuthority(
       authority,
-      await migrationWitnessIds(env),
+      await migrationWitnessIds(env, unownedD1Ids),
     );
     return result.ok
       ? json(request, result.parity)
@@ -753,23 +748,26 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
 
 async function handleMigrationAdopt(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) return unauthorized(request);
-  try {
-    const body = (await request.json()) as { ids?: unknown };
-    if (
-      !Array.isArray(body.ids) ||
-      body.ids.length === 0 ||
-      body.ids.length > 100 ||
-      body.ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id))
-    ) {
-      return badRequest(request, [{
-        field: "ids",
-        message: "ids must contain 1 to 100 valid pack ids",
-      }]);
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
+    if (parsed.reason === "too-large") {
+      return json(request, { error: "Request body is too large" }, 413);
     }
-    return json(request, await getPackIndexDO(env).adoptWitnesses(body.ids as string[]));
-  } catch {
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
+  const body = parsed.body as { ids?: unknown };
+  if (
+    !Array.isArray(body?.ids) ||
+    body.ids.length === 0 ||
+    body.ids.length > 100 ||
+    body.ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id))
+  ) {
+    return badRequest(request, [{
+      field: "ids",
+      message: "ids must contain 1 to 100 valid pack ids",
+    }]);
+  }
+  return json(request, await getPackIndexDO(env).adoptWitnesses(body.ids as string[]));
 }
 
 // ── Scheduled backup ──────────────────────────────────────────────
@@ -805,12 +803,12 @@ function deletedUserKey(userId: string): string {
 /**
  * How long a deletion tombstone outlives the deletion.
  *
- * Only has to cover the window in which a backup read can still be in flight —
- * a single cron invocation — so this is enormously generous. It expires because
- * an unbounded set of tombstones is its own storage problem, and after a full
- * backup cycle no live snapshot can still contain the user.
+ * Retained dated backups live for 90 days; keep the tombstone beyond that
+ * retention window so restore cannot replay a deleted user from an older
+ * backup. It expires because an unbounded set of tombstones is its own storage
+ * problem.
  */
-const DELETED_USER_TTL_SECONDS = 30 * 86400;
+const DELETED_USER_TTL_SECONDS = 97 * 86400;
 
 /**
  * Remove records belonging to deleted users from a snapshot before it is written.
@@ -818,48 +816,114 @@ const DELETED_USER_TTL_SECONDS = 30 * 86400;
  * See the call site for why this happens at write time rather than by ordering
  * the read against the delete.
  */
-async function dropDeletedUsers(
-  env: Env,
-  snapshot: { packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> },
-): Promise<{ packs: Pack[]; packBodies: Record<string, Pack>; votes: Record<string, VoteRecord> }> {
-  const userIds = new Set<string>();
-  for (const pack of snapshot.packs) if (pack.author_id) userIds.add(String(pack.author_id));
-  for (const pack of Object.values(snapshot.packBodies)) {
-    if (pack?.author_id) userIds.add(String(pack.author_id));
-  }
-  for (const vote of Object.values(snapshot.votes)) {
-    if (vote?.userId) userIds.add(String(vote.userId));
-  }
-  if (userIds.size === 0) return snapshot;
+type DeletedUserFilterSnapshot = {
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: Record<string, VoteRecord>;
+};
 
-  // One get per DISTINCT user in the corpus, not per record. Every KV call
-  // counts against the same per-invocation subrequest ceiling that already
-  // forced this cron to stop fanning out per record.
-  const ids = [...userIds];
-  const present = await Promise.all(ids.map((id) => env.ESO_PACKS.get(deletedUserKey(id))));
-  const deleted = new Set(ids.filter((_, i) => present[i] !== null));
+/**
+ * Enumerate every deletion tombstone in one KV list pass — one subrequest per
+ * 1000 tombstones, regardless of corpus size. The previous shape (one get per
+ * DISTINCT corpus user) still scaled with the snapshot and could exceed the
+ * per-invocation subrequest ceiling on the restore begin/final requests, which
+ * then failed deterministically on every retry.
+ *
+ * The map value is the deletion time in ms. Tombstones written before the
+ * metadata was introduced fall back to their stored value via a bounded number
+ * of gets, and to +Infinity when unreadable — which filters every record of
+ * that user, the pre-timestamp behavior.
+ */
+async function loadDeletedUserTombstones(env: Env): Promise<Map<string, number>> {
+  const deleted = new Map<string, number>();
+  const missingMetadata: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.ESO_PACKS.list<{ deletedAt?: string }>({
+      prefix: "deleted:",
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const key of page.keys) {
+      const userId = key.name.slice("deleted:".length);
+      if (!userId) continue;
+      const at = key.metadata?.deletedAt ? Date.parse(key.metadata.deletedAt) : Number.NaN;
+      if (Number.isFinite(at)) {
+        deleted.set(userId, at);
+      } else {
+        deleted.set(userId, Number.POSITIVE_INFINITY);
+        missingMetadata.push(userId);
+      }
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  // Legacy tombstones store the ISO timestamp as the VALUE only. Resolve them
+  // so a returning legacy-deleted user isn't filtered forever; cap the gets so
+  // this path can never become the unbounded fan-out again.
+  for (const userId of missingMetadata.slice(0, 50)) {
+    const value = await env.ESO_PACKS.get(deletedUserKey(userId));
+    const at = value ? Date.parse(value) : Number.NaN;
+    if (Number.isFinite(at)) deleted.set(userId, at);
+  }
+  return deleted;
+}
+
+/** Record timestamp in ms; unparseable/missing collapses to 0, which a
+ * tombstoned author's filter treats as pre-deletion (conservative drop). */
+function recordTimeMs(iso: string | null | undefined): number {
+  const at = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isFinite(at) ? at : 0;
+}
+
+function packPredatesDeletion(deleted: Map<string, number>, pack: Pack | undefined): boolean {
+  if (!pack) return false;
+  const deletedAt = deleted.get(String(pack.author_id));
+  if (deletedAt === undefined) return false;
+  return recordTimeMs(pack.updated_at ?? pack.created_at) <= deletedAt;
+}
+
+function votePredatesDeletion(
+  deleted: Map<string, number>,
+  vote: VoteRecord | undefined,
+): boolean {
+  if (!vote) return false;
+  const deletedAt = deleted.get(String(vote.userId));
+  if (deletedAt === undefined) return false;
+  return recordTimeMs(vote.votedAt) <= deletedAt;
+}
+
+function dropDeletedUsers<T extends DeletedUserFilterSnapshot>(
+  deleted: Map<string, number>,
+  snapshot: T,
+): T {
   if (deleted.size === 0) return snapshot;
 
   const deletedPackIds = new Set(
-    snapshot.packs
-      .filter((pack) => deleted.has(String(pack.author_id)))
-      .map((pack) => pack.id),
+    snapshot.packs.filter((pack) => packPredatesDeletion(deleted, pack)).map((pack) => pack.id),
   );
   for (const [id, pack] of Object.entries(snapshot.packBodies)) {
-    if (deleted.has(String(pack?.author_id))) deletedPackIds.add(id);
+    if (packPredatesDeletion(deleted, pack)) deletedPackIds.add(id);
   }
 
-  console.log(`Backup excluding ${deleted.size} deleted user(s)`);
+  const droppedVotes = new Set(
+    Object.keys(snapshot.votes).filter((key) => {
+      const vote = snapshot.votes[key];
+      return votePredatesDeletion(deleted, vote) || deletedPackIds.has(String(vote?.packId));
+    }),
+  );
+  if (deletedPackIds.size === 0 && droppedVotes.size === 0) return snapshot;
+
+  console.log(
+    `Backup excluding ${deletedPackIds.size} pack(s) / ${droppedVotes.size} vote(s) of deleted user(s)`,
+  );
   return {
-    packs: snapshot.packs.filter((p) => !deleted.has(String(p.author_id))),
+    ...snapshot,
+    packs: snapshot.packs.filter((p) => !deletedPackIds.has(p.id)),
     packBodies: Object.fromEntries(
-      Object.entries(snapshot.packBodies).filter(([, p]) => !deleted.has(String(p?.author_id))),
+      Object.entries(snapshot.packBodies).filter(([id]) => !deletedPackIds.has(id)),
     ),
     votes: Object.fromEntries(
-      Object.entries(snapshot.votes).filter(([, vote]) =>
-        !deleted.has(String(vote?.userId)) &&
-        !deletedPackIds.has(String(vote?.packId)),
-      ),
+      Object.entries(snapshot.votes).filter(([key]) => !droppedVotes.has(key)),
     ),
   };
 }
@@ -911,11 +975,14 @@ async function handleScheduled(env: Env): Promise<void> {
   // Filtering here rather than relying on having read after the delete is what
   // makes the ordering irrelevant: the tombstone outlives the read, so a stale
   // snapshot still cannot publish a deleted user.
-  const { packs, packBodies: keptBodies, votes: keptVotes } = await dropDeletedUsers(env, {
-    packs: index.packs,
-    packBodies,
-    votes,
-  });
+  const { packs, packBodies: keptBodies, votes: keptVotes } = dropDeletedUsers(
+    await loadDeletedUserTombstones(env),
+    {
+      packs: index.packs,
+      packBodies,
+      votes,
+    },
+  );
 
   const snapshot: PackBackupSnapshot = {
     created_at: new Date().toISOString(),
@@ -957,16 +1024,36 @@ async function handleScheduled(env: Env): Promise<void> {
  * - a draft pack: `putPack` + one D1 batch = 2
  * - a vote: `restoreVote` writes both `vote:` and the user index = 2
  *
+ * Tombstone checks are synchronous Map lookups against one per-request
+ * enumeration and cost nothing here. Keeping the constant at 4 deliberately
+ * over-reserves per record; the slack absorbs cost growth without retuning.
+ *
  * Derive the caps from this rather than picking a round number: a page cap of
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
  * is the failure the paging was added to avoid in the first place.
  */
-export const SUBREQUESTS_PER_RECORD = 3;
+export const SUBREQUESTS_PER_RECORD = 4;
 /** Per-request subrequest ceiling on Workers Paid. */
 export const SUBREQUEST_CEILING = 1000;
-/** Held back for the backup read, the fresh index read, the DO index swap and
- *  the cache purge — everything a page does outside the record loop. */
+/** Held back for the backup read, the fresh index read, the DO index swap, the
+ *  cache purge, the tombstone list pages plus the capped legacy-value gets
+ *  (~60 worst case), and the capped final-page exclusion pass — everything a
+ *  page does outside the record loop. */
 export const SUBREQUEST_RESERVE = 100;
+/**
+ * Budget for the final page's exclusion pass — deleting records that were
+ * tombstoned AFTER the job began (begin-time tombstones were already filtered
+ * out of the staged snapshot, so this set is normally empty). Bounded because
+ * an author deleting a large corpus mid-restore could otherwise push the final
+ * page past the subrequest ceiling and wedge it in a deterministic retry loop.
+ * Skipping the remainder is safe: the DO index replacement is what stops
+ * excluded packs being served, writeBackup filters votes to live packs, and
+ * the nightly D1 reconcile sweeps orphan rows. The one residual reconcile
+ * does NOT sweep is a skipped vote's orphan `vote:` KEY in KV — if that exact
+ * slug is later recycled, the stale record makes a previous voter's first
+ * vote toggle off; self-corrects on their second vote.
+ */
+const EXCLUSION_SUBREQUEST_BUDGET = 60;
 
 export const RESTORE_MAX_PAGE_SIZE = Math.floor(
   (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
@@ -989,50 +1076,20 @@ function readCursor(value: unknown): number {
   return Math.floor(value);
 }
 
-/**
- * Fingerprint of the snapshot AND the exact cursor a page was issued for.
- *
- * Not a security token — it is an incident-recovery consistency check, behind
- * the admin API key. `cursor` stops a token from validating a position it was
- * never issued for: a snapshot-wide token let any in-range cursor through, so a
- * mistyped offset could skip whole pages and the final page would still publish
- * an index for bodies that were never replayed.
- *
- * `created_at` and the record count cover the snapshot changing mid-restore, and
- * they are enough only because of WHICH rewriters exist. This worker has exactly
- * two. The midnight cron writes a fresh `created_at`, so it is caught by the
- * timestamp. `purgeUserFromLatestBackup` deliberately preserves `created_at`
- * (pinning to the dated twin would resurrect GDPR-deleted data) but returns
- * early unless `removed > 0`, so any write it performs has dropped at least one
- * record and is caught by the count.
- *
- * That is a narrower guarantee than a content hash: two snapshots with the same
- * timestamp AND the same record count but different records would collide. No
- * path here produces that, and this pair is not a general-purpose fingerprint —
- * a third rewriter that swaps records without changing the count would need a
- * digest of the ordered work list added here.
- *
- * It catches ACCIDENTS, not reconstruction. The value is plaintext and its
- * derivation is right here, so a caller who decides to skip pages can recompute
- * a matching token for any in-range cursor and the corpus ends up advertising
- * bodies that were never written.
- *
- * HMAC does not fix that, which is why it is not used: the only secret this
- * worker holds is `ADMIN_API_KEY`, and every caller who can reach this endpoint
- * already presents it. Signing with a secret the forger holds buys nothing.
- * Real tamper-evidence needs continuation state the CALLER does not own —
- * server-side issued cursors — which is the server-owned restore job already
- * recorded as the follow-up on this PR, together with staged writes and an
- * atomic promote. Until that exists, an operator must finish a restore they
- * start, and the 409 says so rather than inviting a token edit.
- */
-function restoreToken(
-  backupKey: string,
-  snapshot: PackBackupSnapshot,
-  total: number,
-  cursor: number,
-): string {
-  return `${backupKey}|${snapshot.created_at ?? "unknown"}|${total}|${cursor}`;
+const RESTORE_SNAPSHOT_PREFIX = "restore:snapshot:";
+const RESTORE_JOB_TTL_SECONDS = 24 * 60 * 60;
+const RESTORE_TOKEN_SHAPE =
+  /^rst_v1_([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.[A-Za-z0-9_-]{32,}$/i;
+
+function base64Url(bytes: ArrayBuffer | Uint8Array): string {
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = "";
+  for (const byte of array) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function sha256Base64Url(value: string): Promise<string> {
+  return base64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
 }
 
 function clampLimit(value: unknown): number {
@@ -1048,23 +1105,62 @@ function clampLimit(value: unknown): number {
 /** `backup:latest` or `backup:YYYY-MM-DD` — the only keys a restore may read. */
 const BACKUP_KEY_SHAPE = /^backup:(latest|\d{4}-\d{2}-\d{2})$/;
 
-/**
- * The snapshot a continuation refers to, read back out of its own token.
- *
- * A paged restore of a DATED snapshot was impossible without this. The response
- * carried `cursor` and `token` but not `date`, and the docs said to pass the
- * response straight back — so the next call fell through to `backup:latest`,
- * compared it against a token minted for `backup:YYYY-MM-DD`, and 409'd. Making
- * the token carry the snapshot identity means one field round-trips instead of
- * three, and a resume cannot silently retarget a different backup.
- *
- * Shape-checked rather than trusted: the token picks which KV key gets read, and
- * even behind the admin key that should not be arbitrary.
- */
-function backupKeyFromToken(token: unknown): string | null {
+function restoreJobIdFromToken(token: unknown): string | null {
   if (typeof token !== "string") return null;
-  const key = token.split("|")[0] ?? "";
-  return BACKUP_KEY_SHAPE.test(key) ? key : null;
+  return RESTORE_TOKEN_SHAPE.exec(token)?.[1] ?? null;
+}
+
+function isLegacyRestoreToken(token: unknown): boolean {
+  if (typeof token !== "string" || !token.includes("|")) return false;
+  const [key] = token.split("|");
+  return BACKUP_KEY_SHAPE.test(key ?? "");
+}
+
+function backupKeyFromDate(dateInput: unknown): string {
+  return typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
+    ? `backup:${dateInput}`
+    : "backup:latest";
+}
+
+function normalizeBackupSnapshot(snapshot: Partial<PackBackupSnapshot>): PackBackupSnapshot {
+  const packBodies =
+    snapshot.packBodies && Object.keys(snapshot.packBodies).length > 0
+      ? snapshot.packBodies
+      : Object.fromEntries((snapshot.packs ?? []).map((p): [string, Pack] => [p.id, p]));
+  return {
+    created_at: snapshot.created_at ?? "unknown",
+    packs: snapshot.packs ?? Object.values(packBodies),
+    packBodies,
+    votes: snapshot.votes ?? {},
+  };
+}
+
+interface RestorePlan {
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: VoteRecord[];
+  voteMap: Record<string, VoteRecord>;
+  packIds: string[];
+  total: number;
+}
+
+function buildRestorePlan(snapshot: PackBackupSnapshot): RestorePlan {
+  const bodyEntries = Object.entries(snapshot.packBodies ?? {})
+    .filter((entry): entry is [string, Pack] => Boolean(entry[1]?.id))
+    .sort(([a], [b]) => a.localeCompare(b));
+  const packBodies = Object.fromEntries(bodyEntries) as Record<string, Pack>;
+  const packIds = Object.keys(packBodies);
+  const packs = packIds.map((id) => packBodies[id]!).filter(Boolean);
+  const livePackIds = new Set(packIds);
+  const votes = Object.values(snapshot.votes ?? {})
+    .filter((record) => Boolean(record?.packId && record?.userId && livePackIds.has(record.packId)))
+    .sort((a, b) => `${a.packId}:${a.userId}`.localeCompare(`${b.packId}:${b.userId}`));
+  const voteMap = Object.fromEntries(votes.map((vote): [string, VoteRecord] => [`${vote.packId}:${vote.userId}`, vote]));
+  return { packs, packBodies, votes, voteMap, packIds, total: packs.length + votes.length };
+}
+
+async function fingerprintRestorePlan(plan: RestorePlan): Promise<string> {
+  return sha256Base64Url(JSON.stringify({ packs: plan.packs, votes: plan.votes }));
 }
 
 /** Run `tasks` with at most `concurrency` in flight, preserving fail-fast. */
@@ -1079,38 +1175,9 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
   await Promise.all(workers);
 }
 /**
- * Restore the pack corpus from a `backup:YYYY-MM-DD` (or `backup:latest`)
- * snapshot written by the scheduled backup (handleScheduled). Unlike
- * /admin/seed this is a production incident-recovery tool, so it is gated
- * only behind requireAuth (the admin API key) — NOT env.ALLOW_SEED, which
- * exists specifically to disable seed-with-fake-data in production and
- * would defeat the purpose of a restore endpoint if reused here.
- *
- * Replays pack bodies (+ D1 mirror) and vote records directly to KV, then
- * atomically replaces the index via the PackIndexDO — never via raw
- * putPackIndex, which would race a concurrent mutation (see kv.ts's
- * getPackIndex comment on why counter/index writes go through the DO). The
- * replacement index is built from only the ids we actually restored a body
- * for (so drifted "ghost" ids in snapshot.packs don't reappear) unioned with
- * any pack in the current live index that predates or postdates the
- * snapshot entirely (so a pack created after the backup isn't deleted).
- *
- * Paged. A call restores `RESTORE_PAGE_SIZE` records by default, or up to
- * `RESTORE_MAX_PAGE_SIZE` — twice that — when the caller passes `limit`. Quote
- * the max, not the default, when reasoning about the subrequest budget: the
- * default is deliberately half the cap, so checking headroom against it hides
- * the factor of two an operator gets just by passing `limit`. If more records
- * remain, returns `{ done: false, cursor, token }` for the operator to pass
- * straight back in the next request body — the endpoint is a manual incident
- * tool, so a caller-driven cursor beats a background job that can fail
- * unobserved. The token both names the snapshot and binds the cursor to it, so
- * a continuation needs only `{ cursor, token }` even for a dated backup, and
- * resuming against a snapshot that changed underneath is a 409, never a partial
- * restore. The
- * index swap and cache invalidation happen only on the final page, so a restore
- * abandoned half-way leaves the previous index in place rather than publishing a
- * partial corpus. Pages are idempotent, so replaying one after a failure is
- * safe. A snapshot that fits in a single page behaves exactly as before.
+ * Restore the pack corpus from a retained backup through a server-owned Durable
+ * Object job. The opaque token identifies the job; caller-supplied cursors are
+ * treated only as a consistency check and never as authority to advance work.
  */
 async function handleRestore(request: Request, env: Env, url: URL): Promise<Response> {
   if (!requireAuth(request, env)) {
@@ -1121,168 +1188,352 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   let cursorInput: unknown;
   let limitInput: unknown;
   let tokenInput: unknown;
-  try {
-    const body = (await request.json()) as Record<string, unknown> | null;
+  let restartInput: unknown;
+  const parsed = await readJsonBody(request);
+  if (parsed.ok) {
+    const body = parsed.body as Record<string, unknown> | null;
     dateInput = body?.date;
     cursorInput = body?.cursor;
     limitInput = body?.limit;
     tokenInput = body?.token;
-  } catch {
-    // No/invalid JSON body — fall back to backup:latest below.
+    restartInput = body?.restart;
+  } else if (parsed.reason === "too-large") {
+    return json(request, { error: "Request body is too large" }, 413);
   }
 
-  // A continuation names its snapshot through the token it was issued with, so
-  // resuming a dated restore does not depend on the caller also re-sending
-  // `date`. `date` selects the snapshot for the FIRST page only.
-  const resumeKey = readCursor(cursorInput) > 0 ? backupKeyFromToken(tokenInput) : null;
-  const backupKey =
-    resumeKey ??
-    (typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
-      ? `backup:${dateInput}`
-      : "backup:latest");
-
-  const raw = await env.ESO_PACKS.get(backupKey);
-  if (!raw) {
-    return notFound(request, `No backup snapshot found for "${backupKey}"`);
-  }
-
+  const index = getPackIndexDO(env);
+  const limit = clampLimit(limitInput);
+  const requestedCursor = readCursor(cursorInput);
+  // One tombstone enumeration per request, shared by the begin filter, the
+  // per-page write filter, and the final replacement filter — a bounded number
+  // of list subrequests instead of a corpus-sized fan-out of gets.
+  const deletionTombstones = await loadDeletedUserTombstones(env);
   let snapshot: PackBackupSnapshot;
-  try {
-    snapshot = JSON.parse(raw) as PackBackupSnapshot;
-  } catch {
-    return json(request, { error: `Backup "${backupKey}" is corrupt` }, 500);
+  let job: RestoreJobState;
+  let token: string;
+  let tokenHash: string;
+
+  if (tokenInput !== undefined) {
+    if (typeof tokenInput !== "string" || isLegacyRestoreToken(tokenInput)) {
+      return json(
+        request,
+        { error: "Restore continuation token is invalid. Start again with no cursor." },
+        409,
+      );
+    }
+
+    const jobId = restoreJobIdFromToken(tokenInput);
+    if (!jobId) {
+      return json(
+        request,
+        { error: "Restore continuation token is invalid. Start again with no cursor." },
+        409,
+      );
+    }
+
+    token = tokenInput;
+    tokenHash = await sha256Base64Url(token);
+    const resolved = await index.resolveRestoreJob(tokenHash);
+    if (!resolved) {
+      return json(
+        request,
+        { error: "Restore job expired or was not found. Start again with no cursor." },
+        410,
+      );
+    }
+    job = resolved;
+
+    if (job.status === "done") {
+      return json(request, {
+        ok: true,
+        done: true,
+        cursor: null,
+        total: job.total,
+        restored_packs: 0,
+        restored_votes: 0,
+      });
+    }
+
+    if (job.status === "cancelled") {
+      return json(
+        request,
+        { error: "Restore job is no longer active. Start again with no cursor." },
+        410,
+      );
+    }
+
+    const rawSnapshot = await env.ESO_PACKS.get(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
+    if (!rawSnapshot) {
+      await index.cancelActiveRestoreJob(tokenHash);
+      return json(
+        request,
+        { error: "Restore job snapshot expired. Start again with no cursor." },
+        410,
+      );
+    }
+
+    try {
+      snapshot = normalizeBackupSnapshot(JSON.parse(rawSnapshot) as PackBackupSnapshot);
+    } catch {
+      await index.cancelActiveRestoreJob(tokenHash);
+      return json(request, { error: "Restore job snapshot is corrupt" }, 500);
+    }
+  } else {
+    if (cursorInput !== undefined && requestedCursor > 0) {
+      return json(
+        request,
+        { error: "Restore cursor requires an opaque server-owned token. Start again with no cursor." },
+        409,
+      );
+    }
+
+    const backupKey = backupKeyFromDate(dateInput);
+    const raw = await env.ESO_PACKS.get(backupKey);
+    if (!raw) {
+      return notFound(request, `No backup snapshot found for "${backupKey}"`);
+    }
+
+    try {
+      snapshot = normalizeBackupSnapshot(JSON.parse(raw) as PackBackupSnapshot);
+    } catch {
+      return json(request, { error: `Backup "${backupKey}" is corrupt` }, 500);
+    }
+
+    const filtered = dropDeletedUsers(deletionTombstones, snapshot);
+    snapshot = normalizeBackupSnapshot({
+      created_at: snapshot.created_at,
+      packs: filtered.packs,
+      packBodies: filtered.packBodies,
+      votes: filtered.votes,
+    });
+
+    const initialPlan = buildRestorePlan(snapshot);
+    const snapshotFingerprint = await fingerprintRestorePlan(initialPlan);
+    const begun = await index.beginRestoreJob({
+      backupKey,
+      snapshotCreatedAt: snapshot.created_at ?? null,
+      snapshotFingerprint,
+      total: initialPlan.total,
+      restart: restartInput === true,
+    });
+
+    if (!begun.ok) {
+      return json(
+        request,
+        {
+          error: "Another restore job is already active.",
+          active_restore: begun.job,
+        },
+        409,
+      );
+    }
+
+    token = begun.token;
+    tokenHash = await sha256Base64Url(token);
+    job = begun.job;
+
+    try {
+      await env.ESO_PACKS.put(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`, JSON.stringify(snapshot), {
+        expirationTtl: RESTORE_JOB_TTL_SECONDS,
+      });
+    } catch {
+      await index.cancelActiveRestoreJob(tokenHash);
+      return json(request, { error: "Failed to stage restore snapshot" }, 500);
+    }
   }
 
-  // Older backups (pre-packBodies) only carry the index-mirroring `packs`
-  // array — rebuild the per-id map from it so restore still works on them.
-  const packBodies =
-    snapshot.packBodies && Object.keys(snapshot.packBodies).length > 0
-      ? snapshot.packBodies
-      : Object.fromEntries((snapshot.packs ?? []).map((p): [string, Pack] => [p.id, p]));
+  const plan = buildRestorePlan(snapshot);
+  const snapshotFingerprint = await fingerprintRestorePlan(plan);
+  if (plan.total !== job.total || snapshotFingerprint !== job.snapshotFingerprint) {
+    await index.cancelActiveRestoreJob(tokenHash);
+    return json(
+      request,
+      { error: "Restore job snapshot changed while restore was in progress. Start again with no cursor." },
+      409,
+    );
+  }
 
-  const packs = Object.values(packBodies);
-  const votes = snapshot.votes ?? {};
-  const restorablePackIds = new Set(Object.keys(packBodies));
-  const voteRecords = Object.values(votes).filter((record) =>
-    restorablePackIds.has(record.packId),
+  const claim = await index.claimRestorePage({
+    tokenHash,
+    limit,
+    ...(cursorInput !== undefined ? { cursor: requestedCursor } : {}),
+  });
+
+  if (!claim.ok) {
+    if (claim.reason === "done") {
+      return json(request, {
+        ok: true,
+        done: true,
+        cursor: null,
+        total: claim.job?.total ?? job.total,
+        restored_packs: 0,
+        restored_votes: 0,
+      });
+    }
+
+    if (claim.reason === "cursor-mismatch") {
+      return json(
+        request,
+        {
+          error: "Restore cursor does not match the server-owned job cursor.",
+          expected_cursor: claim.job?.nextCursor ?? job.nextCursor,
+        },
+        409,
+      );
+    }
+
+    if (claim.reason === "in-flight") {
+      return json(request, { error: "Restore page is already in progress." }, 409);
+    }
+
+    return json(
+      request,
+      { error: "Restore job expired or was not found. Start again with no cursor." },
+      410,
+    );
+  }
+
+  type RestoreWorkItem = { kind: "pack"; pack: Pack } | { kind: "vote"; vote: VoteRecord };
+  const packById = new Map(plan.packs.map((pack): [string, Pack] => [pack.id, pack]));
+  const work: RestoreWorkItem[] = [
+    ...plan.packs.map((pack): RestoreWorkItem => ({ kind: "pack", pack })),
+    ...plan.votes.map((vote): RestoreWorkItem => ({ kind: "vote", vote })),
+  ];
+  const page = work.slice(claim.start, claim.end);
+
+  let restoredPacks = 0;
+  let restoredVotes = 0;
+  await runBounded(
+    page.map((item) => async () => {
+      if (item.kind === "pack") {
+        if (packPredatesDeletion(deletionTombstones, item.pack)) return;
+        await putPack(env, item.pack);
+        await d1UpsertPack(env, item.pack);
+        restoredPacks++;
+        return;
+      }
+
+      const pack = packById.get(item.vote.packId);
+      if (
+        !pack ||
+        packPredatesDeletion(deletionTombstones, pack) ||
+        votePredatesDeletion(deletionTombstones, item.vote)
+      ) {
+        return;
+      }
+      await restoreVote(env, item.vote.packId, item.vote.userId, item.vote);
+      restoredVotes++;
+    }),
+    RESTORE_CONCURRENCY,
   );
 
-  // One flat, deterministically ordered work list so a cursor means the same
-  // position on every call against the same snapshot.
-  const work: (() => Promise<void>)[] = [
-    ...packs.map((pack) => async () => {
-      await putPack(env, pack);
-      await d1UpsertPack(env, pack);
-    }),
-    // Use each record's own packId/userId fields rather than parsing the
-    // "<packId>:<userId>" map key, since userId could itself contain ":".
-    ...voteRecords.map((record) => async () => {
-      await restoreVote(env, record.packId, record.userId, record);
-    }),
-  ];
-
-  // A cursor only means anything against the snapshot that issued it. Two ways
-  // it can go stale: the daily cron overwrites `backup:latest` at midnight UTC,
-  // so a paged restore straddling midnight would silently change snapshots
-  // mid-run; or an operator re-runs an old cursor by hand. Either way the
-  // numeric offset then points somewhere else in a different work list, the
-  // records before it are never replayed, and the final page still publishes an
-  // index listing every pack in the snapshot — so the corpus ends up advertising
-  // pack bodies that were never written. Bind the cursor to its snapshot and
-  // refuse a mismatch rather than resuming into the wrong list.
-  const start = readCursor(cursorInput);
-  if (start > 0 && tokenInput !== restoreToken(backupKey, snapshot, work.length, start)) {
-    // Deliberately does NOT hand back the token it expected. A snapshot-wide
-    // token let any in-range cursor pass, so echoing the correct one invited an
-    // operator to retry their WRONG cursor with the RIGHT token — skipping every
-    // page in between while the final page still published the whole index.
-    return json(
-      request,
-      {
-        error:
-          "Restore cursor and token do not match — the token was issued for a different cursor, " +
-          "or the snapshot changed mid-restore. Start again with no cursor.",
-      },
-      409,
-    );
-  }
-  // `>=`, not `>`. A cursor exactly equal to `total` slices to an empty page and
-  // then falls straight into the final-page branch, republishing the index for
-  // records this call never wrote — the same hazard as an over-long cursor, and
-  // easy to hit by copying `total` out of the response instead of `cursor`.
-  // `start === 0` is always legitimate: it is a fresh restore, including of an
-  // empty snapshot.
-  if (start > 0 && start >= work.length) {
-    return json(
-      request,
-      {
-        error:
-          `Restore cursor ${start} is not inside this snapshot (${work.length} records). ` +
-          "A completed restore reports done:true — pass the returned cursor, not the total.",
-      },
-      409,
-    );
-  }
-
-  const limit = clampLimit(limitInput);
-  const end = Math.min(start + limit, work.length);
-  await runBounded(work.slice(start, end), RESTORE_CONCURRENCY);
-
-  // Not done yet: hand back a cursor and stop BEFORE touching the index. Every
-  // pack write is an idempotent put, so a page replayed after a network failure
-  // is harmless.
-  //
-  // Deferring the index swap is NOT a rollback, and this comment used to imply
-  // it was. Each page has already written pack bodies to KV and mirrored them
-  // into D1, and `/packs/:id` reads the KV body directly rather than going
-  // through the index — so an abandoned restore leaves a corpus that is
-  // genuinely part-old, part-new, with the website mirror updated too. Holding
-  // the index back only avoids ADDING entries for bodies that were never
-  // written; it cannot un-write the ones that were.
-  //
-  // That property predates the paging (the single-request version wrote every
-  // pack the same way before swapping the index) but paging makes abandonment
-  // far more likely, since stopping between pages is now a normal thing to do.
-  // Fixing it properly means a server-owned job with staged writes and an
-  // atomic promote — see the follow-up note on the PR. Until then an operator
-  // must finish a restore they start.
-  if (end < work.length) {
-    return json(request, {
-      ok: true,
-      done: false,
-      cursor: end,
-      // Minted for THIS cursor, not the snapshot at large. Pass the pair back
-      // together: a token only validates the offset it was issued for, so a
-      // mistyped cursor is refused instead of silently skipping the pages
-      // between.
-      token: restoreToken(backupKey, snapshot, work.length, end),
-      total: work.length,
-      restored_packs: Math.min(end, packs.length) - Math.min(start, packs.length),
-      restored_votes: Math.max(0, end - Math.max(start, packs.length)),
+  let finalReplacement: { packs: Pack[]; restoredIds: string[] } | undefined;
+  if (claim.final) {
+    const filtered = dropDeletedUsers(deletionTombstones, {
+      created_at: snapshot.created_at,
+      packs: plan.packs,
+      packBodies: plan.packBodies,
+      votes: plan.voteMap,
     });
+    const finalSnapshot = normalizeBackupSnapshot({
+      created_at: snapshot.created_at,
+      packs: filtered.packs,
+      packBodies: filtered.packBodies,
+      votes: filtered.votes,
+    });
+    const finalPlan = buildRestorePlan(finalSnapshot);
+    const keptPackIds = new Set(finalPlan.packIds);
+    const keptVoteKeys = new Set(Object.keys(finalPlan.voteMap));
+    const excludedPackIds = plan.packIds.filter((id) => !keptPackIds.has(id));
+    const excludedVotes = plan.votes.filter(
+      (vote) => !keptVoteKeys.has(`${vote.packId}:${vote.userId}`),
+    );
+
+    // Cap this tidiness pass so a mid-restore account deletion of a large
+    // corpus cannot push the final page past the subrequest ceiling (see
+    // EXCLUSION_SUBREQUEST_BUDGET for why skipping the tail is safe).
+    // Costs here are EXACT, not estimates: a pack is one KV delete + one D1
+    // batch (2); a vote is deleteVote's two key deletes (2). Deliberately NOT
+    // deleteVotesForPack — its cost is 1 list + 2 per live vote, unknowable in
+    // advance and unbounded for a vote-heavy pack. The excluded pack's
+    // snapshot votes are already in excludedVotes below; any live votes
+    // outside the snapshot are unserved orphans like the skipped tail.
+    const exclusionTasks: (() => Promise<void>)[] = [];
+    let exclusionCost = 0;
+    let exclusionsSkipped = 0;
+    for (const id of excludedPackIds) {
+      if (exclusionCost + 2 > EXCLUSION_SUBREQUEST_BUDGET) {
+        exclusionsSkipped++;
+        continue;
+      }
+      exclusionCost += 2;
+      exclusionTasks.push(async () => {
+        await env.ESO_PACKS.delete(`pack:${id}`);
+        await d1DeletePack(env, id);
+      });
+    }
+    for (const vote of excludedVotes) {
+      if (exclusionCost + 2 > EXCLUSION_SUBREQUEST_BUDGET) {
+        exclusionsSkipped++;
+        continue;
+      }
+      exclusionCost += 2;
+      exclusionTasks.push(async () => {
+        await deleteVote(env, vote.packId, vote.userId);
+      });
+    }
+    if (exclusionsSkipped > 0) {
+      console.warn(
+        `Restore final page skipped ${exclusionsSkipped} exclusion deletion(s) over budget; ` +
+          "orphans are unserved and swept by reconcile.",
+      );
+    }
+    await runBounded(exclusionTasks, RESTORE_CONCURRENCY);
+
+    finalReplacement = { packs: finalPlan.packs, restoredIds: plan.packIds };
   }
 
-  // Rebuild the index from only the packs we actually have bodies for (drops
-  // "ghost" entries that are in snapshot.packs but absent from packBodies —
-  // exactly the index/per-key drift this backup's packBodies capture exists
-  // to repair), then union in any pack from the CURRENT live index that isn't
-  // part of this snapshot at all, so packs created after the backup was taken
-  // aren't deleted by the restore.
-  // Fresh read: a pack created inside the 60s cache window would otherwise be
-  // absent from `preservedPacks` and dropped from the rebuilt index — which is
-  // exactly what the preservation above promises not to do, and restore runs
-  // at incident time when recent writes are most likely in flight.
-  await getPackIndexDO(env).replaceIndexPreserving({ packs }, Object.keys(packBodies));
+  const completed = await index.completeRestorePage({
+    tokenHash,
+    claimId: claim.claimId,
+    end: claim.end,
+    ...(finalReplacement ? { finalReplacement } : {}),
+  });
 
-  await invalidatePackListCache(url);
+  if (!completed.ok) {
+    if (completed.reason === "done") {
+      return json(request, {
+        ok: true,
+        done: true,
+        cursor: null,
+        total: completed.job?.total ?? job.total,
+        restored_packs: restoredPacks,
+        restored_votes: restoredVotes,
+      });
+    }
+
+    const status = completed.reason === "claim-mismatch" ? 409 : 410;
+    return json(
+      request,
+      { error: "Restore job could not be completed. Start again with no cursor." },
+      status,
+    );
+  }
+
+  const done = completed.job.status === "done";
+  if (done) {
+    await env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
+    await invalidatePackListCache(url);
+  }
 
   return json(request, {
     ok: true,
-    done: true,
-    cursor: null,
-    total: work.length,
-    restored_packs: packs.length - Math.min(start, packs.length),
-    restored_votes: voteRecords.length - Math.max(0, start - packs.length),
+    done,
+    cursor: done ? null : completed.job.nextCursor,
+    ...(done ? {} : { token }),
+    total: plan.total,
+    restored_packs: restoredPacks,
+    restored_votes: restoredVotes,
   });
 }
 
@@ -1373,8 +1624,14 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   // may already hold stale pack/vote reads; filtering at write time sees this
   // marker regardless of whether account cleanup or backup serialization wins
   // the race.
-  await env.ESO_PACKS.put(deletedUserKey(userId), new Date().toISOString(), {
+  // The timestamp rides in list metadata so the tombstone enumeration can
+  // scope filtering to records that predate the deletion — a returning user's
+  // NEW packs pass, while every pre-deletion record stays filtered for the
+  // full backup-retention window even if the user comes back.
+  const deletedAt = new Date().toISOString();
+  await env.ESO_PACKS.put(deletedUserKey(userId), deletedAt, {
     expirationTtl: DELETED_USER_TTL_SECONDS,
+    metadata: { deletedAt },
   });
 
   // 1. Find and delete all user's packs.
@@ -1472,8 +1729,8 @@ export default {
     } catch (err) {
       console.error("Scheduled backup failed:", err);
       // Observability may be disabled in production, so persist a durable
-      // breadcrumb — otherwise a failing cron is invisible until /health's
-      // last_backup_ok staleness check trips up to ~36h later.
+      // breadcrumb for authenticated operator inspection; /health deliberately
+      // exposes only availability and does not publish backup timing.
       try {
         await env.ESO_PACKS.put(
           "backup:last_error",
@@ -1485,6 +1742,11 @@ export default {
       } catch (writeErr) {
         console.error("Failed to record backup:last_error:", writeErr);
       }
+    }
+    try {
+      await reconcileD1(env);
+    } catch (err) {
+      console.error("D1 reconciliation failed unexpectedly:", err);
     }
   },
 } satisfies ExportedHandler<Env>;

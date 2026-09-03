@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Browser, type Page } from "@playwright/test";
 import {
   addonFilterTab,
   addonList,
@@ -92,58 +92,64 @@ async function showAllAddons(page: Page): Promise<void> {
 }
 
 test.describe.serial("Addon lifecycle @sandbox", () => {
+  let browser: Browser;
+  let page: Page;
+
   test.skip(
     !sandboxDir || !fixtureZip || !fixtureFolder,
     "Run via `npm run test:e2e:sandbox` — this spec mutates the AddOns folder and needs a sandbox."
   );
 
-  test("refuses to run against anything but the sandbox folder", async () => {
-    const { browser, page } = await connectToTauri();
-    try {
-      // Ask the app what folder it REGISTERED, not what the environment says.
-      //
-      // Reading `debug_addons_dir_override` back proved nothing: it is a pure
-      // function of the env var this runner set moments earlier, so it returned
-      // the sandbox whether or not the app had booted onto it. Deleting the
-      // `sandboxPath || storedPath` line in `initializeApp` left it green.
-      //
-      // `scan_installed_addons` goes through `require_allowed_path`, which
-      // compares against what `set_addons_path` actually stored — so it can only
-      // succeed if the live registration IS the sandbox.
-      // One assertion is enough, and a second would be worse than none.
-      // `require_allowed_path` compares canonical equality against the single
-      // registered folder, so this call succeeding means the registration IS the
-      // sandbox — had the app booted onto the real install, it would be refused.
-      // Asserting that some OTHER path is rejected proves nothing: a path that
-      // does not exist fails in `validate_addons_path` long before the
-      // allowed-path comparison, so it would pass against a totally broken
-      // guard.
-      await invoke<unknown[]>(page, "scan_installed_addons", { addonsPath: sandboxDir });
+  test.beforeAll(async () => {
+    ({ browser, page } = await connectToTauri());
+  });
 
-      // `copy_addons_to_instance` is the one command with a SECOND AddOns root.
-      // Its target is validated against detected game instances — the real Live
-      // and PTS folders — so `require_allowed_path` on the source does not
-      // contain it, and a sandbox run could have written fixture addons into a
-      // real install.
-      //
-      // The target here is deliberately a path that does not exist. Passing a
-      // REAL instance would mean that the day this guard regresses, the test
-      // performs the copy it is meant to prevent before reporting it. Matching
-      // on the message is what makes this fail on regression: without the guard
-      // the command still errors, but on the target being inaccessible.
-      const copyError = await invoke<string>(page, "copy_addons_to_instance", {
-        addonsPath: sandboxDir,
-        targetAddonsPath: path.join(sandboxDir, "..", "NotAnInstance", "AddOns"),
-      }).then(
-        () => "resolved",
-        (error: Error) => error.message
-      );
-      expect(copyError, "cross-instance copy was not refused by the sandbox guard").toContain(
-        "KALPA_ADDONS_DIR"
-      );
-    } finally {
-      await browser.close();
-    }
+  test.afterAll(async () => {
+    await browser.close();
+  });
+
+  test("refuses to run against anything but the sandbox folder", async () => {
+    // Ask the app what folder it REGISTERED, not what the environment says.
+    //
+    // Reading `debug_addons_dir_override` back proved nothing: it is a pure
+    // function of the env var this runner set moments earlier, so it returned
+    // the sandbox whether or not the app had booted onto it. Deleting the
+    // `sandboxPath || storedPath` line in `initializeApp` left it green.
+    //
+    // `scan_installed_addons` goes through `require_allowed_path`, which
+    // compares against what `set_addons_path` actually stored — so it can only
+    // succeed if the live registration IS the sandbox.
+    // One assertion is enough, and a second would be worse than none.
+    // `require_allowed_path` compares canonical equality against the single
+    // registered folder, so this call succeeding means the registration IS the
+    // sandbox — had the app booted onto the real install, it would be refused.
+    // Asserting that some OTHER path is rejected proves nothing: a path that
+    // does not exist fails in `validate_addons_path` long before the
+    // allowed-path comparison, so it would pass against a totally broken
+    // guard.
+    await invoke<unknown[]>(page, "scan_installed_addons", { addonsPath: sandboxDir });
+
+    // `copy_addons_to_instance` is the one command with a SECOND AddOns root.
+    // Its target is validated against detected game instances — the real Live
+    // and PTS folders — so `require_allowed_path` on the source does not
+    // contain it, and a sandbox run could have written fixture addons into a
+    // real install.
+    //
+    // The target here is deliberately a path that does not exist. Passing a
+    // REAL instance would mean that the day this guard regresses, the test
+    // performs the copy it is meant to prevent before reporting it. Matching
+    // on the message is what makes this fail on regression: without the guard
+    // the command still errors, but on the target being inaccessible.
+    const copyError = await invoke<string>(page, "copy_addons_to_instance", {
+      addonsPath: sandboxDir,
+      targetAddonsPath: path.join(sandboxDir, "..", "NotAnInstance", "AddOns"),
+    }).then(
+      () => "resolved",
+      (error: Error) => error.message
+    );
+    expect(copyError, "cross-instance copy was not refused by the sandbox guard").toContain(
+      "KALPA_ADDONS_DIR"
+    );
   });
 
   // NOT an install-path test. `debug_install_fixture_zip` runs the real
@@ -152,92 +158,80 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
   // SETUP so the removal flow has something real on disk to delete. The product
   // install path remains uncovered here; see the follow-up on the PR.
   test("removes an addon and restores it with undo", async () => {
-    const { browser, page } = await connectToTauri();
+    await showAllAddons(page);
 
-    try {
-      await showAllAddons(page);
+    const before = await addonList(page).getAttribute("aria-label");
+    expect(before, "sandbox should start with no addons").toBe("Installed addons, 0 items");
 
-      const before = await addonList(page).getAttribute("aria-label");
-      expect(before, "sandbox should start with no addons").toBe("Installed addons, 0 items");
+    // Fixture setup, not the product install: the real extractor against a
+    // local zip, so the spec depends on neither the network nor ESOUI's
+    // current release. What is under test starts at the Remove click below.
+    const extracted = await invoke<string[]>(page, "debug_install_fixture_zip", {
+      addonsPath: sandboxDir,
+      zipPath: fixtureZip,
+    });
+    expect(extracted.length, "fixture zip extracted nothing").toBeGreaterThan(0);
 
-      // Fixture setup, not the product install: the real extractor against a
-      // local zip, so the spec depends on neither the network nor ESOUI's
-      // current release. What is under test starts at the Remove click below.
-      const extracted = await invoke<string[]>(page, "debug_install_fixture_zip", {
-        addonsPath: sandboxDir,
-        zipPath: fixtureZip,
-      });
-      expect(extracted.length, "fixture zip extracted nothing").toBeGreaterThan(0);
+    // Refresh brings the new folder into the list the way the UI would after
+    // an install.
+    await page.keyboard.press("Control+r");
+    await expectAddonListCount(page, 1, "installed fixture did not appear in the list");
+    await expect(row(page), "fixture row is missing").toBeVisible({ timeout: 5_000 });
 
-      // Refresh brings the new folder into the list the way the UI would after
-      // an install.
-      await page.keyboard.press("Control+r");
-      await expectAddonListCount(page, 1, "installed fixture did not appear in the list");
-      await expect(row(page), "fixture row is missing").toBeVisible({ timeout: 5_000 });
+    // --- the destructive part ---
+    await row(page).click();
+    const removeButton = page.getByRole("button", { name: "Remove Addon" });
+    await expect(removeButton, "detail pane has no Remove Addon button").toBeVisible({
+      timeout: 5_000,
+    });
+    await removeButton.click();
 
-      // --- the destructive part ---
-      await row(page).click();
-      const removeButton = page.getByRole("button", { name: "Remove Addon" });
-      await expect(removeButton, "detail pane has no Remove Addon button").toBeVisible({
-        timeout: 5_000,
-      });
-      await removeButton.click();
+    await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
 
-      await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
+    // Undo inside the 3s window must put the row back.
+    //
+    // The row only, not its update state. Nothing below reads the badge, and
+    // with this fixture it could not: `debug_install_fixture_zip` writes no
+    // metadata record, so the addon has no ESOUI id and never produces an
+    // UpdateResult for the queue to carry. The update-row half of the restore
+    // is covered by the unit tests on `restoreUpdateResult`, not here.
+    const undo = page.getByRole("button", { name: "Undo" });
+    await expect(undo, "no Undo affordance on the removal toast").toBeVisible({ timeout: 2_000 });
+    await undo.click();
 
-      // Undo inside the 3s window must put the row back.
-      //
-      // The row only, not its update state. Nothing below reads the badge, and
-      // with this fixture it could not: `debug_install_fixture_zip` writes no
-      // metadata record, so the addon has no ESOUI id and never produces an
-      // UpdateResult for the queue to carry. The update-row half of the restore
-      // is covered by the unit tests on `restoreUpdateResult`, not here.
-      const undo = page.getByRole("button", { name: "Undo" });
-      await expect(undo, "no Undo affordance on the removal toast").toBeVisible({ timeout: 2_000 });
-      await undo.click();
+    await expectAddonListCount(page, 1, "undo did not restore the removed addon");
+    await expect(row(page), "restored fixture row is missing").toBeVisible({ timeout: 5_000 });
 
-      await expectAddonListCount(page, 1, "undo did not restore the removed addon");
-      await expect(row(page), "restored fixture row is missing").toBeVisible({ timeout: 5_000 });
+    // And the undo must have cancelled the real deletion, not just re-rendered
+    // a row over a folder that is already gone. Outlive the 3s removal timer,
+    // then read the FILESYSTEM — the UI already shows 1, so a row-count
+    // assertion here would resolve without waiting for anything.
+    await page.waitForTimeout(3_500);
+    expect(fixtureOnDisk(), "the addon folder was deleted despite undo").toBe(true);
 
-      // And the undo must have cancelled the real deletion, not just re-rendered
-      // a row over a folder that is already gone. Outlive the 3s removal timer,
-      // then read the FILESYSTEM — the UI already shows 1, so a row-count
-      // assertion here would resolve without waiting for anything.
-      await page.waitForTimeout(3_500);
-      expect(fixtureOnDisk(), "the addon folder was deleted despite undo").toBe(true);
+    // The rescan then confirms the app agrees with the disk.
+    await page.keyboard.press("Control+r");
+    await expectAddonListCount(page, 1, "rescan lost the restored addon");
 
-      // The rescan then confirms the app agrees with the disk.
-      await page.keyboard.press("Control+r");
-      await expectAddonListCount(page, 1, "rescan lost the restored addon");
-
-      await page.screenshot({ path: "e2e/screenshots/addon-lifecycle-restored.png" });
-    } finally {
-      await browser.close();
-    }
+    await page.screenshot({ path: "e2e/screenshots/addon-lifecycle-restored.png" });
   });
 
   test("a committed removal actually deletes the folder", async () => {
-    const { browser, page } = await connectToTauri();
+    await showAllAddons(page);
+    await expect(row(page), "fixture should still be installed").toBeVisible({ timeout: 5_000 });
+    expect(fixtureOnDisk(), "fixture folder missing before the removal").toBe(true);
 
-    try {
-      await showAllAddons(page);
-      await expect(row(page), "fixture should still be installed").toBeVisible({ timeout: 5_000 });
-      expect(fixtureOnDisk(), "fixture folder missing before the removal").toBe(true);
+    await row(page).click();
+    await page.getByRole("button", { name: "Remove Addon" }).click();
+    await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
 
-      await row(page).click();
-      await page.getByRole("button", { name: "Remove Addon" }).click();
-      await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
+    // Let the undo window lapse so the removal commits, then prove it reached
+    // the disk. Again the filesystem, not the row count: the UI already shows
+    // 0 from the optimistic hide, so a count assertion proves nothing here.
+    await page.waitForTimeout(4_000);
+    expect(fixtureOnDisk(), "the undo window lapsed but the folder is still there").toBe(false);
 
-      // Let the undo window lapse so the removal commits, then prove it reached
-      // the disk. Again the filesystem, not the row count: the UI already shows
-      // 0 from the optimistic hide, so a count assertion proves nothing here.
-      await page.waitForTimeout(4_000);
-      expect(fixtureOnDisk(), "the undo window lapsed but the folder is still there").toBe(false);
-
-      await page.keyboard.press("Control+r");
-      await expectAddonListCount(page, 0, "the addon came back after the undo window lapsed");
-    } finally {
-      await browser.close();
-    }
+    await page.keyboard.press("Control+r");
+    await expectAddonListCount(page, 0, "the addon came back after the undo window lapsed");
   });
 });

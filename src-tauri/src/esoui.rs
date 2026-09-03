@@ -3,6 +3,7 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Seek};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -25,6 +26,11 @@ struct ApiFileDetail {
     downloads: u64,
     downloads_monthly: u64,
     favorites: u64,
+    /// Full version history as one BBCode blob, newest first. The API omits it
+    /// on some entries and sends the literal string "None" on others, so it is
+    /// defaulted here and normalised in [`fetch_addon_detail`].
+    #[serde(default)]
+    change_log: String,
     #[serde(default)]
     images: Vec<ApiImage>,
 }
@@ -35,8 +41,49 @@ struct ApiImage {
     image_url: String,
 }
 
-/// Fetch addon details from the ESOUI filedetails JSON API.
+/// How long a `filedetails` response stays reusable.
+///
+/// Sized to collapse the resolve-then-install pair — the Discover flow calls
+/// `resolve_esoui_addon` and then `install_addon` seconds apart, and both need
+/// the same detail record, so without this an install costs two identical
+/// uncached round trips. Short enough that nothing has to invalidate it: the
+/// only consumers are download URLs and checksums for an install happening right
+/// now, while update DETECTION reads the separate filelist cache, which keeps
+/// its own invalidation. A minute-old detail record cannot mislead either.
+const DETAIL_TTL: Duration = Duration::from_secs(60);
+
+static DETAIL_CACHE: OnceLock<Mutex<HashMap<u32, (Instant, ApiFileDetail)>>> = OnceLock::new();
+
+fn detail_cache() -> &'static Mutex<HashMap<u32, (Instant, ApiFileDetail)>> {
+    DETAIL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A still-fresh cached record, or `None`. A poisoned lock reads as a miss so a
+/// caller always degrades to a live fetch rather than to an error.
+fn cached_file_detail(id: u32) -> Option<ApiFileDetail> {
+    let cache = detail_cache().lock().ok()?;
+    let (fetched_at, detail) = cache.get(&id)?;
+    (fetched_at.elapsed() < DETAIL_TTL).then(|| detail.clone())
+}
+
+/// Store a successful lookup, dropping expired entries on the way in so the map
+/// stays bounded by "addons fetched in the last minute" rather than growing for
+/// the life of the process as a user browses.
+fn store_file_detail(id: u32, detail: &ApiFileDetail) {
+    let Ok(mut cache) = detail_cache().lock() else {
+        return;
+    };
+    cache.retain(|_, (fetched_at, _)| fetched_at.elapsed() < DETAIL_TTL);
+    cache.insert(id, (Instant::now(), detail.clone()));
+}
+
+/// Fetch addon details from the ESOUI filedetails JSON API, reusing a recent
+/// response when one is available. Only successes are cached — an error must
+/// stay retryable immediately.
 fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiFileDetail, String> {
+    if let Some(hit) = cached_file_detail(id) {
+        return Ok(hit);
+    }
     let url = format!("https://api.mmoui.com/v4/game/ESO/filedetails/{id}.json");
     let response = fetch_with_retry(client, &url).map_err(|e| {
         if e.contains("HTTP 404") {
@@ -52,9 +99,11 @@ fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiF
         .json()
         .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))?;
 
-    entries.into_iter().next().ok_or_else(|| {
+    let detail = entries.into_iter().next().ok_or_else(|| {
         format!("ESOUI API returned empty response for addon {id}. It may have been removed.")
-    })
+    })?;
+    store_file_detail(id, &detail);
+    Ok(detail)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +114,11 @@ pub struct EsouiAddonInfo {
     pub version: String,
     pub download_url: String,
     pub updated: String,
+    /// Publication marker from the same filedetails response as the checksum
+    /// and download URL. It lets update metadata distinguish a stale filelist
+    /// entry from a genuinely newer artifact.
+    #[serde(skip_serializing)]
+    pub(crate) last_update: u64,
     /// MD5 the filedetails API reports for `download_url`. Pass it to
     /// [`download_addon`] as `expected_md5` so the existing verification runs —
     /// without it, a corrupt-but-structurally-valid ZIP installs silently.
@@ -131,6 +185,17 @@ fn user_agent() -> String {
 /// reqwest's blocking builder has no idle-read timeout, so a dropped connection
 /// is caught by TCP keepalive probes instead: after 30s of silence, probes every
 /// 10s, connection failed after 4 unanswered (~70s) rather than hanging forever.
+///
+/// Do NOT try to add `read_timeout` here. It exists on reqwest's ASYNC builder
+/// and a `blocking::ClientBuilder` can be built `From` an async one, so wiring it
+/// up compiles cleanly — and then panics at runtime on the first response body:
+/// `ReadTimeoutBody::poll_frame` calls `tokio::time::sleep`, and the blocking
+/// client polls bodies on the caller's thread, where there is no reactor
+/// ("there is no reactor running, must be called from the context of a Tokio 1.x
+/// runtime"). The omission from the blocking builder is a guard rail, not an
+/// oversight. This was shipped once and broke every download; the tests missed it
+/// because they drive `stream_download_body` with in-memory readers and never
+/// make a real request.
 fn download_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -212,6 +277,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         version: detail.version,
         download_url: detail.download_uri,
         updated: String::new(), // Not needed by callers — metadata uses last_update epoch
+        last_update: detail.last_update,
         checksum: detail.checksum,
     })
 }
@@ -233,6 +299,23 @@ pub struct EsouiAddonDetail {
     pub created: String,
     pub screenshots: Vec<String>,
     pub download_url: String,
+    /// Cleaned version history, or empty when the author published none.
+    pub change_log: String,
+    /// Upload dates for past releases, newest first, scraped from the same
+    /// fileinfo page the compatibility/created fields come from — so this
+    /// costs no extra request. Empty when the author archives nothing.
+    pub archived_versions: Vec<ArchivedVersion>,
+}
+
+/// One row of the ESOUI "Archived Files" table: a past release and the date it
+/// was uploaded. The current version is never in this table — its date is the
+/// API's `lastUpdate`, already exposed as [`EsouiAddonDetail::updated`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedVersion {
+    pub version: String,
+    /// As ESOUI renders it, e.g. `04/23/26 01:16 PM`.
+    pub date: String,
 }
 
 fn clean_description(s: &str) -> String {
@@ -250,6 +333,17 @@ fn clean_description(s: &str) -> String {
     static RE_HTML: OnceLock<Regex> = OnceLock::new();
     let re_html = RE_HTML.get_or_init(|| Regex::new(r"</?[A-Za-z][^>]*>").unwrap());
     re_html.replace_all(&no_bbcode, "").trim().to_string()
+}
+
+/// Normalise the API's `changeLog` field. ESOUI sends the literal string
+/// "None" rather than an empty value when an author published no changelog, so
+/// both collapse to `""` — the single "no changelog" signal the UI checks.
+fn clean_change_log(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return String::new();
+    }
+    clean_description(trimmed)
 }
 
 fn decode_html_entities(s: &str) -> String {
@@ -372,13 +466,17 @@ fn format_epoch_millis(millis: u64) -> String {
     )
 }
 
-/// Scrape compatibility and created from the ESOUI fileinfo HTML page.
-/// Best-effort: returns empty strings on any failure.
-fn scrape_fileinfo_page(client: &reqwest::blocking::Client, id: u32) -> (String, String) {
+/// Scrape compatibility, created and the archived-version dates from the ESOUI
+/// fileinfo HTML page. Best-effort: returns empties on any failure, because a
+/// detail view without these is still useful.
+fn scrape_fileinfo_page(
+    client: &reqwest::blocking::Client,
+    id: u32,
+) -> (String, String, Vec<ArchivedVersion>) {
     let url = format!("https://www.esoui.com/downloads/fileinfo.php?id={id}");
     let body = match fetch_page(client, &url, None) {
         Ok(b) => b,
-        Err(_) => return (String::new(), String::new()),
+        Err(_) => return (String::new(), String::new(), Vec::new()),
     };
     let document = Html::parse_document(&body);
 
@@ -418,7 +516,59 @@ fn scrape_fileinfo_page(client: &reqwest::blocking::Client, id: u32) -> (String,
         i += 1;
     }
 
-    (compatibility, created)
+    (compatibility, created, scrape_archived_versions(&document))
+}
+
+/// Parse the "Archived Files" table into version/date pairs.
+///
+/// Anchored on the `#other_t` section that wraps the table, with a shape check
+/// on every row (five cells, a date-looking last cell) so a markup change
+/// degrades to "no dates" rather than to rows of nonsense.
+fn scrape_archived_versions(document: &Html) -> Vec<ArchivedVersion> {
+    let Ok(row_sel) = Selector::parse("div#other_t tr") else {
+        return Vec::new();
+    };
+    let Ok(cell_sel) = Selector::parse("td") else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for row in document.select(&row_sel) {
+        let cells: Vec<String> = row
+            .select(&cell_sel)
+            .map(|c| c.text().collect::<String>().trim().to_string())
+            .collect();
+
+        // File Name | Version | Size | Uploader | Date
+        if cells.len() < 5 {
+            continue;
+        }
+        let version = cells[1].trim();
+        let date = cells[4].trim();
+        if version.is_empty() || !looks_like_esoui_date(date) {
+            continue;
+        }
+        out.push(ArchivedVersion {
+            version: version.to_string(),
+            date: date.to_string(),
+        });
+    }
+    out
+}
+
+/// ESOUI renders archive dates as `MM/DD/YY HH:MM AM`. Checking the shape keeps
+/// the header row and any future column shuffle out of the results.
+fn looks_like_esoui_date(s: &str) -> bool {
+    let head = s.as_bytes();
+    head.len() >= 8
+        && head[0].is_ascii_digit()
+        && head[1].is_ascii_digit()
+        && head[2] == b'/'
+        && head[3].is_ascii_digit()
+        && head[4].is_ascii_digit()
+        && head[5] == b'/'
+        && head[6].is_ascii_digit()
+        && head[7].is_ascii_digit()
 }
 
 /// Fetch full addon details from the ESOUI JSON API.
@@ -429,7 +579,8 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let description = clean_description(&detail.description);
     let screenshots: Vec<String> = detail.images.into_iter().map(|img| img.image_url).collect();
     let updated = format_epoch_millis(detail.last_update);
-    let (compatibility, created) = scrape_fileinfo_page(client, detail.id);
+    let change_log = clean_change_log(&detail.change_log);
+    let (compatibility, created, archived_versions) = scrape_fileinfo_page(client, detail.id);
 
     Ok(EsouiAddonDetail {
         id: detail.id,
@@ -446,6 +597,8 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         created,
         screenshots,
         download_url: detail.download_uri,
+        change_log,
+        archived_versions,
     })
 }
 
@@ -996,7 +1149,248 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
     Ok(BrowsePopularPage { results, has_more })
 }
 
+/// Cancellation + progress hooks for [`download_addon_with`], mirroring
+/// [`crate::installer::ExtractHooks`] on the extraction side. Both default to
+/// `None` (see [`DownloadHooks::NONE`]) so the common callers stay trivial.
+#[derive(Clone, Copy)]
+pub struct DownloadHooks<'a> {
+    /// Polled between body chunks; when it reads `true` the download aborts with
+    /// [`crate::installer::CANCELLED`] — deliberately the same sentinel the
+    /// extract loop returns, so `cancel_update` callers keep matching one string
+    /// whichever phase the Stop lands in.
+    pub cancel: Option<&'a AtomicBool>,
+    /// Invoked as `(bytes_done, total)` while the body streams in, so the UI can
+    /// render "Downloading 4.2 / 19.1 MB". `total` is the server's
+    /// `Content-Length`; `None` on the rare response without one, which the UI
+    /// renders as an indeterminate bar. Callers are expected to throttle their
+    /// own emissions — this fires once per chunk.
+    pub progress: Option<&'a dyn Fn(u64, Option<u64>)>,
+}
+
+impl DownloadHooks<'_> {
+    /// No cancellation, no progress — the default for callers that need neither.
+    pub const NONE: DownloadHooks<'static> = DownloadHooks {
+        cancel: None,
+        progress: None,
+    };
+}
+
+/// Body chunk size for the streaming download. Large enough that a 19 MB
+/// library costs a few hundred reads rather than thousands, small enough that a
+/// Stop request is observed promptly (the cancel flag is polled per chunk).
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+/// How often a download that is receiving no data re-checks the cancel flag.
+const BODY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Pumps a blocking body reader on a dedicated thread so the consuming side
+/// can keep observing cancellation while the underlying `read()` is stalled.
+///
+/// The blocking client cannot take an idle-read timeout (see
+/// [`download_client`] for why wiring one up panics), so a read into a
+/// connection that stopped sending blocks until TCP keepalive gives up
+/// (~70s) — and a Stop click used to go unobserved for that whole window.
+/// Here the stalled read blocks the pump thread instead; `read` on this
+/// adapter returns `WouldBlock` every [`BODY_POLL_INTERVAL`] with no data,
+/// which [`stream_download_body`] treats as "poll cancel and retry".
+///
+/// After the consumer walks away (cancel, error), the pump thread lingers in
+/// its blocked read until keepalive fails it (≤70s), notices the dropped
+/// receiver, and exits — bounded, and it holds nothing but the response.
+struct ThreadedBodyReader {
+    rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// Chunk delivered by the pump but not yet fully consumed by `read`.
+    pending: Vec<u8>,
+    pending_pos: usize,
+}
+
+impl ThreadedBodyReader {
+    fn spawn<R: io::Read + Send + 'static>(mut body: R) -> Self {
+        // Bounded: a fast network with a slow disk must not buffer the whole
+        // download in memory. 4 chunks = 256 KB in flight.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(4);
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+            loop {
+                match body.read(&mut buf) {
+                    // EOF: drop tx, the consumer reads it as end of body.
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(Ok(buf[..n].to_vec())).is_err() {
+                            break; // consumer gone (cancelled or failed)
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            rx,
+            pending: Vec::new(),
+            pending_pos: 0,
+        }
+    }
+}
+
+impl io::Read for ThreadedBodyReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pending_pos >= self.pending.len() {
+            match self.rx.recv_timeout(BODY_POLL_INTERVAL) {
+                Ok(Ok(chunk)) => {
+                    self.pending = chunk;
+                    self.pending_pos = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "no data within the poll interval",
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.pending.len() - self.pending_pos);
+        buf[..n].copy_from_slice(&self.pending[self.pending_pos..self.pending_pos + n]);
+        self.pending_pos += n;
+        Ok(n)
+    }
+}
+
+fn report_download_progress(hooks: &DownloadHooks, done: u64, total: Option<u64>) {
+    if let Some(cb) = hooks.progress {
+        cb(done, total);
+    }
+}
+
+fn download_is_cancelled(hooks: &DownloadHooks) -> bool {
+    hooks
+        .cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// Map an I/O failure raised while READING the response body — the network side.
+///
+/// A timeout here is the network giving up mid-body, not a disk problem —
+/// "Failed to write download to temp file" sent users looking at their drive
+/// instead of their connection. Every other read failure is the network too: a
+/// socket reset mid-body is the CDN dropping us, and naming the temp file
+/// misdirects in exactly the way the timeout wording exists to prevent. The old
+/// single `io::copy` could not tell the two sides apart, so every failure
+/// inherited the disk wording; streaming the body ourselves is what makes the
+/// split possible.
+fn map_download_read_error(e: &io::Error) -> String {
+    if matches!(
+        e.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        "Download stalled — the connection stopped sending data. Check your internet connection and try again.".to_string()
+    } else {
+        format!(
+            "Download failed while receiving data: {e}. Check your internet connection and try again."
+        )
+    }
+}
+
+/// Map an I/O failure raised while WRITING the body to the temp file — the disk
+/// side, the one place the "check your drive" reading is actually correct (a
+/// full disk, a denied temp directory).
+fn map_download_write_error(e: &io::Error) -> String {
+    format!("Failed to write download to temp file: {e}")
+}
+
+/// Stream `reader` into `writer` in one pass, folding the MD5 verification into
+/// the same loop instead of re-reading the finished file from disk, and
+/// reporting `(bytes_done, total)` as it goes.
+///
+/// Returns the number of bytes written. The checksum is compared here, inside
+/// the single pass, so a corrupt body is rejected with the same message the
+/// old seek-and-re-read block produced. Generic over `Read`/`Write` so the
+/// progress accounting, cancellation and hashing are testable without a
+/// network response.
+fn stream_download_body<R: io::Read, W: io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    total: Option<u64>,
+    expected_md5: Option<&str>,
+    hooks: DownloadHooks,
+) -> Result<u64, String> {
+    use md5::{Digest, Md5};
+
+    // An empty checksum means ESOUI published none for this artifact; skip the
+    // hashing work entirely rather than compare against "".
+    let expected = expected_md5
+        .map(|s| s.to_lowercase())
+        .filter(|s| !s.is_empty());
+    // md-5 0.11 (digest 0.11) dropped the `io::Write` impl on the hasher, so it
+    // is fed in chunks via `update` rather than through `io::copy`.
+    let mut hasher = expected.as_ref().map(|_| Md5::new());
+
+    let mut buf = vec![0u8; DOWNLOAD_CHUNK_BYTES];
+    let mut written: u64 = 0;
+    // Report zero up front so the UI can swap to a determinate bar (and show the
+    // total size) before the first chunk lands, rather than after it.
+    report_download_progress(&hooks, 0, total);
+
+    loop {
+        if download_is_cancelled(&hooks) {
+            return Err(crate::installer::CANCELLED.to_string());
+        }
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            // A `ThreadedBodyReader` tick: no data within its poll window.
+            // Loop back to the cancel check instead of failing — this is what
+            // makes Stop responsive while a stalled read sits in TCP
+            // keepalive's ~70s window on the pump thread.
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(map_download_read_error(&e)),
+        };
+        if n == 0 {
+            break;
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| map_download_write_error(&e))?;
+        if let Some(h) = hasher.as_mut() {
+            h.update(&buf[..n]);
+        }
+        written += n as u64;
+        report_download_progress(&hooks, written, total);
+    }
+    writer.flush().map_err(|e| map_download_write_error(&e))?;
+
+    if let (Some(expected), Some(hasher)) = (expected, hasher) {
+        // digest 0.11 output no longer implements `LowerHex`; hex-encode by hand.
+        let digest = hasher.finalize();
+        let mut actual = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(actual, "{byte:02x}");
+        }
+        if actual != expected {
+            return Err(
+                "Download checksum mismatch — the file may be corrupt. Try again.".to_string(),
+            );
+        }
+    }
+
+    Ok(written)
+}
+
 pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTempFile, String> {
+    download_addon_with(url, expected_md5, DownloadHooks::NONE)
+}
+
+/// Like [`download_addon`] but with cancellation/progress hooks.
+pub fn download_addon_with(
+    url: &str,
+    expected_md5: Option<&str>,
+    hooks: DownloadHooks,
+) -> Result<NamedTempFile, String> {
     if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
@@ -1047,63 +1441,19 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
 
     let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
-    let mut response = response;
-    let written = io::copy(&mut response, &mut tmp).map_err(|e| {
-        // A timeout here is the network giving up mid-body, not a disk problem —
-        // "Failed to write download to temp file" sent users looking at their
-        // drive instead of their connection.
-        if matches!(
-            e.kind(),
-            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-        ) {
-            "Download stalled — the connection stopped sending data. Check your internet connection and try again.".to_string()
-        } else {
-            format!("Failed to write download to temp file: {e}")
-        }
-    })?;
+    // One pass: body → temp file, MD5 folded in, progress reported per chunk.
+    // The file is never re-read to hash it, which is what made a 19 MB /
+    // 5,642-file library pay for its own bytes twice. The body is pumped on a
+    // dedicated thread (see `ThreadedBodyReader`) so a Stop lands within
+    // ~250ms even while a stalled connection blocks the actual read.
+    let mut body = ThreadedBodyReader::spawn(response);
+    let written = stream_download_body(&mut body, &mut tmp, expected_size, expected_md5, hooks)?;
 
     if let Some(expected) = expected_size {
         if written != expected {
             return Err(format!(
                 "Download incomplete: received {written} bytes, expected {expected}. Try again."
             ));
-        }
-    }
-
-    // Verify MD5 checksum if provided by ESOUI API
-    if let Some(expected) = expected_md5 {
-        if !expected.is_empty() {
-            use md5::{Digest, Md5};
-            use std::io::Read;
-            tmp.as_file()
-                .seek(io::SeekFrom::Start(0))
-                .map_err(|e| format!("Failed to seek: {e}"))?;
-            let mut hasher = Md5::new();
-            // md-5 0.11 (digest 0.11) dropped the `io::Write` impl on the hasher,
-            // so feed it in chunks via `update` instead of `io::copy`.
-            let mut file = tmp.as_file();
-            let mut buf = [0u8; 8192];
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .map_err(|e| format!("Failed to hash download: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-            // digest 0.11 output no longer implements `LowerHex`; hex-encode by hand.
-            let digest = hasher.finalize();
-            let mut actual = String::with_capacity(digest.len() * 2);
-            for byte in digest {
-                use std::fmt::Write as _;
-                let _ = write!(actual, "{byte:02x}");
-            }
-            if actual != expected.to_lowercase() {
-                return Err(
-                    "Download checksum mismatch — the file may be corrupt. Try again.".to_string(),
-                );
-            }
         }
     }
 
@@ -1318,6 +1668,29 @@ fn ensure_filelist_cache(force: bool) -> Result<(), String> {
 #[allow(dead_code)]
 pub fn refresh_filelist_cache() -> Result<(), String> {
     ensure_filelist_cache(true)
+}
+
+/// Drop a filelist observation after an update successfully installs an
+/// artifact described by a newer filedetails response. The next update check
+/// must fetch again instead of comparing the installed artifact against the
+/// stale pre-download filelist and offering a phantom update.
+pub fn invalidate_filelist_cache() {
+    // Serialize with the complete fetch-and-publish operation. Clearing only
+    // the cache mutex allows a refresh that started before an install to
+    // publish its stale, pre-install observation after this invalidation.
+    let _refresh_guard = FILELIST_REFRESH_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+/// Invalidate only when at least one update was actually applied. Batch paths
+/// can finish with zero successes and must preserve a still-valid observation.
+pub fn invalidate_filelist_cache_if_applied(applied: bool) {
+    if applied {
+        invalidate_filelist_cache();
+    }
 }
 
 /// Fetch the full ESOUI filelist and build a lookup map keyed by addon folder path.
@@ -1598,6 +1971,77 @@ mod tests {
     }
 
     #[test]
+    fn archived_versions_parsed_from_fileinfo_table() {
+        // The shape ESOUI renders: File Name | Version | Size | Uploader | Date.
+        let html = r##"<html><body><div id="other_t">
+          <div class="title">Archived Files (2)</div>
+          <table>
+            <tr><td class="thead"><div>File Name</div></td><td class="thead"><div>Version</div></td>
+                <td class="thead"><div>Size</div></td><td class="thead"><div>Uploader</div></td>
+                <td class="thead"><div>Date</div></td></tr>
+            <tr><td><div><a href="#">AwesomeGuildStore</a></div></td><td><div>1.7.7</div></td>
+                <td><div>393kB</div></td><td><div>sirinsidiator</div></td>
+                <td><div>04/23/26 01:16 PM</div></td></tr>
+            <tr><td><div><a href="#">AwesomeGuildStore</a></div></td><td><div>1.7.6</div></td>
+                <td><div>393kB</div></td><td><div>sirinsidiator</div></td>
+                <td><div>09/06/25 11:16 AM</div></td></tr>
+          </table></div></body></html>"##;
+        let out = scrape_archived_versions(&Html::parse_document(html));
+        assert_eq!(out.len(), 2, "header row must not become an entry");
+        assert_eq!(out[0].version, "1.7.7");
+        assert_eq!(out[0].date, "04/23/26 01:16 PM");
+        assert_eq!(out[1].version, "1.7.6");
+    }
+
+    #[test]
+    fn archived_versions_empty_when_section_missing() {
+        // No #other_t: the addon archives nothing, or the markup drifted. Both
+        // must degrade to "no dates" rather than to rows of nonsense.
+        let html = "<html><body><table><tr><td>x</td></tr></table></body></html>";
+        assert!(scrape_archived_versions(&Html::parse_document(html)).is_empty());
+    }
+
+    #[test]
+    fn esoui_date_shape_is_checked() {
+        assert!(looks_like_esoui_date("04/23/26 01:16 PM"));
+        assert!(!looks_like_esoui_date("Date"));
+        assert!(!looks_like_esoui_date("393kB"));
+        assert!(!looks_like_esoui_date(""));
+    }
+
+    #[test]
+    fn change_log_none_sentinel_becomes_empty() {
+        // ESOUI sends the literal string "None" rather than an empty value when
+        // an author published no changelog. Both must collapse to "", which is
+        // the single signal the UI checks before rendering the section.
+        assert_eq!(clean_change_log("None"), "");
+        assert_eq!(clean_change_log("none"), "");
+        assert_eq!(clean_change_log("  None  "), "");
+        assert_eq!(clean_change_log(""), "");
+        assert_eq!(clean_change_log("   "), "");
+    }
+
+    #[test]
+    fn change_log_strips_bbcode_and_keeps_versions() {
+        let input = "[B]Version 1.7.8[/B][LIST]\r\n[*] Fixed a crash[/LIST]";
+        let result = clean_change_log(input);
+        assert!(result.contains("Version 1.7.8"));
+        assert!(result.contains("Fixed a crash"));
+        // The [*] marker becomes a bullet so list items do not run together.
+        assert!(result.contains('\u{2022}'));
+        assert!(!result.contains("[B]"));
+        assert!(!result.contains("[LIST]"));
+    }
+
+    #[test]
+    fn change_log_keeps_a_real_entry_named_none_in_context() {
+        // Only a bare "None" is the sentinel — a changelog that merely mentions
+        // the word must survive.
+        let result = clean_change_log("None of the old bugs remain");
+        assert_eq!(result, "None of the old bugs remain");
+    }
+
+    #[test]
     fn download_addon_rejects_non_esoui_urls() {
         let result = download_addon("https://evil.com/malware.zip", None);
         assert!(result.is_err());
@@ -1608,5 +2052,375 @@ mod tests {
     fn download_addon_rejects_http_esoui() {
         let result = download_addon("http://cdn.esoui.com/addon.zip", None);
         assert!(result.is_err());
+    }
+
+    /// MD5 of `b"kalpa"`, computed outside this crate so the streaming-hash
+    /// tests assert against an independent value rather than the code's own
+    /// output.
+    const KALPA_MD5: &str = "cb0fa609383235d6bdb40d38ae0a31c2";
+
+    fn kalpa_body() -> Vec<u8> {
+        b"kalpa".to_vec()
+    }
+
+    #[test]
+    fn stream_download_body_hashes_in_the_same_pass() {
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        let written = stream_download_body(
+            &mut src,
+            &mut out,
+            Some(5),
+            Some(KALPA_MD5),
+            DownloadHooks::NONE,
+        )
+        .expect("matching checksum must verify");
+        assert_eq!(written, 5);
+        assert_eq!(out, b"kalpa");
+    }
+
+    #[test]
+    fn stream_download_body_rejects_a_mismatched_checksum() {
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut src,
+            &mut out,
+            Some(5),
+            Some("00000000000000000000000000000000"),
+            DownloadHooks::NONE,
+        )
+        .expect_err("a wrong checksum must fail the download");
+        assert!(err.contains("checksum mismatch"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn stream_download_body_accepts_uppercase_and_skips_empty_checksums() {
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        assert!(stream_download_body(
+            &mut src,
+            &mut out,
+            None,
+            Some(&KALPA_MD5.to_uppercase()),
+            DownloadHooks::NONE,
+        )
+        .is_ok());
+
+        // ESOUI publishes no checksum for some artifacts; an empty string must
+        // skip verification rather than compare the digest against "".
+        let mut src = io::Cursor::new(kalpa_body());
+        let mut out: Vec<u8> = Vec::new();
+        assert!(
+            stream_download_body(&mut src, &mut out, None, Some(""), DownloadHooks::NONE).is_ok()
+        );
+    }
+
+    #[test]
+    fn stream_download_body_reports_monotonic_byte_progress() {
+        // Two-and-a-bit chunks, so progress is reported more than once.
+        let body = vec![7u8; DOWNLOAD_CHUNK_BYTES * 2 + 17];
+        let total = body.len() as u64;
+        let ticks = std::sync::Mutex::new(Vec::<(u64, Option<u64>)>::new());
+        let record = |done: u64, all: Option<u64>| ticks.lock().unwrap().push((done, all));
+        let mut src = io::Cursor::new(body);
+        let mut out: Vec<u8> = Vec::new();
+        let written = stream_download_body(
+            &mut src,
+            &mut out,
+            Some(total),
+            None,
+            DownloadHooks {
+                cancel: None,
+                progress: Some(&record),
+            },
+        )
+        .expect("stream must succeed");
+
+        let ticks = ticks.into_inner().unwrap();
+        assert_eq!(written, total);
+        // Opens at zero so the UI can render a determinate bar immediately,
+        // ends exactly at the total, and never goes backwards in between.
+        assert_eq!(ticks.first().copied(), Some((0, Some(total))));
+        assert_eq!(ticks.last().copied(), Some((total, Some(total))));
+        assert!(ticks.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert!(ticks.iter().all(|(_, t)| *t == Some(total)));
+        assert!(ticks.len() >= 4, "expected a tick per chunk: {ticks:?}");
+    }
+
+    #[test]
+    fn stream_download_body_aborts_mid_body_when_cancelled() {
+        // A reader that trips the cancel flag after handing over the first
+        // chunk, so the abort happens mid-body rather than before the first
+        // read — the case a user hits when they Stop a large download.
+        struct CancelAfterFirstChunk<'a> {
+            flag: &'a AtomicBool,
+            reads: usize,
+        }
+        impl io::Read for CancelAfterFirstChunk<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                self.flag.store(true, Ordering::Relaxed);
+                let n = buf.len().min(1024);
+                buf[..n].fill(1);
+                Ok(n)
+            }
+        }
+
+        let flag = AtomicBool::new(false);
+        let mut src = CancelAfterFirstChunk {
+            flag: &flag,
+            reads: 0,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut src,
+            &mut out,
+            None,
+            None,
+            DownloadHooks {
+                cancel: Some(&flag),
+                progress: None,
+            },
+        )
+        .expect_err("a cancelled download must not report success");
+        // The same sentinel the extract loop returns, so the frontend's single
+        // "Update cancelled" check covers both phases.
+        assert_eq!(err, crate::installer::CANCELLED);
+        assert_eq!(src.reads, 1, "must stop reading once the flag is set");
+        assert_eq!(out.len(), 1024);
+    }
+
+    #[test]
+    fn stream_download_body_maps_a_stalled_body_to_the_connection_message() {
+        struct Stalled;
+        impl io::Read for Stalled {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"))
+            }
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(&mut Stalled, &mut out, None, None, DownloadHooks::NONE)
+            .expect_err("a timed-out body must fail");
+        // Deliberately not the "Failed to write download to temp file" wording:
+        // a mid-body timeout is the network, not the user's drive.
+        assert!(err.contains("Download stalled"), "unexpected error: {err}");
+    }
+
+    /// The Stop-during-stall path: the read yields no data (`WouldBlock`
+    /// ticks from `ThreadedBodyReader`), and the loop must bounce back to the
+    /// cancel check instead of failing or blocking — here the flag is set
+    /// while the body is stalled, and the sentinel must come out.
+    #[test]
+    fn stream_download_body_observes_cancel_while_the_body_stalls() {
+        struct StallAndSetCancel<'a> {
+            flag: &'a AtomicBool,
+        }
+        impl io::Read for StallAndSetCancel<'_> {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                self.flag.store(true, Ordering::Relaxed);
+                Err(io::Error::new(io::ErrorKind::WouldBlock, "stalled"))
+            }
+        }
+
+        let flag = AtomicBool::new(false);
+        let mut src = StallAndSetCancel { flag: &flag };
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_download_body(
+            &mut src,
+            &mut out,
+            None,
+            None,
+            DownloadHooks {
+                cancel: Some(&flag),
+                progress: None,
+            },
+        )
+        .expect_err("a cancelled stall must not report success");
+        assert_eq!(err, crate::installer::CANCELLED);
+    }
+
+    #[test]
+    fn threaded_body_reader_round_trips_the_body() {
+        use std::io::Read as _;
+        let payload: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let mut reader = ThreadedBodyReader::spawn(io::Cursor::new(payload.clone()));
+        let mut out = Vec::new();
+        // read_to_end retries on WouldBlock? No — it fails. Pull manually the
+        // way stream_download_body does: WouldBlock means try again.
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn threaded_body_reader_ticks_would_block_while_the_body_is_stalled() {
+        use std::io::Read as _;
+        // An underlying body blocked in a read (a stalled connection): the
+        // adapter must return a WouldBlock tick within its poll interval
+        // rather than block the caller.
+        struct BlockedUntilDropped(std::sync::mpsc::Receiver<()>);
+        impl io::Read for BlockedUntilDropped {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                let _ = self.0.recv(); // blocks until the sender is dropped
+                Ok(0)
+            }
+        }
+
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let mut reader = ThreadedBodyReader::spawn(BlockedUntilDropped(blocked));
+        let mut buf = [0u8; 16];
+        let err = reader
+            .read(&mut buf)
+            .expect_err("stall must tick, not block");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // Unblock the pump: the body EOFs and the adapter reads as done.
+        drop(release);
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => panic!("no data was ever sent"),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn threaded_body_reader_propagates_the_body_error_after_its_data() {
+        struct DataThenError {
+            sent: bool,
+        }
+        impl io::Read for DataThenError {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.sent {
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "keepalive gave up"))
+                } else {
+                    self.sent = true;
+                    buf[..3].copy_from_slice(b"abc");
+                    Ok(3)
+                }
+            }
+        }
+
+        use std::io::Read as _;
+        let mut reader = ThreadedBodyReader::spawn(DataThenError { sent: false });
+        let mut out = Vec::new();
+        let mut buf = [0u8; 16];
+        let err = loop {
+            match reader.read(&mut buf) {
+                Ok(0) => panic!("must surface the error, not EOF"),
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(out, b"abc");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn detail_cache_serves_a_fresh_entry_and_expires_a_stale_one() {
+        let detail = ApiFileDetail {
+            id: 4161,
+            title: "LibCustomIcons".to_string(),
+            version: "2026-08-31".to_string(),
+            author: "m00nyONE".to_string(),
+            description: String::new(),
+            last_update: 0,
+            checksum: "abc".to_string(),
+            download_uri: "https://cdn.esoui.com/x.zip".to_string(),
+            downloads: 0,
+            downloads_monthly: 0,
+            favorites: 0,
+            change_log: String::new(),
+            images: Vec::new(),
+        };
+
+        store_file_detail(4161, &detail);
+        let hit = cached_file_detail(4161).expect("a just-stored entry must be a hit");
+        assert_eq!(hit.checksum, "abc");
+
+        // Backdate past the TTL: the entry must read as a miss, and the next
+        // store must evict it rather than let the map grow.
+        {
+            let mut cache = detail_cache().lock().unwrap();
+            let entry = cache.get_mut(&4161).unwrap();
+            entry.0 = Instant::now() - DETAIL_TTL - Duration::from_secs(1);
+        }
+        assert!(
+            cached_file_detail(4161).is_none(),
+            "an entry past the TTL must not be served"
+        );
+
+        store_file_detail(999_999, &detail);
+        assert!(
+            !detail_cache().lock().unwrap().contains_key(&4161),
+            "storing must evict expired entries"
+        );
+        detail_cache().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn applied_update_invalidates_stale_filelist_observation() {
+        {
+            let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(FilelistCache {
+                entries: Vec::new(),
+                lookup: Arc::new(HashMap::new()),
+                fetched_at: Instant::now(),
+            });
+        }
+
+        assert!(cache_exists());
+        invalidate_filelist_cache();
+        assert!(!cache_exists());
+    }
+
+    #[test]
+    fn invalidation_waits_for_an_in_flight_refresh_to_finish() {
+        let refresh_guard = FILELIST_REFRESH_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+        let invalidator = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            invalidate_filelist_cache();
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(finished_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        drop(refresh_guard);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        invalidator.join().unwrap();
+    }
+
+    #[test]
+    fn zero_applied_updates_preserve_filelist_observation() {
+        {
+            let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(FilelistCache {
+                entries: Vec::new(),
+                lookup: Arc::new(HashMap::new()),
+                fetched_at: Instant::now(),
+            });
+        }
+
+        invalidate_filelist_cache_if_applied(false);
+        assert!(cache_exists());
+        invalidate_filelist_cache();
     }
 }

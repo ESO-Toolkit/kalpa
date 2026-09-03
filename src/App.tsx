@@ -34,6 +34,7 @@ import {
   isDependencySkipped,
   setDependencyPolicy,
 } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { DependencyPromptProvider, type ResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import {
   getTauriErrorMessage,
@@ -43,7 +44,7 @@ import {
 } from "@/lib/tauri";
 import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import { pruneSelection, reconcileSelectedAddon } from "@/lib/addon-selection";
-import { BatchUpdateLatch } from "@/lib/batch-update-latch";
+import { BatchUpdateLatch, refuseRemovalWhileBatchActive } from "@/lib/batch-update-latch";
 import {
   RemovalQueue,
   hideAddon,
@@ -59,6 +60,10 @@ import {
 } from "@/lib/removal-queue";
 import { isModKey, isWindows } from "@/lib/platform";
 import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
+import {
+  countUpdatesWithoutProtectedEditsBaseline,
+  shouldPublishProtectedEditsCoverage,
+} from "@/lib/protected-edits";
 import type {
   AddonManifest,
   AuthUser,
@@ -69,6 +74,7 @@ import type {
   GameInstance,
   InstallResult,
   PendingDependency,
+  RemoveAddonResult,
   StreamingBatchResult,
   UpdateCheckResult,
   WriteAccessStatus,
@@ -77,8 +83,12 @@ import type {
   FilterMode,
   ViewMode,
   DiscoverTab,
+  AddonPhase,
 } from "./types";
 import type { LogPathDetection } from "@/types/uploader";
+
+const ACTIVE_BATCH_REMOVAL_MESSAGE =
+  "Wait for the current update batch to finish before removing addons.";
 
 const AddonDetail = lazy(() =>
   import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
@@ -94,8 +104,10 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "support"
   | "shortcuts"
   | "log-upload"
+  | "client-health"
   | null;
 
 interface PendingDeepLinkPayload {
@@ -106,8 +118,6 @@ interface PendingDeepLinkPayload {
   logUpload: boolean;
   packHub: boolean;
 }
-
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
 
 /**
  * Merge duplicate entries so the picker asks about each library once, listing
@@ -222,6 +232,7 @@ function App() {
   const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
+  const addonsRef = useRef<AddonManifest[]>([]);
   const viewModeRef = useRef<ViewMode>("installed");
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
@@ -254,6 +265,18 @@ function App() {
   const depPromptPathRef = useRef("");
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
+  const scanAddonsRef = useRef<
+    ((path: string, retryAfterStaleEpoch?: boolean) => Promise<void>) | null
+  >(null);
+  const checkForUpdatesRef = useRef<
+    | ((
+        path: string,
+        autoUpdate?: boolean,
+        notifyOnError?: boolean,
+        retryAfterStaleEpoch?: boolean
+      ) => Promise<void>)
+    | null
+  >(null);
   const activeDialogRef = useRef<ActiveDialog>(null);
   const setupInstancesRef = useRef<GameInstance[] | null>(null);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
@@ -411,11 +434,9 @@ function App() {
     };
   }, []);
 
-  const scanAddons = useCallback(async (path: string) => {
+  const scanAddons = useCallback(async (path: string, retryAfterStaleEpoch = true) => {
     const seq = ++scanSeqRef.current;
-    // Stamped BEFORE the invoke: a removal confirmed while this scan is in
-    // flight must mask the row even though the backend enumerated it.
-    const since = pendingRemovalsRef.current.stamp();
+    const removalEpoch = pendingRemovalsRef.current.captureRemovalEpoch(path);
     setLoading(true);
     setError(null);
     setErrorShowSettings(false);
@@ -425,13 +446,23 @@ function App() {
         addonsPath: path,
       });
       if (seq !== scanSeqRef.current) return;
+      if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+        if (retryAfterStaleEpoch) {
+          // A successful removal invalidated this snapshot while it was in
+          // flight. Retry once so an explicit refresh still converges on the
+          // post-removal filesystem state instead of silently disappearing.
+          void scanAddonsRef.current?.(path, false);
+        }
+        return;
+      }
 
       // A queued removal has hidden its row but has not deleted the folder yet,
       // so a rescan inside the 3s undo window reads it straight back off disk.
       // Left unmasked, the row returns and then STAYS after the delete
       // succeeds — the list shows an addon that no longer exists.
-      const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path, since);
+      const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path);
 
+      addonsRef.current = visible;
       setAddons(visible);
       if (selectedAddonRef.current) {
         setSelectedAddon(reconcileSelectedAddon(selectedAddonRef.current, visible));
@@ -442,12 +473,10 @@ function App() {
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
+      addonsRef.current = [];
       setAddons([]);
       setSelectedFolders(new Set());
     } finally {
-      // Unconditional: the stamp is registered per REQUEST, not per winning
-      // request, so a superseded scan still has to release its own.
-      pendingRemovalsRef.current.release(since);
       if (seq === scanSeqRef.current) {
         setLoading(false);
       }
@@ -455,11 +484,14 @@ function App() {
   }, []);
 
   const checkForUpdates = useCallback(
-    async (path: string, autoUpdate = false, notifyOnError = false) => {
+    async (
+      path: string,
+      autoUpdate = false,
+      notifyOnError = false,
+      retryAfterStaleEpoch = true
+    ) => {
       const seq = ++checkSeqRef.current;
-      // Same reason as the scan: stamp before the invoke so a removal that lands
-      // mid-flight still masks its update row.
-      const since = pendingRemovalsRef.current.stamp();
+      const removalEpoch = pendingRemovalsRef.current.captureRemovalEpoch(path);
       // Deliberately does NOT clear updatingAll/updateProgress: those belong to
       // the batch path that set them, and a refresh landing mid-Update-All would
       // otherwise hide the progress UI and unlatch the batch re-entry guard.
@@ -469,6 +501,15 @@ function App() {
           addonsPath: path,
         });
         if (seq !== checkSeqRef.current) return;
+        if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+          if (retryAfterStaleEpoch) {
+            // The check's result was observed before a successful removal.
+            // Retry once so the update list is refreshed against the current
+            // filesystem state rather than leaving the refresh incomplete.
+            void checkForUpdatesRef.current?.(path, autoUpdate, notifyOnError, false);
+          }
+          return;
+        }
 
         // Same masking as the scan: an addon inside its undo window is still on
         // disk, so the check still reports it. Its update row must not outlive
@@ -479,12 +520,7 @@ function App() {
         // see, and — worse — let auto-update extract into a folder already
         // queued for deletion, racing the remover and surfacing dependency work
         // for an addon the user had removed.
-        const visibleResults = hidePendingRemovals(
-          results,
-          pendingRemovalsRef.current,
-          path,
-          since
-        );
+        const visibleResults = hidePendingRemovals(results, pendingRemovalsRef.current, path);
         setUpdateResults(visibleResults);
 
         // The check just wrote fresh esoui_last_update values to metadata, but the
@@ -528,7 +564,6 @@ function App() {
           toast.error(`Failed to check for updates: ${getTauriErrorMessage(updateError)}`);
         }
       } finally {
-        pendingRemovalsRef.current.release(since);
         if (seq === checkSeqRef.current) {
           setCheckingUpdates(false);
         }
@@ -536,6 +571,11 @@ function App() {
     },
     [srAnnounce]
   );
+
+  useEffect(() => {
+    scanAddonsRef.current = scanAddons;
+    checkForUpdatesRef.current = checkForUpdates;
+  }, [checkForUpdates, scanAddons]);
 
   const scanAndCheck = useCallback(
     async (path: string, notifyOnUpdateError = false) => {
@@ -567,6 +607,12 @@ function App() {
           `Auto-linked ${result.data.linked.length} addon${result.data.linked.length > 1 ? "s" : ""} to ESOUI`
         );
         await scanAddons(path);
+      }
+
+      if (result.data.notFound.length > 0) {
+        toast.warning(
+          `Could not auto-link ${result.data.notFound.length} addon${result.data.notFound.length > 1 ? "s" : ""}; review them manually.`
+        );
       }
     },
     [scanAddons]
@@ -684,8 +730,16 @@ function App() {
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
         void refreshUploaderIntroDetection();
         // Scan (disk) and update check (metadata + network) touch different
-        // state and locks, so run them concurrently instead of in series.
-        await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, autoUpdate, false)]);
+        // state and locks, so run them concurrently unless auto-update needs
+        // scan-derived Protected Edits coverage first.
+        if (autoUpdate) {
+          // Auto-update needs the scan's Protected Edits coverage before it may
+          // disclose risk and begin mutation.
+          await scanAddons(savedPath);
+          await checkForUpdates(savedPath, true, false);
+        } else {
+          await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, false, false)]);
+        }
         void runAutoLink(savedPath);
         // Populate knownInstances so the Settings instance switcher works for
         // returning users. Fire-and-forget — does not block startup.
@@ -728,8 +782,13 @@ function App() {
           // Best-effort persist: this is auto-detection, so if the write fails it
           // self-heals — the same instance is re-detected and re-selected next launch.
           void setSetting("addonsPath", path);
-          // Scan and update check are independent — run concurrently.
-          await Promise.all([scanAddons(path), checkForUpdates(path, autoUpdate, false)]);
+          if (autoUpdate) {
+            await scanAddons(path);
+            await checkForUpdates(path, true, false);
+          } else {
+            // No mutation follows, so the disk scan and network check may overlap.
+            await Promise.all([scanAddons(path), checkForUpdates(path, false, false)]);
+          }
           void runAutoLink(path);
         } catch (initError) {
           setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
@@ -896,8 +955,16 @@ function App() {
   // keep dependents' "N missing" badges correct. Returns false in the common
   // case (toggling a non-dependency addon), preserving the no-rescan perf win.
   const togglingAffectsDependencies = useCallback(
-    (toggledFolders: Set<string>) =>
-      addons.some((addon) => addon.dependsOn.some((dep) => toggledFolders.has(dep.name))),
+    (toggledFolders: Set<string>) => {
+      // ESO resolves addon names case-insensitively (normalize_addon_name in
+      // commands.rs is the backend twin), so the manifest's DependsOn token
+      // and the on-disk folder casing may differ; compare both lowercased or
+      // a cased mismatch skips the rescan and leaves dependents' badges stale.
+      const toggled = new Set([...toggledFolders].map((folder) => folder.trim().toLowerCase()));
+      return addons.some((addon) =>
+        addon.dependsOn.some((dep) => toggled.has(dep.name.trim().toLowerCase()))
+      );
+    },
     [addons]
   );
 
@@ -960,9 +1027,10 @@ function App() {
   const handleOpenFolder = useCallback(
     async (folderName: string) => {
       try {
-        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
         const { join } = await import("@tauri-apps/api/path");
-        await revealItemInDir(await join(addonsPath, folderName));
+        await invokeOrThrow("reveal_allowed_path", {
+          path: await join(addonsPath, folderName),
+        });
       } catch (e) {
         toast.error(`Could not open folder: ${getTauriErrorMessage(e)}`);
       }
@@ -1105,45 +1173,27 @@ function App() {
     [presentDependencyBatch]
   );
 
-  const handleSingleUpdate = useCallback(
-    async (folderName: string) => {
-      const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
-      if (!ur) return;
-      if (!(await ensureEsoNotBlocking())) return;
-      try {
-        const result = await invokeOrThrow<InstallResult>("update_addon", {
-          addonsPath,
-          esouiId: ur.esouiId,
-          // Record the version the update CHECK compared against (the filelist
-          // string), not the one the filedetails endpoint reports. When the two
-          // sources disagree the addon otherwise stays permanently "outdated".
-          apiVersion: ur.remoteVersion,
-          dependencyPolicy: await getDependencyPolicy(),
-        });
-        toast.success(`Updated ${folderName}`);
-        srAnnounce(`Updated ${folderName}`);
-        handleAddonUpdated(ur.esouiId);
-        // Empty unless the policy is "ask"; the picker owns the rest. Pass the
-        // same folder this update wrote to, not the live one — the user may
-        // have switched instances while it ran.
-        void resolvePendingDeps(result.pendingDeps, addonsPath);
-      } catch (e) {
-        toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
-      }
-    },
-    [
-      addonsPath,
-      updateResults,
-      srAnnounce,
-      handleAddonUpdated,
-      ensureEsoNotBlocking,
-      resolvePendingDeps,
-    ]
-  );
+  const handleSingleUpdate = useCallback((folderName: string) => {
+    const addon = addonsRef.current.find((candidate) => candidate.folderName === folderName);
+    if (!addon) return;
+    // Route the shortcut through AddonDetail's fresh conflict preflight. The
+    // legacy command snapshots disk only after extraction and cannot safely
+    // infer a migrated addon's pre-existing edits.
+    setSelectedAddon(addon);
+  }, []);
 
   // The optimistic-removal queue. Its group-timer and per-entry AddOns-folder
   // rules live in `lib/removal-queue.ts` so they can be tested without the app.
   const pendingRemovalsRef = useRef(new RemovalQueue());
+
+  // The latch is promoted before React can paint `updatingAll`, so it is the
+  // authority for imperative/stale callbacks as well as the visible controls.
+  const refuseRemovalDuringActiveBatch = useCallback(() => {
+    return refuseRemovalWhileBatchActive(batchLatchRef.current, () => {
+      toast.info(ACTIVE_BATCH_REMOVAL_MESSAGE);
+      srAnnounce(ACTIVE_BATCH_REMOVAL_MESSAGE);
+    });
+  }, [srAnnounce]);
 
   // Bumped the moment `handlePathChange` decides a switch is happening, which is
   // BEFORE it awaits `flushPendingRemovals()` and long before it syncs
@@ -1172,15 +1222,15 @@ function App() {
     await Promise.all(
       entries.map(async (entry) => {
         try {
-          const result = await invokeResult("remove_addon", {
+          const result = await invokeResult<RemoveAddonResult>("remove_addon", {
             addonsPath: entry.addonsPath,
             folderName: entry.addon.folderName,
           });
           if (result.ok) {
-            // Confirmed gone: record it before `endCommit` below lifts the
-            // in-flight mask, so a scan still in flight cannot deliver the row
-            // back as a phantom.
-            pendingRemovalsRef.current.markRemoved(entry.addon.folderName, entry.addonsPath);
+            pendingRemovalsRef.current.recordSuccessfulRemoval(entry.addonsPath);
+            if (result.data.cleanupWarning) {
+              toast.warning(`Removed with cleanup warning: ${result.data.cleanupWarning}`);
+            }
             return;
           }
           toast.error(`Remove failed: ${result.error}`);
@@ -1204,6 +1254,7 @@ function App() {
 
   const handleSingleRemove = useCallback(
     (folderName: string) => {
+      if (refuseRemovalDuringActiveBatch()) return;
       const addon = addons.find((a) => a.folderName === folderName);
       if (!addon) return;
       const updateResult = updateResults.find((r) => r.folderName === folderName) ?? null;
@@ -1230,10 +1281,16 @@ function App() {
         // returns, and a scan landing in that gap would restore a row nothing
         // hides again once the delete succeeds.
         pendingRemovalsRef.current.beginCommit(folderName, queuedPath);
-        void invokeOrThrow("remove_addon", { addonsPath: queuedPath, folderName })
-          // Success only — a failed delete leaves the folder on disk and the
-          // row must be free to come back.
-          .then(() => pendingRemovalsRef.current.markRemoved(folderName, queuedPath))
+        void invokeOrThrow<RemoveAddonResult>("remove_addon", {
+          addonsPath: queuedPath,
+          folderName,
+        })
+          .then((result) => {
+            pendingRemovalsRef.current.recordSuccessfulRemoval(queuedPath);
+            if (result.cleanupWarning) {
+              toast.warning(`Removed with cleanup warning: ${result.cleanupWarning}`);
+            }
+          })
           .catch((e) => {
             toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
             if (entry && sameAddonsFolder(queuedPath, addonsPathRef.current)) {
@@ -1265,7 +1322,14 @@ function App() {
       });
       srAnnounce(`Removed ${addon.title}. Press undo to restore.`);
     },
-    [addons, addonsPath, updateResults, srAnnounce, restorePendingRemoval]
+    [
+      addons,
+      addonsPath,
+      updateResults,
+      srAnnounce,
+      restorePendingRemoval,
+      refuseRemovalDuringActiveBatch,
+    ]
   );
 
   const handleRemoveByEsouiId = useCallback(
@@ -1392,7 +1456,7 @@ function App() {
       // `> 0`, not just non-null: `record_installed_folders` stamps every
       // SECONDARY folder of a multi-folder addon with esoui_id 0, so a bare
       // null check seeds the set with 0 and makes `has(0)` true for every
-      // consumer — another way for the UI to claim something is installed.
+      // consumer — Packs and Discover both read this set.
       if (addon.esouiId != null && addon.esouiId > 0) ids.add(addon.esouiId);
     }
     return ids;
@@ -1402,14 +1466,19 @@ function App() {
   // banner's "Choose" checklist reads like the addon list rather than raw
   // folder names.
   const bannerUpdates = useMemo<BannerUpdate[]>(() => {
-    const titleByFolder = new Map(addons.map((a) => [a.folderName, a.title] as const));
+    const addonByFolder = new Map(addons.map((addon) => [addon.folderName, addon] as const));
     return updatesAvailable
-      .map((u) => ({
-        folderName: u.folderName,
-        title: titleByFolder.get(u.folderName) ?? u.folderName,
-        currentVersion: u.currentVersion,
-        remoteVersion: u.remoteVersion,
-      }))
+      .map((u) => {
+        const addon = addonByFolder.get(u.folderName);
+        return {
+          folderName: u.folderName,
+          title: addon?.title ?? u.folderName,
+          currentVersion: u.currentVersion,
+          remoteVersion: u.remoteVersion,
+          esouiId: u.esouiId,
+          hasProtectedEditsBaseline: addon?.hasProtectedEditsBaseline === true,
+        };
+      })
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [updatesAvailable, addons]);
 
@@ -1430,6 +1499,47 @@ function App() {
       // guard takes over below.
       const latch = batchLatchRef.current;
       if (!latch.tryEnterPreflight()) return;
+
+      // Refresh coverage at action time: a hash manifest may have been removed
+      // or corrupted since the update banner's last installed-addon scan.
+      const removalEpoch = pendingRemovalsRef.current.captureRemovalEpoch(path);
+      const coverage = await invokeResult<AddonManifest[]>("scan_installed_addons", {
+        addonsPath: path,
+      });
+      if (
+        !shouldPublishProtectedEditsCoverage(
+          switchGen,
+          pathSwitchGenRef.current,
+          sameAddonsFolder(path, addonsPathRef.current)
+        )
+      ) {
+        latch.abortPreflight();
+        toast.info("AddOns folder changed — the update was not started.");
+        return;
+      }
+      if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+        latch.abortPreflight();
+        toast.info("Installed addons changed — refresh updates and try again.");
+        return;
+      }
+      const currentAddons = coverage.ok
+        ? hidePendingRemovals(coverage.data, pendingRemovalsRef.current, path)
+        : [];
+      if (coverage.ok) {
+        addonsRef.current = currentAddons;
+        setAddons(currentAddons);
+      }
+
+      const unavailableCount = countUpdatesWithoutProtectedEditsBaseline(updates, currentAddons);
+      if (unavailableCount > 0) {
+        toast.warning(
+          `Protected Edits unavailable for ${unavailableCount} addon${unavailableCount === 1 ? "" : "s"}.`,
+          {
+            description:
+              "No trusted file baseline exists, so Kalpa cannot detect which files you changed. Updating may overwrite those edits.",
+          }
+        );
+      }
 
       if (!(await ensureEsoNotBlocking())) {
         latch.abortPreflight();
@@ -1505,6 +1615,19 @@ function App() {
         return;
       }
 
+      // A removal that was queued before this preflight can finish while the
+      // ESO/write-access/settings awaits are in flight. At that point its queue
+      // mask is gone, so re-masking alone cannot distinguish the deleted addon
+      // from a live update row captured at entry. The epoch is the durable part
+      // of that handoff: abort instead of extracting into a folder that was
+      // successfully removed during the preflight.
+      if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+        setUpdatingAll(false);
+        setUpdateProgress(null);
+        toast.info("Installed addons changed — refresh updates and try again.");
+        return;
+      }
+
       // `updates` was captured before the preamble above, and the preamble can
       // await an ESO-running prompt that waits on the user indefinitely plus
       // three IPC round trips. The list is masked against the removal queue
@@ -1514,14 +1637,9 @@ function App() {
       // and raises dependency prompts for an addon the user just removed. So
       // re-mask here, where nothing awaits between the check and the call.
       //
-      // This closes the window up to the invoke, NOT the batch itself: removal
-      // stays enabled while `updatingAll` is true, so an addon can still be
-      // queued for removal mid-batch and Undo will then restore its pre-update
-      // manifest and update row, showing a freshly-updated addon as outdated
-      // until the next scan. That behaviour predates this module (main restores
-      // the same update row on undo) and closing it properly means deciding
-      // whether removal should be refused or deferred while a batch runs, which
-      // is a UX call rather than a bug fix. Tracked as a follow-up on the PR.
+      // This closes the preflight window up to the invoke. Once the latch is
+      // running, every removal handler refuses new queue entries until the
+      // batch ends, so Undo cannot restore a pre-update manifest or update row.
       const live = hidePendingRemovals(updates, pendingRemovalsRef.current, path);
       if (live.length === 0) {
         setUpdatingAll(false);
@@ -1556,6 +1674,8 @@ function App() {
         srAnnounce("Batch update failed");
         return;
       }
+
+      reportDependencyFailures(batch.data.failedDeps);
 
       const { completed, failed, errors: batchErrors, conflicts: remainingConflicts } = batch.data;
 
@@ -1756,6 +1876,7 @@ function App() {
   }, []);
 
   const handleBatchRemove = useCallback(() => {
+    if (refuseRemovalDuringActiveBatch()) return;
     if (selectedFolders.size === 0) return;
 
     const removedAddons = addons.filter((a) => selectedFolders.has(a.folderName));
@@ -1799,13 +1920,16 @@ function App() {
       })
         .then((result) => {
           const failedSet = new Set(result.failed);
-          // Record the confirmed deletions before `endCommit` lifts their mask,
-          // and before the instance-switch bail below — the folders are gone
-          // regardless of which instance the user is looking at now.
-          for (const entry of entries) {
-            if (!failedSet.has(entry.addon.folderName)) {
-              pendingRemovalsRef.current.markRemoved(entry.addon.folderName, entry.addonsPath);
-            }
+          if (entries.some((entry) => !failedSet.has(entry.addon.folderName))) {
+            pendingRemovalsRef.current.recordSuccessfulRemoval(queuedPath);
+          }
+          const cleanupWarnings = Object.entries(result.cleanupWarnings);
+          if (cleanupWarnings.length > 0) {
+            toast.warning(
+              `Removed ${cleanupWarnings.length} addon(s) with cleanup warnings: ${cleanupWarnings
+                .map(([name, warning]) => `${name}: ${warning}`)
+                .join("; ")}`
+            );
           }
           if (result.failed.length > 0) {
             // Restore only the addons that failed to remove
@@ -1856,7 +1980,15 @@ function App() {
       duration: 3000,
     });
     srAnnounce(`Removed ${count} addon${count !== 1 ? "s" : ""}. Press undo to restore.`);
-  }, [addons, addonsPath, selectedFolders, updateResults, srAnnounce, restorePendingRemoval]);
+  }, [
+    addons,
+    addonsPath,
+    selectedFolders,
+    updateResults,
+    srAnnounce,
+    restorePendingRemoval,
+    refuseRemovalDuringActiveBatch,
+  ]);
 
   const handleBatchUpdate = useCallback(async () => {
     const toUpdate = updatesAvailable.filter((update) => selectedFolders.has(update.folderName));
@@ -2060,6 +2192,7 @@ function App() {
   const handleOpenProfiles = useCallback(() => setActiveDialog("profiles"), []);
   const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
   const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
+  const handleOpenSupport = useCallback(() => setActiveDialog("support"), []);
   const handleOpenLogUpload = useCallback(() => {
     dismissUploaderIntro();
     setLogUploaderMounted(true);
@@ -2333,6 +2466,7 @@ function App() {
             onOpenProfiles={handleOpenProfiles}
             onOpenSavedVars={handleOpenSavedVars}
             onOpenSettings={handleOpenSettings}
+            onOpenSupport={handleOpenSupport}
             onOpenLogUpload={handleOpenLogUpload}
             onAuthChange={handleAuthChange}
             onRefresh={handleRefresh}
@@ -2403,6 +2537,7 @@ function App() {
               isOffline={isOffline}
               onUpdateAddon={handleUpdateAddonClick}
               onRemoveAddon={handleRemoveAddonClick}
+              removalBlockedReason={updatingAll ? ACTIVE_BATCH_REMOVAL_MESSAGE : undefined}
               onToggleDisable={handleToggleDisable}
               onOpenFolder={handleOpenFolderClick}
               onToggleFavorite={handleTagsChange}
@@ -2424,6 +2559,7 @@ function App() {
                   addonsPath={addonsPath}
                   onRefresh={handleRefresh}
                   onRemoveAddon={handleSingleRemove}
+                  removalBlockedReason={updatingAll ? ACTIVE_BATCH_REMOVAL_MESSAGE : undefined}
                   onToggleDisable={handleToggleDisable}
                   updateResult={selectedUpdateResult}
                   onAddonUpdated={handleAddonUpdated}
@@ -2442,6 +2578,7 @@ function App() {
                 addonsPath={addonsPath}
                 onInstalled={handleRefresh}
                 onRemoveByEsouiId={handleRemoveByEsouiId}
+                removalBlockedReason={updatingAll ? ACTIVE_BATCH_REMOVAL_MESSAGE : undefined}
                 installedEsouiIds={installedEsouiIds}
                 isOffline={isOffline}
               />
@@ -2467,6 +2604,9 @@ function App() {
             deepLinkPackId={deepLinkPackId}
             deepLinkShareCode={deepLinkShareCode}
             knownInstances={knownInstances}
+            checkingUpdates={checkingUpdates}
+            isOffline={isOffline}
+            lastError={error}
             logUploaderMounted={logUploaderMounted}
             onAuthChange={handleAuthChange}
             onCheckForAppUpdate={handleCheckForAppUpdateClick}
@@ -2475,6 +2615,7 @@ function App() {
             onPathChange={handlePathChangeClick}
             onRefresh={handleRefresh}
             onShowDialog={handleOpenDialog}
+            updateResults={updateResults}
           />
 
           <EsoRunningDialog

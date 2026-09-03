@@ -84,6 +84,17 @@ export class RemovalQueue {
   private readonly entries = new Map<string, PendingRemoval>();
 
   /**
+   * Monotonic successful-removal generation per AddOns folder.
+   *
+   * A request captures this before asking the backend to enumerate disk. If a
+   * delete succeeds before that request is delivered, the generation changes
+   * and the whole stale snapshot is rejected. Failed deletes and Undo never
+   * advance it. Keeping one number per visited instance avoids both permanent
+   * addon tombstones and expiry races.
+   */
+  private readonly successfulRemovalEpochs = new Map<string, number>();
+
+  /**
    * Folders whose undo window has closed and whose `remove_addon` call is
    * in flight.
    *
@@ -99,45 +110,6 @@ export class RemovalQueue {
    * confirms the delete or fails and the row is restored.
    */
   private readonly committing = new Set<string>();
-
-  /**
-   * Removals the backend has CONFIRMED, stamped with the generation at which
-   * they landed.
-   *
-   * `committing` only covers the delete while it is in flight. It cannot cover
-   * the request that enumerated the folder BEFORE the delete started and is
-   * delivered after it finished — by then nothing is queued and nothing is
-   * committing, so the row goes back into the list and stays there until the
-   * next scan. Closing that window needs the queue to remember removals that
-   * completed after a given request began, which is what this log plus
-   * {@link RemovalQueue.stamp} provide: a caller snapshots the generation when
-   * it issues the request and masks anything whose removal was confirmed at a
-   * LATER generation.
-   *
-   * Comparing generations rather than just membership is what keeps a reinstall
-   * visible. A scan issued after the addon came back carries a stamp at or above
-   * the removal's generation, so the log no longer masks it and the fresh row
-   * shows through.
-   */
-  private readonly completed = new Map<string, number>();
-
-  /** Bumped once per confirmed removal; see {@link RemovalQueue.completed}. */
-  private generation = 0;
-
-  /**
-   * Stamps of the requests currently in flight, refcounted (two scans issued
-   * back to back with no removal between them share a generation).
-   *
-   * This is what bounds {@link RemovalQueue.completed}. A log entry is only ever
-   * consulted by a request stamped BEFORE it, so once the oldest in-flight
-   * request has settled nothing can need it again and it can go. Capping the log
-   * by entry count instead would have been a silent correctness hole: removing
-   * more addons in one batch than the cap allows would evict the earliest
-   * removals while the very scan they need to be masked from was still in
-   * flight, resurrecting exactly the phantom rows this log exists to prevent.
-   */
-  private readonly active = new Map<number, number>();
-
   private readonly clearTimer: (handle: TimerHandle) => void;
 
   /**
@@ -180,79 +152,26 @@ export class RemovalQueue {
    * would restore: `endCommit` only lifts the mask, it does not re-run the scan
    * that was filtered while it was up.
    */
-  isHidden(folderName: string, addonsPath: string, since = Number.POSITIVE_INFINITY): boolean {
+  isHidden(folderName: string, addonsPath: string): boolean {
     const queued = this.entries.get(folderName);
     if (queued && sameAddonsFolder(queued.addonsPath, addonsPath)) return true;
-    const key = maskKey(addonsPath, folderName);
-    if (this.committing.has(key)) return true;
-    // Confirmed gone AFTER the caller issued its request, so the folder the
-    // backend enumerated no longer exists by the time the answer is applied.
-    // A folder with no log entry is NOT hidden — the absent case has to read as
-    // "never removed", not as an unbounded generation.
-    const removedAt = this.completed.get(key);
-    return removedAt !== undefined && removedAt > since;
+    return this.committing.has(maskKey(addonsPath, folderName));
   }
 
-  /**
-   * Snapshot the generation for a request about to be issued, and register the
-   * request as in flight.
-   *
-   * Pair it with the `since` argument of {@link RemovalQueue.isHidden} (or
-   * {@link hidePendingRemovals}) when the result is applied, and with
-   * {@link RemovalQueue.release} in a `finally` once the request has settled —
-   * a stamp that is never released pins the completed-removal log forever.
-   */
-  stamp(): number {
-    const stamp = this.generation;
-    this.active.set(stamp, (this.active.get(stamp) ?? 0) + 1);
-    return stamp;
+  /** Snapshot the successful-removal generation before a filesystem read. */
+  captureRemovalEpoch(addonsPath: string): number {
+    return this.successfulRemovalEpochs.get(normalizeAddonsFolder(addonsPath)) ?? 0;
   }
 
-  /** The request that took this stamp has settled. */
-  release(stamp: number): void {
-    const outstanding = this.active.get(stamp);
-    if (outstanding === undefined) return;
-    if (outstanding > 1) {
-      this.active.set(stamp, outstanding - 1);
-    } else {
-      this.active.delete(stamp);
-    }
-    this.pruneCompleted();
+  /** Can a filesystem snapshot captured at epoch still be published? */
+  isRemovalEpochCurrent(addonsPath: string, epoch: number): boolean {
+    return this.captureRemovalEpoch(addonsPath) === epoch;
   }
 
-  /**
-   * Forget completed removals no in-flight request can still ask about.
-   *
-   * An entry recorded at generation `g` only changes the answer for a request
-   * stamped strictly below `g`, so anything at or below the oldest outstanding
-   * stamp is dead weight — and with nothing in flight, all of it is.
-   */
-  private pruneCompleted(): void {
-    if (this.completed.size === 0) return;
-    if (this.active.size === 0) {
-      this.completed.clear();
-      return;
-    }
-    let oldest = Number.POSITIVE_INFINITY;
-    for (const stamp of this.active.keys()) {
-      if (stamp < oldest) oldest = stamp;
-    }
-    for (const [key, recordedAt] of this.completed) {
-      if (recordedAt <= oldest) this.completed.delete(key);
-    }
-  }
-
-  /**
-   * The backend confirmed the folder is gone. Records it so requests already in
-   * flight do not deliver it back as a phantom row.
-   *
-   * Call this on the SUCCESS path only, before {@link RemovalQueue.endCommit}
-   * lifts the in-flight mask — a failed delete leaves the folder on disk and its
-   * row must come back.
-   */
-  markRemoved(folderName: string, addonsPath: string): void {
-    this.completed.set(maskKey(addonsPath, folderName), ++this.generation);
-    this.pruneCompleted();
+  /** Invalidate filesystem snapshots that predate a confirmed deletion. */
+  recordSuccessfulRemoval(addonsPath: string): void {
+    const path = normalizeAddonsFolder(addonsPath);
+    this.successfulRemovalEpochs.set(path, (this.successfulRemovalEpochs.get(path) ?? 0) + 1);
   }
 
   /** The undo window has closed and the backend delete is starting. */
@@ -318,30 +237,16 @@ export class RemovalQueue {
  * filter through the same rule.
  *
  * The mask is read when the request RESOLVES, not when the backend read the
- * folder, so "still queued or still committing" is not enough on its own. The
- * race is between the backend ENUMERATING the addon and this code applying the
- * result:
+ * folder, so by itself it cannot catch this race between ENUMERATING the addon
+ * and applying the result:
  *
  *     t=0.0  Refresh issues scan_installed_addons
  *     t=0.1  the backend enumerates the folder — Foo is still on disk
  *     t=0.2  user removes Foo — row hidden, entry queued
  *     t=3.2  timer fires, remove_addon starts (beginCommit masks Foo)
  *     t=3.3  delete succeeds, endCommit lifts the mask
- *     t=3.4  the scan resolves — nothing is queued, nothing is committing
- *
- * At t=3.4 the queue-only mask says "visible" and Foo goes back into `addons`
- * as a phantom row — an addon that exists in neither the AddOns folder nor
- * `kalpa.json`, sitting in the list until something else triggers a scan. That
- * is the shipped "I uninstalled it and it still shows installed" report, and
- * why it looked arbitrary: it needs a scan in flight across the delete, so two
- * removals seconds apart can behave differently.
- *
- * `since` closes it. Callers snapshot {@link RemovalQueue.stamp} BEFORE issuing
- * the request and pass it here; anything whose removal was confirmed at a later
- * generation stays masked no matter what the backend reported. Omitting `since`
- * keeps the old queue-only behaviour, which is what callers that are not
- * applying an in-flight result (the pre-invoke re-mask in `runBatchUpdates`)
- * actually want.
+ *     t=3.4  the scan resolves — nothing is queued, nothing is committing,
+ *            so Foo goes back into `addons`
  *
  * The window is "enumerated before the delete, delivered after it", NOT the
  * whole request duration. A request that has not read the folder yet when the
@@ -351,17 +256,20 @@ export class RemovalQueue {
  * so a delete during that fetch is simply reflected. Its exposure is the
  * narrower gap between the metadata phase and delivery.
  *
+ * The path-scoped successful-removal epoch closes that delivery window: callers
+ * capture it before the request and reject the whole snapshot if a confirmed
+ * delete advances it before delivery. No addon tombstone or expiry is needed.
+ *
  * On `main` this window was not narrower, it was total: nothing masked these
  * lists at all, so every scan inside the undo window resurrected the row.
  */
 export function hidePendingRemovals<T extends { folderName: string }>(
   items: T[],
   queue: Pick<RemovalQueue, "isHidden">,
-  addonsPath: string,
-  since?: number
+  addonsPath: string
 ): T[] {
   if (items.length === 0) return items;
-  const masked = items.filter((item) => !queue.isHidden(item.folderName, addonsPath, since));
+  const masked = items.filter((item) => !queue.isHidden(item.folderName, addonsPath));
   return masked.length === items.length ? items : masked;
 }
 

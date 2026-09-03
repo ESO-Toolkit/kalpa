@@ -9,22 +9,34 @@ use crate::uploader::native::session::{SessionProvider, StoredSessionProvider};
 use crate::AllowedAddonsPath;
 use crate::MetadataLock;
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
 /// Prevents a compromised webview from targeting arbitrary filesystem locations.
 fn validate_addons_path(addons_path: &str) -> Result<(PathBuf, PathBuf), String> {
     let path = PathBuf::from(addons_path);
+    // Reject UNC/device-namespace prefixes BEFORE is_dir/canonicalize: those
+    // calls perform SMB name resolution on a `\\server\share` root and leak a
+    // NetNTLM handshake to an attacker-named host. This is the root of trust
+    // that feeds the uploader's own confinement, so the guard must live here
+    // too, not only on the uploader's per-call paths.
+    if crate::platform::has_unc_or_verbatim_prefix(&path) {
+        return Err("AddOns folder path uses an unsupported network or device prefix.".to_string());
+    }
     if !path.is_dir() {
         return Err(format!("AddOns folder not found: {addons_path}"));
     }
@@ -53,6 +65,60 @@ fn require_allowed_path(
         return Err("Addons path does not match the configured path.".to_string());
     }
     Ok(allowed_path.configured.clone())
+}
+
+fn resolve_allowed_reveal_path(
+    addons_root: &Path,
+    requested_path: &str,
+) -> Result<PathBuf, String> {
+    let addons_root = dunce::canonicalize(addons_root)
+        .map_err(|e| format!("Could not resolve the configured AddOns folder: {e}"))?;
+    let requested = Path::new(requested_path);
+    if crate::platform::has_unc_or_verbatim_prefix(requested) {
+        return Err("Network and special paths are not allowed.".to_string());
+    }
+
+    let canonical = dunce::canonicalize(requested)
+        .map_err(|e| format!("Could not resolve the item to reveal: {e}"))?;
+    if canonical.starts_with(&addons_root) {
+        return Ok(canonical);
+    }
+
+    let eso_root = addons_root
+        .parent()
+        .ok_or_else(|| "Could not resolve the ESO directory.".to_string())?;
+    for sibling in ["Logs", "kalpa-backups"] {
+        let allowed_root = eso_root.join(sibling);
+        let allowed_root = dunce::canonicalize(&allowed_root).unwrap_or(allowed_root);
+        if canonical.starts_with(allowed_root) {
+            return Ok(canonical);
+        }
+    }
+
+    Err("The item is outside the configured ESO folders.".to_string())
+}
+
+/// Reveal an item only after native code confines it to the configured ESO
+/// AddOns directory or its sibling Logs and kalpa-backups directories. The webview intentionally
+/// has no direct reveal permission because valid ESO locations are runtime
+/// state and cannot be represented safely by static capability globs.
+#[tauri::command]
+pub fn reveal_allowed_path(
+    app: AppHandle,
+    state: tauri::State<'_, AllowedAddonsPath>,
+    path: String,
+) -> Result<(), String> {
+    let addons_root = {
+        let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+        guard
+            .as_ref()
+            .map(|allowed| allowed.canonical.clone())
+            .ok_or_else(|| "Addons path has not been initialized.".to_string())?
+    };
+    let path = resolve_allowed_reveal_path(&addons_root, &path)?;
+    app.opener()
+        .reveal_item_in_dir(path)
+        .map_err(|e| format!("Could not reveal the item: {e}"))
 }
 
 /// Called by the frontend to register the approved addons directory.
@@ -214,20 +280,111 @@ pub struct UpdateCheckResult {
 
 /// Determine the "primary" folder from a list of installed folders.
 ///
-/// Prefer a folder whose name appears in the ESOUI title, otherwise
-/// fall back to the first folder in the list.
-fn determine_primary_folder(installed_folders: &[String], esoui_title: &str) -> String {
+/// The primary is the folder the archive is really *about*; every other
+/// top-level folder it creates is something the archive also ships.
+///
+/// Preference order, most to least trustworthy:
+///
+/// 1. A unique folder already recorded under this very ESOUI ID. On an update
+///    the existing primary must stay the primary, or an archive whose title
+///    stops matching would hand ownership to a bundled library. Legacy installs
+///    may have recorded the ID on several folders, so duplicate IDs are
+///    disambiguated by the title before falling through to the other heuristics.
+/// 2. An exact, case-insensitive match against the ESOUI title.
+/// 3. A folder name contained in the title, longest first - so "LibFoo-2.0"
+///    wins over "LibFoo" instead of depending on iteration order.
+/// 4. The first untracked folder (or legacy ID-zero folder) in the list.
+/// 5. The first folder only when every candidate is already tracked.
+///
+/// The fallback used to be reached far more often, and the list arrived from a
+/// `HashSet`, so which folder was treated as primary could differ between two
+/// runs over the same archive. `extract_addon_zip` now returns its folders
+/// sorted, which makes the fallback at least deterministic.
+fn determine_primary_folder(
+    store: &metadata::MetadataStore,
+    installed_folders: &[String],
+    esoui_id: u32,
+    esoui_title: &str,
+) -> String {
+    let same_id: Vec<&String> = if esoui_id == 0 {
+        Vec::new()
+    } else {
+        installed_folders
+            .iter()
+            .filter(|folder| {
+                store
+                    .addons
+                    .get(folder.as_str())
+                    .is_some_and(|meta| meta.esoui_id == esoui_id)
+            })
+            .collect()
+    };
+
+    // A single recorded owner is authoritative. Legacy installs, however,
+    // stamped the same ID onto every folder in a multi-folder archive, so the
+    // first match is not necessarily the archive's primary folder. Let the
+    // title disambiguate those duplicates below.
+    if same_id.len() == 1 {
+        return same_id[0].clone();
+    }
+
+    if same_id.len() > 1 {
+        let title = esoui_title.trim();
+        if let Some(exact) = same_id
+            .iter()
+            .find(|folder| folder.eq_ignore_ascii_case(title))
+        {
+            return (*exact).clone();
+        }
+
+        let mut contained: Vec<&String> = same_id
+            .iter()
+            .copied()
+            .filter(|folder| !folder.is_empty() && title.contains(folder.as_str()))
+            .collect();
+        contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        if let Some(best) = contained.first() {
+            return (*best).clone();
+        }
+    }
+
+    let eligible = |folder: &String| {
+        store
+            .addons
+            .get(folder.as_str())
+            .is_none_or(|meta| meta.esoui_id == 0)
+    };
+    let title = esoui_title.trim();
+    if let Some(exact) = installed_folders
+        .iter()
+        .find(|folder| eligible(folder) && folder.eq_ignore_ascii_case(title))
+    {
+        return exact.clone();
+    }
+
+    let mut contained: Vec<&String> = installed_folders
+        .iter()
+        .filter(|folder| eligible(folder) && !folder.is_empty() && title.contains(folder.as_str()))
+        .collect();
+    contained.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    if let Some(best) = contained.first() {
+        return (*best).clone();
+    }
+
     installed_folders
         .iter()
-        .find(|f| esoui_title.contains(f.as_str()))
-        .or(installed_folders.first())
+        .find(|folder| eligible(folder))
+        .or_else(|| installed_folders.first())
         .cloned()
         .unwrap_or_default()
 }
 
-/// Record metadata for a set of installed folders. The primary folder gets
-/// the esoui_id and version from ESOUI; secondary folders get id 0 and
-/// their local manifest version.
+/// Record metadata for every folder an archive created.
+///
+/// The primary folder is owned by this addon and takes the ESOUI identity and
+/// version. Every other folder goes through [`metadata::record_bundled_folder`],
+/// which keeps a separately tracked library on its own ESOUI entry instead of
+/// demoting it to ID 0 and silently dropping it out of update checks.
 #[allow(clippy::too_many_arguments)]
 fn record_installed_folders(
     store: &mut metadata::MetadataStore,
@@ -239,22 +396,29 @@ fn record_installed_folders(
     download_url: &str,
     esoui_last_update: u64,
 ) {
-    let primary = determine_primary_folder(installed_folders, esoui_title);
+    let primary = determine_primary_folder(store, installed_folders, esoui_id, esoui_title);
     for folder in installed_folders {
-        let is_primary = *folder == primary;
-        let version = if is_primary && !esoui_version.is_empty() {
-            esoui_version.to_string()
+        // The manifest on disk is the truth for anything Kalpa did not just
+        // fetch from ESOUI: the archive overwrote these files, so the recorded
+        // version has to describe what is actually installed.
+        let local_version = read_local_version(addons_dir, folder);
+        if *folder == primary {
+            let version = if esoui_version.is_empty() {
+                local_version
+            } else {
+                esoui_version.to_string()
+            };
+            metadata::record_install_ext(
+                store,
+                folder,
+                esoui_id,
+                &version,
+                download_url,
+                esoui_last_update,
+            );
         } else {
-            read_local_version(addons_dir, folder)
-        };
-        metadata::record_install_ext(
-            store,
-            folder,
-            if is_primary { esoui_id } else { 0 },
-            &version,
-            download_url,
-            if is_primary { esoui_last_update } else { 0 },
-        );
+            metadata::record_bundled_folder(store, folder, esoui_id, download_url, &local_version);
+        }
     }
 }
 
@@ -407,8 +571,23 @@ fn resolve_deps_with_policy(
     store: &mut metadata::MetadataStore,
     policy: DependencyPolicy,
 ) -> ResolvedDeps {
+    resolve_deps_with_policy_reporting(addons_dir, installed_folders, store, policy, None)
+}
+
+/// Like [`resolve_deps_with_policy`] but reports each dependency as it starts.
+/// Only the `Auto` branch can report anything: `Ask` installs nothing here and
+/// `Skip` does no work at all.
+fn resolve_deps_with_policy_reporting(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    policy: DependencyPolicy,
+    on_dep: DepInstallReporter,
+) -> ResolvedDeps {
     match policy {
-        DependencyPolicy::Auto => resolve_transitive_deps(addons_dir, installed_folders, store),
+        DependencyPolicy::Auto => {
+            resolve_transitive_deps_reporting(addons_dir, installed_folders, store, on_dep)
+        }
         DependencyPolicy::Ask => ResolvedDeps {
             // Nothing is installed here. Whatever the user accepts comes back
             // through `install_selected_dependencies`, which installs
@@ -433,11 +612,34 @@ fn resolve_deps_with_policy(
     }
 }
 
-fn resolve_transitive_deps(
+/// Resolve and install the full required-dependency chain, naming each
+/// dependency to the UI as it starts (see [`DepInstallReporter`]; pass `None`
+/// for the silent behaviour every caller had before progress existed).
+fn resolve_transitive_deps_reporting(
     addons_dir: &Path,
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
+    on_dep: DepInstallReporter,
 ) -> ResolvedDeps {
+    resolve_transitive_deps_with(
+        addons_dir,
+        installed_folders,
+        store,
+        try_install_dep,
+        on_dep,
+    )
+}
+
+fn resolve_transitive_deps_with<F>(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+    mut install_dep: F,
+    on_dep: DepInstallReporter,
+) -> ResolvedDeps
+where
+    F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
+{
     let mut all_installed = build_installed_set(addons_dir);
 
     let mut installed_deps: Vec<String> = Vec::new();
@@ -464,12 +666,21 @@ fn resolve_transitive_deps(
         }
 
         let mut newly_installed_folders: Vec<String> = Vec::new();
+        let round_total = missing_deps.len();
         for (i, dep_name) in missing_deps.iter().enumerate() {
             // Throttle between ESOUI requests to avoid hammering the server
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            match try_install_dep(dep_name, addons_dir, store) {
+            // Named before the work starts: a library download is the longest
+            // silent stretch of an install, and until now the UI showed nothing
+            // at all while it ran. Reported per round — the resolver discovers
+            // the next round's dependencies only after this one is installed,
+            // so no honest total over the whole chain exists here.
+            if let Some(report) = on_dep {
+                report(dep_name, i + 1, round_total);
+            }
+            match install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
                     for f in &dep_folders {
                         // Only mark an extracted folder as installed if it is
@@ -484,8 +695,12 @@ fn resolve_transitive_deps(
                     }
                     installed_deps.push(dep_name.clone());
                 }
-                Err("not_found") => skipped_deps.push(dep_name.clone()),
-                Err(_) => failed_deps.push(dep_name.clone()),
+                Err(reason) => record_dependency_failure(
+                    dep_name,
+                    &reason,
+                    &mut failed_deps,
+                    &mut skipped_deps,
+                ),
             }
         }
 
@@ -507,30 +722,123 @@ fn try_install_dep(
     dep_name: &str,
     addons_dir: &Path,
     store: &mut metadata::MetadataStore,
-) -> Result<Vec<String>, &'static str> {
+) -> Result<Vec<String>, String> {
     let dep_id = if let Some(meta) = store.addons.get(dep_name) {
         meta.esoui_id
     } else {
         match esoui::search_addon_by_name(dep_name) {
             Ok(Some(id)) => id,
-            Ok(None) => return Err("not_found"),
-            Err(_) => return Err("search_failed"),
+            Ok(None) => return Err("not_found".to_string()),
+            Err(_) => return Err("search_failed".to_string()),
         }
     };
-    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
+    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed".to_string())?;
     let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
-        .map_err(|_| "download_failed")?;
-    let dep_folders =
-        installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
+        .map_err(|_| "download_failed".to_string())?;
+    let dep_folders = installer::install_addon_zip_with_hashes(
+        dep_tmp.path(),
+        addons_dir,
+        dep_id,
+        &dep_info.version,
+        installer::ExtractHooks::NONE,
+    )?;
 
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|_| "hash_record_failed")?;
-
-    for f in &dep_folders {
-        let dep_version = read_local_version(addons_dir, f);
-        metadata::record_install(store, f, dep_id, &dep_version, &dep_info.download_url);
-    }
+    // A dependency archive can create several folders, exactly like a normal
+    // install: stamping the dependency ID onto every one of them made a
+    // two-folder library produce two identical update rows and two downloads,
+    // and would overwrite the identity of any folder the user tracks
+    // separately. Route through the same primary/bundled rule as a direct
+    // install.
+    record_installed_folders(
+        store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+        0,
+    );
     Ok(dep_folders)
+}
+
+fn dependency_failure(dep_name: &str, reason: &str) -> String {
+    format!("{dep_name}: {reason}")
+}
+
+fn record_dependency_failure(
+    dep_name: &str,
+    reason: &str,
+    failed_deps: &mut Vec<String>,
+    skipped_deps: &mut Vec<String>,
+) {
+    if reason == "not_found" {
+        skipped_deps.push(dep_name.to_string());
+    } else {
+        failed_deps.push(dependency_failure(dep_name, reason));
+    }
+}
+
+fn install_selected_dependencies_with<F>(
+    addons_dir: &Path,
+    names: &[String],
+    store: &mut metadata::MetadataStore,
+    mut install_dep: F,
+) -> InstallResult
+where
+    F: FnMut(&str, &Path, &mut metadata::MetadataStore) -> Result<Vec<String>, String>,
+{
+    let mut installed_folders: Vec<String> = Vec::new();
+    let mut installed_deps: Vec<String> = Vec::new();
+    let mut failed_deps: Vec<String> = Vec::new();
+    let mut skipped_deps: Vec<String> = Vec::new();
+
+    for (i, dep_name) in names.iter().enumerate() {
+        // Same inter-request delay the transitive resolver uses, so a long
+        // accepted list is no harsher on ESOUI than auto-resolution.
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        match install_dep(dep_name, addons_dir, store) {
+            Ok(dep_folders) => {
+                for folder in &dep_folders {
+                    if !installed_folders.contains(folder) {
+                        installed_folders.push(folder.clone());
+                    }
+                }
+                installed_deps.push(dep_name.clone());
+            }
+            Err(reason) => {
+                record_dependency_failure(dep_name, &reason, &mut failed_deps, &mut skipped_deps)
+            }
+        }
+    }
+
+    // A library's own libraries are an implementation detail: resolve them
+    // transitively rather than prompting again. Guarded so a fully-failed
+    // selection skips the whole-folder disk walk.
+    if !installed_folders.is_empty() {
+        // The picker flow reports nothing per dependency: the user is already
+        // looking at the list they accepted.
+        let resolved = resolve_transitive_deps_with(
+            addons_dir,
+            &installed_folders,
+            store,
+            &mut install_dep,
+            None,
+        );
+        installed_deps.extend(resolved.installed_deps);
+        failed_deps.extend(resolved.failed_deps);
+        skipped_deps.extend(resolved.skipped_deps);
+    }
+
+    InstallResult {
+        installed_folders,
+        installed_deps,
+        failed_deps,
+        skipped_deps,
+        pending_deps: Vec::new(),
+    }
 }
 
 /// Normalize an addon folder or dependency name for matching.
@@ -759,28 +1067,54 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
 /// I/O.
 fn find_manifest_in(dir: &std::path::Path, base_name: &str) -> Option<PathBuf> {
     let txt = dir.join(format!("{base_name}.txt"));
-    if txt.exists() {
-        return Some(txt);
-    }
     let addon = dir.join(format!("{base_name}.addon"));
-    if addon.exists() {
-        return Some(addon);
+    match (txt.exists(), addon.exists()) {
+        (true, true) => return Some(pick_current_manifest(base_name, txt, addon)),
+        (true, false) => return Some(txt),
+        (false, true) => return Some(addon),
+        (false, false) => {}
     }
 
     let lower = base_name.to_lowercase();
     let wanted_txt = format!("{lower}.txt");
     let wanted_addon = format!("{lower}.addon");
+    let mut txt_match: Option<PathBuf> = None;
     let mut addon_match: Option<PathBuf> = None;
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
-        if name == wanted_txt {
-            return Some(entry.path());
+        if name == wanted_txt && txt_match.is_none() {
+            txt_match = Some(entry.path());
         }
         if name == wanted_addon && addon_match.is_none() {
             addon_match = Some(entry.path());
         }
     }
-    addon_match
+    match (txt_match, addon_match) {
+        (Some(txt), Some(addon)) => Some(pick_current_manifest(base_name, txt, addon)),
+        (txt, addon) => txt.or(addon),
+    }
+}
+
+/// Resolve a folder that carries BOTH `<name>.txt` and `<name>.addon`.
+///
+/// One of the two is a leftover: when an author renames their manifest across
+/// releases (LibSetDetection 4 shipped a `.txt`, 5 ships a `.addon`) the old
+/// file used to survive the update as a "residual" — and a blind `.txt`-first
+/// preference then reads the STALE manifest forever, misreporting the
+/// installed version and raising phantom outdated-dependency badges that
+/// Update All can never clear. Real installs carry leftovers in both rename
+/// directions, so neither extension can win by fiat: prefer the manifest with
+/// the higher `## AddOnVersion`; ties, or two manifests without one, keep the
+/// historical `.txt` preference. A manifest that fails to parse loses to one
+/// that parses with a version.
+fn pick_current_manifest(base_name: &str, txt: PathBuf, addon: PathBuf) -> PathBuf {
+    let version =
+        |path: &PathBuf| manifest::parse_manifest(base_name, path).and_then(|m| m.addon_version);
+    match (version(&txt), version(&addon)) {
+        (Some(t), Some(a)) if a > t => addon,
+        (None, Some(_)) => addon,
+        _ => txt,
+    }
 }
 
 pub(crate) fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
@@ -1091,6 +1425,7 @@ pub async fn scan_installed_addons(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+
         scan_installed_addons_blocking(&addons_dir, &cache_dir)
     })
     .await
@@ -1101,6 +1436,7 @@ fn scan_installed_addons_blocking(
     addons_dir: &Path,
     cache_dir: &Path,
 ) -> Result<Vec<AddonManifest>, String> {
+    let _transaction = crate::install_txn::lock_and_recover(addons_dir)?;
     let entries =
         fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
 
@@ -1121,6 +1457,9 @@ fn scan_installed_addons_blocking(
             Some(n) => n.to_string(),
             None => continue,
         };
+        if crate::installer::is_reserved_state_folder(&name) {
+            continue;
+        }
         let is_disabled = name.ends_with(".disabled");
         let base_name = if is_disabled {
             name.strip_suffix(".disabled").unwrap_or(&name).to_string()
@@ -1226,15 +1565,22 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    // Modified-file counts live in one JSON manifest per addon under
-    // .kalpa-hashes; each read is independent disk I/O, so collect them in
-    // parallel (mirroring the manifest parsing above) instead of paying one
-    // sequential read per addon inside the enrichment loop.
-    let modified_counts: HashMap<String, u32> = addons
+    // Protected Edits coverage and modified-file counts live in one JSON
+    // manifest per addon under .kalpa-hashes. Each read is independent disk I/O,
+    // so collect both in parallel instead of paying one sequential read per
+    // addon inside the enrichment loop.
+    let protected_edits_state: HashMap<String, (u32, bool)> = addons
         .par_iter()
-        .filter_map(|addon| {
-            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
-                .map(|count| (addon.folder_name.clone(), count))
+        .map(|addon| {
+            let modified_file_count =
+                file_hashes::load_modified_file_count(addons_dir, &addon.folder_name);
+            (
+                addon.folder_name.clone(),
+                (
+                    modified_file_count.unwrap_or(0),
+                    modified_file_count.is_some(),
+                ),
+            )
         })
         .collect();
 
@@ -1284,8 +1630,9 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(count) = modified_counts.get(&addon.folder_name) {
+        if let Some((count, has_baseline)) = protected_edits_state.get(&addon.folder_name) {
             addon.modified_file_count = *count;
+            addon.has_protected_edits_baseline = *has_baseline;
         }
     }
 
@@ -1325,6 +1672,8 @@ pub async fn set_addon_tags(
                         installed_at: String::new(),
                         tags,
                         esoui_last_update: 0,
+                        bundled_by: Vec::new(),
+                        esoui_marker_installed: false,
                     },
                 );
             }
@@ -1365,6 +1714,7 @@ pub async fn search_esoui_addons(query: String) -> Result<Vec<EsouiSearchResult>
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_addon(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
@@ -1374,6 +1724,10 @@ pub async fn install_addon(
     esoui_version: String,
     // Option so existing callers (and tests) keep the historic "auto" behaviour.
     dependency_policy: Option<String>,
+    // Correlates `update-progress` events with the UI row that started this
+    // install. Option so a caller that renders no progress can omit it; an empty
+    // id simply matches no listener.
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
@@ -1384,15 +1738,47 @@ pub async fn install_addon(
     }
 
     let dep_policy = DependencyPolicy::parse(dependency_policy.as_deref());
+    let operation_id = operation_id.unwrap_or_default();
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Re-derive the checksum for this artifact. This was the only one of the
+        // six `download_addon` call sites that verified nothing, so a corrupt but
+        // structurally valid ZIP installed silently here while every other path
+        // rejected it. The frontend does hold a checksum from `resolve_esoui_addon`,
+        // but taking it as a parameter would let a caller pass one that doesn't
+        // describe the bytes we fetch; deriving it from the ID we're installing
+        // costs one small JSON request against the multi-MB download that follows.
+        //
+        // Verification is best-effort by design: it only applies when filedetails
+        // still points at the same URL the caller asked for (an archived-version
+        // install legitimately differs), and a failed lookup falls back to the
+        // previous no-checksum behaviour rather than blocking the install.
+        let expected_md5 = esoui::fetch_addon_info(esoui_id)
+            .ok()
+            .filter(|info| info.download_url == download_url)
+            .map(|info| info.checksum);
+
         // Download outside the lock — network I/O doesn't touch kalpa.json
-        let tmp_file = esoui::download_addon(&download_url, None)?;
+        let download_progress =
+            make_download_progress_emitter(app.clone(), operation_id.clone(), esoui_title.clone());
+        let tmp_file = esoui::download_addon_with(
+            &download_url,
+            expected_md5.as_deref(),
+            esoui::DownloadHooks {
+                // No Stop control on the Discover install button, so nothing to
+                // poll — the cancel hook stays wired to the update path.
+                cancel: None,
+                progress: Some(&download_progress),
+            },
+        )?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        let extract_progress =
+            make_progress_emitter(app.clone(), operation_id.clone(), esoui_title.clone());
+        let dep_progress = make_dependency_progress_emitter(app, operation_id);
         install_addon_blocking(
             &addons_dir,
             tmp_file,
@@ -1401,10 +1787,60 @@ pub async fn install_addon(
             &esoui_title,
             &esoui_version,
             dep_policy,
+            installer::ExtractHooks {
+                cancel: None,
+                progress: Some(&extract_progress),
+            },
+            Some(&dep_progress),
         )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Debug-only stopwatch that prints the elapsed time of each install phase to
+/// the `tauri dev` console. Release builds get a zero-sized no-op: the fields
+/// and the printing are both behind `debug_assertions`, so nothing is measured
+/// or logged in a shipped binary.
+pub(crate) struct PhaseTimer {
+    #[cfg(debug_assertions)]
+    label: &'static str,
+    #[cfg(debug_assertions)]
+    started: std::time::Instant,
+    #[cfg(debug_assertions)]
+    last: std::cell::Cell<std::time::Instant>,
+}
+
+impl PhaseTimer {
+    #[cfg(debug_assertions)]
+    pub(crate) fn start(label: &'static str) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            label,
+            started: now,
+            last: std::cell::Cell::new(now),
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub(crate) fn start(_label: &'static str) -> Self {
+        Self {}
+    }
+
+    pub(crate) fn mark(&self, _phase: &str) {
+        #[cfg(debug_assertions)]
+        {
+            let now = std::time::Instant::now();
+            let step = now.duration_since(self.last.get());
+            self.last.set(now);
+            eprintln!(
+                "[{}] {_phase}: {:.2}s (total {:.2}s)",
+                self.label,
+                step.as_secs_f64(),
+                now.duration_since(self.started).as_secs_f64()
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1416,17 +1852,24 @@ fn install_addon_blocking(
     esoui_title: &str,
     esoui_version: &str,
     dep_policy: DependencyPolicy,
+    hooks: installer::ExtractHooks,
+    on_dep: DepInstallReporter,
 ) -> Result<InstallResult, String> {
-    let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
+    // Debug-only phase timing. Compiled out of release builds; exists so a slow
+    // install can be attributed to a phase instead of guessed at.
+    let phase = PhaseTimer::start("install");
 
-    file_hashes::record_hashes_for_folders(
+    let installed_folders = installer::install_addon_zip_with_hashes(
+        tmp_file.path(),
         addons_dir,
-        &installed_folders,
         esoui_id,
         esoui_version,
+        hooks,
     )?;
+    phase.mark("extract + hash baseline");
 
     let mut store = metadata::load_metadata(addons_dir);
+    phase.mark("load metadata");
 
     // Only the primary folder gets the esoui_id so that check_for_updates
     // compares versions correctly. Secondary folders get esoui_id 0.
@@ -1441,9 +1884,19 @@ fn install_addon_blocking(
         0, // esoui_last_update will be populated during next update check
     );
 
-    let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
+    phase.mark("record folders");
+
+    let resolved = resolve_deps_with_policy_reporting(
+        addons_dir,
+        &installed_folders,
+        &mut store,
+        dep_policy,
+        on_dep,
+    );
+    phase.mark("resolve dependencies");
 
     metadata::save_metadata(addons_dir, &store)?;
+    phase.mark("save metadata");
 
     Ok(InstallResult {
         installed_folders,
@@ -1460,7 +1913,7 @@ pub async fn remove_addon(
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_name: String,
-) -> Result<(), String> {
+) -> Result<RemoveAddonResult, String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
@@ -1468,30 +1921,10 @@ pub async fn remove_addon(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-
-        // Remove both the enabled and disabled copies if they exist.
-        // If only one exists, remove that one. Handles the edge case where
-        // an external tool or reinstall left both Foo/ and Foo.disabled/.
-        let enabled_exists = addons_dir.join(&folder_name).is_dir();
-        let disabled_name = format!("{folder_name}.disabled");
-        let disabled_exists = addons_dir.join(&disabled_name).is_dir();
-
-        if enabled_exists {
-            installer::remove_addon(&addons_dir, &folder_name)?;
-        }
-        if disabled_exists {
-            installer::remove_addon(&addons_dir, &disabled_name)?;
-        }
-        if !enabled_exists && !disabled_exists {
-            return Err(format!("Addon folder not found: {folder_name}"));
-        }
-
-        // Clean up metadata
-        let mut store = metadata::load_metadata(&addons_dir);
-        metadata::remove_entry(&mut store, &folder_name);
-        metadata::save_metadata(&addons_dir, &store)?;
-
-        Ok(())
+        // Keep the cross-process lock across the existence snapshot, disk
+        // deletion, and metadata/hash cleanup performed by the R4 helper.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
+        remove_addon_from_disk(&addons_dir, &folder_name)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -1505,6 +1938,7 @@ pub fn disable_addon(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
     let src = addons_dir.join(&folder_name);
     if !src.is_dir() {
         return Err(format!("Addon folder not found: {folder_name}"));
@@ -1524,6 +1958,7 @@ pub fn enable_addon(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
     let src = addons_dir.join(format!("{folder_name}.disabled"));
     if !src.is_dir() {
         return Err(format!("Disabled addon folder not found: {folder_name}"));
@@ -1537,14 +1972,24 @@ pub fn enable_addon(
 
 #[tauri::command]
 pub async fn install_dependency(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     dep_name: String,
+    // Same opt-in correlation id as `install_addon`; omitted by callers that
+    // render no progress for this button.
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let operation_id = operation_id.unwrap_or_default();
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // One event naming the library before any of the slow work starts, so
+        // this path is no longer silent between click and toast.
+        let dep_progress = make_dependency_progress_emitter(app.clone(), operation_id.clone());
+        dep_progress(&dep_name, 1, 1);
+
         // Network I/O outside the lock: search ESOUI, fetch info, download ZIP
         let dep_id = {
             let store = metadata::load_metadata(&addons_dir);
@@ -1560,14 +2005,30 @@ pub async fn install_dependency(
         };
         let dep_info = esoui::fetch_addon_info(dep_id)
             .map_err(|_| format!("Failed to install {dep_name}: fetch_failed"))?;
-        let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
-            .map_err(|_| format!("Failed to install {dep_name}: download_failed"))?;
+        let download_progress =
+            make_download_progress_emitter(app.clone(), operation_id.clone(), dep_name.clone());
+        let dep_tmp = esoui::download_addon_with(
+            &dep_info.download_url,
+            Some(&dep_info.checksum),
+            esoui::DownloadHooks {
+                cancel: None,
+                progress: Some(&download_progress),
+            },
+        )
+        .map_err(|_| format!("Failed to install {dep_name}: download_failed"))?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        install_dependency_blocking(&addons_dir, &dep_name, dep_id, dep_info, dep_tmp)
+        install_dependency_blocking(
+            &addons_dir,
+            &dep_name,
+            dep_id,
+            dep_info,
+            dep_tmp,
+            Some(&dep_progress),
+        )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -1579,26 +2040,43 @@ fn install_dependency_blocking(
     dep_id: u32,
     dep_info: EsouiAddonInfo,
     dep_tmp: NamedTempFile,
+    on_dep: DepInstallReporter,
 ) -> Result<InstallResult, String> {
     // Surface the real extraction error (installer already explains the common
     // Controlled Folder Access / permission case with fix steps) rather than a
     // generic "extract_failed" the user can't act on.
-    let dep_folders = installer::extract_addon_zip(dep_tmp.path(), addons_dir)
-        .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
-
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
-        .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
+    let dep_folders = installer::install_addon_zip_with_hashes(
+        dep_tmp.path(),
+        addons_dir,
+        dep_id,
+        &dep_info.version,
+        installer::ExtractHooks::NONE,
+    )
+    .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
     let mut store = metadata::load_metadata(addons_dir);
-    for f in &dep_folders {
-        let dep_version = read_local_version(addons_dir, f);
-        metadata::record_install(&mut store, f, dep_id, &dep_version, &dep_info.download_url);
-    }
+    // A dependency archive can create several folders, exactly like a normal
+    // install: stamping the dependency ID onto every one of them made a
+    // two-folder library produce two identical update rows and two downloads,
+    // and would overwrite the identity of any folder the user tracks
+    // separately. Route through the same primary/bundled rule as a direct
+    // install.
+    record_installed_folders(
+        &mut store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+        0,
+    );
 
     // Hard-wired to "auto": the user explicitly asked for THIS library, and its
     // own libraries are an implementation detail — prompting again here would be
-    // a second modal for something they already accepted.
-    let resolved = resolve_transitive_deps(addons_dir, &dep_folders, &mut store);
+    // a second modal for something they already accepted. They are still named
+    // as they install, so the wait is attributable.
+    let resolved = resolve_transitive_deps_reporting(addons_dir, &dep_folders, &mut store, on_dep);
     metadata::save_metadata(addons_dir, &store)?;
     Ok(InstallResult {
         installed_folders: dep_folders,
@@ -1654,56 +2132,16 @@ pub async fn install_selected_dependencies(
     tokio::task::spawn_blocking(move || {
         // Hold the lock across the whole install: `try_install_dep` mutates the
         // store in memory and one save at the end persists every dependency,
-        // matching how `resolve_transitive_deps` is driven elsewhere.
+        // matching how `resolve_transitive_deps_reporting` is driven elsewhere.
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
         let mut store = metadata::load_metadata(&addons_dir);
 
-        let mut installed_folders: Vec<String> = Vec::new();
-        let mut installed_deps: Vec<String> = Vec::new();
-        let mut failed_deps: Vec<String> = Vec::new();
-        let mut skipped_deps: Vec<String> = Vec::new();
-
-        for (i, dep_name) in names.iter().enumerate() {
-            // Same inter-request delay the transitive resolver uses, so a long
-            // accepted list is no harsher on ESOUI than auto-resolution.
-            if i > 0 {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            match try_install_dep(dep_name, &addons_dir, &mut store) {
-                Ok(dep_folders) => {
-                    for f in &dep_folders {
-                        if !installed_folders.contains(f) {
-                            installed_folders.push(f.clone());
-                        }
-                    }
-                    installed_deps.push(dep_name.clone());
-                }
-                Err("not_found") => skipped_deps.push(dep_name.clone()),
-                Err(_) => failed_deps.push(dep_name.clone()),
-            }
-        }
-
-        // A library's own libraries are an implementation detail: resolve them
-        // transitively rather than prompting again while the lock is held.
-        // Guarded so a fully-failed selection skips the whole-folder disk walk.
-        if !installed_folders.is_empty() {
-            let resolved = resolve_transitive_deps(&addons_dir, &installed_folders, &mut store);
-            installed_deps.extend(resolved.installed_deps);
-            failed_deps.extend(resolved.failed_deps);
-            skipped_deps.extend(resolved.skipped_deps);
-        }
-
+        let result =
+            install_selected_dependencies_with(&addons_dir, &names, &mut store, try_install_dep);
         metadata::save_metadata(&addons_dir, &store)?;
-
-        Ok(InstallResult {
-            installed_folders,
-            installed_deps,
-            failed_deps,
-            skipped_deps,
-            pending_deps: Vec::new(),
-        })
+        Ok(result)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -1720,13 +2158,21 @@ pub async fn check_for_updates(
     tokio::task::spawn_blocking(move || {
         // Phase 0: fetch the full ESOUI filelist outside the lock — big HTTP call
         let api_lookup = esoui::fetch_filelist_lookup()?;
+        // Minion updates addon files independently of Kalpa, so its live
+        // metadata is needed to reconcile versions already tracked in
+        // kalpa.json. A missing, unreadable, or malformed file is non-fatal;
+        // the normal Kalpa metadata comparison still works without it.
+        let minion_addons = find_minion_xml()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|content| parse_minion_addons(&content))
+            .unwrap_or_default();
 
         // Phase 1: acquire lock for metadata comparison and save
         let pending = {
             let _guard = lock
                 .lock()
                 .map_err(|_| "Internal metadata lock error".to_string())?;
-            check_for_updates_metadata(&addons_dir, &api_lookup)?
+            check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons)?
         };
         // Lock is released here
 
@@ -1773,6 +2219,7 @@ struct UpdatePending {
 fn check_for_updates_metadata(
     addons_dir: &Path,
     api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    minion_addons: &[MinionAddon],
 ) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
@@ -1786,7 +2233,7 @@ fn check_for_updates_metadata(
             continue;
         }
 
-        let meta = match store.addons.get(folder_name) {
+        let mut meta = match store.addons.get(folder_name) {
             Some(m) => m.clone(),
             None => continue,
         };
@@ -1800,21 +2247,48 @@ fn check_for_updates_metadata(
             None => continue,
         };
 
-        // Normalize versions: strip leading "v"/"V" and trim whitespace
-        let local_ver = meta
-            .installed_version
-            .trim()
-            .strip_prefix('v')
-            .or_else(|| meta.installed_version.trim().strip_prefix('V'))
-            .unwrap_or(meta.installed_version.trim());
-        let remote_ver = api_entry
-            .version
-            .trim()
-            .strip_prefix('v')
-            .or_else(|| api_entry.version.trim().strip_prefix('V'))
-            .unwrap_or(api_entry.version.trim());
+        // Minion can replace an addon without touching kalpa.json. Its
+        // `ui-version` is authoritative when both the folder and ESOUI id match.
+        // Only trust that evidence when the folder-keyed ESOUI lookup still
+        // resolves to the same addon id we track locally; the filelist cache is
+        // keyed by top-level folder name, so a stale or duplicate mapping should
+        // not let unrelated external state rewrite this entry.
+        let api_ids_match = api_entry.esoui_id == meta.esoui_id;
+        let remote_ver = normalized_version(&api_entry.version);
+        let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
+        let detected_version = (api_ids_match && !stored_matches_api)
+            .then(|| {
+                let minion_matches_api = minion_version_for_folder(
+                    minion_addons,
+                    addons_dir,
+                    folder_name,
+                    meta.esoui_id,
+                )
+                .is_some_and(|version| normalized_version(version) == remote_ver);
+                minion_matches_api.then(|| api_entry.version.clone())
+            })
+            .flatten();
 
-        let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
+        if let Some(detected_version) = detected_version {
+            if detected_version != meta.installed_version {
+                if let Some(entry) = store.addons.get_mut(folder_name) {
+                    entry.installed_version = detected_version.clone();
+                    metadata_changed = true;
+                }
+                meta.installed_version = detected_version;
+            }
+        }
+
+        // Normalize versions: strip leading "v"/"V" and trim whitespace
+        let local_ver = normalized_version(&meta.installed_version);
+
+        let has_update = artifact_is_newer_with_marker_state(
+            local_ver,
+            remote_ver,
+            meta.esoui_last_update,
+            meta.esoui_marker_installed,
+            api_entry.last_update,
+        );
 
         if let Some(entry) = store.addons.get_mut(folder_name) {
             // Sync the raw string only when both sides are real versions that
@@ -1824,15 +2298,37 @@ fn check_for_updates_metadata(
             // would mark it up to date without downloading anything and mask
             // that update forever.
             if !has_update
+                && api_ids_match
                 && !remote_ver.is_empty()
                 && !local_ver.is_empty()
+                && remote_ver == local_ver
                 && meta.installed_version != api_entry.version
             {
                 entry.installed_version = api_entry.version.clone();
                 metadata_changed = true;
             }
-            if entry.esoui_last_update != api_entry.last_update {
+            // A matching version observation establishes that a legacy marker
+            // belongs to the artifact on disk. Until then, markers loaded from
+            // pre-v2 metadata remain observation-only and cannot suppress a
+            // version mismatch.
+            if !local_ver.is_empty()
+                && !remote_ver.is_empty()
+                && local_ver == remote_ver
+                && api_entry.last_update > 0
+                && api_entry.last_update == entry.esoui_last_update
+                && !entry.esoui_marker_installed
+            {
+                entry.esoui_marker_installed = true;
+                metadata_changed = true;
+            }
+            // A marker is the publication identity of the installed artifact.
+            // Learn it from a matching filelist observation, but leave it
+            // untouched while an update is pending: recording the remote
+            // marker before download would make an ignored update appear
+            // installed on the next check.
+            if !has_update && api_entry.last_update > entry.esoui_last_update {
                 entry.esoui_last_update = api_entry.last_update;
+                entry.esoui_marker_installed = true;
                 metadata_changed = true;
             }
         }
@@ -1857,20 +2353,145 @@ fn check_for_updates_metadata(
     Ok(pending)
 }
 
+fn normalized_version(version: &str) -> &str {
+    version
+        .trim()
+        .strip_prefix('v')
+        .or_else(|| version.trim().strip_prefix('V'))
+        .unwrap_or(version.trim())
+}
+
+/// Return Minion's version for the selected AddOns root. Older Minion files
+/// without root information fall back to accepting a version only when every
+/// matching installation agrees.
+fn minion_version_for_folder<'a>(
+    minion_addons: &'a [MinionAddon],
+    addons_dir: &Path,
+    folder_name: &str,
+    esoui_id: u32,
+) -> Option<&'a str> {
+    let has_scoped_entries = minion_addons
+        .iter()
+        .any(|addon| addon.addons_path.is_some());
+    let mut matches = minion_addons.iter().filter(|addon| {
+        addon.uid == esoui_id
+            && !addon.version.trim().is_empty()
+            && minion_addon_is_for_root(addon, addons_dir, has_scoped_entries)
+            && addon
+                .folders
+                .iter()
+                .any(|folder| folder.eq_ignore_ascii_case(folder_name))
+    });
+    let first = matches.next()?.version.trim();
+    matches
+        .all(|addon| normalized_version(&addon.version) == normalized_version(first))
+        .then_some(first)
+}
+
+pub(crate) fn minion_addon_is_for_root(
+    addon: &MinionAddon,
+    addons_dir: &Path,
+    has_scoped_entries: bool,
+) -> bool {
+    match addon.addons_path.as_deref() {
+        Some(path) => paths_refer_to_same_dir(path, addons_dir),
+        None => !has_scoped_entries,
+    }
+}
+
+fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
+    let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .eq_ignore_ascii_case(right.to_string_lossy().trim_end_matches(['/', '\\']))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 // ── Update cancellation + progress ──────────────────────────────────────
 
-/// Per-file progress for a single addon update, emitted on the `update-progress`
-/// event. The frontend correlates events by `operation_id` and renders the phase
-/// plus "Extracting N of M".
+/// Progress for a single addon install or update, emitted on the
+/// `update-progress` event. The frontend correlates events by `operation_id` and
+/// renders the phase plus "Downloading 4.2 / 19.1 MB" or "Extracting N of M".
+///
+/// One event shape carries every phase rather than a second parallel event, so
+/// a listener that already handles `update-progress` keeps working: the
+/// pre-existing fields never changed meaning, and the byte fields are omitted
+/// from the payload entirely on the file-bound phases.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProgressEvent {
     pub operation_id: String,
+    /// The addon this event is about. For [`PHASE_DEPENDENCIES`] it is the
+    /// dependency's name, not the addon that pulled it in — the point of those
+    /// events is to name the library the user is waiting on.
     pub folder_name: String,
-    /// Currently always "extracting" — the slow, file-count-bound phase.
+    /// One of [`PHASE_DOWNLOADING`], [`PHASE_EXTRACTING`] or
+    /// [`PHASE_DEPENDENCIES`]. It used to be always "extracting"; anything that
+    /// assumed that is now wrong.
     pub phase: String,
+    /// Files extracted so far, or the dependency's 1-based position in the
+    /// round. Zero during [`PHASE_DOWNLOADING`], where bytes are the unit.
     pub file_index: usize,
     pub file_total: usize,
+    /// Bytes received so far. Only present during [`PHASE_DOWNLOADING`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_done: Option<u64>,
+    /// Total bytes from the server's `Content-Length`. Absent (so the UI falls
+    /// back to an indeterminate bar) on the rare response without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+}
+
+/// Bytes are arriving for the addon's archive.
+pub const PHASE_DOWNLOADING: &str = "downloading";
+/// The archive is being written into the AddOns folder, file by file.
+pub const PHASE_EXTRACTING: &str = "extracting";
+/// A required library is being fetched and installed on the addon's behalf.
+/// Deliberately one event per dependency — not per file inside it — so a
+/// library chain reads as "Installing LibCustomIcons…" rather than a second
+/// nested progress bar.
+pub const PHASE_DEPENDENCIES: &str = "dependencies";
+
+impl UpdateProgressEvent {
+    /// A file-counted event (extraction, or one-of-N dependencies).
+    fn files(
+        operation_id: &str,
+        folder_name: &str,
+        phase: &str,
+        index: usize,
+        total: usize,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.to_string(),
+            folder_name: folder_name.to_string(),
+            phase: phase.to_string(),
+            file_index: index,
+            file_total: total,
+            bytes_done: None,
+            bytes_total: None,
+        }
+    }
+
+    /// A byte-counted download event.
+    fn bytes(operation_id: &str, folder_name: &str, done: u64, total: Option<u64>) -> Self {
+        Self {
+            operation_id: operation_id.to_string(),
+            folder_name: folder_name.to_string(),
+            phase: PHASE_DOWNLOADING.to_string(),
+            file_index: 0,
+            file_total: 0,
+            bytes_done: Some(done),
+            bytes_total: total,
+        }
+    }
 }
 
 /// RAII registration of a cancellation flag in [`crate::UpdateCancels`]. Inserted
@@ -1950,21 +2571,82 @@ fn make_progress_emitter(
         last.store(done, Ordering::Relaxed);
         let _ = app.emit(
             "update-progress",
-            UpdateProgressEvent {
-                operation_id: operation_id.clone(),
-                folder_name: folder_name.clone(),
-                phase: "extracting".to_string(),
-                file_index: done,
-                file_total: total,
-            },
+            UpdateProgressEvent::files(&operation_id, &folder_name, PHASE_EXTRACTING, done, total),
+        );
+    }
+}
+
+/// How many bytes must arrive since the last emitted download event before the
+/// next one is sent. The download hook fires once per 64 KiB chunk, which on a
+/// fast connection is hundreds of events a second for a 19 MB library — far
+/// more than a progress label can usefully render.
+const BYTE_PROGRESS_EMIT_STRIDE: u64 = 256 * 1024;
+
+/// Throttle decision for the download-progress emitter, the byte-denominated
+/// twin of [`should_emit_progress`] and factored out as a pure function for the
+/// same reason.
+///
+/// `prev` is the `done` value at the last emitted event, or `u64::MAX` if none
+/// has been emitted yet. Emits when: this is the first event, OR the body is
+/// complete, OR at least [`BYTE_PROGRESS_EMIT_STRIDE`] bytes have arrived since
+/// the last emit. The first-event branch is stride-independent so the frontend
+/// learns the total size (and can switch to a determinate bar) before any bytes
+/// land, even on a small archive that never reaches one stride.
+fn should_emit_byte_progress(prev: u64, done: u64, total: Option<u64>) -> bool {
+    prev == u64::MAX
+        || total.is_some_and(|t| done >= t)
+        || done.saturating_sub(prev) >= BYTE_PROGRESS_EMIT_STRIDE
+}
+
+/// Build a throttled download-progress callback that emits `update-progress`
+/// events on the first chunk, every [`BYTE_PROGRESS_EMIT_STRIDE`] bytes, and at
+/// completion.
+fn make_download_progress_emitter(
+    app: tauri::AppHandle,
+    operation_id: String,
+    folder_name: String,
+) -> impl Fn(u64, Option<u64>) {
+    let last = AtomicU64::new(u64::MAX);
+    move |done: u64, total: Option<u64>| {
+        let prev = last.load(Ordering::Relaxed);
+        if !should_emit_byte_progress(prev, done, total) {
+            return;
+        }
+        last.store(done, Ordering::Relaxed);
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressEvent::bytes(&operation_id, &folder_name, done, total),
+        );
+    }
+}
+
+/// Reports one event per dependency, immediately before Kalpa starts installing
+/// it, as `(dep_name, index, total)` with a 1-based index. Threaded into the
+/// dependency resolver so a library pulled in behind the user's back ("install
+/// this 50 KB addon" → 19 MB of LibCustomIcons) has a name attached to the wait.
+type DepInstallReporter<'a> = Option<&'a dyn Fn(&str, usize, usize)>;
+
+/// Build the [`DepInstallReporter`] callback for an operation, emitting
+/// `update-progress` events in the [`PHASE_DEPENDENCIES`] phase. Not throttled:
+/// each dependency costs at least a search, a fetch and a download, so the
+/// events are inherently seconds apart.
+fn make_dependency_progress_emitter(
+    app: tauri::AppHandle,
+    operation_id: String,
+) -> impl Fn(&str, usize, usize) {
+    move |dep_name: &str, index: usize, total: usize| {
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressEvent::files(&operation_id, dep_name, PHASE_DEPENDENCIES, index, total),
         );
     }
 }
 
 /// Signal an in-flight update (identified by `operation_id`) to stop. Returns
 /// `true` if a matching in-flight operation was found and flagged, `false` if it
-/// had already finished or never existed. The extraction loop polls the flag
-/// between files and aborts cleanly, rolling back any partially-written folder.
+/// had already finished or never existed. The download loop polls the flag
+/// between body chunks and the extraction loop polls it between files; both
+/// abort cleanly, rolling back any partially-written folder.
 #[tauri::command]
 pub async fn cancel_update(
     cancels: tauri::State<'_, crate::UpdateCancels>,
@@ -2006,7 +2688,20 @@ pub async fn update_addon(
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url, Some(&info.checksum))?;
+        // The download is byte-bound, so it reports bytes and polls the same
+        // cancellation flag between chunks: Stop pressed while a large library
+        // is still arriving now aborts there instead of waiting for extraction
+        // to start.
+        let download_progress =
+            make_download_progress_emitter(app.clone(), operation_id.clone(), info.title.clone());
+        let tmp_file = esoui::download_addon_with(
+            &info.download_url,
+            Some(&info.checksum),
+            esoui::DownloadHooks {
+                cancel: Some(cancel.flag()),
+                progress: Some(&download_progress),
+            },
+        )?;
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
@@ -2046,20 +2741,40 @@ fn update_addon_blocking(
     hooks: installer::ExtractHooks,
     dep_policy: DependencyPolicy,
 ) -> Result<InstallResult, String> {
-    // Extract the downloaded ZIP
-    let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
+    // Store the version from the checksum-bound filedetails descriptor that
+    // supplied this artifact. The earlier filelist value is only an observation
+    // and may be stale if ESOUI publishes between check and download.
+    let artifact_version =
+        downloaded_artifact_version(api_version.unwrap_or_default(), &info.version);
 
-    // Store the API version (from filelist.json) when available, since
-    // check_for_updates compares against the API version. Using the
-    // HTML-scraped version here caused perpetual "update available" when
-    // the two sources returned slightly different version strings.
-    let version = api_version.unwrap_or(&info.version);
+    // Keep a known local version if both remote sources are empty. In
+    // particular, never let an empty filedetails version erase the installed
+    // artifact marker or hash-manifest version.
+    let mut store = metadata::load_metadata(addons_dir);
+    let fallback_version = store
+        .addons
+        .values()
+        .find(|m| m.esoui_id == esoui_id)
+        .map(|m| m.installed_version.clone())
+        .unwrap_or_default();
+    let version = if artifact_version.is_empty() {
+        fallback_version.as_str()
+    } else {
+        artifact_version
+    };
 
-    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
+    // Publish the addon folders and their matching hash baselines as one
+    // recoverable transaction. Metadata is updated only after that succeeds.
+    let installed_folders = installer::install_addon_zip_with_hashes(
+        tmp_file.path(),
+        addons_dir,
+        esoui_id,
+        version,
+        hooks,
+    )?;
 
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
-    let mut store = metadata::load_metadata(addons_dir);
     let old_folders: Vec<String> = store
         .addons
         .iter()
@@ -2079,12 +2794,12 @@ fn update_addon_blocking(
         version,
         &info.title,
         &info.download_url,
-        0, // preserved from existing metadata
+        info.last_update,
     );
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -2103,6 +2818,86 @@ pub struct BatchUpdateEntry {
     pub esoui_id: u32,
     pub folder_name: String,
     pub api_version: String,
+}
+
+/// Choose the version persisted for an update after the backend has fetched the
+/// artifact descriptor. The fetched version and its checksum/download URL form
+/// one provenance tuple; the frontend value is only the earlier observation
+/// that caused the update request.
+fn downloaded_artifact_version<'a>(observed_version: &'a str, fetched_version: &'a str) -> &'a str {
+    let fetched_version = fetched_version.trim();
+    if !fetched_version.is_empty() {
+        fetched_version
+    } else {
+        observed_version.trim()
+    }
+}
+
+/// Compare the version strings used for local/API identity checks. ESOUI may
+/// include a leading `v` or surrounding whitespace, but an empty value is not
+/// evidence that the installed artifact matches the API entry.
+fn versions_match(local_version: &str, remote_version: &str) -> bool {
+    let local = local_version.trim();
+    let remote = remote_version.trim();
+    let local = local
+        .strip_prefix('v')
+        .or_else(|| local.strip_prefix('V'))
+        .unwrap_or(local);
+    let remote = remote
+        .strip_prefix('v')
+        .or_else(|| remote.strip_prefix('V'))
+        .unwrap_or(remote);
+    !local.is_empty() && !remote.is_empty() && local == remote
+}
+
+/// Compare a local artifact with a filelist observation. A filelist marker at
+/// or before the marker recorded with the installed artifact is not allowed to
+/// trigger an update: ESOUI can briefly serve an older filelist after the
+/// filedetails endpoint has published a new artifact.
+#[cfg(test)]
+fn artifact_is_newer(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    remote_marker: u64,
+) -> bool {
+    artifact_is_newer_with_marker_state(
+        local_version,
+        remote_version,
+        installed_marker,
+        true,
+        remote_marker,
+    )
+}
+
+fn artifact_is_newer_with_marker_state(
+    local_version: &str,
+    remote_version: &str,
+    installed_marker: u64,
+    marker_is_installed: bool,
+    remote_marker: u64,
+) -> bool {
+    if local_version.is_empty() || remote_version.is_empty() {
+        return false;
+    }
+    if marker_is_installed && installed_marker > 0 && remote_marker <= installed_marker {
+        return false;
+    }
+    remote_version != local_version
+}
+
+/// Persist metadata for an applied update, then discard the pre-download
+/// filelist observation. If filedetails advanced between check and download,
+/// the next check must fetch a current filelist rather than compare the newly
+/// installed version against the stale version that initiated this request.
+fn save_applied_update_metadata(
+    addons_dir: &Path,
+    store: &metadata::MetadataStore,
+    applied: bool,
+) -> Result<(), String> {
+    metadata::save_metadata(addons_dir, store)?;
+    esoui::invalidate_filelist_cache_if_applied(applied);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -2200,11 +2995,13 @@ fn batch_download_addons(
                             total,
                         },
                     );
+                    let artifact_version =
+                        downloaded_artifact_version(&entry.api_version, &info.version).to_string();
                     BatchDownloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
-                        api_version: entry.api_version.clone(),
+                        api_version: artifact_version,
                         index: i,
                     }
                 });
@@ -2247,33 +3044,27 @@ fn batch_extract_and_record(
                 failed.push(folder_name);
                 // Already emitted "failed" during download phase
             }
-            Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
-                Err(e) => {
-                    let _ = app.emit(
-                        "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: folder_name.clone(),
-                            phase: "failed".to_string(),
-                            index: dl.index,
-                            total,
-                        },
-                    );
-                    errors.insert(folder_name.clone(), e);
-                    failed.push(folder_name);
-                }
-                Ok(installed_folders) => {
-                    let version = &dl.api_version;
+            Ok(dl) => {
+                let fallback_version = store
+                    .addons
+                    .values()
+                    .find(|m| m.esoui_id == dl.esoui_id)
+                    .map(|m| m.installed_version.clone())
+                    .unwrap_or_default();
+                let version = if dl.api_version.trim().is_empty() {
+                    fallback_version
+                } else {
+                    dl.api_version.trim().to_string()
+                };
 
-                    if let Err(e) = file_hashes::record_hashes_for_folders(
-                        addons_dir,
-                        &installed_folders,
-                        dl.esoui_id,
-                        version,
-                    ) {
-                        // Files are on disk, but the hash baseline didn't persist.
-                        // Don't record this addon in metadata — leaving metadata
-                        // pointing at a folder with no baseline would let the next
-                        // update silently clobber user edits. Surface it as failed.
+                match installer::install_addon_zip_with_hashes(
+                    dl.tmp.path(),
+                    addons_dir,
+                    dl.esoui_id,
+                    &version,
+                    installer::ExtractHooks::NONE,
+                ) {
+                    Err(e) => {
                         let _ = app.emit(
                             "batch-update-progress",
                             BatchUpdateProgress {
@@ -2285,48 +3076,48 @@ fn batch_extract_and_record(
                         );
                         errors.insert(folder_name.clone(), e);
                         failed.push(folder_name);
-                        continue;
                     }
-
-                    // Clean up old metadata entries for this esoui_id
-                    // that aren't in the newly extracted folders (handles renames)
-                    let old_folders: Vec<String> = store
-                        .addons
-                        .iter()
-                        .filter(|(_, m)| m.esoui_id == dl.esoui_id)
-                        .map(|(name, _)| name.clone())
-                        .collect();
-                    for old in &old_folders {
-                        if !installed_folders.contains(old) {
-                            metadata::remove_entry(&mut store, old);
+                    Ok(installed_folders) => {
+                        // Clean up old metadata entries for this esoui_id
+                        // that aren't in the newly extracted folders (handles renames)
+                        let old_folders: Vec<String> = store
+                            .addons
+                            .iter()
+                            .filter(|(_, m)| m.esoui_id == dl.esoui_id)
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        for old in &old_folders {
+                            if !installed_folders.contains(old) {
+                                metadata::remove_entry(&mut store, old);
+                            }
                         }
+                        record_installed_folders(
+                            &mut store,
+                            addons_dir,
+                            &installed_folders,
+                            dl.esoui_id,
+                            &version,
+                            &dl.info.title,
+                            &dl.info.download_url,
+                            dl.info.last_update,
+                        );
+                        let _ = app.emit(
+                            "batch-update-progress",
+                            BatchUpdateProgress {
+                                folder_name: folder_name.clone(),
+                                phase: "completed".to_string(),
+                                index: dl.index,
+                                total,
+                            },
+                        );
+                        completed.push(folder_name);
                     }
-                    record_installed_folders(
-                        &mut store,
-                        addons_dir,
-                        &installed_folders,
-                        dl.esoui_id,
-                        version,
-                        &dl.info.title,
-                        &dl.info.download_url,
-                        0,
-                    );
-                    let _ = app.emit(
-                        "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: folder_name.clone(),
-                            phase: "completed".to_string(),
-                            index: dl.index,
-                            total,
-                        },
-                    );
-                    completed.push(folder_name);
                 }
-            },
+            }
         }
     }
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, !completed.is_empty())?;
 
     Ok(BatchUpdateResult {
         completed,
@@ -2335,7 +3126,7 @@ fn batch_extract_and_record(
     })
 }
 
-// ── Protected Edits: Conflict scanning & file browser ───────���─────────
+// ── Protected Edits: Conflict scanning & file browser ───────────────────
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2349,11 +3140,21 @@ pub struct FileConflict {
 #[serde(rename_all = "camelCase")]
 pub struct ConflictReport {
     pub session_id: String,
+    /// The archive primary. Retained for metadata carry-forward and display;
+    /// it is no longer the only folder the report covers.
     pub folder_name: String,
+    /// Every top-level folder this archive writes, sorted. The UI groups rows
+    /// by folder when there is more than one.
+    pub folders: Vec<String>,
     pub update_version: String,
+    /// Paths in these three lists are **folder-qualified** (`Folder/rel`).
+    /// They cross the folder boundary, so a bare path would be ambiguous once
+    /// an archive touches more than one folder - two siblings shipping
+    /// `init.lua` would collide.
     pub safe_files: Vec<String>,
     pub auto_kept_files: Vec<String>,
     pub conflicts: Vec<FileConflict>,
+    pub has_hash_baseline: bool,
 }
 
 fn generate_session_id(folder_name: &str) -> String {
@@ -2373,6 +3174,7 @@ struct ClassifiedFiles {
     safe_files: Vec<String>,
     auto_kept_files: Vec<String>,
     conflicts: Vec<FileConflict>,
+    has_hash_baseline: bool,
 }
 
 /// Classify the files `zip_hashes` would write over the installed folder.
@@ -2453,29 +3255,197 @@ fn classify_update_files(
         safe_files,
         auto_kept_files,
         conflicts,
+        has_hash_baseline: stored.is_some(),
     })
 }
 
-/// Build a conflict report for one addon folder against a downloaded ZIP, and
-/// return the ZIP hash map alongside it so an immediately-following extraction
-/// can reuse it as the new hash baseline instead of re-hashing the folder.
+/// Classify every folder an archive writes, qualifying the results.
+///
+/// [`classify_update_files`] stays per-folder and bare, because it compares
+/// against a single `.kalpa-hashes/<Folder>.json`. This wrapper is what makes
+/// bundled siblings participate at all: previously only the primary folder was
+/// classified, so a modified sibling file was overwritten with no prompt and no
+/// backup even though it had a baseline and was displayed as modified.
+fn classify_update_archive(
+    addons_dir: &Path,
+    primary_folder: &str,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Result<ClassifiedFiles, String> {
+    let mut safe_files = Vec::new();
+    let mut auto_kept_files = Vec::new();
+    let mut conflicts = Vec::new();
+    let mut has_hash_baseline = false;
+
+    for (folder, hashes) in &zip_hashes.folders {
+        let classified = classify_update_files(addons_dir, folder, hashes)?;
+        if folder == primary_folder {
+            has_hash_baseline = classified.has_hash_baseline;
+        }
+        safe_files.extend(
+            classified
+                .safe_files
+                .iter()
+                .map(|rel| file_hashes::qualify(folder, rel)),
+        );
+        auto_kept_files.extend(
+            classified
+                .auto_kept_files
+                .iter()
+                .map(|rel| file_hashes::qualify(folder, rel)),
+        );
+        conflicts.extend(
+            classified
+                .conflicts
+                .into_iter()
+                .map(|conflict| FileConflict {
+                    relative_path: file_hashes::qualify(folder, &conflict.relative_path),
+                    ..conflict
+                }),
+        );
+    }
+
+    // Foldered archives may also write loose files directly under AddOns. They
+    // are owned by the primary folder for baseline/provenance purposes, but
+    // their live path is the AddOns root rather than AddOns/<folder>.
+    if !zip_hashes.root_files.is_empty() {
+        let stored = file_hashes::load_hash_manifest(addons_dir, primary_folder);
+        let stored_files = stored.as_ref().map(|m| &m.root_files);
+        let mut root_safe = Vec::new();
+        let mut root_auto_kept = Vec::new();
+        let mut root_conflicts = Vec::new();
+        for (relative, zip_hash) in &zip_hashes.root_files {
+            let stored_hash = stored_files.and_then(|f| f.get(relative));
+            let path = addons_dir.join(relative);
+            let disk_hash = if stored.is_some() && path.is_file() {
+                Some(file_hashes::file_signature(relative, &path)?)
+            } else {
+                None
+            };
+            let user_modified = match (stored_hash, disk_hash.as_ref()) {
+                (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
+                (Some(_), None) => true,
+                (None, Some(disk)) => !file_hashes::signatures_match(disk, zip_hash),
+                (None, None) => false,
+            };
+            let upstream_changed = stored_hash != Some(zip_hash);
+            let qualified = file_hashes::qualify(primary_folder, relative);
+            match (user_modified, upstream_changed) {
+                (false, _) => root_safe.push(qualified),
+                (true, false) => root_auto_kept.push(qualified),
+                (true, true) => root_conflicts.push(FileConflict {
+                    relative_path: qualified,
+                    user_hash: disk_hash.unwrap_or_default(),
+                    upstream_hash: zip_hash.clone(),
+                }),
+            }
+        }
+        safe_files.extend(root_safe);
+        auto_kept_files.extend(root_auto_kept);
+        conflicts.extend(root_conflicts);
+    }
+
+    safe_files.sort();
+    auto_kept_files.sort();
+    conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(ClassifiedFiles {
+        safe_files,
+        auto_kept_files,
+        conflicts,
+        has_hash_baseline,
+    })
+}
+
+/// Upstream hashes for kept-mine files, grouped by folder.
+///
+/// A kept file keeps the user's bytes on disk but records the *upstream* hash
+/// as its baseline, so the edit stays detectable on the next update instead of
+/// re-conflicting forever. Grouped by folder because manifests are per folder.
+fn build_hash_overrides(
+    kept_files: &[String],
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Option<BTreeMap<String, HashMap<String, String>>> {
+    let mut overrides: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    for key in kept_files {
+        let Some((folder, relative)) = file_hashes::split_qualified(key) else {
+            continue;
+        };
+        if let Some(hash) = zip_hashes.folders.get(folder).and_then(|m| m.get(relative)) {
+            overrides
+                .entry(folder.to_string())
+                .or_default()
+                .insert(relative.to_string(), hash.clone());
+        }
+    }
+    (!overrides.is_empty()).then_some(overrides)
+}
+
+/// Convert UI-facing folder-qualified keep keys into the archive-relative keys
+/// consumed by the extractor. Loose files at the AddOns root are qualified by
+/// the primary folder in reports, but their ZIP entry is bare. Converting them
+/// here avoids ambiguous basename matching inside the extractor (for example,
+/// `LibFoo/init.lua` must never suppress a distinct root `init.lua`).
+fn build_extraction_skip_files(
+    kept_files: &[String],
+    primary_folder: &str,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> HashSet<String> {
+    kept_files
+        .iter()
+        .map(|key| {
+            file_hashes::split_qualified(key)
+                .filter(|(folder, relative)| {
+                    *folder == primary_folder && zip_hashes.root_files.contains_key(*relative)
+                })
+                .map_or_else(|| key.clone(), |(_, relative)| relative.to_string())
+        })
+        .collect()
+}
+
+/// Upstream hashes for kept files written directly under AddOns. Root entries
+/// are qualified with the primary folder for the conflict UI, while their
+/// persisted baseline lives in that folder's manifest under `root_files`.
+fn build_root_hash_overrides(
+    kept_files: &[String],
+    primary_folder: &str,
+    zip_hashes: &file_hashes::ZipHashSet,
+) -> Option<HashMap<String, String>> {
+    let mut overrides = HashMap::new();
+    for key in kept_files {
+        let Some((folder, relative)) = file_hashes::split_qualified(key) else {
+            continue;
+        };
+        if folder == primary_folder {
+            if let Some(hash) = zip_hashes.root_files.get(relative) {
+                overrides.insert(relative.to_string(), hash.clone());
+            }
+        }
+    }
+    (!overrides.is_empty()).then_some(overrides)
+}
+
+/// Build a conflict report for a downloaded ZIP, covering every folder it
+/// writes, and return the archive hash set alongside it so an immediately-
+/// following extraction can reuse it as the new baseline instead of re-hashing.
 fn build_conflict_report(
     addons_dir: &Path,
     folder_name: &str,
     zip_path: &Path,
     update_version: &str,
     session_id: &str,
-) -> Result<(ConflictReport, HashMap<String, String>), String> {
-    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
-    let classified = classify_update_files(addons_dir, folder_name, &zip_hashes)?;
+) -> Result<(ConflictReport, file_hashes::ZipHashSet), String> {
+    let zip_hashes = file_hashes::hash_zip_entries_by_folder(zip_path)?;
+    let classified = classify_update_archive(addons_dir, folder_name, &zip_hashes)?;
 
     let report = ConflictReport {
         session_id: session_id.to_string(),
         folder_name: folder_name.to_string(),
+        folders: zip_hashes.folders.keys().cloned().collect(),
         update_version: update_version.to_string(),
         safe_files: classified.safe_files,
         auto_kept_files: classified.auto_kept_files,
         conflicts: classified.conflicts,
+        has_hash_baseline: classified.has_hash_baseline,
     };
 
     Ok((report, zip_hashes))
@@ -2513,26 +3483,40 @@ pub async fn scan_update_conflicts(
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
 
+        let stored_version = metadata::load_metadata(&addons_dir)
+            .addons
+            .values()
+            .find(|m| m.esoui_id == esoui_id)
+            .map(|m| m.installed_version.clone())
+            .unwrap_or_default();
+        let version = if info.version.trim().is_empty() {
+            stored_version
+        } else {
+            info.version.trim().to_string()
+        };
+
         // Keep the ZIP hash map: the apply step (update_addon_with_decisions)
         // reuses it as the new baseline instead of re-decompressing and
         // re-hashing the whole archive a second time — the big saving on
         // many-file addons.
-        let (report, zip_hashes) = build_conflict_report(
-            &addons_dir,
-            &folder_name,
-            &kept_path,
-            &info.version,
-            &session_id,
-        )?;
+        let (report, zip_hashes) =
+            build_conflict_report(&addons_dir, &folder_name, &kept_path, &version, &session_id)?;
 
         if let Ok(mut map) = pending_clone.lock() {
+            let reviewed_conflicts = report
+                .conflicts
+                .iter()
+                .map(|conflict| conflict.relative_path.clone())
+                .collect();
             map.insert(
                 session_id.clone(),
                 crate::PendingUpdate {
                     zip_path: kept_path,
                     folder_name: folder_name.clone(),
                     esoui_id,
-                    update_version: info.version,
+                    update_version: version,
+                    artifact_last_update: info.last_update,
+                    reviewed_conflicts,
                     zip_hashes: Arc::new(zip_hashes),
                 },
             );
@@ -2616,6 +3600,7 @@ pub async fn scan_batch_conflicts(
             kept_path: PathBuf,
             esoui_id: u32,
             api_version: String,
+            artifact_last_update: u64,
         }
 
         let app_clone = app.clone();
@@ -2626,7 +3611,7 @@ pub async fn scan_batch_conflicts(
                     .enumerate()
                     .map(|(i, entry)| {
                         let result = fetch_and_download_with_retry(entry.esoui_id).and_then(
-                            |(tmp, _info)| {
+                            |(tmp, info)| {
                                 let _ = app_clone.emit(
                                     "batch-update-progress",
                                     BatchUpdateProgress {
@@ -2639,10 +3624,14 @@ pub async fn scan_batch_conflicts(
                                 let (_, kept_path) = tmp
                                     .keep()
                                     .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 Ok(Downloaded {
                                     kept_path,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
+                                    artifact_last_update: info.last_update,
                                 })
                             },
                         );
@@ -2695,6 +3684,11 @@ pub async fn scan_batch_conflicts(
                         // the baseline instead of re-hashing the archive.
                         Ok((report, zip_hashes)) => {
                             if let Ok(mut map) = pending_clone.lock() {
+                                let reviewed_conflicts = report
+                                    .conflicts
+                                    .iter()
+                                    .map(|conflict| conflict.relative_path.clone())
+                                    .collect();
                                 map.insert(
                                     session_id.clone(),
                                     crate::PendingUpdate {
@@ -2702,6 +3696,8 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
+                                        artifact_last_update: dl.artifact_last_update,
+                                        reviewed_conflicts,
                                         zip_hashes: Arc::new(zip_hashes),
                                     },
                                 );
@@ -2821,6 +3817,10 @@ pub async fn update_batch_with_decisions(
 
         let auto_resolve = conflict_policy == "keep_mine" || conflict_policy == "take_update";
 
+        // Kept out of the producer's `move` capture so a worker panic can be
+        // reconciled against the full batch afterwards.
+        let folder_names: Vec<String> = updates.iter().map(|e| e.folder_name.clone()).collect();
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(download_thread_count(total))
             .build()
@@ -2856,11 +3856,14 @@ pub async fn update_batch_with_decisions(
                     .for_each_with(tx, |tx, (i, entry)| {
                         let result =
                             fetch_and_download_with_retry(entry.esoui_id).map(|(zip, info)| {
+                                let artifact_version =
+                                    downloaded_artifact_version(&entry.api_version, &info.version)
+                                        .to_string();
                                 StreamedDownload {
                                     zip,
                                     info,
                                     esoui_id: entry.esoui_id,
-                                    api_version: entry.api_version.clone(),
+                                    api_version: artifact_version,
                                 }
                             });
                         let phase = if result.is_ok() {
@@ -2886,7 +3889,7 @@ pub async fn update_batch_with_decisions(
         // Consumer: extract each download as it arrives, on THIS thread, holding
         // the metadata lock. `rx.iter()` blocks until a download is ready and
         // ends when the producer drops its sender.
-        let extract_outcome = extract_streamed_downloads(
+        let mut extract_outcome = extract_streamed_downloads(
             &addons_dir,
             &app,
             total,
@@ -2898,11 +3901,31 @@ pub async fn update_batch_with_decisions(
         );
 
         // The producer has finished sending by the time the channel drained;
-        // join so the thread isn't detached. A producer panic is intentionally
-        // swallowed — fetch_and_download_with_retry returns Result rather than
-        // panicking, so a panic here would be a bug, and the consumer has
-        // already produced a complete result from whatever it received.
-        let _ = producer.join();
+        // join so the thread isn't detached. A worker panic unwinds through
+        // rayon, drops the channel sender, and the consumer quietly finishes
+        // with whatever it received — which once surfaced to the user as
+        // Update All "starting then resetting" with zero completions and no
+        // error. Reconcile instead: any addon the consumer never heard about
+        // is reported failed, with the panic message attached.
+        if let Err(panic) = producer.join() {
+            let message = panic_payload_message(panic.as_ref());
+            eprintln!("[batch-update] download worker panicked: {message}");
+            for folder in &folder_names {
+                let accounted = extract_outcome.completed.contains(folder)
+                    || extract_outcome.failed.contains(folder)
+                    || extract_outcome
+                        .conflicts
+                        .iter()
+                        .any(|c| c.folder_name == *folder);
+                if !accounted {
+                    extract_outcome.failed.push(folder.clone());
+                    extract_outcome.errors.insert(
+                        folder.clone(),
+                        format!("Internal error while downloading updates: {message}"),
+                    );
+                }
+            }
+        }
 
         let elapsed = t_start.elapsed();
         eprintln!(
@@ -2918,6 +3941,19 @@ pub async fn update_batch_with_decisions(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Human-readable message from a joined thread's panic payload. `panic!` with
+/// a literal carries `&str`; with a format string, `String`; anything else is
+/// opaque.
+fn panic_payload_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "a download worker panicked".to_string()
+    }
 }
 
 /// Pick a download parallelism that scales with the batch but stays polite to
@@ -2973,13 +4009,26 @@ fn extract_streamed_downloads(
         };
 
         let session_id = generate_session_id(&folder_name);
+        // A filedetails response can omit its version temporarily. Keep the
+        // installed version for conflict/backup/hash metadata in that case;
+        // persisting an empty version makes the next update ambiguous.
+        let version = if dl.api_version.trim().is_empty() {
+            store
+                .addons
+                .values()
+                .find(|m| m.esoui_id == dl.esoui_id)
+                .map(|m| m.installed_version.clone())
+                .unwrap_or_default()
+        } else {
+            dl.api_version.trim().to_string()
+        };
         // Keep the ZIP hash map: this addon is extracted right below, so the map
         // doubles as the new hash baseline (no second decompression to re-hash).
         let (report, zip_hashes) = match build_conflict_report(
             addons_dir,
             &folder_name,
             dl.zip.path(),
-            &dl.api_version,
+            &version,
             &session_id,
         ) {
             Ok(r) => r,
@@ -3009,13 +4058,20 @@ fn extract_streamed_downloads(
                 }
             };
             if let Ok(mut map) = pending.lock() {
+                let reviewed_conflicts = report
+                    .conflicts
+                    .iter()
+                    .map(|conflict| conflict.relative_path.clone())
+                    .collect();
                 map.insert(
                     session_id.clone(),
                     crate::PendingUpdate {
                         zip_path: kept_path,
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
-                        update_version: dl.api_version.clone(),
+                        update_version: version.clone(),
+                        artifact_last_update: dl.info.last_update,
+                        reviewed_conflicts,
                         zip_hashes: Arc::new(zip_hashes),
                     },
                 );
@@ -3044,40 +4100,107 @@ fn extract_streamed_downloads(
         // path keeps. A failed backup fails the addon rather than proceeding to
         // destroy the edits it was supposed to preserve.
         if has_conflicts && conflict_policy == "take_update" {
-            let files_to_backup: Vec<String> = report
-                .conflicts
-                .iter()
-                .map(|c| c.relative_path.clone())
-                .collect();
-            let from_version = file_hashes::load_hash_manifest(addons_dir, &folder_name)
-                .map(|m| m.installed_version)
-                .unwrap_or_default();
-            if let Err(e) = crate::edit_backups::backup_user_files(
-                addons_dir,
-                &folder_name,
-                &files_to_backup,
-                &from_version,
-                &dl.api_version,
-            ) {
+            // Conflicts can now come from more than one folder, and backups are
+            // stored per folder under `.kalpa-backups/<folder>/`. Group first,
+            // and read each folder's own recorded version - using the primary's
+            // for a sibling would label the backup with the wrong "from".
+            let by_folder = file_hashes::group_by_folder(
+                &report
+                    .conflicts
+                    .iter()
+                    .filter(|c| {
+                        file_hashes::split_qualified(&c.relative_path).is_some_and(
+                            |(folder, relative)| {
+                                !(folder == folder_name
+                                    && zip_hashes.root_files.contains_key(relative))
+                            },
+                        )
+                    })
+                    .map(|c| c.relative_path.clone())
+                    .collect::<Vec<_>>(),
+            );
+            let mut backup_error = None;
+            for (conflict_folder, files) in &by_folder {
+                let from_version = file_hashes::load_hash_manifest(addons_dir, conflict_folder)
+                    .map(|m| m.installed_version)
+                    .unwrap_or_default();
+                if let Err(e) = crate::edit_backups::backup_user_files(
+                    addons_dir,
+                    conflict_folder,
+                    files,
+                    &from_version,
+                    &version,
+                ) {
+                    backup_error = Some(e);
+                    break;
+                }
+            }
+            if let Some(e) = backup_error {
                 emit_phase(&folder_name, "failed", index);
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
                 continue;
             }
+            let root_files: Vec<String> = report
+                .conflicts
+                .iter()
+                .filter_map(|c| {
+                    let (folder, relative) = file_hashes::split_qualified(&c.relative_path)?;
+                    (folder == folder_name && zip_hashes.root_files.contains_key(relative))
+                        .then(|| relative.to_string())
+                })
+                .collect();
+            if !root_files.is_empty() {
+                let from_version = file_hashes::load_hash_manifest(addons_dir, &folder_name)
+                    .map(|m| m.installed_version)
+                    .unwrap_or_default();
+                if let Err(e) = crate::edit_backups::backup_root_files(
+                    addons_dir,
+                    &folder_name,
+                    &root_files,
+                    &from_version,
+                    &dl.api_version,
+                ) {
+                    emit_phase(&folder_name, "failed", index);
+                    errors.insert(folder_name.clone(), e);
+                    failed.push(folder_name);
+                    continue;
+                }
+            }
         }
 
-        let skip_files: HashSet<String> = kept_files
-            .iter()
-            .map(|p| format!("{folder_name}/{p}"))
-            .collect();
+        let skip_files = build_extraction_skip_files(&kept_files, &folder_name, &zip_hashes);
 
-        let extract_result = if skip_files.is_empty() {
-            installer::extract_addon_zip(dl.zip.path(), addons_dir)
-        } else {
-            installer::extract_addon_zip_selective(dl.zip.path(), addons_dir, &skip_files)
-        };
+        // For kept files, store the upstream hash as the new baseline so the
+        // user's edit stays detectable on the next update. The ZIP hashes were
+        // already computed for the conflict report above — reuse them here
+        // instead of decompressing the ZIP a second time.
+        let hash_overrides = build_hash_overrides(&kept_files, &zip_hashes);
+        let root_hash_overrides = build_root_hash_overrides(&kept_files, &folder_name, &zip_hashes);
+        let root_baseline =
+            (!zip_hashes.root_files.is_empty()).then_some(installer::RootHashBaseline {
+                owner_folder: &folder_name,
+                hashes: &zip_hashes.root_files,
+                overrides: root_hash_overrides.as_ref(),
+            });
 
-        let installed_folders = match extract_result {
+        // Record the baseline straight from the ZIP hash map (plus a disk pass
+        // over only the files the ZIP didn't provide), rather than re-hashing
+        // the whole freshly extracted folder. If the baseline can't be recorded,
+        // don't write metadata for this addon: a folder tracked in metadata but
+        // missing its hash baseline would let the next update silently overwrite
+        // user edits. Surface it as a failed addon instead.
+        let empty_overrides = BTreeMap::new();
+        let installed_folders = match installer::install_addon_zip_selective_with_hashes_and_root(
+            dl.zip.path(),
+            addons_dir,
+            &skip_files,
+            installer::ExtractHooks::NONE,
+            dl.esoui_id,
+            &version,
+            hash_overrides.as_ref().unwrap_or(&empty_overrides),
+            root_baseline,
+        ) {
             Ok(folders) => folders,
             Err(e) => {
                 emit_phase(&folder_name, "failed", index);
@@ -3086,42 +4209,6 @@ fn extract_streamed_downloads(
                 continue;
             }
         };
-
-        // For kept files, store the upstream hash as the new baseline so the
-        // user's edit stays detectable on the next update. The ZIP hashes were
-        // already computed for the conflict report above — reuse them here
-        // instead of decompressing the ZIP a second time.
-        let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
-            None
-        } else {
-            let overrides: HashMap<String, String> = kept_files
-                .iter()
-                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-                .collect();
-            (!overrides.is_empty()).then_some(overrides)
-        };
-
-        // Record the baseline straight from the ZIP hash map (plus a disk pass
-        // over only the files the ZIP didn't provide), rather than re-hashing
-        // the whole freshly extracted folder. If the baseline can't be recorded,
-        // don't write metadata for this addon: a folder tracked in metadata but
-        // missing its hash baseline would let the next update silently overwrite
-        // user edits. Surface it as a failed addon instead.
-        if let Err(e) = file_hashes::record_hashes_with_zip_baseline(
-            addons_dir,
-            dl.zip.path(),
-            &installed_folders,
-            &folder_name,
-            &zip_hashes,
-            dl.esoui_id,
-            &dl.api_version,
-            hash_overrides.as_ref(),
-        ) {
-            emit_phase(&folder_name, "failed", index);
-            errors.insert(folder_name.clone(), e);
-            failed.push(folder_name);
-            continue;
-        }
 
         // Drop stale metadata entries for this esoui_id whose folders were
         // renamed/removed by the new release.
@@ -3142,10 +4229,10 @@ fn extract_streamed_downloads(
             addons_dir,
             &installed_folders,
             dl.esoui_id,
-            &dl.api_version,
+            &version,
             &dl.info.title,
             &dl.info.download_url,
-            0,
+            dl.info.last_update,
         );
 
         for f in &installed_folders {
@@ -3180,6 +4267,8 @@ fn extract_streamed_downloads(
             errors.insert(folder.clone(), reason.clone());
             failed.push(folder);
         }
+    } else if !completed.is_empty() {
+        esoui::invalidate_filelist_cache();
     }
 
     StreamingBatchResult {
@@ -3215,15 +4304,30 @@ pub async fn get_conflict_diff(
     let pending_clone = pending.0.clone();
 
     tokio::task::spawn_blocking(move || {
-        let (zip_path, folder_name) = {
+        let (zip_path, primary_folder, zip_hashes) = {
             let map = pending_clone
                 .lock()
                 .map_err(|_| "Failed to access pending updates".to_string())?;
             let pu = map
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {session_id} not found"))?;
-            (pu.zip_path.clone(), pu.folder_name.clone())
+            (
+                pu.zip_path.clone(),
+                pu.folder_name.clone(),
+                Arc::clone(&pu.zip_hashes),
+            )
         };
+
+        // The requested path names its own folder. It used to be re-qualified
+        // with the pending update's primary folder, so a diff for a bundled
+        // sibling looked for the file under the wrong folder on both sides.
+        let (folder_name, relative_path) = file_hashes::split_qualified(&relative_path)
+            .filter(|(folder, relative)| {
+                zip_hashes.has_folder(folder)
+                    || (*folder == primary_folder.as_str()
+                        && zip_hashes.root_files.contains_key(*relative))
+            })
+            .ok_or_else(|| format!("Path does not belong to this update: {relative_path}"))?;
 
         const MAX_DIFF_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
 
@@ -3232,7 +4336,13 @@ pub async fn get_conflict_diff(
         // every platform, while rewriting them to backslashes would name a
         // single literal-backslash component on macOS/Linux and silently render
         // the user's side of the diff as empty.
-        let user_file_path = addons_dir.join(&folder_name).join(&relative_path);
+        let is_root_file =
+            folder_name == primary_folder && zip_hashes.root_files.contains_key(relative_path);
+        let user_file_path = if is_root_file {
+            addons_dir.join(relative_path)
+        } else {
+            addons_dir.join(folder_name).join(relative_path)
+        };
         let user_content = if user_file_path.exists() {
             let meta = fs::metadata(&user_file_path)
                 .map_err(|e| format!("Failed to read user file: {e}"))?;
@@ -3257,7 +4367,14 @@ pub async fn get_conflict_diff(
         let file = fs::File::open(&zip_path).map_err(|e| format!("Failed to open ZIP: {e}"))?;
         let mut archive =
             zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {e}"))?;
-        let zip_entry_name = format!("{folder_name}/{relative_path}");
+        // A flat archive's entries carry no folder prefix - the folder only
+        // exists after extraction re-roots them - so the entry name cannot be
+        // rebuilt by string concatenation.
+        let zip_entry_name = if is_root_file {
+            relative_path.to_string()
+        } else {
+            zip_hashes.zip_entry_name(folder_name, relative_path)
+        };
         let mut entry = archive
             .by_name(&zip_entry_name)
             .map_err(|e| format!("File not found in ZIP: {e}"))?;
@@ -3295,6 +4412,44 @@ pub async fn get_conflict_diff(
 pub struct FileDecision {
     pub relative_path: String,
     pub action: String, // "keep_mine" | "take_update"
+}
+
+const CONFLICTS_CHANGED_PREFIX: &str = "Conflicts changed while the update was open";
+
+/// Complete the lifecycle claimed by `update_addon_with_decisions`.
+///
+/// Revalidation errors are deliberately retryable at the UI level: the old
+/// review must remain cancellable while the user closes it and starts a fresh
+/// scan. All other outcomes consume the session, matching the command's
+/// historical cleanup guarantee.
+fn finish_pending_update(
+    pending: &Mutex<HashMap<String, crate::PendingUpdate>>,
+    session_id: &str,
+    zip_path: &Path,
+    outcome: Result<InstallResult, String>,
+) -> Result<InstallResult, String> {
+    if outcome
+        .as_ref()
+        .is_err_and(|error| error.starts_with(CONFLICTS_CHANGED_PREFIX))
+    {
+        return outcome;
+    }
+
+    // Delete the kept temp ZIP first, then drop the pending entry. If the
+    // delete genuinely fails (e.g. another process briefly holds the file),
+    // keep the entry so `cancel_pending_update` can retry cleanup later. A
+    // file that's already gone counts as removed.
+    let removed = match fs::remove_file(zip_path) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    };
+    if removed {
+        if let Ok(mut map) = pending.lock() {
+            map.remove(session_id);
+        }
+    }
+
+    outcome
 }
 
 #[tauri::command]
@@ -3338,10 +4493,16 @@ pub async fn update_addon_with_decisions(
 
         // Run the fallible work in a helper so that, once the session is claimed,
         // the pending entry and kept temp ZIP are cleaned up whether that work
-        // succeeds OR fails. The temp ZIP was `.keep()`-ed (no auto-delete), so an
-        // early `?` return inside the helper (backup, hashing, extraction,
-        // recording, metadata save) would otherwise orphan it and leave a stale
-        // pending entry that blocks re-resolving the conflict.
+        // succeeds OR fails. The one exception is apply-time revalidation: no
+        // writes have happened yet, and the visible conflict panel still owns the
+        // session so the user can close it (which calls `cancel_pending_update`)
+        // and run a fresh scan. Consuming the session there leaves the panel with
+        // a dead id and makes its next diff/apply fail with "Session not found".
+        //
+        // The temp ZIP was `.keep()`-ed (no auto-delete), so an early `?` return
+        // inside the helper (backup, hashing, extraction, recording, metadata
+        // save) would otherwise orphan it and leave a stale pending entry that
+        // blocks re-resolving the conflict.
         //
         // The only exits before this point are the lock-poisoned and
         // session-not-found errors above, where there is nothing to clean up: no
@@ -3360,21 +4521,7 @@ pub async fn update_addon_with_decisions(
         };
         let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks, dep_policy);
 
-        // Delete the kept temp ZIP first, then drop the pending entry. If the
-        // delete genuinely fails (e.g. another process briefly holds the file),
-        // keep the entry so `cancel_pending_update` can retry cleanup later. A
-        // file that's already gone counts as removed.
-        let removed = match fs::remove_file(&pu.zip_path) {
-            Ok(()) => true,
-            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-        };
-        if removed {
-            if let Ok(mut map) = pending_clone.lock() {
-                map.remove(&session_id);
-            }
-        }
-
-        outcome
+        finish_pending_update(&pending_clone, &session_id, &pu.zip_path, outcome)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -3394,14 +4541,11 @@ fn update_with_decisions_inner(
     // detection (stored on the pending update) so we don't re-decompress and
     // re-hash the whole archive again here — the dominant cost on many-file
     // addons. Fall back to hashing it if a pending entry predates that field.
-    // This map becomes the new baseline after extraction (reused by
-    // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
-    // "keep_mine" files so the user's edit stays detectable on the next update.
-    let zip_hashes = if pu.zip_hashes.is_empty() {
-        Arc::new(file_hashes::hash_zip_entries(
-            &pu.zip_path,
-            &pu.folder_name,
-        )?)
+    // This map becomes the staged transaction's new baseline and supplies the
+    // upstream hashes for kept "keep_mine" files so the user's edit stays
+    // detectable on the next update.
+    let zip_hashes = if pu.zip_hashes.folders.is_empty() {
+        Arc::new(file_hashes::hash_zip_entries_by_folder(&pu.zip_path)?)
     } else {
         Arc::clone(&pu.zip_hashes)
     };
@@ -3411,11 +4555,73 @@ fn update_with_decisions_inner(
     // files are never sent as decisions in the first place (the UI appends them
     // by convention, and one forgetful caller would silently destroy them), and
     // a file edited during the user's deliberation carries no decision at all.
-    let classified = classify_update_files(addons_dir, &pu.folder_name, &zip_hashes)?;
+    // Across EVERY folder the archive writes, not just the primary: a sibling
+    // edited while the user deliberated would otherwise carry no decision and
+    // no conflict, and be overwritten silently.
+    let classified = classify_update_archive(addons_dir, &pu.folder_name, &zip_hashes)?;
+
+    // A decision must name a folder this archive actually writes. The
+    // classification is re-derived server-side precisely so the client cannot
+    // steer it; extending that guard to the folder axis keeps a crafted or
+    // stale decision from reaching an unrelated addon's files.
+    for decision in decisions {
+        if !matches!(decision.action.as_str(), "keep_mine" | "take_update") {
+            return Err(format!(
+                "Invalid update decision for {}: {}",
+                decision.relative_path, decision.action
+            ));
+        }
+        match file_hashes::split_qualified(&decision.relative_path) {
+            Some((folder, relative))
+                if zip_hashes.has_folder(folder)
+                    || (folder == pu.folder_name
+                        && zip_hashes.root_files.contains_key(relative)) => {}
+            _ => {
+                return Err(format!(
+                    "Update decision does not belong to this archive: {}",
+                    decision.relative_path
+                ));
+            }
+        }
+    }
+
+    // Honour a decision only for a file that is STILL conflicting. The
+    // classification above is re-derived from the current disk state, so a
+    // decision can be stale: the user marks a conflict keep-mine, then reverts
+    // the file to its baseline before applying. Trusting the stale decision
+    // would skip that file during extraction - leaving it on the old version
+    // while the update reports success - and then record the upstream hash as
+    // its baseline, so the staleness would never be noticed again.
+    let still_conflicting: HashSet<&str> = classified
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.relative_path.as_str())
+        .collect();
+
+    let reviewed_conflicts: HashSet<&str> =
+        pu.reviewed_conflicts.iter().map(String::as_str).collect();
+    let newly_conflicting: Vec<&str> = classified
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.relative_path.as_str())
+        .filter(|path| {
+            !reviewed_conflicts.contains(*path)
+                || !decisions
+                    .iter()
+                    .any(|decision| decision.relative_path.as_str() == *path)
+        })
+        .collect();
+    if !newly_conflicting.is_empty() {
+        return Err(format!(
+            "{CONFLICTS_CHANGED_PREFIX}; close this review and run Update again: {}",
+            newly_conflicting.join(", ")
+        ));
+    }
 
     let mut kept_files: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "keep_mine")
+        .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
     for path in &classified.auto_kept_files {
@@ -3424,73 +4630,94 @@ fn update_with_decisions_inner(
         }
     }
 
-    // Collect files to skip during extraction (full ZIP path with folder prefix)
-    let skip_files: HashSet<String> = kept_files
-        .iter()
-        .map(|p| format!("{}/{}", pu.folder_name, p))
-        .collect();
+    let skip_files = build_extraction_skip_files(&kept_files, &pu.folder_name, &zip_hashes);
 
-    // Collect files to back up: the ones the user chose "take_update" on, plus
-    // any edit that appeared after the scan and therefore has no decision — both
-    // are about to be overwritten.
-    let mut files_to_backup: Vec<String> = decisions
+    // Back up only current conflicts the user explicitly chose to overwrite.
+    let files_to_backup: Vec<String> = decisions
         .iter()
         .filter(|d| d.action == "take_update")
+        .filter(|d| still_conflicting.contains(d.relative_path.as_str()))
         .map(|d| d.relative_path.clone())
         .collect();
-    for conflict in &classified.conflicts {
-        let path = &conflict.relative_path;
-        if !files_to_backup.contains(path) && !kept_files.contains(path) {
-            files_to_backup.push(path.clone());
-        }
-    }
 
-    // Get current version from hash manifest for backup metadata
+    // Get current version from hash manifest for backup metadata. Pending
+    // entries created before version tracking (or from an empty API response)
+    // must not erase this known version when they are applied.
     let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
         .map(|m| m.installed_version)
         .unwrap_or_default();
+    let update_version = if pu.update_version.trim().is_empty() {
+        from_version.clone()
+    } else {
+        pu.update_version.clone()
+    };
 
-    // Back up files before overwriting
-    if !files_to_backup.is_empty() {
+    // Back up before overwriting, one call per folder. Backups live under
+    // `.kalpa-backups/<folder>/`, and each folder records its own installed
+    // version - labelling a sibling's backup with the primary's "from" version
+    // would misreport what the user is restoring from.
+    let root_files_to_backup: Vec<String> = files_to_backup
+        .iter()
+        .filter_map(|key| {
+            let (folder, relative) = file_hashes::split_qualified(key)?;
+            (folder == pu.folder_name && zip_hashes.root_files.contains_key(relative))
+                .then(|| relative.to_string())
+        })
+        .collect();
+    let non_root_files_to_backup: Vec<String> = files_to_backup
+        .iter()
+        .filter(|key| {
+            file_hashes::split_qualified(key).is_some_and(|(folder, relative)| {
+                !(folder == pu.folder_name && zip_hashes.root_files.contains_key(relative))
+            })
+        })
+        .cloned()
+        .collect();
+    for (backup_folder, files) in file_hashes::group_by_folder(&non_root_files_to_backup) {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &backup_folder)
+            .map(|m| m.installed_version)
+            .unwrap_or_default();
         crate::edit_backups::backup_user_files(
             addons_dir,
-            &pu.folder_name,
-            &files_to_backup,
+            &backup_folder,
+            &files,
             &from_version,
-            &pu.update_version,
+            &update_version,
+        )?;
+    }
+    if !root_files_to_backup.is_empty() {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
+            .map(|m| m.installed_version)
+            .unwrap_or_default();
+        crate::edit_backups::backup_root_files(
+            addons_dir,
+            &pu.folder_name,
+            &root_files_to_backup,
+            &from_version,
+            &update_version,
         )?;
     }
 
-    let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
-        None
-    } else {
-        let overrides: HashMap<String, String> = kept_files
-            .iter()
-            .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-            .collect();
-        (!overrides.is_empty()).then_some(overrides)
-    };
+    let hash_overrides = build_hash_overrides(&kept_files, &zip_hashes);
+    let root_hash_overrides = build_root_hash_overrides(&kept_files, &pu.folder_name, &zip_hashes);
+    let root_baseline =
+        (!zip_hashes.root_files.is_empty()).then_some(installer::RootHashBaseline {
+            owner_folder: &pu.folder_name,
+            hashes: &zip_hashes.root_files,
+            overrides: root_hash_overrides.as_ref(),
+        });
 
     // Extract with selective skipping (cancellable, progress-reporting)
-    let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip_with(&pu.zip_path, addons_dir, hooks)?
-    } else {
-        installer::extract_addon_zip_selective_with(&pu.zip_path, addons_dir, &skip_files, hooks)?
-    };
-
-    // Record the baseline from the ZIP hash map (plus a disk pass over only
-    // the files the ZIP didn't provide), rather than re-hashing the folder.
-    // Fail the update if it can't persist: saving metadata without a hash
-    // baseline would let the next update silently overwrite the user's edits.
-    file_hashes::record_hashes_with_zip_baseline(
-        addons_dir,
+    let empty_overrides = BTreeMap::new();
+    let installed_folders = installer::install_addon_zip_selective_with_hashes_and_root(
         &pu.zip_path,
-        &installed_folders,
-        &pu.folder_name,
-        &zip_hashes,
+        addons_dir,
+        &skip_files,
+        hooks,
         pu.esoui_id,
-        &pu.update_version,
-        hash_overrides.as_ref(),
+        &update_version,
+        hash_overrides.as_ref().unwrap_or(&empty_overrides),
+        root_baseline,
     )?;
 
     // Update metadata
@@ -3521,15 +4748,15 @@ fn update_with_decisions_inner(
         addons_dir,
         &installed_folders,
         pu.esoui_id,
-        &pu.update_version,
+        &update_version,
         &pu.folder_name,
         &download_url,
-        0,
+        pu.artifact_last_update,
     );
 
     let resolved = resolve_deps_with_policy(addons_dir, &installed_folders, &mut store, dep_policy);
 
-    metadata::save_metadata(addons_dir, &store)?;
+    save_applied_update_metadata(addons_dir, &store, true)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -3794,26 +5021,14 @@ pub async fn write_addon_file(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // Serialize the live-file mutation with publication and recovery in
+        // every Kalpa process, not just this Tauri instance.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
         // Atomic temp-file + rename: the file being saved is one the user hand
         // edited, so a crash or a Controlled Folder Access block mid-write must
         // not be able to truncate it.
-        let tmp_name = format!(
-            "{}.kalpa-edit-tmp",
-            file_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-        );
-        let tmp_path = file_path
-            .parent()
-            .map(|p| p.join(&tmp_name))
-            .unwrap_or_else(|| PathBuf::from(&tmp_name));
-        fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
-        fs::rename(&tmp_path, &file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to write file: {e}")
-        })?;
+        write_addon_file_atomically(&file_path, content.as_bytes())?;
 
         // Re-hash only the file we just wrote — compute_addon_hashes would walk
         // the entire addon folder (0.7-1.5 s per Ctrl+S on large addons) just to
@@ -3842,6 +5057,11 @@ pub async fn write_addon_file(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+fn write_addon_file_atomically(file_path: &Path, content: &[u8]) -> Result<(), String> {
+    crate::atomic_file::atomic_write(file_path, content)
+        .map_err(|error| format!("Failed to write file: {error}"))
+}
+
 #[tauri::command]
 pub async fn rescan_addon_hashes(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -3861,6 +5081,8 @@ pub async fn rescan_addon_hashes(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // Keep the folder walk and manifest save on one published generation.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
         file_hashes::detect_modifications(&addons_dir, &folder_name)
     })
     .await
@@ -3913,6 +5135,9 @@ pub async fn restore_edit_backup(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || {
+        // A restore replaces a live addon file, so it must not race a
+        // whole-folder installer publication from either Kalpa process.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
         crate::edit_backups::restore_backup_file(
             &addons_dir,
             &folder_name,
@@ -4049,28 +5274,58 @@ fn auto_link_addons_blocking(
         if let Some(api_entry) = api_lookup.get(&folder_name) {
             let already_tracked = store.addons.get(&folder_name);
 
-            // Skip bundled secondary folders: if esouiId is 0 and another
-            // addon in the store installed this folder (shares download_url),
-            // don't auto-link it to its own ESOUI entry — that would cause
-            // version mismatches since the bundled version differs from the
-            // standalone version.
+            // Skip bundled secondary folders: a folder another addon ships is
+            // not auto-linked to its own ESOUI entry, because the bundled
+            // version generally differs from the standalone one and linking
+            // would report a permanent phantom update.
+            //
+            // Provenance decides this now. Entries recorded since
+            // `bundled_by` exists say outright who shipped them. Older entries
+            // predate it and are still matched the legacy way, by ID 0 plus a
+            // shared download URL - but that heuristic is exactly what made a
+            // demoted library permanent: once demoted it shared the parent URL,
+            // so this guard refused to ever restore it.
+            //
+            // For those legacy entries the version on disk breaks the tie. If
+            // it equals what ESOUI publishes, the folder is byte-identical to
+            // the standalone release and can be relinked with no mismatch risk.
+            // Anything else is left alone rather than guessed at, and surfaces
+            // in the unlinked list for the user to decide.
             let is_bundled_secondary = already_tracked.is_some_and(|m| {
-                m.esoui_id == 0
+                if !m.bundled_by.is_empty() {
+                    return m.esoui_id == 0;
+                }
+                let legacy_shape = m.esoui_id == 0
                     && store
                         .addons
                         .values()
-                        .any(|other| other.esoui_id != 0 && other.download_url == m.download_url)
+                        .any(|other| other.esoui_id != 0 && other.download_url == m.download_url);
+                if !legacy_shape {
+                    return false;
+                }
+                let on_disk = read_local_version(addons_dir, &folder_name);
+                let heals = !on_disk.is_empty()
+                    && !api_entry.version.is_empty()
+                    && on_disk == api_entry.version;
+                !heals
             });
             if is_bundled_secondary {
+                // Keep the mismatch visible to the caller. It is already
+                // tracked metadata, so it cannot reach the ordinary
+                // `!store.addons.contains_key` not-found branch below.
+                not_found.push(folder_name);
                 continue;
             }
 
             let needs_update = match already_tracked {
                 Some(meta) => {
-                    // Update existing entries: fill in missing esoui_id or last_update
+                    // Update existing entries: fill in missing esoui_id or a
+                    // newer publication marker when its version matches the
+                    // artifact on disk. A stale filelist response must not
+                    // trigger metadata churn or regress the marker.
                     (meta.esoui_id == 0 && api_entry.esoui_id > 0)
-                        || meta.esoui_last_update == 0
-                        || meta.esoui_last_update != api_entry.last_update
+                        || (versions_match(&meta.installed_version, &api_entry.version)
+                            && api_entry.last_update > meta.esoui_last_update)
                 }
                 None => true,
             };
@@ -4088,14 +5343,24 @@ fn auto_link_addons_blocking(
                         installed_at: String::new(),
                         tags: Vec::new(),
                         esoui_last_update: 0,
+                        bundled_by: Vec::new(),
+                        esoui_marker_installed: false,
                     }
                 });
-                metadata::reconcile_addon(
-                    entry,
-                    api_entry.esoui_id,
-                    api_entry.last_update,
-                    &api_entry.file_info_uri,
-                );
+                if versions_match(&entry.installed_version, &api_entry.version) {
+                    metadata::reconcile_addon(
+                        entry,
+                        api_entry.esoui_id,
+                        api_entry.last_update,
+                        &api_entry.file_info_uri,
+                    );
+                } else {
+                    metadata::reconcile_addon_identity(
+                        entry,
+                        api_entry.esoui_id,
+                        &api_entry.file_info_uri,
+                    );
+                }
                 linked.push(folder_name);
             }
         } else if !store.addons.contains_key(&folder_name) {
@@ -4114,6 +5379,118 @@ pub struct BatchRemoveResult {
     pub removed: Vec<String>,
     pub failed: Vec<String>,
     pub errors: HashMap<String, String>,
+    pub cleanup_warnings: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAddonResult {
+    pub cleanup_warning: Option<String>,
+}
+
+fn remove_addon_from_disk(
+    addons_dir: &Path,
+    folder_name: &str,
+) -> Result<RemoveAddonResult, String> {
+    validate_name(folder_name)?;
+
+    // Remove both the enabled and disabled copies if they exist. If only one
+    // exists, remove that one. This also handles an external tool or reinstall
+    // leaving both Foo/ and Foo.disabled/ behind.
+    let enabled_exists = addons_dir.join(folder_name).is_dir();
+    let disabled_name = format!("{folder_name}.disabled");
+    let disabled_exists = addons_dir.join(&disabled_name).is_dir();
+
+    if enabled_exists {
+        installer::remove_addon_locked(addons_dir, folder_name)?;
+    }
+    if disabled_exists {
+        installer::remove_addon_locked(addons_dir, &disabled_name)?;
+    }
+    if !enabled_exists && !disabled_exists {
+        return Err(format!("Addon folder not found: {folder_name}"));
+    }
+
+    // The folder is already gone, so cleanup failures are warnings rather
+    // than removal failures. Returning an error here would make the
+    // optimistic frontend restore a row whose folder no longer exists.
+    let mut store = metadata::load_metadata(addons_dir);
+    // Anything this addon also shipped into keeps its own identity and its
+    // files; only the record that this addon wrote there goes away. The
+    // folders themselves stay on disk because other addons may declare a
+    // dependency on them.
+    let removed_id = store.addons.get(folder_name).map(|m| m.esoui_id);
+    metadata::remove_entry(&mut store, folder_name);
+    if let Some(id) = removed_id {
+        metadata::forget_bundled_parent(&mut store, id);
+    }
+
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = metadata::save_metadata(addons_dir, &store) {
+        cleanup_errors.push(error);
+    }
+    if let Some(id) = removed_id {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_dir, id) {
+            cleanup_errors.push(error);
+        }
+    }
+
+    Ok(RemoveAddonResult {
+        cleanup_warning: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; ")),
+    })
+}
+
+fn batch_remove_addons_from_disk(
+    addons_dir: &Path,
+    folder_names: &[String],
+) -> Result<BatchRemoveResult, String> {
+    let mut store = metadata::load_metadata(addons_dir);
+    let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
+    let mut removed_ids: Vec<(String, u32)> = Vec::new();
+
+    for name in folder_names {
+        match installer::remove_addon_locked(addons_dir, name) {
+            Ok(()) => {
+                let removed_id = store.addons.get(name).map(|meta| meta.esoui_id);
+                metadata::remove_entry(&mut store, name);
+                if let Some(id) = removed_id {
+                    metadata::forget_bundled_parent(&mut store, id);
+                    removed_ids.push((name.clone(), id));
+                }
+                removed.push(name.clone());
+            }
+            Err(e) => {
+                errors.insert(name.clone(), e);
+                failed.push(name.clone());
+            }
+        }
+    }
+
+    let mut cleanup_warnings = HashMap::new();
+    if let Err(error) = metadata::save_metadata(addons_dir, &store) {
+        for name in &removed {
+            cleanup_warnings.insert(name.clone(), error.clone());
+        }
+    }
+    for (name, id) in removed_ids {
+        if let Err(error) = file_hashes::forget_esoui_owner(addons_dir, id) {
+            cleanup_warnings
+                .entry(name)
+                .and_modify(|warning| {
+                    warning.push_str("; ");
+                    warning.push_str(&error);
+                })
+                .or_insert(error);
+        }
+    }
+    Ok(BatchRemoveResult {
+        removed,
+        failed,
+        errors,
+        cleanup_warnings,
+    })
 }
 
 /// Batch remove multiple addons.
@@ -4133,31 +5510,11 @@ pub async fn batch_remove_addons(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // One lock covers the whole batch and its metadata commit. Calling the
+        // public remover here would release the lock between entries.
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
-        let mut store = metadata::load_metadata(&addons_dir);
-        let mut removed: Vec<String> = Vec::new();
-        let mut failed: Vec<String> = Vec::new();
-        let mut errors: HashMap<String, String> = HashMap::new();
-
-        for name in &folder_names {
-            match installer::remove_addon(&addons_dir, name) {
-                Ok(()) => {
-                    metadata::remove_entry(&mut store, name);
-                    removed.push(name.clone());
-                }
-                Err(e) => {
-                    errors.insert(name.clone(), e);
-                    failed.push(name.clone());
-                }
-            }
-        }
-
-        metadata::save_metadata(&addons_dir, &store)?;
-        Ok(BatchRemoveResult {
-            removed,
-            failed,
-            errors,
-        })
+        batch_remove_addons_from_disk(&addons_dir, &folder_names)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -4216,6 +5573,8 @@ pub async fn batch_set_tags(
                             installed_at: String::new(),
                             tags: entry.tags,
                             esoui_last_update: 0,
+                            bundled_by: Vec::new(),
+                            esoui_marker_installed: false,
                         },
                     );
                 }
@@ -4270,6 +5629,7 @@ pub async fn batch_set_enabled(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
 
         let mut enabled: Vec<String> = Vec::new();
         let mut disabled: Vec<String> = Vec::new();
@@ -4473,28 +5833,18 @@ fn import_extract_and_record(
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
             }
-            Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
+            Ok(dl) => match installer::install_addon_zip_with_hashes(
+                dl.tmp.path(),
+                addons_dir,
+                dl.esoui_id,
+                &dl.info.version,
+                installer::ExtractHooks::NONE,
+            ) {
                 Err(e) => {
                     errors.insert(folder_name.clone(), e);
                     failed.push(folder_name);
                 }
                 Ok(folders) => {
-                    // Record the modification baseline before tracking the install,
-                    // so the next update can detect user edits instead of silently
-                    // overwriting them. Treat a baseline failure as a failed import
-                    // rather than leaving metadata pointing at a folder with no
-                    // baseline (mirrors install_addon_blocking / try_install_dep).
-                    if let Err(e) = file_hashes::record_hashes_for_folders(
-                        addons_dir,
-                        &folders,
-                        dl.esoui_id,
-                        &dl.info.version,
-                    ) {
-                        errors.insert(folder_name.clone(), e);
-                        failed.push(folder_name);
-                        continue;
-                    }
-
                     record_installed_folders(
                         &mut store,
                         addons_dir,
@@ -4690,7 +6040,13 @@ pub async fn batch_install_pack_addons(
                             total,
                         },
                     );
-                    match installer::extract_addon_zip(dl.tmp.path(), &addons_dir) {
+                    match installer::install_addon_zip_with_hashes(
+                        dl.tmp.path(),
+                        &addons_dir,
+                        dl.esoui_id,
+                        &dl.info.version,
+                        installer::ExtractHooks::NONE,
+                    ) {
                         Err(e) => {
                             errors.insert(dl.esoui_id, e);
                             failed.push(dl.esoui_id);
@@ -4706,35 +6062,6 @@ pub async fn batch_install_pack_addons(
                             );
                         }
                         Ok(folders) => {
-                            // Record the modification baseline BEFORE tracking the
-                            // install in metadata. Without it, the next update sees
-                            // stored=None, treats every file as unmodified, and would
-                            // silently overwrite the user's edits — the exact failure
-                            // the hash system prevents. If the baseline can't persist,
-                            // treat the addon as failed rather than leaving metadata
-                            // pointing at a folder with no baseline (mirrors
-                            // install_addon_blocking and try_install_dep).
-                            if let Err(e) = file_hashes::record_hashes_for_folders(
-                                &addons_dir,
-                                &folders,
-                                dl.esoui_id,
-                                &dl.info.version,
-                            ) {
-                                errors.insert(dl.esoui_id, e);
-                                failed.push(dl.esoui_id);
-                                let _ = app.emit(
-                                    "pack-install-progress",
-                                    PackInstallProgress {
-                                        esoui_id: dl.esoui_id,
-                                        label: dl.label.clone(),
-                                        phase: "failed".to_string(),
-                                        index,
-                                        total,
-                                    },
-                                );
-                                continue;
-                            }
-
                             record_installed_folders(
                                 &mut store,
                                 &addons_dir,
@@ -5733,6 +7060,26 @@ fn load_profiles_with_mirror(
     metadata::load_json_with_backup(&primary)
 }
 
+fn load_profiles_read_only_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+) -> ProfileStore {
+    let primary = profiles_path(addons_dir);
+    let primary_gone = !primary.exists()
+        && !primary.with_extension("json.tmp").exists()
+        && !primary.with_extension("json.bak").exists();
+    if primary_gone {
+        if let Some(mirror) = mirror {
+            if let Ok(content) = fs::read_to_string(mirror) {
+                if let Ok(store) = serde_json::from_str::<ProfileStore>(&content) {
+                    return store;
+                }
+            }
+        }
+    }
+    metadata::load_json_read_only_with_backup(&primary)
+}
+
 fn save_profiles_with_mirror(
     addons_dir: &std::path::Path,
     mirror: Option<&std::path::Path>,
@@ -5746,7 +7093,7 @@ fn save_profiles_with_mirror(
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(store) {
-            let _ = fs::write(mirror, json);
+            let _ = crate::atomic_file::atomic_write(mirror, json.as_bytes());
         }
     }
     Ok(())
@@ -5770,8 +7117,35 @@ fn profile_store_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn profile_transaction_guard(
+    addons_dir: &std::path::Path,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire(
+        profiles_path(addons_dir),
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn profile_read_transaction_guard(
+    addons_dir: &std::path::Path,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire_read(
+        profiles_path(addons_dir),
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     load_profiles_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+    )
+}
+
+fn load_profiles_read_only(addons_dir: &std::path::Path) -> ProfileStore {
+    load_profiles_read_only_with_mirror(
         addons_dir,
         default_profile_mirror_path(addons_dir).as_deref(),
     )
@@ -5791,7 +7165,9 @@ pub fn list_profiles(
     addons_path: String,
 ) -> Result<(Vec<AddonProfile>, Option<String>), String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let store = load_profiles(&addons_dir);
+    let _guard = profile_store_guard();
+    let _transaction = profile_read_transaction_guard(&addons_dir)?;
+    let store = load_profiles_read_only(&addons_dir);
     Ok((store.profiles, store.active_profile))
 }
 
@@ -5844,6 +7220,7 @@ pub async fn create_profile(
         let enabled_addons = snapshot_enabled_addons(&addons_dir);
 
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
 
         if store.profiles.iter().any(|p| p.name == profile_name) {
@@ -5884,6 +7261,9 @@ pub struct ActivateProfileResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilePlan {
+    /// SHA-256 digest of the canonical plan contents, used to bind activation
+    /// to the preview the user reviewed.
+    pub digest: String,
     pub to_enable: Vec<String>,
     pub to_disable: Vec<String>,
     /// See [`ActivateProfileResult::kept_dependencies`].
@@ -5892,6 +7272,49 @@ pub struct ProfilePlan {
     /// Addons the plan wants disabled but cannot: both `Foo/` and
     /// `Foo.disabled/` exist, so the rename would collide.
     pub blocked: Vec<String>,
+}
+
+// `rename_all_fields` for the struct-variant fields; the current field names
+// are single lowercase words so it is inert today, but a future snake_case
+// field must not silently break the TS contract (see uploader::watcher).
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ActivateProfileOutcome {
+    Applied { result: ActivateProfileResult },
+    PlanChanged { plan: ProfilePlan },
+}
+
+fn update_profile_plan_digest_list(hasher: &mut Sha256, field: &str, values: &[String]) {
+    let mut sorted: Vec<&str> = values.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+
+    hasher.update(field.as_bytes());
+    hasher.update([0]);
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for value in sorted {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+}
+
+fn profile_plan_digest(plan: &ProfilePlan) -> String {
+    let mut hasher = Sha256::new();
+    // Schema tag mirrors migration_plan_digest; digests never persist, so
+    // changing the byte layout has no compatibility surface.
+    hasher.update(b"schema");
+    hasher.update([0]);
+    hasher.update((b"kalpa.profile.plan.v1".len() as u64).to_le_bytes());
+    hasher.update(b"kalpa.profile.plan.v1");
+    update_profile_plan_digest_list(&mut hasher, "to_enable", &plan.to_enable);
+    update_profile_plan_digest_list(&mut hasher, "to_disable", &plan.to_disable);
+    update_profile_plan_digest_list(&mut hasher, "kept_dependencies", &plan.kept_dependencies);
+    update_profile_plan_digest_list(&mut hasher, "missing", &plan.missing);
+    update_profile_plan_digest_list(&mut hasher, "blocked", &plan.blocked);
+    file_hashes::to_hex(&hasher.finalize())
 }
 
 /// On-disk copies of one addon base name: `Foo/` and/or `Foo.disabled/`.
@@ -6088,23 +7511,19 @@ pub(crate) fn plan_profile(addons_dir: &std::path::Path, profile: &AddonProfile)
     missing.sort();
     kept_dependencies.sort();
 
-    ProfilePlan {
+    let mut plan = ProfilePlan {
+        digest: String::new(),
         to_enable,
         to_disable,
         kept_dependencies,
         missing,
         blocked,
-    }
+    };
+    plan.digest = profile_plan_digest(&plan);
+    plan
 }
 
-/// Execute a profile activation: recompute the plan against the CURRENT disk
-/// state, then perform the renames it calls for.
-pub(crate) fn apply_profile(
-    addons_dir: &std::path::Path,
-    profile: &AddonProfile,
-) -> ActivateProfileResult {
-    let plan = plan_profile(addons_dir, profile);
-
+fn apply_profile_plan(addons_dir: &std::path::Path, plan: ProfilePlan) -> ActivateProfileResult {
     let mut enabled: Vec<String> = Vec::new();
     let mut disabled: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
@@ -6141,17 +7560,44 @@ pub(crate) fn apply_profile(
     }
 }
 
+/// Execute a profile activation: recompute the plan against the CURRENT disk
+/// state, then perform the renames it calls for.
+pub(crate) fn apply_profile(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+) -> ActivateProfileResult {
+    let plan = plan_profile(addons_dir, profile);
+    apply_profile_plan(addons_dir, plan)
+}
+
+pub(crate) fn apply_profile_with_expected_plan(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+    expected_plan_digest: Option<&str>,
+) -> ActivateProfileOutcome {
+    let plan = plan_profile(addons_dir, profile);
+    if expected_plan_digest.is_some_and(|expected| expected != plan.digest) {
+        return ActivateProfileOutcome::PlanChanged { plan };
+    }
+
+    ActivateProfileOutcome::Applied {
+        result: apply_profile_plan(addons_dir, plan),
+    }
+}
+
 #[tauri::command]
 pub async fn activate_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     profile_name: String,
-) -> Result<ActivateProfileResult, String> {
+    expected_plan_digest: Option<String>,
+) -> Result<ActivateProfileOutcome, String> {
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
         let profile = {
             let _guard = profile_store_guard();
+            let _transaction = profile_transaction_guard(&addons_dir)?;
             let store = load_profiles(&addons_dir);
             store
                 .profiles
@@ -6161,18 +7607,32 @@ pub async fn activate_profile(
                 .ok_or_else(|| format!("Profile '{profile_name}' not found."))?
         };
 
+        let _addon_transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
+
         // Unlocked: the renames take seconds, and holding the lock across them
-        // would freeze every other profile command for the duration.
-        let result = apply_profile(&addons_dir, &profile);
+        // would freeze every other profile command for the duration. The
+        // AddOns transaction lock remains held so installs cannot race them.
+        let outcome = match expected_plan_digest.as_deref() {
+            Some(expected_plan_digest) => {
+                apply_profile_with_expected_plan(&addons_dir, &profile, Some(expected_plan_digest))
+            }
+            None => ActivateProfileOutcome::Applied {
+                result: apply_profile(&addons_dir, &profile),
+            },
+        };
+        if matches!(outcome, ActivateProfileOutcome::PlanChanged { .. }) {
+            return Ok(outcome);
+        }
 
         // Re-load rather than writing the pre-apply snapshot back: a profile
         // created, renamed or deleted while the renames ran must survive.
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
 
-        Ok(result)
+        Ok(outcome)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -6189,7 +7649,11 @@ pub async fn preview_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        let store = load_profiles(&addons_dir);
+        let store = {
+            let _guard = profile_store_guard();
+            let _transaction = profile_read_transaction_guard(&addons_dir)?;
+            load_profiles_read_only(&addons_dir)
+        };
         let profile = store
             .profiles
             .iter()
@@ -6218,6 +7682,7 @@ pub async fn update_profile(
         let enabled = snapshot_enabled_addons(&addons_dir);
 
         let _guard = profile_store_guard();
+        let _transaction = profile_transaction_guard(&addons_dir)?;
         let mut store = load_profiles(&addons_dir);
 
         let profile = store
@@ -6248,6 +7713,7 @@ pub fn rename_profile(
     validate_name(&new_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let mut store = load_profiles(&addons_dir);
 
     if old_name == new_name {
@@ -6279,6 +7745,7 @@ pub fn delete_profile(
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let _guard = profile_store_guard();
+    let _transaction = profile_transaction_guard(&addons_dir)?;
     let mut store = load_profiles(&addons_dir);
 
     store.profiles.retain(|p| p.name != profile_name);
@@ -6414,6 +7881,12 @@ pub async fn copy_addons_to_instance(
 
     tokio::task::spawn_blocking(move || {
         let target = PathBuf::from(&target_addons_path);
+        // Same class as validate_addons_path: a UNC/device target makes the
+        // canonicalize below resolve over SMB before the detected-instance
+        // check can reject it. A real game instance is never one of these.
+        if crate::platform::has_unc_or_verbatim_prefix(&target) {
+            return Err("Target folder uses an unsupported network or device prefix.".to_string());
+        }
         let target_canonical = target
             .canonicalize()
             .map_err(|e| format!("Target AddOns folder is not accessible: {e}"))?;
@@ -6439,6 +7912,11 @@ pub async fn copy_addons_to_instance(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        // Copy reads one live addon tree and publishes into another. Hold both
+        // transaction locks in canonical order so either instance's installer
+        // must finish first and two opposite-direction copies cannot deadlock.
+        let _transactions =
+            crate::install_txn::lock_many_and_recover(&[&source, &target_canonical])?;
         Ok(copy_addons_between(&source, &target_canonical))
     })
     .await
@@ -7176,6 +8654,8 @@ pub struct MinionAddon {
     pub uid: u32,
     pub version: String,
     pub folders: Vec<String>,
+    #[serde(skip)]
+    pub addons_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7199,21 +8679,36 @@ pub fn find_minion_xml() -> Option<PathBuf> {
 
 pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
     let mut addons: Vec<MinionAddon> = Vec::new();
+    static RE_GAME: OnceLock<Regex> = OnceLock::new();
+    let re_game = RE_GAME.get_or_init(|| Regex::new(r#"<game\s+([^>]*)>"#).unwrap());
     static RE_ADDON: OnceLock<Regex> = OnceLock::new();
-    let re_addon = RE_ADDON.get_or_init(|| {
-        Regex::new(r#"<addon[^>]*uid="(\d+)"[^>]*ui-version="([^"]*)"[^>]*>"#).unwrap()
-    });
+    let re_addon = RE_ADDON.get_or_init(|| Regex::new(r#"<addon\s+([^>]*)>"#).unwrap());
+    static RE_UID: OnceLock<Regex> = OnceLock::new();
+    let re_uid = RE_UID.get_or_init(|| Regex::new(r#"(?:^|\s)uid="(\d+)""#).unwrap());
+    static RE_VERSION: OnceLock<Regex> = OnceLock::new();
+    let re_version =
+        RE_VERSION.get_or_init(|| Regex::new(r#"(?:^|\s)ui-version="([^"]*)""#).unwrap());
+    static RE_ADDONS_PATH: OnceLock<Regex> = OnceLock::new();
+    let re_addons_path =
+        RE_ADDONS_PATH.get_or_init(|| Regex::new(r#"(?:^|\s)addon-path="([^"]*)""#).unwrap());
     static RE_DIR: OnceLock<Regex> = OnceLock::new();
     let re_dir = RE_DIR.get_or_init(|| Regex::new(r"<dir>([^<]+)</dir>").unwrap());
 
     // Simple state machine parser for Minion XML
+    let mut current_addons_path: Option<PathBuf> = None;
     let mut current_uid: Option<u32> = None;
     let mut current_version = String::new();
     let mut current_dirs: Vec<String> = Vec::new();
 
     for line in xml_content.lines() {
         let line = line.trim();
-        if let Some(caps) = re_addon.captures(line) {
+        if let Some(caps) = re_game.captures(line) {
+            current_addons_path = re_addons_path
+                .captures(&caps[1])
+                .and_then(|path_caps| decode_minion_addons_path(&path_caps[1]));
+        } else if line.contains("</game>") {
+            current_addons_path = None;
+        } else if let Some(caps) = re_addon.captures(line) {
             // Save previous addon if any
             if let Some(uid) = current_uid {
                 if !current_dirs.is_empty() {
@@ -7221,11 +8716,17 @@ pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
                         uid,
                         version: current_version.clone(),
                         folders: current_dirs.clone(),
+                        addons_path: current_addons_path.clone(),
                     });
                 }
             }
-            current_uid = caps[1].parse::<u32>().ok();
-            current_version = caps[2].to_string();
+            current_uid = re_uid
+                .captures(&caps[1])
+                .and_then(|uid_caps| uid_caps[1].parse::<u32>().ok());
+            current_version = re_version
+                .captures(&caps[1])
+                .map(|version_caps| version_caps[1].to_string())
+                .unwrap_or_default();
             current_dirs = Vec::new();
         } else if let Some(caps) = re_dir.captures(line) {
             current_dirs.push(caps[1].to_string());
@@ -7236,6 +8737,7 @@ pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
                         uid,
                         version: current_version.clone(),
                         folders: current_dirs.clone(),
+                        addons_path: current_addons_path.clone(),
                     });
                 }
             }
@@ -7245,6 +8747,21 @@ pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
     }
 
     addons
+}
+
+fn decode_minion_addons_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    BASE64_STANDARD
+        .decode(value)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from(value)))
 }
 
 #[tauri::command]
@@ -7268,13 +8785,19 @@ pub async fn migrate_from_minion(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        let result = safe_migration::execute_migration(&addons_dir)?;
-        Ok(MinionMigrationResult {
-            found: true,
-            addon_count: result.addon_count,
-            imported: result.imported,
-            already_tracked: result.already_tracked,
-        })
+        match safe_migration::execute_migration(&addons_dir, None)? {
+            safe_migration::MigrationExecuteOutcome::Applied { result } => {
+                Ok(MinionMigrationResult {
+                    found: true,
+                    addon_count: result.addon_count,
+                    imported: result.imported,
+                    already_tracked: result.already_tracked,
+                })
+            }
+            safe_migration::MigrationExecuteOutcome::PlanChanged { .. } => {
+                Err("Migration plan changed unexpectedly.".to_string())
+            }
+        }
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -7327,7 +8850,8 @@ pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
-) -> Result<safe_migration::MigrationResult, String> {
+    expected_plan_digest: Option<String>,
+) -> Result<safe_migration::MigrationExecuteOutcome, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
@@ -7335,7 +8859,7 @@ pub async fn migration_execute(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        safe_migration::execute_migration(&addons_dir)
+        safe_migration::execute_migration(&addons_dir, expected_plan_digest.as_deref())
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -7371,9 +8895,12 @@ pub async fn restore_snapshot(
 ) -> Result<u32, String> {
     validate_name(&snapshot_id)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || safe_migration::restore_snapshot(&addons_dir, &snapshot_id))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
+        safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -8541,10 +10068,16 @@ pub struct EsoPackData {
     pub addons: Vec<PackAddonEntry>,
 }
 
-#[tauri::command]
-pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
-    let file_path = PathBuf::from(&path);
+fn pack_export_file_name(title: &str) -> String {
+    let safe_name: String = title
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || "-_ ".contains(*character))
+        .collect();
+    let safe_name = safe_name.split_whitespace().collect::<Vec<_>>().join("-");
+    format!("{safe_name}.esopack")
+}
 
+fn export_pack_to_path(pack: EsoPackFile, file_path: &Path) -> Result<(), String> {
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Export path must have .esopack extension.".to_string());
     }
@@ -8568,18 +10101,30 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     // Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING), so removing the
     // previous export first would only open a window where a crash leaves the
     // user with no .esopack at all.
-    let tmp_path = file_path.with_extension("esopack.tmp");
-    fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {e}"))?;
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })
+    crate::atomic_file::atomic_write(&file_path, json.as_bytes())
+        .map_err(|error| format!("Failed to write file: {error}"))
 }
 
 #[tauri::command]
-pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
-    let file_path = PathBuf::from(&path);
+pub async fn export_pack_file(app: AppHandle, pack: EsoPackFile) -> Result<bool, String> {
+    let file_name = pack_export_file_name(&pack.pack.title);
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .add_filter("ESO Pack", &["esopack"])
+        .set_file_name(file_name)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let file_path = selected_path
+        .into_path()
+        .map_err(|_| "The save dialog did not return a local file path.".to_string())?;
+    export_pack_to_path(pack, &file_path)?;
+    Ok(true)
+}
 
+fn import_pack_from_path(file_path: &Path) -> Result<EsoPackFile, String> {
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Only .esopack files can be imported.".to_string());
     }
@@ -8612,6 +10157,22 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     }
 
     Ok(pack)
+}
+
+#[tauri::command]
+pub async fn import_pack_file(app: AppHandle) -> Result<Option<EsoPackFile>, String> {
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .add_filter("ESO Pack", &["esopack"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let file_path = selected_path
+        .into_path()
+        .map_err(|_| "The open dialog did not return a local file path.".to_string())?;
+    import_pack_from_path(&file_path).map(Some)
 }
 
 /// Export the SavedVariables settings block for a list of addon folder names.
@@ -8892,14 +10453,8 @@ pub async fn import_sv_settings(
             // Unix AND on Windows (MoveFileExW with MOVEFILE_REPLACE_EXISTING),
             // so the live file is never removed first — a failure here leaves
             // the previous settings in place instead of no file at all.
-            let tmp = sv_dir.join(format!("{folder}.lua.tmp"));
-            if let Err(e) = fs::write(&tmp, &substituted) {
+            if let Err(e) = write_imported_sv(&dest, substituted.as_bytes()) {
                 errors.push(format!("{folder}: failed to write: {e}"));
-                continue;
-            }
-            if let Err(e) = fs::rename(&tmp, &dest) {
-                let _ = fs::remove_file(&tmp);
-                errors.push(format!("{folder}: failed to finalize write: {e}"));
                 continue;
             }
 
@@ -8914,6 +10469,10 @@ pub async fn import_sv_settings(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn write_imported_sv(destination: &Path, content: &[u8]) -> Result<(), String> {
+    crate::atomic_file::atomic_write(destination, content).map_err(|error| error.to_string())
 }
 
 /// Walk the SavedVariables `.lua` files, parse each that parses successfully,
@@ -9437,7 +10996,7 @@ pub async fn is_eso_running() -> Result<bool, String> {
     tokio::task::spawn_blocking(|| {
         #[cfg(target_os = "windows")]
         {
-            is_eso_running_windows()
+            is_eso_running_windows(is_eso_client_process_name)
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -9452,10 +11011,84 @@ pub async fn is_eso_running() -> Result<bool, String> {
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Check for eso64.exe / eso.exe using the Windows Toolhelp32 snapshot API.
-/// This avoids spawning a `tasklist` subprocess (which lists every process as CSV).
+/// Like [`is_eso_running`], but also true while the ZOS/Bethesda launcher is
+/// open. The launcher's patcher rewrites files inside the client directory —
+/// including `nvngx_dlss.dll` — during a game update or a Repair, so any
+/// feature that writes into that directory (ReShade install, DLSS DLL swap)
+/// must treat the launcher as "the client is active" even though no addon
+/// manager or migration flow needs to.
+///
+/// This is intentionally a separate command from `is_eso_running` rather than
+/// broadening it in place: `is_eso_running` already backs the migration
+/// wizard's preconditions (`safe_migration.rs`) and the `eso-running-dialog`
+/// UI, both of which tell the user to close *the game*. Making that check
+/// also fire while only the launcher window is open (a common idle state)
+/// would be a false-positive regression for those callers.
+///
+/// Used by `client_write::begin_write` as the gate on every client-directory
+/// write.
+#[tauri::command]
+pub async fn is_eso_or_launcher_running() -> Result<bool, String> {
+    tokio::task::spawn_blocking(is_eso_or_launcher_running_blocking)
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Blocking core of [`is_eso_or_launcher_running`].
+///
+/// Exposed separately because `client_write::ApprovedRoot` re-asserts the
+/// gate from inside `client_backup`'s placement loop, which is synchronous
+/// filesystem work its callers already run on a blocking thread. Going
+/// through the async command there would mean either blocking a runtime
+/// worker or making the whole transactional placement path async for one
+/// process-list walk.
+pub fn is_eso_or_launcher_running_blocking() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        is_eso_running_windows(is_eso_or_launcher_process_name)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Same substring-match caveat as `is_eso_running`'s unix branch.
+        Ok(crate::platform::unix_process_running("eso64")
+            || crate::platform::unix_process_running("bethesda.net_launcher")
+            || crate::platform::unix_process_running("esolauncher"))
+    }
+}
+
+/// True if `name` is `eso64.exe` or `eso.exe`, compared case-insensitively.
+/// `name` may be mixed-case; this lowercases before matching.
+///
+/// Only the Windows process walk matches on executable *names*; the other
+/// platforms go through `pgrep`, so outside Windows this exists purely for the
+/// unit tests below and would otherwise trip `-D dead_code`.
+#[cfg(any(target_os = "windows", test))]
+fn is_eso_client_process_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "eso64.exe" || lower == "eso.exe"
+}
+
+/// True if `name` is the ESO client, or the ZOS/Bethesda launcher, compared
+/// case-insensitively. The launcher names are kept in sync with
+/// `PROTECTED_NAMES` in `client_write.rs`, which refuses to let Kalpa write
+/// over these same executables.
+///
+/// Same non-Windows caveat as [`is_eso_client_process_name`].
+#[cfg(any(target_os = "windows", test))]
+fn is_eso_or_launcher_process_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    is_eso_client_process_name(&lower)
+        || lower == "bethesda.net_launcher.exe"
+        || lower == "esolauncher.exe"
+}
+
+/// Check the running-process snapshot on Windows for a process name matching
+/// `matches`. Shared by [`is_eso_running`] and [`is_eso_or_launcher_running`]
+/// so the Toolhelp32 FFI walk is written once. This avoids spawning a
+/// `tasklist` subprocess (which lists every process as CSV).
 #[cfg(target_os = "windows")]
-fn is_eso_running_windows() -> Result<bool, String> {
+fn is_eso_running_windows(matches: impl Fn(&str) -> bool) -> Result<bool, String> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
 
@@ -9497,10 +11130,9 @@ fn is_eso_running_windows() -> Result<bool, String> {
         if Process32FirstW(snap, &mut entry) != 0 {
             loop {
                 let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
-                let name = OsString::from_wide(&entry.szExeFile[..len])
-                    .to_string_lossy()
-                    .to_lowercase();
-                if name == "eso64.exe" || name == "eso.exe" {
+                let name_os = OsString::from_wide(&entry.szExeFile[..len]);
+                let name = name_os.to_string_lossy();
+                if matches(&name) {
                     found = true;
                     break;
                 }
@@ -9773,8 +11405,11 @@ pub fn update_tray_tooltip(
 /// instead of the plugin-store `save()` so writes are crash-safe (write-temp +
 /// fsync + atomic rename); see `settings_store`.
 #[tauri::command]
-pub async fn flush_settings(app: tauri::AppHandle) -> Result<(), String> {
-    crate::settings_store::flush(&app)
+pub async fn flush_settings(
+    app: tauri::AppHandle,
+    entries: BTreeMap<String, serde_json::Value>,
+) -> Result<(), String> {
+    crate::settings_store::flush_entries(&app, entries)
 }
 
 /// Whether the settings store opened TAINTED (empty over an unreadable settings
@@ -9925,22 +11560,404 @@ fn resolve_native_shell_executable(app: &tauri::AppHandle) -> Result<PathBuf, St
     resolve_native_shell_executable_from(explicit, current_exe, resource_dir, current_dir)
 }
 
-/// Name of the "a native boot is in flight and not yet confirmed" marker in
-/// the app data dir. Written just before spawning the sidecar; deleted by the
-/// sidecar once its event loop is up. A surviving marker on the NEXT launch
-/// means the last native boot died before showing a window — the startup gate
-/// then reverts to the WebView UI instead of crash-looping with no UI at all.
-const NATIVE_BOOT_PENDING: &str = "native-boot.pending";
 /// One-shot note the fallback leaves for the WebView frontend so it can tell
 /// the user native mode was turned off (read + cleared by
 /// [`native_boot_failure_pending`]).
 const NATIVE_BOOT_FAILED: &str = "native-boot-failed";
 
+static WEBVIEW_AUTHORITY: OnceLock<Mutex<Option<crate::native_boot::AuthorityGuard>>> =
+    OnceLock::new();
+static NATIVE_HANDOFF_ACTIVE: AtomicBool = AtomicBool::new(false);
+static NATIVE_HANDOFF_CANCELLED: AtomicBool = AtomicBool::new(false);
+static NATIVE_HANDOFF_IS_STARTUP: AtomicBool = AtomicBool::new(false);
+static STARTUP_WEBVIEW_REQUESTED: AtomicBool = AtomicBool::new(false);
+const NATIVE_HANDOFF_CANCELLED_ERROR: &str =
+    "Native handoff was cancelled to preserve an incoming activation.";
+/// Set when this process released UI authority and could not take it back.
+///
+/// Staying alive in that state is not merely "unauthoritative": the lock is the
+/// only thing that stops the next launch from spawning a sidecar, and a sidecar
+/// that finds the lock free claims it and starts writing. Two independent
+/// writers is exactly what the handshake exists to prevent, so this is fatal —
+/// the same rule the sidecar's own authority failures already follow.
+static WEBVIEW_AUTHORITY_LOST: AtomicBool = AtomicBool::new(false);
+
+fn webview_authority() -> &'static Mutex<Option<crate::native_boot::AuthorityGuard>> {
+    WEBVIEW_AUTHORITY.get_or_init(|| Mutex::new(None))
+}
+
+fn begin_native_handoff(is_startup: bool) -> Result<(), String> {
+    // Serialize admission with activation cancellation and authority release.
+    // Only the admitted invocation may reset the process-global cancel flag.
+    let _authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    NATIVE_HANDOFF_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|_| "A native performance mode handoff is already in progress.".to_string())?;
+    NATIVE_HANDOFF_CANCELLED.store(
+        is_startup && STARTUP_WEBVIEW_REQUESTED.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    NATIVE_HANDOFF_IS_STARTUP.store(is_startup, Ordering::SeqCst);
+    Ok(())
+}
+
+fn abort_native_handoff() {
+    // The caller reached this only after winning begin_native_handoff, so it
+    // owns both flags. Taking the mutex prevents an activation from observing
+    // a half-reset state.
+    if let Ok(_authority) = webview_authority().lock() {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+        STARTUP_WEBVIEW_REQUESTED.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn claim_webview_authority(app: &tauri::AppHandle) -> Result<(), String> {
+    let state_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    let guard = crate::native_boot::claim_webview_after_shutdown(
+        &state_dir,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    *authority = Some(guard);
+    STARTUP_WEBVIEW_REQUESTED.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+fn reclaim_webview_authority(state_dir: &Path) -> Result<(), String> {
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if authority.is_some() {
+        return Ok(());
+    }
+    let guard = match crate::native_boot::claim_webview_after_shutdown(
+        state_dir,
+        crate::native_boot::READY_TIMEOUT,
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            // The reclaim polls for the whole timeout, so failing means either
+            // another process held the lock for that entire window — it is the
+            // UI now, not this one — or the lock itself is unusable. Continuing
+            // to render and write either way is the two-writer bug.
+            WEBVIEW_AUTHORITY_LOST.store(true, Ordering::SeqCst);
+            eprintln!(
+                "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
+            );
+            return Err(error);
+        }
+    };
+    *authority = Some(guard);
+    Ok(())
+}
+
+/// Whether this process released UI authority and failed to take it back.
+pub(crate) fn webview_authority_was_lost() -> bool {
+    WEBVIEW_AUTHORITY_LOST.load(Ordering::SeqCst)
+}
+
+/// Whether this process currently holds the cross-process UI authority lock.
+///
+/// A live WebView normally always holds it: startup fails closed if
+/// `claim_webview_authority` cannot, and a reverse-handoff child claims it in
+/// `complete_webview_handoff`. It is false only between releasing authority to
+/// a native child and either that child proving acquisition or this process
+/// reclaiming. Acting on a user activation in that window is what would put two
+/// writers on the same state, so the activation path gates on this.
+pub(crate) fn holds_webview_authority() -> bool {
+    webview_authority()
+        .lock()
+        .map(|authority| authority.is_some())
+        .unwrap_or(false)
+}
+
+/// Preserve an activation in the still-live WebView instead of letting an
+/// in-flight native handoff exit underneath it.
+fn cancel_native_handoff(
+    reclaim: impl FnOnce() -> Result<crate::native_boot::AuthorityGuard, String>,
+) -> Result<bool, String> {
+    // Checking the handoff state and publishing cancellation belong to the
+    // same critical section as authority release. Otherwise commit can pass
+    // between the load and store and exit underneath this activation.
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
+        NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+        eprintln!("[native-shell] cancelling handoff for incoming activation");
+        if authority.is_none() && !NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst) {
+            // The child became ready and the command released authority, but
+            // ExitRequested has not committed yet. Reclaim before the callback
+            // reveals or emits into this WebView.
+            match reclaim() {
+                Ok(guard) => *authority = Some(guard),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Atomically choose between committing the ready child or preserving an
+/// activation that raced the end of the wait. The callback and this function
+/// serialize on the authority mutex, closing the post-ready/pre-exit gap.
+fn commit_native_handoff_authority_release() -> Result<(), String> {
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    if NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst) {
+        NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+        NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+        return Err(NATIVE_HANDOFF_CANCELLED_ERROR.into());
+    }
+    authority.take();
+    Ok(())
+}
+
+pub(crate) fn finish_native_handoff_exit() -> bool {
+    // Serialize the ExitRequested decision with an activation callback that
+    // has entered cancellation but has not published its flag yet.
+    let Ok(_authority) = webview_authority().lock() else {
+        return true;
+    };
+    if !NATIVE_HANDOFF_ACTIVE.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.swap(false, Ordering::SeqCst)
+}
+
+/// Decide an early-startup duplicate result on the UI thread. An activation
+/// callback and this decision are serialized by that thread and this mutex.
+pub(crate) fn should_exit_for_existing_native_startup() -> bool {
+    let Ok(_authority) = webview_authority().lock() else {
+        return false;
+    };
+    !STARTUP_WEBVIEW_REQUESTED.swap(false, Ordering::SeqCst)
+}
+
+fn finish_existing_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<bool, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let exit_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let should_exit = should_exit_for_existing_native_startup();
+        let _ = sender.send(should_exit);
+        if should_exit {
+            exit_handle.exit(0);
+        }
+    })
+    .map_err(|error| format!("Failed to finalize native startup on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())
+}
+
+/// Complete the reverse handoff only after the WebView page/runtime is live.
+/// Called by the main-window finished-load callback while the window is hidden.
+pub(crate) fn complete_webview_handoff(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(launch_id) = std::env::var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    // This process claims authority under the handoff ID rather than minting its
+    // own, so the ID must classify as a WebView owner. Refusing here fails closed
+    // to the still-live native shell, which reclaims on our exit; proceeding
+    // would publish an active record that reads as native.
+    if !crate::native_boot::is_webview_launch_id(&launch_id) {
+        return Err(format!(
+            "WebView handoff launch ID is not WebView-shaped: {launch_id}"
+        ));
+    }
+    let state_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    if !crate::native_boot::signal_ready(&state_dir, &launch_id)? {
+        return Err(format!(
+            "WebView handoff launch ID was rejected: {launch_id}"
+        ));
+    }
+    eprintln!("[native-shell] WebView runtime ready launch_id={launch_id}");
+    let guard = crate::native_boot::claim_after_ready_release(
+        &state_dir,
+        &launch_id,
+        crate::native_boot::READY_TIMEOUT,
+    )?;
+    let mut authority = webview_authority()
+        .lock()
+        .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+    *authority = Some(guard);
+    let proof = authority
+        .as_ref()
+        .expect("WebView authority was just stored")
+        .signal_acquired();
+    match proof {
+        Ok(true) => {}
+        Ok(false) => {
+            authority.take();
+            return Err(format!(
+                "WebView handoff authority proof failed for {launch_id}: launch ID was rejected"
+            ));
+        }
+        Err(error) => {
+            authority.take();
+            return Err(format!(
+                "WebView handoff authority proof failed for {launch_id}: {error}"
+            ));
+        }
+    }
+    drop(authority);
+    std::env::remove_var(crate::native_boot::WEBVIEW_LAUNCH_ID_ENV);
+    Ok(())
+}
+
+fn acquire_native_launch_guard(
+    state_dir: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<crate::transaction_lock::LockGuard, String> {
+    crate::transaction_lock::acquire(
+        crate::native_boot::pending_path(state_dir),
+        crate::transaction_lock::LockOptions {
+            timeout: crate::native_boot::READY_TIMEOUT,
+            cancel,
+        },
+    )
+    .map_err(|error| format!("Could not serialize native launch: {error}"))
+}
+
+#[derive(Clone)]
+enum NativeLaunchMode {
+    Startup(tauri::AppHandle),
+    Handoff(tauri::AppHandle),
+}
+
+impl NativeLaunchMode {
+    fn cancel_flag(&self) -> &'static AtomicBool {
+        &NATIVE_HANDOFF_CANCELLED
+    }
+}
+
+pub(crate) fn cancel_native_handoff_for_activation(
+    app: &tauri::AppHandle,
+    startup_pending: bool,
+) -> Result<bool, String> {
+    if startup_pending {
+        let _authority = webview_authority()
+            .lock()
+            .map_err(|_| "WebView authority state is unavailable.".to_string())?;
+        STARTUP_WEBVIEW_REQUESTED.store(true, Ordering::SeqCst);
+        if NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst) {
+            NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+        }
+        return Ok(true);
+    }
+    cancel_native_handoff(|| {
+        let state_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+        crate::native_boot::claim_webview_after_shutdown(
+            &state_dir,
+            crate::native_boot::READY_TIMEOUT,
+        )
+    })
+}
+
+fn finish_native_startup_on_main_thread(app: &tauri::AppHandle) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let exit_handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = commit_native_handoff_authority_release();
+        let should_exit = result.is_ok();
+        let _ = sender.send(result);
+        if should_exit {
+            exit_handle.exit(0);
+        }
+    })
+    .map_err(|error| format!("Failed to finalize native startup on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "Native startup finalization channel closed unexpectedly.".to_string())?
+}
+
+fn set_main_webview_visible_on_main_thread(
+    app: &tauri::AppHandle,
+    visible: bool,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let window_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = window_app
+            .get_webview_window("main")
+            .ok_or_else(|| "Main WebView window is unavailable.".to_string())
+            .and_then(|window| {
+                if visible {
+                    window.show().map_err(|error| {
+                        format!("Failed to restore the WebView window: {error}")
+                    })?;
+                    window.set_focus().map_err(|error| {
+                        format!("Failed to focus the restored WebView window: {error}")
+                    })
+                } else {
+                    window
+                        .hide()
+                        .map_err(|error| format!("Failed to quiesce the WebView window: {error}"))
+                }
+            });
+        let _ = sender.send(result);
+    })
+    .map_err(|error| format!("Failed to update the WebView on the event loop: {error}"))?;
+    receiver
+        .recv()
+        .map_err(|_| "WebView visibility channel closed unexpectedly.".to_string())?
+}
+
+fn quiesce_then_release_webview_authority(
+    quiesce: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    quiesce()?;
+    commit_native_handoff_authority_release()
+}
+
+fn restore_handoff_webview(mode: &NativeLaunchMode) -> Result<(), String> {
+    match mode {
+        NativeLaunchMode::Handoff(app) => set_main_webview_visible_on_main_thread(app, true),
+        NativeLaunchMode::Startup(_) => Ok(()),
+    }
+}
+
 fn launch_native_shell_process(
     exe_path: &Path,
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
+    mode: NativeLaunchMode,
 ) -> Result<(), String> {
+    let state_dir = app_data_dir.ok_or_else(|| {
+        "Native performance UI requires an application state directory.".to_string()
+    })?;
+    let cancel = mode.cancel_flag();
+    let _pending_guard = match acquire_native_launch_guard(&state_dir, Some(cancel)) {
+        Ok(guard) => guard,
+        Err(_) if cancel.load(Ordering::SeqCst) => {
+            return Err(NATIVE_HANDOFF_CANCELLED_ERROR.to_string());
+        }
+        Err(error) => return Err(error),
+    };
+    let launch_id = crate::native_boot::new_launch_id();
+    crate::native_boot::prepare(&state_dir, &launch_id)?;
     let (render_preset, render_backend) = native_shell_render_config();
     let mut command = std::process::Command::new(exe_path);
     // This process may itself carry re-entry flags from the launch that
@@ -9952,6 +11969,7 @@ fn launch_native_shell_process(
         "KALPA_START_PACK_HUB",
         "KALPA_START_PACK_HUB_ID",
         "KALPA_FORCE_WEBVIEW",
+        crate::native_boot::LAUNCH_ID_ENV,
         // Slint reads this one itself. We pass KALPA_SLINT_BACKEND explicitly
         // below and the sidecar prefers it, but leaving an inherited value in
         // the child's environment means the renderer it ends up on is not
@@ -9963,31 +11981,191 @@ fn launch_native_shell_process(
     command
         .env("KALPA_RENDER_PRESET", render_preset)
         .env("KALPA_SLINT_BACKEND", render_backend)
-        .env("KALPA_NATIVE_AUTO_PLACE", "0");
+        .env("KALPA_NATIVE_AUTO_PLACE", "0")
+        .env(crate::native_boot::LAUNCH_ID_ENV, &launch_id)
+        .env("KALPA_NATIVE_STATE_DIR", &state_dir);
 
-    if let Some(path) = &app_data_dir {
-        command.env("KALPA_NATIVE_STATE_DIR", path);
-        // Boot handshake: the sidecar deletes this once its UI is really up.
-        let _ = fs::create_dir_all(path);
-        let _ = fs::write(path.join(NATIVE_BOOT_PENDING), b"1");
-    }
     if let Some(path) = webview_exe {
         command.env("KALPA_WEBVIEW_EXE", path);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Failed to launch native performance UI: {error}"))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(format!("Failed to launch native performance UI: {error}"));
+        }
+    };
 
-    std::thread::sleep(Duration::from_millis(200));
-    match child.try_wait() {
-        Ok(Some(status)) => Err(format!(
-            "Native performance UI exited immediately: {status}"
-        )),
-        Ok(None) => Ok(()),
-        Err(error) => Err(format!(
-            "Failed to verify native performance UI launch: {error}"
-        )),
+    eprintln!("[native-shell] waiting for ready launch_id={launch_id}");
+    let mut cancelled = false;
+    let outcome = crate::native_boot::wait_for_ready(
+        &state_dir,
+        &launch_id,
+        crate::native_boot::READY_TIMEOUT,
+        || {
+            if cancel.load(Ordering::SeqCst) {
+                cancelled = true;
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))?;
+                eprintln!("[native-shell] launch cancelled before ready launch_id={launch_id}");
+                return Ok(crate::native_boot::ChildState::Exited);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!(
+                    "[native-shell] child exited before ready launch_id={launch_id} status={status}"
+                );
+                    Ok(crate::native_boot::ChildState::Exited)
+                }
+                Ok(None) => Ok(crate::native_boot::ChildState::Running),
+                Err(error) => Err(format!(
+                    "Failed to inspect native performance UI launch {launch_id}: {error}"
+                )),
+            }
+        },
+    );
+    // Positive proof of a live owner is the held OS lock alone. Conjoining the
+    // child's `ready` marker would make duplicate acceptance depend on a file
+    // publication the duplicate child may fail to complete.
+    let existing_native_ready = crate::native_boot::live_native_authority_exists(&state_dir);
+    let first_outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            return Err(error);
+        }
+    };
+    if first_outcome == crate::native_boot::WaitOutcome::Ready {
+        let release = match &mode {
+            NativeLaunchMode::Handoff(app) => quiesce_then_release_webview_authority(|| {
+                set_main_webview_visible_on_main_thread(app, false)
+            }),
+            NativeLaunchMode::Startup(_) => commit_native_handoff_authority_release(),
+        };
+        if let Err(error) = release {
+            let _ =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            restore_handoff_webview(&mode).map_err(|restore_error| {
+                format!("{error} WebView restoration failed: {restore_error}")
+            })?;
+            return Err(error);
+        }
+        eprintln!("[native-shell] ready launch_id={launch_id}; waiting for authority proof");
+        let acquired = crate::native_boot::wait_for_acquired(
+            &state_dir,
+            &launch_id,
+            crate::native_boot::READY_TIMEOUT,
+            || {
+                if cancel.load(Ordering::SeqCst) {
+                    cancelled = true;
+                    let _ = crate::native_boot::terminate_and_reap_child(
+                        &mut child,
+                        Duration::from_secs(1),
+                    );
+                    return Ok(crate::native_boot::ChildState::Exited);
+                }
+                match child.try_wait() {
+                    Ok(Some(_)) => Ok(crate::native_boot::ChildState::Exited),
+                    Ok(None) => Ok(crate::native_boot::ChildState::Running),
+                    Err(error) => Err(format!(
+                        "Failed to inspect native authority handoff {launch_id}: {error}"
+                    )),
+                }
+            },
+        );
+        if !matches!(acquired, Ok(crate::native_boot::WaitOutcome::Ready)) {
+            let reap =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1));
+            let reclaim = if matches!(&mode, NativeLaunchMode::Handoff(_)) {
+                reclaim_webview_authority(&state_dir)
+            } else {
+                Ok(())
+            };
+            crate::native_boot::clear_owned(&state_dir, &launch_id);
+            if let Err(error) = reap {
+                eprintln!(
+                    "[native-shell] failed to reap unsuccessful launch_id={launch_id}: {error}"
+                );
+            }
+            let failure = if cancelled {
+                NATIVE_HANDOFF_CANCELLED_ERROR.to_string()
+            } else {
+                match acquired {
+                    Ok(_) => {
+                        "Native performance UI failed to acquire UI authority after readiness."
+                            .to_string()
+                    }
+                    Err(error) => format!(
+                        "Failed while waiting for native UI authority after readiness: {error}"
+                    ),
+                }
+            };
+            reclaim
+                .map_err(|error| format!("{failure} WebView authority recovery failed: {error}"))?;
+            restore_handoff_webview(&mode)
+                .map_err(|error| format!("{failure} WebView restoration failed: {error}"))?;
+            return Err(failure);
+        }
+        crate::native_boot::clear_owned(&state_dir, &launch_id);
+        eprintln!("[native-shell] authority acquired launch_id={launch_id}");
+        if let NativeLaunchMode::Startup(app) = &mode {
+            if let Err(error) = finish_native_startup_on_main_thread(app) {
+                let _ = crate::native_boot::terminate_and_reap_child(
+                    &mut child,
+                    Duration::from_secs(1),
+                );
+                crate::native_boot::clear_owned(&state_dir, &launch_id);
+                return Err(error);
+            }
+        }
+        return Ok(());
+    }
+    crate::native_boot::clear_owned(&state_dir, &launch_id);
+    match first_outcome {
+        crate::native_boot::WaitOutcome::Ready => {
+            if existing_native_ready {
+                eprintln!("[native-shell] ready with authority launch_id={launch_id}");
+                if let NativeLaunchMode::Startup(app) = &mode {
+                    finish_native_startup_on_main_thread(app)?;
+                }
+                Ok(())
+            } else {
+                Err(
+                    "Native performance UI reported readiness without owning UI authority."
+                        .to_string(),
+                )
+            }
+        }
+        crate::native_boot::WaitOutcome::ChildExited if cancelled => {
+            Err(NATIVE_HANDOFF_CANCELLED_ERROR.to_string())
+        }
+        crate::native_boot::WaitOutcome::ChildExited if existing_native_ready => {
+            eprintln!(
+                "[native-shell] duplicate child acknowledged live native owner launch_id={launch_id}"
+            );
+            if let NativeLaunchMode::Startup(app) = &mode {
+                finish_native_startup_on_main_thread(app)?;
+            }
+            Ok(())
+        }
+        crate::native_boot::WaitOutcome::ChildExited => Err(
+            "Native performance UI exited before reporting that its event loop was ready."
+                .to_string(),
+        ),
+        crate::native_boot::WaitOutcome::TimedOut => {
+            eprintln!("[native-shell] ready timeout launch_id={launch_id}; keeping WebView");
+            if let Err(error) =
+                crate::native_boot::terminate_and_reap_child(&mut child, Duration::from_secs(1))
+            {
+                eprintln!(
+                    "[native-shell] failed to terminate/reap timed-out launch_id={launch_id}: {error}"
+                );
+            }
+            Err("Native performance UI timed out before its event loop was ready.".to_string())
+        }
     }
 }
 
@@ -10212,6 +12390,16 @@ fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String
 /// trap the user in a no-UI crash loop. Best-effort: an unreadable settings
 /// file simply leaves the gate to fail open into the webview next launch.
 fn revert_performance_mode_to_webview(settings_path: &Path) {
+    let _transaction = match crate::transaction_lock::acquire(
+        settings_path,
+        crate::transaction_lock::LockOptions::default(),
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("Could not lock settings while reverting native mode: {error}");
+            return;
+        }
+    };
     let Ok(content) = fs::read_to_string(settings_path) else {
         return;
     };
@@ -10230,10 +12418,7 @@ fn revert_performance_mode_to_webview(settings_path: &Path) {
     let Ok(serialized) = serde_json::to_string_pretty(&value) else {
         return;
     };
-    let temp = settings_path.with_extension("json.native-revert.tmp");
-    if fs::write(&temp, serialized).is_ok() {
-        let _ = fs::rename(&temp, settings_path);
-    }
+    let _ = crate::atomic_file::atomic_write(settings_path, serialized.as_bytes());
 }
 
 /// One-shot query for the WebView frontend: did the last launch auto-revert
@@ -10253,6 +12438,11 @@ pub fn native_boot_failure_pending(app: tauri::AppHandle) -> bool {
     }
 }
 
+fn live_native_startup_owner(state_dir: &Path) -> Option<PathBuf> {
+    crate::native_boot::live_native_authority_exists(state_dir)
+        .then(|| crate::native_boot::authority_path(state_dir))
+}
+
 pub fn try_launch_native_performance_mode_on_startup(
     app: &tauri::AppHandle,
 ) -> Result<Option<PathBuf>, String> {
@@ -10266,38 +12456,70 @@ pub fn try_launch_native_performance_mode_on_startup(
         .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
     let settings_path = app_data_dir.join("settings.json");
 
-    // Boot-handshake check: a surviving marker means the LAST native launch
-    // spawned a sidecar that died before its UI came up (GPU/driver failure,
-    // panic during state load, AV interference). Without this, the user is
-    // locked in a windowless crash loop that even reinstalling doesn't clear
-    // (app data survives uninstall). A young marker (<10s) is a boot still in
-    // flight — another activation racing the sidecar's startup — and proceeds
-    // native; the sidecar's single-instance lock collapses the duplicate.
-    let marker = app_data_dir.join(NATIVE_BOOT_PENDING);
-    if let Ok(meta) = fs::metadata(&marker) {
-        let stale = meta
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .map(|age| age > Duration::from_secs(10))
-            // An unreadable mtime counts as stale: failing into the webview is
-            // always recoverable, a crash loop is not.
-            .unwrap_or(true);
-        if stale {
-            revert_performance_mode_to_webview(&settings_path);
-            let _ = fs::remove_file(&marker);
-            let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
-            eprintln!(
-                "Native performance UI never finished starting last launch; \
-                 reverting to the WebView UI."
-            );
-            return Ok(None);
+    // Authority is stronger evidence than any marker. A parent may die after
+    // its child has acquired authority and become ready but before it clears
+    // `pending`; preserve that healthy sidecar instead of misclassifying its
+    // marker as an abandoned launch and reverting the user's mode.
+    if let Some(authority_path) = live_native_startup_owner(&app_data_dir) {
+        eprintln!("[native-shell] live native owner holds authority; exiting duplicate");
+        return finish_existing_native_startup_on_main_thread(app)
+            .map(|should_exit| should_exit.then_some(authority_path));
+    }
+
+    // A surviving marker whose fs4 launch guard is free belongs to an abandoned
+    // launch and triggers the existing crash-loop fallback. If the guard is
+    // held, another parent is actively waiting for its matching child; this
+    // duplicate activation exits without changing the user's setting or marker.
+    if crate::native_boot::has_pending(&app_data_dir) {
+        let marker = crate::native_boot::pending_path(&app_data_dir);
+        match crate::transaction_lock::acquire(
+            &marker,
+            crate::transaction_lock::LockOptions {
+                timeout: Duration::ZERO,
+                cancel: None,
+            },
+        ) {
+            Err(crate::transaction_lock::LockError::Timeout { .. }) => {
+                eprintln!(
+                    "[native-shell] another launcher is awaiting readiness; exiting duplicate"
+                );
+                return finish_existing_native_startup_on_main_thread(app)
+                    .map(|should_exit| should_exit.then_some(marker));
+            }
+            Ok(stale_guard) => {
+                // Keep the launch guard through cleanup so a rapid relaunch
+                // cannot publish a fresh marker between classification and remove.
+                revert_performance_mode_to_webview(&settings_path);
+                let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+                let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+                let _ = fs::remove_file(crate::native_boot::acquired_path(&app_data_dir));
+                let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+                drop(stale_guard);
+                eprintln!(
+                    "[native-shell] stale pending launch found; reverting to the WebView UI."
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                eprintln!("[native-shell] pending launch state unreadable: {error}; falling back");
+                // Without the launch guard we cannot prove the marker still
+                // belongs to the stale launch. Preserve it rather than racing a
+                // new owner; disabling native mode keeps subsequent boots safe.
+                revert_performance_mode_to_webview(&settings_path);
+                let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+                return Err(format!("Could not inspect stale native launch: {error}"));
+            }
         }
     }
 
     if !native_performance_mode_enabled_from_path(&settings_path)? {
         return Ok(None);
     }
+
+    // Startup has not claimed WebView authority yet, but it still participates
+    // in activation cancellation so a duplicate launch cannot disappear while
+    // the sidecar spends up to the handshake timeout becoming ready.
+    begin_native_handoff(true)?;
 
     // Resolve failure = the sidecar is missing entirely (broken or partial
     // install). Same treatment as a boot that died mid-start: self-heal the
@@ -10308,6 +12530,11 @@ pub fn try_launch_native_performance_mode_on_startup(
     let exe_path = match resolve_native_shell_executable(app) {
         Ok(path) => path,
         Err(error) => {
+            let cancelled = NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst);
+            abort_native_handoff();
+            if cancelled {
+                return Ok(None);
+            }
             revert_performance_mode_to_webview(&settings_path);
             let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
             return Err(error);
@@ -10317,12 +12544,21 @@ pub fn try_launch_native_performance_mode_on_startup(
         &exe_path,
         Some(app_data_dir.clone()),
         std::env::current_exe().ok(),
+        NativeLaunchMode::Startup(app.clone()),
     ) {
-        // The sidecar could not even spawn (or died <200ms in): revert NOW so
+        let cancelled = NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst)
+            || error == NATIVE_HANDOFF_CANCELLED_ERROR;
+        abort_native_handoff();
+        if cancelled {
+            return Ok(None);
+        }
+        // The sidecar could not spawn, exited, or timed out before readiness:
         // this launch continues into the webview and the next one doesn't
         // retry a known-broken native mode.
         revert_performance_mode_to_webview(&settings_path);
-        let _ = fs::remove_file(app_data_dir.join(NATIVE_BOOT_PENDING));
+        let _ = fs::remove_file(crate::native_boot::pending_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::ready_path(&app_data_dir));
+        let _ = fs::remove_file(crate::native_boot::acquired_path(&app_data_dir));
         let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
         return Err(error);
     }
@@ -10334,22 +12570,38 @@ pub async fn launch_native_performance_mode(
     app: tauri::AppHandle,
 ) -> Result<NativePerformanceLaunch, String> {
     let exe_path = resolve_native_shell_executable(&app)?;
+    begin_native_handoff(false)?;
     let app_data_dir = app.path().app_data_dir().ok();
     let webview_exe = std::env::current_exe().ok();
     let launch_path = exe_path.clone();
-    tokio::task::spawn_blocking(move || {
-        launch_native_shell_process(&launch_path, app_data_dir, webview_exe)
+    let handoff_app = app.clone();
+    let task_result = tokio::task::spawn_blocking(move || {
+        launch_native_shell_process(
+            &launch_path,
+            app_data_dir,
+            webview_exe,
+            NativeLaunchMode::Handoff(handoff_app),
+        )
     })
-    .await
-    .map_err(|error| format!("Task failed: {error}"))??;
+    .await;
+    let launch_result = task_result
+        .map_err(|error| format!("Native handoff task failed: {error}"))
+        .and_then(|result| result);
+    if let Err(error) = launch_result {
+        abort_native_handoff();
+        if webview_authority_was_lost() {
+            // Returning the error alone would leave a visible, lock-less window
+            // that the next launch would happily spawn a sidecar alongside.
+            eprintln!("[native-shell] exiting: cannot continue without UI authority ({error})");
+            app.exit(1);
+        }
+        return Err(error);
+    }
 
-    let exit_app = app.clone();
-    std::thread::spawn(move || {
-        // Free the WebView process after the Slint shell has spawned; keeping both
-        // alive would defeat the memory-mode toggle.
-        std::thread::sleep(Duration::from_millis(300));
-        exit_app.exit(0);
-    });
+    // The blocking launcher returns only after the matching child has executed
+    // a callback on Slint's live event loop. Every failure keeps this WebView
+    // process authoritative and visible.
+    app.exit(0);
 
     Ok(NativePerformanceLaunch {
         exe_path: exe_path.to_string_lossy().into_owned(),
@@ -10482,6 +12734,84 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn eso_client_process_name_matches_case_insensitively() {
+        assert!(is_eso_client_process_name("eso64.exe"));
+        assert!(is_eso_client_process_name("ESO64.EXE"));
+        assert!(is_eso_client_process_name("eso.exe"));
+        assert!(!is_eso_client_process_name("notepad.exe"));
+        // Substring, not a match: "eso" appearing inside another exe name.
+        assert!(!is_eso_client_process_name("resolve.exe"));
+        assert!(!is_eso_client_process_name("bethesda.net_launcher.exe"));
+    }
+
+    #[test]
+    fn eso_or_launcher_process_name_also_matches_the_zos_launcher() {
+        assert!(is_eso_or_launcher_process_name("eso64.exe"));
+        assert!(is_eso_or_launcher_process_name("ESO64.EXE"));
+        assert!(is_eso_or_launcher_process_name("bethesda.net_launcher.exe"));
+        assert!(is_eso_or_launcher_process_name("Bethesda.net_Launcher.exe"));
+        assert!(is_eso_or_launcher_process_name("esolauncher.exe"));
+        assert!(!is_eso_or_launcher_process_name("notepad.exe"));
+        assert!(!is_eso_or_launcher_process_name("resolve.exe"));
+    }
+
+    #[test]
+    fn reveal_paths_are_confined_to_the_approved_eso_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let addons = live.join("AddOns");
+        let addon = addons.join("ExampleAddon");
+        let logs = live.join("Logs");
+        let log = logs.join("Encounter.log");
+        let backups = live.join("kalpa-backups");
+        let backup = backups.join("manual");
+        let outside = temp.path().join("outside.txt");
+        fs::create_dir_all(&addon).unwrap();
+        fs::create_dir_all(&logs).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(&log, b"log").unwrap();
+        fs::write(&outside, b"outside").unwrap();
+
+        let addons = fs::canonicalize(addons).unwrap();
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &addon.to_string_lossy()).unwrap(),
+            dunce::canonicalize(addon).unwrap()
+        );
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &log.to_string_lossy()).unwrap(),
+            dunce::canonicalize(log).unwrap()
+        );
+        assert_eq!(
+            resolve_allowed_reveal_path(&addons, &backup.to_string_lossy()).unwrap(),
+            dunce::canonicalize(backup).unwrap()
+        );
+        assert!(resolve_allowed_reveal_path(&addons, &outside.to_string_lossy()).is_err());
+        assert!(resolve_allowed_reveal_path(
+            &addons,
+            &temp.path().join("missing.log").to_string_lossy()
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reveal_paths_reject_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let addons = temp.path().join("live").join("AddOns");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&addons).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, addons.join("escape")).unwrap();
+
+        let addons = dunce::canonicalize(addons).unwrap();
+        assert!(
+            resolve_allowed_reveal_path(&addons, &addons.join("escape").to_string_lossy()).is_err()
+        );
+    }
+
+    #[test]
     // Names the DETECTOR, not the import, because that is all it exercises.
     //
     // It called itself "block_an_import" while only asserting the helper, so
@@ -10544,6 +12874,46 @@ mod tests {
     }
 
     #[test]
+    fn should_emit_byte_progress_first_stride_and_completion() {
+        let total = Some(19_000_000u64);
+
+        // First event always fires, so the UI learns the total size (and can
+        // draw a determinate bar) before any bytes land.
+        assert!(should_emit_byte_progress(u64::MAX, 0, total));
+        assert!(should_emit_byte_progress(u64::MAX, 0, None));
+
+        // Within a stride of the last emit: nothing until 256 KiB has arrived.
+        assert!(!should_emit_byte_progress(0, 1, total));
+        assert!(!should_emit_byte_progress(
+            0,
+            BYTE_PROGRESS_EMIT_STRIDE - 1,
+            total
+        ));
+        assert!(should_emit_byte_progress(
+            0,
+            BYTE_PROGRESS_EMIT_STRIDE,
+            total
+        ));
+
+        // A 64 KiB chunk loop over a 19 MB body must not emit per chunk: four
+        // chunks in, still nothing.
+        assert!(!should_emit_byte_progress(0, 64 * 1024 * 3, total));
+
+        // Completion always fires so the final "19.1 / 19.1 MB" lands, even
+        // though only a few KiB arrived since the last emit.
+        assert!(should_emit_byte_progress(18_999_000, 19_000_000, total));
+
+        // Without a Content-Length there is no completion to detect, so the
+        // stride is the only gate — the UI shows an indeterminate bar anyway.
+        assert!(!should_emit_byte_progress(0, 1, None));
+        assert!(should_emit_byte_progress(
+            0,
+            BYTE_PROGRESS_EMIT_STRIDE,
+            None
+        ));
+    }
+
+    #[test]
     fn download_thread_count_scales_and_clamps() {
         // A single-addon batch must still get at least one thread. (The
         // streaming consumer runs on its own thread, so num_threads(1) is safe,
@@ -10554,6 +12924,198 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn downloaded_artifact_version_uses_fetched_descriptor_after_publish_race() {
+        // The UI observed v1, then v2 was published before the backend fetched
+        // the descriptor and downloaded its checksum-bound artifact.
+        assert_eq!(downloaded_artifact_version("v1", "v2"), "v2");
+    }
+
+    #[test]
+    fn downloaded_artifact_version_falls_back_to_observation_when_fetched_version_empty() {
+        assert_eq!(downloaded_artifact_version("v1", ""), "v1");
+        assert_eq!(downloaded_artifact_version(" v1 ", "   "), "v1");
+    }
+
+    #[test]
+    fn artifact_comparison_ignores_lagging_filelist() {
+        // The downloaded filedetails artifact is v2, while the eventually
+        // consistent filelist still reports v1.
+        assert!(!artifact_is_newer("v2", "v1", 200, 100));
+    }
+
+    #[test]
+    fn artifact_comparison_accepts_newer_filelist_release() {
+        assert!(artifact_is_newer("v1", "v2", 100, 200));
+    }
+
+    fn update_check_fixture(
+        installed_version: &str,
+        installed_marker: u64,
+        remote_version: &str,
+        remote_marker: u64,
+    ) -> (
+        tempfile::TempDir,
+        HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("Addon")).unwrap();
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "Addon",
+            1,
+            installed_version,
+            "https://example.invalid/addon.zip",
+            installed_marker,
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 1,
+                title: "Addon".to_string(),
+                version: remote_version.to_string(),
+                author: "Test".to_string(),
+                last_update: remote_marker,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+        (tmp, lookup)
+    }
+
+    #[test]
+    fn update_check_does_not_downgrade_installed_artifact_from_lagging_filelist() {
+        let (tmp, lookup) = update_check_fixture("v2", 200, "v1", 100);
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.installed_version, "v2");
+        assert_eq!(addon.esoui_last_update, 200);
+    }
+
+    #[test]
+    fn update_check_detects_newer_artifact_from_filelist() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 200);
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.installed_version, "v1");
+        // The remote marker is only persisted once its artifact is actually
+        // downloaded and installed.
+        assert_eq!(addon.esoui_last_update, 100);
+    }
+
+    #[test]
+    fn update_check_keeps_legacy_observation_marker_from_hiding_version_update() {
+        let (tmp, lookup) = update_check_fixture("v1", 100, "v2", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store.version = 1;
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].has_update);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
+    }
+
+    #[test]
+    fn lagging_matching_observation_does_not_claim_retained_legacy_marker() {
+        let (tmp, mut lookup) = update_check_fixture("v1", 200, "v1", 100);
+        let path = tmp.path().join("kalpa.json");
+        let mut store: metadata::MetadataStore = metadata::load_json_with_backup(&path);
+        store
+            .addons
+            .get_mut("Addon")
+            .unwrap()
+            .esoui_marker_installed = false;
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert!(!pending[0].has_update);
+        assert!(!metadata::load_metadata(tmp.path()).addons["Addon"].esoui_marker_installed);
+
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).version = "v2".to_string();
+        Arc::make_mut(lookup.get_mut("Addon").unwrap()).last_update = 200;
+        let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+        assert!(pending[0].has_update);
+    }
+
+    #[test]
+    fn auto_link_does_not_advance_marker_for_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addon_dir = tmp.path().join("Addon");
+        fs::create_dir(&addon_dir).unwrap();
+        fs::write(
+            addon_dir.join("Addon.txt"),
+            "## Title: Addon\n## Version: v1\n",
+        )
+        .unwrap();
+
+        // This models a legacy pending observation: the identity is not yet
+        // linked, and marker 100 was observed but was not proven to belong to
+        // the local v1 artifact.
+        let mut store = metadata::MetadataStore::default();
+        store.addons.insert(
+            "Addon".to_string(),
+            metadata::AddonMetadata {
+                esoui_id: 0,
+                installed_version: "v1".to_string(),
+                download_url: String::new(),
+                installed_at: String::new(),
+                tags: Vec::new(),
+                esoui_last_update: 100,
+                bundled_by: Vec::new(),
+                esoui_marker_installed: false,
+            },
+        );
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "Addon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 7,
+                title: "Addon".to_string(),
+                version: "v2".to_string(),
+                author: "Test".to_string(),
+                last_update: 200,
+                file_info_uri: "https://example.invalid/file.json".to_string(),
+            }),
+        );
+
+        let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+        assert_eq!(result.linked, vec!["Addon"]);
+
+        let store = metadata::load_metadata(tmp.path());
+        let addon = store.addons.get("Addon").unwrap();
+        assert_eq!(addon.esoui_id, 7);
+        assert_eq!(addon.installed_version, "v1");
+        assert_eq!(addon.esoui_last_update, 100);
+        assert!(!addon.esoui_marker_installed);
     }
 
     #[test]
@@ -10806,6 +13368,362 @@ mod tests {
     }
 
     #[test]
+    fn parse_minion_addons_accepts_real_attribute_order_and_tracks_root() {
+        let encoded_path = BASE64_STANDARD.encode(r"C:\Games\ESO\live\AddOns");
+        let xml = format!(
+            r#"<game addon-path="{encoded_path}" game-id="ESO">
+                <addon md5="abc123" ui-version="2.0 r7" uid="123">
+                    <dirs>
+                        <dir>MyAddon</dir>
+                        <dir>MyAddonData</dir>
+                    </dirs>
+                </addon>
+            </game>"#
+        );
+
+        let addons = parse_minion_addons(&xml);
+
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].uid, 123);
+        assert_eq!(addons[0].version, "2.0 r7");
+        assert_eq!(addons[0].folders, ["MyAddon", "MyAddonData"]);
+        assert_eq!(
+            addons[0].addons_path.as_deref(),
+            Some(Path::new(r"C:\Games\ESO\live\AddOns"))
+        );
+    }
+
+    #[test]
+    fn update_check_reconciles_a_minion_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let minion_addons = parse_minion_addons(
+            r#"<addon md5="abc123" ui-version="2.0" uid="123">
+                <dirs>
+                    <dir>MyAddon</dir>
+                </dirs>
+            </addon>"#,
+        );
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
+    }
+
+    #[test]
+    fn update_check_uses_minion_version_from_selected_root_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live_addons_dir = tmp.path().join("live").join("AddOns");
+        let pts_addons_dir = tmp.path().join("pts").join("AddOns");
+        make_addon_folder(
+            &live_addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+        std::fs::create_dir_all(&pts_addons_dir).unwrap();
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&live_addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let live_path = BASE64_STANDARD.encode(live_addons_dir.to_string_lossy().as_bytes());
+        let pts_path = BASE64_STANDARD.encode(pts_addons_dir.to_string_lossy().as_bytes());
+        let xml = format!(
+            r#"<games>
+                <game addon-path="{pts_path}" game-id="ESO">
+                    <addon ui-version="1.0" uid="123">
+                        <dirs><dir>MyAddon</dir></dirs>
+                    </addon>
+                </game>
+                <game addon-path="{live_path}" game-id="ESO">
+                    <addon ui-version="2.0" uid="123">
+                        <dirs><dir>MyAddon</dir></dirs>
+                    </addon>
+                </game>
+            </games>"#
+        );
+        let minion_addons = parse_minion_addons(&xml);
+
+        let results =
+            check_for_updates_metadata(&live_addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+    }
+
+    #[test]
+    fn update_check_keeps_known_version_when_manifest_version_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(&addons_dir, "MyAddon", "## Title: My Addon\n");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
+    fn update_check_does_not_replace_api_version_with_stale_external_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-1.9\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "2.0",
+            "https://example.com/current.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let stale_minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "1.9".to_string(),
+            folders: vec!["MyAddon".to_string()],
+            addons_path: None,
+        }];
+        let results =
+            check_for_updates_metadata(&addons_dir, &api_lookup, &stale_minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "2.0");
+        assert!(!results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "2.0");
+    }
+
+    #[test]
+    fn update_check_does_not_infer_external_update_from_manifest_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: 2.0\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
+    fn update_check_does_not_downgrade_an_outdated_version_from_stale_minion_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: manifest-version\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.5",
+            "https://example.com/intermediate.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 123,
+                title: "My Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let stale_minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "1.0".to_string(),
+            folders: vec!["MyAddon".to_string()],
+            addons_path: None,
+        }];
+        let results =
+            check_for_updates_metadata(&addons_dir, &api_lookup, &stale_minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "1.5");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.5");
+    }
+
+    #[test]
+    fn update_check_ignores_external_reconciliation_when_api_lookup_points_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        make_addon_folder(
+            &addons_dir,
+            "MyAddon",
+            "## Title: My Addon\n## Version: 2.0\n",
+        );
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "MyAddon",
+            123,
+            "1.0",
+            "https://example.com/old.zip",
+        );
+        metadata::save_metadata(&addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "MyAddon".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 999,
+                title: "Other Addon".to_string(),
+                version: "2.0".to_string(),
+                author: "Author".to_string(),
+                last_update: 42,
+                file_info_uri: String::new(),
+            }),
+        );
+
+        let minion_addons = vec![MinionAddon {
+            uid: 123,
+            version: "2.0".to_string(),
+            folders: vec!["MyAddon".to_string()],
+            addons_path: None,
+        }];
+        let results = check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons).unwrap();
+
+        assert_eq!(results[0].current_version, "1.0");
+        assert!(results[0].has_update);
+        let saved = metadata::load_metadata(&addons_dir);
+        assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+    }
+
+    #[test]
     fn conflict_report_does_not_treat_legacy_binary_hash_as_unchanged_upstream() {
         use std::io::Write;
 
@@ -10844,7 +13762,7 @@ mod tests {
 
         assert_eq!(report.auto_kept_files, Vec::<String>::new());
         assert_eq!(report.conflicts.len(), 1);
-        assert_eq!(report.conflicts[0].relative_path, "icons/a.dds");
+        assert_eq!(report.conflicts[0].relative_path, "MediaAddon/icons/a.dds");
     }
 
     #[test]
@@ -10895,10 +13813,65 @@ mod tests {
             build_conflict_report(&addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
 
         assert_eq!(report.conflicts.len(), 1);
-        assert_eq!(report.conflicts[0].relative_path, "extra.lua");
+        assert_eq!(report.conflicts[0].relative_path, "MyAddon/extra.lua");
         assert_eq!(
             report.safe_files,
-            vec!["same.lua".to_string(), "stock.lua".to_string()]
+            vec![
+                "MyAddon/same.lua".to_string(),
+                "MyAddon/stock.lua".to_string()
+            ]
+        );
+        assert!(report.has_hash_baseline);
+    }
+
+    #[test]
+    fn conflict_report_discloses_when_protected_edits_has_no_baseline() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MigratedAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- possibly edited").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "MigratedAddon/main.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"-- upstream replacement").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MigratedAddon", &zip_path, "2.0", "session")
+                .unwrap();
+
+        assert!(!report.has_hash_baseline);
+        assert!(report.conflicts.is_empty());
+    }
+
+    #[test]
+    fn panic_payload_message_reads_str_and_string_payloads() {
+        let payload = std::thread::spawn(|| panic!("literal payload"))
+            .join()
+            .unwrap_err();
+        assert_eq!(panic_payload_message(payload.as_ref()), "literal payload");
+
+        let payload = std::thread::spawn(|| panic!("formatted {}", 42))
+            .join()
+            .unwrap_err();
+        assert_eq!(panic_payload_message(payload.as_ref()), "formatted 42");
+
+        let payload = std::thread::spawn(|| std::panic::panic_any(7u32))
+            .join()
+            .unwrap_err();
+        assert_eq!(
+            panic_payload_message(payload.as_ref()),
+            "a download worker panicked"
         );
     }
 
@@ -10915,6 +13888,43 @@ mod tests {
             found.file_name().unwrap().to_string_lossy().to_lowercase(),
             "myaddon.txt"
         );
+    }
+
+    /// Regression: a leftover manifest from before an author renamed theirs
+    /// (`.txt` ↔ `.addon`) used to win on extension preference alone, so Kalpa
+    /// read a stale `## AddOnVersion` forever. With both present, the higher
+    /// version must win regardless of extension.
+    #[test]
+    fn find_manifest_in_prefers_the_higher_addon_version_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("LibSetDetection");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("LibSetDetection.txt"), b"## AddOnVersion: 4").unwrap();
+        fs::write(dir.join("LibSetDetection.addon"), b"## AddOnVersion: 5").unwrap();
+
+        let found = find_manifest_in(&dir, "LibSetDetection").unwrap();
+        assert!(found.to_string_lossy().ends_with(".addon"));
+
+        // The reverse leftover direction: the .txt is the current one.
+        let dir = tmp.path().join("SuperStar");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SuperStar.txt"), b"## AddOnVersion: 80000").unwrap();
+        fs::write(dir.join("SuperStar.addon"), b"## AddOnVersion: 70200").unwrap();
+
+        let found = find_manifest_in(&dir, "SuperStar").unwrap();
+        assert!(found.to_string_lossy().ends_with(".txt"));
+    }
+
+    #[test]
+    fn find_manifest_in_keeps_the_txt_preference_when_versions_tie_or_are_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("MapPins");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("MapPins.txt"), b"## Version: 1.100.22").unwrap();
+        fs::write(dir.join("MapPins.addon"), b"## Version: 1.99.4").unwrap();
+
+        let found = find_manifest_in(&dir, "MapPins").unwrap();
+        assert!(found.to_string_lossy().ends_with(".txt"));
     }
 
     #[test]
@@ -11096,12 +14106,754 @@ mod tests {
         fs::write(dir.join(format!("{base}.txt")), manifest).unwrap();
     }
 
+    /// Writes a manifest carrying a version, so `read_local_version` reports
+    /// what is actually on disk after an archive overwrites a folder.
+    fn write_versioned_addon(addons_dir: &Path, folder: &str, version: &str) {
+        let dir = addons_dir.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{folder}.txt")),
+            format!("## Title: {folder}\n## Version: {version}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The R4 invariant, end to end. Installing an addon that bundles a library
+    /// the user tracks separately must not take the library over.
+    ///
+    /// Update checks skip `esoui_id == 0`, so the old behaviour of stamping 0
+    /// onto every non-primary folder did not merely mislabel the library - it
+    /// removed it from update checks entirely, and permanently.
+    #[test]
+    fn bundling_a_separately_tracked_library_does_not_take_it_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+        write_versioned_addon(addons_dir, "LibFoo", "1.2");
+
+        // LibFoo is tracked in its own right, at a NEWER version than the copy
+        // AddonA bundles.
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib-foo", 900);
+
+        // AddonA ships both folders.
+        record_installed_folders(
+            &mut store,
+            addons_dir,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+            500,
+        );
+
+        let addon = store.addons.get("AddonA").expect("primary recorded");
+        assert_eq!(addon.esoui_id, 3);
+        assert_eq!(addon.installed_version, "3.0");
+        assert!(addon.bundled_by.is_empty());
+
+        let lib = store.addons.get("LibFoo").expect("library still recorded");
+        assert_eq!(lib.esoui_id, 7, "the library must keep its own identity");
+        assert_eq!(lib.download_url, "https://esoui/lib-foo");
+        assert_eq!(lib.esoui_last_update, 900);
+        assert_eq!(lib.bundled_by, vec![3]);
+        // This is the condition every update check filters on.
+        assert_ne!(
+            lib.esoui_id, 0,
+            "a demoted library is skipped by update checks forever"
+        );
+        // The bundled copy really did overwrite the folder, so the recorded
+        // version is the older one now on disk - which is what makes the
+        // library's own update check offer the upgrade back.
+        assert_eq!(lib.installed_version, "1.2");
+    }
+
+    /// Which folder an archive "owns" must not depend on iteration order, and
+    /// on an update the existing owner must stay the owner.
+    #[test]
+    fn primary_folder_selection_is_deterministic_and_stable() {
+        let empty = metadata::MetadataStore::default();
+        let forward = vec!["LibFoo".to_string(), "FooAddon".to_string()];
+        let reversed = vec!["FooAddon".to_string(), "LibFoo".to_string()];
+
+        // Exact title match wins regardless of order.
+        for order in [&forward, &reversed] {
+            assert_eq!(
+                determine_primary_folder(&empty, order, 3, "FooAddon"),
+                "FooAddon"
+            );
+        }
+
+        // Containment prefers the longest match, not the first one seen.
+        let libs = vec!["Lib".to_string(), "LibFoo".to_string()];
+        assert_eq!(
+            determine_primary_folder(&empty, &libs, 3, "LibFoo Bundle"),
+            "LibFoo"
+        );
+
+        // Nothing matches: fall back deterministically rather than to whatever
+        // order the extractor happened to produce.
+        for order in [&forward, &reversed] {
+            assert_eq!(
+                determine_primary_folder(&empty, order, 3, "Totally Unrelated"),
+                order[0],
+                "the caller supplies a sorted list, so the first entry is stable"
+            );
+        }
+
+        // On an update the recorded owner wins even if the title stops matching,
+        // so ownership cannot drift to a bundled library.
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "FooAddon", 3, "1.0", "u", 0);
+        assert_eq!(
+            determine_primary_folder(&store, &forward, 3, "Renamed Upstream"),
+            "FooAddon"
+        );
+
+        // An unrelated title must not let the deterministic fallback steal a
+        // folder that is already tracked as a different ESOUI addon.
+        let mut tracked = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut tracked, "LibFoo", 7, "1.0", "u", 0);
+        let mixed = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+        assert_eq!(
+            determine_primary_folder(&tracked, &mixed, 3, "Totally Unrelated"),
+            "ZAddon"
+        );
+
+        // Legacy metadata could stamp the archive ID onto every folder. A
+        // duplicate ID is not enough to identify the owner: the title must
+        // disambiguate it instead of accepting the first (sorted) candidate.
+        let mut legacy = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut legacy, "LibFoo", 3, "1.0", "u", 0);
+        metadata::record_install_ext(&mut legacy, "ZAddon", 3, "1.0", "u", 0);
+        let legacy_folders = vec!["LibFoo".to_string(), "ZAddon".to_string()];
+        assert_eq!(
+            determine_primary_folder(&legacy, &legacy_folders, 3, "ZAddon"),
+            "ZAddon"
+        );
+    }
+
+    #[test]
+    fn auto_link_surfaces_legacy_version_mismatch_as_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "2.0");
+        write_versioned_addon(addons_dir, "LibFoo", "1.0");
+
+        // This is the pre-provenance shape: LibFoo was demoted to ID zero but
+        // still shares the parent archive URL. Its standalone disk version is
+        // different from ESOUI, so auto-linking would create a phantom update.
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "2.0", "parent", 1);
+        metadata::record_install_ext(&mut store, "LibFoo", 0, "1.0", "parent", 0);
+        metadata::save_metadata(addons_dir, &store).unwrap();
+
+        let mut api_lookup = HashMap::new();
+        api_lookup.insert(
+            "LibFoo".to_string(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 7,
+                title: "LibFoo".to_string(),
+                version: "2.0".to_string(),
+                author: "Test".to_string(),
+                last_update: 2,
+                file_info_uri: "standalone".to_string(),
+            }),
+        );
+
+        let result = auto_link_addons_blocking(addons_dir, &api_lookup).unwrap();
+        assert!(result.linked.is_empty());
+        assert_eq!(result.not_found, vec!["LibFoo"]);
+        assert_eq!(
+            metadata::load_metadata(addons_dir).addons["LibFoo"].esoui_id,
+            0
+        );
+    }
+
+    #[test]
+    fn tracked_title_match_cannot_become_another_addons_primary() {
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "ExactTitle", 77, "1.0", "u", 0);
+        let candidates = vec!["ExactTitle".to_string(), "NewPrimary".to_string()];
+
+        assert_eq!(
+            determine_primary_folder(&store, &candidates, 3, "ExactTitle"),
+            "NewPrimary",
+            "a title match must not steal a folder tracked under another ESOUI id"
+        );
+    }
+
+    /// Removing the parent must not disturb the library it happened to ship.
+    #[test]
+    fn removing_a_bundling_addon_leaves_the_library_tracked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+        write_versioned_addon(addons_dir, "LibFoo", "1.2");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.5", "https://esoui/lib", 0);
+        record_installed_folders(
+            &mut store,
+            addons_dir,
+            &["AddonA".to_string(), "LibFoo".to_string()],
+            3,
+            "3.0",
+            "Addon A",
+            "https://esoui/addon-a",
+            0,
+        );
+
+        // Uninstalling AddonA drops its provenance, nothing else.
+        metadata::remove_entry(&mut store, "AddonA");
+        metadata::forget_bundled_parent(&mut store, 3);
+
+        let lib = store.addons.get("LibFoo").expect("library survives");
+        assert_eq!(lib.esoui_id, 7);
+        assert_eq!(lib.installed_version, "1.2");
+        assert!(lib.bundled_by.is_empty());
+    }
+
+    #[test]
+    fn batch_remove_clears_only_successful_parent_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::record_install_ext(&mut store, "MissingParent", 9, "1.0", "u", 0);
+        metadata::record_install_ext(&mut store, "LibFoo", 7, "1.2", "u", 0);
+        store.addons.get_mut("LibFoo").unwrap().bundled_by = vec![3, 9];
+        metadata::save_metadata(addons_dir, &store).unwrap();
+        file_hashes::save_hash_manifest(
+            addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "LibFoo".to_string(),
+                esoui_ids: vec![7, 3, 9],
+                recorded_at: "2026-08-28T00-00-00Z".to_string(),
+                installed_version: "1.2".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let result = batch_remove_addons_from_disk(
+            addons_dir,
+            &["AddonA".to_string(), "MissingParent".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.removed, vec!["AddonA"]);
+        assert_eq!(result.failed, vec!["MissingParent"]);
+        assert!(!addons_dir.join("AddonA").exists());
+        let store = metadata::load_metadata(addons_dir);
+        assert!(!store.addons.contains_key("AddonA"));
+        assert!(store.addons.contains_key("MissingParent"));
+        assert_eq!(store.addons["LibFoo"].bundled_by, vec![9]);
+        assert_eq!(
+            file_hashes::load_hash_manifest(addons_dir, "LibFoo")
+                .unwrap()
+                .esoui_ids,
+            vec![7, 9]
+        );
+    }
+
+    #[test]
+    fn remove_reports_hash_cleanup_warning_after_persisting_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(addons_dir, &store).unwrap();
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        fs::write(hashes_dir.join("Broken.json"), "not json").unwrap();
+
+        let result = remove_addon_from_disk(addons_dir, "AddonA").unwrap();
+
+        assert!(!addons_dir.join("AddonA").exists());
+        assert!(!metadata::load_metadata(addons_dir)
+            .addons
+            .contains_key("AddonA"));
+        assert!(result
+            .cleanup_warning
+            .is_some_and(|warning| warning.contains("hash manifest")));
+    }
+
+    #[test]
+    fn batch_remove_preserves_success_result_when_hash_cleanup_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        write_versioned_addon(addons_dir, "AddonA", "3.0");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(&mut store, "AddonA", 3, "3.0", "u", 0);
+        metadata::save_metadata(addons_dir, &store).unwrap();
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        fs::write(hashes_dir.join("Broken.json"), "not json").unwrap();
+
+        let result = batch_remove_addons_from_disk(addons_dir, &["AddonA".to_string()]).unwrap();
+
+        assert_eq!(result.removed, vec!["AddonA"]);
+        assert!(result.failed.is_empty());
+        assert!(!addons_dir.join("AddonA").exists());
+        assert!(!metadata::load_metadata(addons_dir)
+            .addons
+            .contains_key("AddonA"));
+        assert!(result.cleanup_warnings["AddonA"].contains("hash manifest"));
+    }
+
+    /// The R5 bug, end to end. A bundled sibling folder has a hash baseline and
+    /// its edits are already shown as modified in the file browser - but the
+    /// conflict pipeline only ever classified the archive primary, so the edit
+    /// was overwritten on update with no prompt and no backup.
+    #[test]
+    fn a_modified_file_in_a_bundled_sibling_folder_conflicts() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+
+        for folder in ["MainAddon", "LibFoo"] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), b"-- original").unwrap();
+        }
+        // The user edited the LIBRARY, not the primary.
+        fs::write(addons_dir.join("LibFoo").join("init.lua"), b"-- my edit").unwrap();
+        // The same archive also writes a loose root file. Keep its baseline
+        // with the primary addon, while the conflict key remains qualified so
+        // it can coexist with the sibling conflict in one report.
+        fs::write(addons_dir.join("readme.txt"), b"-- my root edit").unwrap();
+
+        // Both folders have a baseline recording the original bytes.
+        for folder in ["MainAddon", "LibFoo"] {
+            let mut files = HashMap::new();
+            files.insert(
+                "init.lua".to_string(),
+                file_hashes::file_signature(
+                    "init.lua",
+                    &addons_dir.join("MainAddon").join("init.lua"),
+                )
+                .unwrap(),
+            );
+            file_hashes::save_hash_manifest(
+                addons_dir,
+                &file_hashes::HashManifest {
+                    addon_folder: folder.to_string(),
+                    esoui_ids: vec![123],
+                    recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                    installed_version: "1.0".to_string(),
+                    files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut primary = file_hashes::load_hash_manifest(addons_dir, "MainAddon").unwrap();
+        primary.root_files.insert(
+            "readme.txt".to_string(),
+            file_hashes::file_signature("readme.txt", &addons_dir.join("readme.txt")).unwrap(),
+        );
+        file_hashes::save_hash_manifest(addons_dir, &primary).unwrap();
+        fs::write(addons_dir.join("readme.txt"), b"-- my root edit v2").unwrap();
+
+        // The update ships new bytes for both folders.
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("MainAddon/MainAddon.txt", options)
+            .unwrap();
+        archive.write_all(b"## Title: MainAddon").unwrap();
+        archive.start_file("MainAddon/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream v2").unwrap();
+        archive.start_file("LibFoo/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream lib v2").unwrap();
+        archive.start_file("readme.txt", options).unwrap();
+        archive.write_all(b"-- upstream readme v2").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(addons_dir, "MainAddon", &zip_path, "2.0", "session").unwrap();
+
+        assert_eq!(
+            report.folders,
+            vec!["LibFoo".to_string(), "MainAddon".to_string()],
+            "the report must cover every folder the archive writes"
+        );
+        assert_eq!(
+            report.conflicts.len(),
+            2,
+            "sibling and AddOns-root edits must be offered to the user, not silently overwritten"
+        );
+        assert_eq!(
+            report
+                .conflicts
+                .iter()
+                .map(|c| c.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["LibFoo/init.lua", "MainAddon/readme.txt"]
+        );
+        // The primary was untouched by the user, so it updates without asking.
+        assert_eq!(
+            report.safe_files,
+            vec![
+                "MainAddon/MainAddon.txt".to_string(),
+                "MainAddon/init.lua".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_apply_rejects_a_sibling_conflict_that_appeared_after_scan() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        for folder in ["MainAddon", "LibFoo"] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), b"-- baseline").unwrap();
+            file_hashes::record_hashes_for_folders(addons_dir, &[folder.to_string()], 123, "1.0")
+                .unwrap();
+        }
+        fs::write(addons_dir.join("MainAddon/init.lua"), b"-- main edit").unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MainAddon/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream main v2").unwrap();
+        archive.start_file("LibFoo/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream lib v2").unwrap();
+        archive.finish().unwrap();
+
+        let (report, zip_hashes) =
+            build_conflict_report(addons_dir, "MainAddon", &zip_path, "2.0", "session").unwrap();
+        assert_eq!(report.conflicts[0].relative_path, "MainAddon/init.lua");
+        let pending = crate::PendingUpdate {
+            zip_path,
+            folder_name: "MainAddon".to_string(),
+            esoui_id: 123,
+            update_version: "2.0".to_string(),
+            artifact_last_update: 0,
+            reviewed_conflicts: report
+                .conflicts
+                .iter()
+                .map(|conflict| conflict.relative_path.clone())
+                .collect(),
+            zip_hashes: Arc::new(zip_hashes),
+        };
+
+        fs::write(addons_dir.join("LibFoo/init.lua"), b"-- fresh lib edit").unwrap();
+        let decisions = vec![FileDecision {
+            relative_path: "MainAddon/init.lua".to_string(),
+            action: "take_update".to_string(),
+        }];
+        let error = update_with_decisions_inner(
+            addons_dir,
+            &pending,
+            &decisions,
+            installer::ExtractHooks::NONE,
+            DependencyPolicy::Skip,
+        )
+        .expect_err("a newly-conflicting sibling must stop the apply");
+
+        assert!(
+            error.contains("LibFoo/init.lua"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("close this review and run Update again"));
+
+        // Exercise the command wrapper's lifecycle boundary, not only the
+        // classifier: this specific error must leave both resources alive so
+        // the still-visible panel can cancel its session before a fresh scan.
+        let pending_store = Mutex::new(HashMap::from([("session".to_string(), pending.clone())]));
+        let outcome =
+            finish_pending_update(&pending_store, "session", &pending.zip_path, Err(error));
+        assert!(outcome.is_err());
+        assert!(pending.zip_path.is_file(), "the pending ZIP must survive");
+        assert!(
+            pending_store.lock().unwrap().contains_key("session"),
+            "the visible conflict panel must retain a cancellable session"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("MainAddon/init.lua")).unwrap(),
+            b"-- main edit"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("LibFoo/init.lua")).unwrap(),
+            b"-- fresh lib edit"
+        );
+    }
+
+    #[test]
+    fn synthetic_auto_kept_decision_cannot_approve_a_new_real_conflict() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        let addon_dir = addons_dir.join("MyAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+        file_hashes::record_hashes_for_folders(addons_dir, &["MyAddon".to_string()], 7, "1.0")
+            .unwrap();
+
+        // Upstream still matches the baseline, while the user's bytes do not:
+        // this is auto-kept at scan time and the UI synthesizes keep_mine.
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MyAddon/main.lua", options).unwrap();
+        archive.write_all(b"-- baseline").unwrap();
+        archive.finish().unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- user edit").unwrap();
+
+        let (report, zip_hashes) =
+            build_conflict_report(addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
+        assert!(report.conflicts.is_empty());
+        assert_eq!(report.auto_kept_files, vec!["MyAddon/main.lua"]);
+
+        let pending = crate::PendingUpdate {
+            zip_path,
+            folder_name: "MyAddon".to_string(),
+            esoui_id: 7,
+            update_version: "2.0".to_string(),
+            artifact_last_update: 0,
+            reviewed_conflicts: Vec::new(),
+            zip_hashes: Arc::new(zip_hashes),
+        };
+
+        // Simulate another locked operation advancing the stored baseline while
+        // the review is open. The same live bytes now genuinely conflict with
+        // the pending ZIP, but the synthetic decision was never user review.
+        let mut manifest = file_hashes::load_hash_manifest(addons_dir, "MyAddon").unwrap();
+        manifest.files.insert(
+            "main.lua".to_string(),
+            "sha256:different-upstream".to_string(),
+        );
+        file_hashes::save_hash_manifest(addons_dir, &manifest).unwrap();
+
+        let decisions = vec![FileDecision {
+            relative_path: "MyAddon/main.lua".to_string(),
+            action: "keep_mine".to_string(),
+        }];
+        let error = update_with_decisions_inner(
+            addons_dir,
+            &pending,
+            &decisions,
+            installer::ExtractHooks::NONE,
+            DependencyPolicy::Skip,
+        )
+        .expect_err("a synthetic decision must not approve an unseen conflict");
+
+        assert!(error.starts_with(CONFLICTS_CHANGED_PREFIX), "{error}");
+        assert!(error.contains("MyAddon/main.lua"), "{error}");
+        assert_eq!(
+            fs::read(addon_dir.join("main.lua")).unwrap(),
+            b"-- user edit",
+            "revalidation must reject before extraction writes anything"
+        );
+    }
+
+    /// Two folders shipping the same relative filename must stay distinct all
+    /// the way through. With bare keys they collided: one decision, one backup
+    /// path and one diff lookup for two genuinely different files.
+    #[test]
+    fn identically_named_files_in_two_folders_do_not_collide() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+
+        for (folder, body) in [("AddonA", "-- a edit"), ("AddonB", "-- b edit")] {
+            let dir = addons_dir.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("init.lua"), body.as_bytes()).unwrap();
+            let mut files = HashMap::new();
+            files.insert("init.lua".to_string(), "sha256:stale".to_string());
+            file_hashes::save_hash_manifest(
+                addons_dir,
+                &file_hashes::HashManifest {
+                    addon_folder: folder.to_string(),
+                    esoui_ids: vec![1],
+                    recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                    installed_version: "1.0".to_string(),
+                    files,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("AddonA/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream a").unwrap();
+        archive.start_file("AddonB/init.lua", options).unwrap();
+        archive.write_all(b"-- upstream b").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(addons_dir, "AddonA", &zip_path, "2.0", "session").unwrap();
+
+        let paths: Vec<&str> = report
+            .conflicts
+            .iter()
+            .map(|c| c.relative_path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["AddonA/init.lua", "AddonB/init.lua"]);
+    }
+
+    /// A decision is only ever advisory: the server re-derives the
+    /// classification from current disk state at apply time.
+    ///
+    /// The gap this closes: the user marks a conflict keep-mine, then reverts
+    /// the file to its baseline before applying. Reclassification now says the
+    /// file is safe to update, but the stale decision used to still skip it
+    /// during extraction - leaving the old bytes on disk while the update
+    /// reported success - and then record the upstream hash as its baseline, so
+    /// the divergence would never be flagged again.
+    #[test]
+    fn a_stale_keep_mine_decision_does_not_survive_reclassification() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path();
+        let addon_dir = addons_dir.join("MyAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+
+        // Baseline records the pristine bytes.
+        let mut files = HashMap::new();
+        files.insert(
+            "main.lua".to_string(),
+            file_hashes::file_signature("main.lua", &addon_dir.join("main.lua")).unwrap(),
+        );
+        file_hashes::save_hash_manifest(
+            addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "MyAddon".to_string(),
+                esoui_ids: vec![7],
+                recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                installed_version: "1.0".to_string(),
+                files,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("MyAddon/main.lua", options).unwrap();
+        archive.write_all(b"-- upstream v2").unwrap();
+        archive.finish().unwrap();
+
+        // While the file is edited it genuinely conflicts.
+        fs::write(addon_dir.join("main.lua"), b"-- user edit").unwrap();
+        let (report, _) =
+            build_conflict_report(addons_dir, "MyAddon", &zip_path, "2.0", "session").unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].relative_path, "MyAddon/main.lua");
+
+        // The user then reverts it, so at apply time nothing conflicts.
+        fs::write(addon_dir.join("main.lua"), b"-- baseline").unwrap();
+        let zip_hashes = file_hashes::hash_zip_entries_by_folder(&zip_path).unwrap();
+        let classified = classify_update_archive(addons_dir, "MyAddon", &zip_hashes).unwrap();
+        assert!(
+            classified.conflicts.is_empty(),
+            "reverting the edit must clear the conflict"
+        );
+        assert_eq!(classified.safe_files, vec!["MyAddon/main.lua".to_string()]);
+
+        // The stale keep-mine decision must therefore be ignored: the file is
+        // no longer in the conflict set, so it must not be added to the skip
+        // set that would leave it un-updated.
+        let still_conflicting: HashSet<&str> = classified
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.relative_path.as_str())
+            .collect();
+        assert!(!still_conflicting.contains("MyAddon/main.lua"));
+    }
+
     fn profile_of(names: &[&str]) -> AddonProfile {
         AddonProfile {
             name: "test".to_string(),
             enabled_addons: names.iter().map(|s| s.to_string()).collect(),
             created_at: String::new(),
         }
+    }
+
+    fn write_reserved_dependency_zip(path: &Path) {
+        use std::io::Write;
+
+        let file = fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                ".KALPA-STAGING. /Victim.lua",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"-- must never be extracted").unwrap();
+        archive.finish().unwrap();
+    }
+
+    #[test]
+    fn auto_dependency_result_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        write_dep_addon(&addons_dir, "AddonA", "LibReserved", "");
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_dependency_zip(&zip_path);
+        let mut store = metadata::MetadataStore::default();
+
+        let result = resolve_transitive_deps_with(
+            &addons_dir,
+            &["AddonA".to_string()],
+            &mut store,
+            |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+            None,
+        );
+
+        assert_eq!(result.failed_deps.len(), 1);
+        assert!(result.failed_deps[0].starts_with("LibReserved: "));
+        assert!(result.failed_deps[0].contains("reserved state folder"));
+        assert!(result.failed_deps[0].contains(".KALPA-STAGING. "));
+    }
+
+    #[test]
+    fn selected_dependency_result_preserves_reserved_folder_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+        let zip_path = tmp.path().join("reserved.zip");
+        write_reserved_dependency_zip(&zip_path);
+        let mut store = metadata::MetadataStore::default();
+
+        let result = install_selected_dependencies_with(
+            &addons_dir,
+            &["LibReserved".to_string()],
+            &mut store,
+            |_, destination, _| installer::extract_addon_zip(&zip_path, destination),
+        );
+
+        assert!(result.skipped_deps.is_empty());
+        assert!(result.failed_deps[0].contains("reserved state folder"));
+        assert!(result.failed_deps[0].contains(".KALPA-STAGING. "));
     }
 
     #[test]
@@ -11269,6 +15021,82 @@ mod tests {
     }
 
     #[test]
+    fn activate_profile_outcome_serializes_camel_case() {
+        let outcome = ActivateProfileOutcome::PlanChanged {
+            plan: ProfilePlan {
+                digest: "aa".to_string(),
+                to_enable: vec![],
+                to_disable: vec![],
+                kept_dependencies: vec![],
+                missing: vec![],
+                blocked: vec![],
+            },
+        };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        // Pins the wire keys the TS ActivateProfileOutcome contract reads, so a
+        // future snake_case field cannot silently serialize wrong (the enum's
+        // rename_all_fields comment becomes enforceable).
+        assert_eq!(value["status"], "planChanged");
+        assert!(value["plan"].get("toEnable").is_some());
+        assert!(value["plan"].get("keptDependencies").is_some());
+    }
+
+    #[test]
+    fn profile_plan_digest_is_deterministic_and_order_independent() {
+        let plan_a = ProfilePlan {
+            digest: "ignored".to_string(),
+            to_enable: vec!["AddonB".to_string(), "AddonA".to_string()],
+            to_disable: vec!["AddonD".to_string(), "AddonC".to_string()],
+            kept_dependencies: vec!["LibB".to_string(), "LibA".to_string()],
+            missing: vec!["GoneB".to_string(), "GoneA".to_string()],
+            blocked: vec!["BlockedB".to_string(), "BlockedA".to_string()],
+        };
+        let plan_b = ProfilePlan {
+            digest: "also ignored".to_string(),
+            to_enable: vec!["AddonA".to_string(), "AddonB".to_string()],
+            to_disable: vec!["AddonC".to_string(), "AddonD".to_string()],
+            kept_dependencies: vec!["LibA".to_string(), "LibB".to_string()],
+            missing: vec!["GoneA".to_string(), "GoneB".to_string()],
+            blocked: vec!["BlockedA".to_string(), "BlockedB".to_string()],
+        };
+
+        let digest = profile_plan_digest(&plan_a);
+
+        assert_eq!(digest, profile_plan_digest(&plan_b));
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn apply_profile_with_stale_digest_refuses_and_renames_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        write_addon(tmp.path(), "AddonB.disabled", "");
+
+        let profile = profile_of(&["AddonB"]);
+        let reviewed_plan = plan_profile(tmp.path(), &profile);
+        write_addon(tmp.path(), "AddonC", "");
+
+        let outcome =
+            apply_profile_with_expected_plan(tmp.path(), &profile, Some(&reviewed_plan.digest));
+
+        match outcome {
+            ActivateProfileOutcome::PlanChanged { plan } => {
+                assert_eq!(plan.to_enable, vec!["AddonB"]);
+                assert_eq!(plan.to_disable, vec!["AddonA", "AddonC"]);
+            }
+            ActivateProfileOutcome::Applied { .. } => panic!("stale digest should be refused"),
+        }
+        assert!(tmp.path().join("AddonA").is_dir());
+        assert!(tmp.path().join("AddonB.disabled").is_dir());
+        assert!(tmp.path().join("AddonC").is_dir());
+        assert!(!tmp.path().join("AddonA.disabled").exists());
+        assert!(!tmp.path().join("AddonB").exists());
+        assert!(!tmp.path().join("AddonC.disabled").exists());
+    }
+
+    #[test]
     fn profile_store_mirror_survives_addons_folder_wipe() {
         let addons = tempfile::tempdir().unwrap();
         let mirror_root = tempfile::tempdir().unwrap();
@@ -11317,6 +15145,32 @@ mod tests {
 
         let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
         assert_eq!(loaded.profiles[0].name, "newer");
+    }
+
+    #[test]
+    fn read_only_profile_load_does_not_promote_legacy_recovery_file() {
+        let addons = tempfile::tempdir().unwrap();
+        let primary = profiles_path(addons.path());
+        let legacy_tmp = primary.with_extension("json.tmp");
+        let store = ProfileStore {
+            profiles: vec![profile_of(&["Recovered"])],
+            active_profile: Some("test".to_string()),
+        };
+        fs::write(&legacy_tmp, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let loaded = load_profiles_read_only_with_mirror(addons.path(), None);
+
+        assert_eq!(loaded.profiles[0].name, "test");
+        assert_eq!(loaded.profiles[0].enabled_addons, vec!["Recovered"]);
+        assert_eq!(loaded.active_profile.as_deref(), Some("test"));
+        assert!(
+            !primary.exists(),
+            "a read-only load must not publish a primary"
+        );
+        assert!(
+            legacy_tmp.exists(),
+            "a read-only load must not remove the recovery file"
+        );
     }
 
     #[test]
@@ -11383,6 +15237,8 @@ mod tests {
                 installed_at: String::new(),
                 tags: vec!["favorite".to_string()],
                 esoui_last_update: 0,
+                bundled_by: Vec::new(),
+                esoui_marker_installed: false,
             },
         );
         metadata::save_metadata(src.path(), &store).unwrap();
@@ -11973,8 +15829,8 @@ mod tests {
             shared_by: String::new(),
             settings: HashMap::new(),
         };
-        assert!(export_pack_file(pack.clone(), "C:\\test.json".to_string()).is_err());
-        assert!(export_pack_file(pack, "C:\\test.exe".to_string()).is_err());
+        assert!(export_pack_to_path(pack.clone(), Path::new("C:\\test.json")).is_err());
+        assert!(export_pack_to_path(pack, Path::new("C:\\test.exe")).is_err());
     }
 
     #[test]
@@ -12001,7 +15857,7 @@ mod tests {
             shared_by: String::new(),
             settings: HashMap::new(),
         };
-        export_pack_file(pack, dest.to_string_lossy().to_string()).unwrap();
+        export_pack_to_path(pack, &dest).unwrap();
 
         let written = fs::read_to_string(&dest).unwrap();
         assert!(written.contains("Replacement"));
@@ -12009,6 +15865,82 @@ mod tests {
             !tmp.path().join("pack.esopack.tmp").exists(),
             "the temp file must not survive a successful export"
         );
+    }
+
+    #[test]
+    fn concurrent_pack_exports_never_share_a_staging_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = std::sync::Arc::new(temp.path().join("pack.esopack"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let destination = destination.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let pack = EsoPackFile {
+                        format: "esopack".to_string(),
+                        version: 1,
+                        pack: EsoPackData {
+                            title: format!("Writer {writer}"),
+                            description: String::new(),
+                            pack_type: "addon-pack".to_string(),
+                            tags: vec![],
+                            addons: vec![],
+                        },
+                        shared_at: String::new(),
+                        shared_by: String::new(),
+                        settings: HashMap::new(),
+                    };
+                    start.wait();
+                    export_pack_to_path(pack, &destination).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let contents = fs::read_to_string(destination.as_ref()).unwrap();
+        serde_json::from_str::<EsoPackFile>(&contents).unwrap();
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(crate::atomic_file::STAGING_INFIX)
+        }));
+    }
+
+    #[test]
+    fn concurrent_import_and_editor_writes_leave_complete_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let imported = std::sync::Arc::new(temp.path().join("Addon.lua"));
+        let edited = std::sync::Arc::new(temp.path().join("init.lua"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|writer| {
+                let imported = imported.clone();
+                let edited = edited.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let lua = format!("Addon = {{ writer = {writer} }}\n");
+                    start.wait();
+                    write_imported_sv(imported.as_ref(), lua.as_bytes()).unwrap();
+                    write_addon_file_atomically(edited.as_ref(), lua.as_bytes()).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        for path in [imported.as_ref(), edited.as_ref()] {
+            let contents = fs::read_to_string(path).unwrap();
+            assert!(contents.starts_with("Addon = { writer = "));
+            assert!(contents.ends_with(" }\n"));
+        }
+        assert!(!temp.path().join("Addon.lua.tmp").exists());
+        assert!(!temp.path().join("init.lua.kalpa-edit-tmp").exists());
     }
 
     #[test]
@@ -12084,6 +16016,14 @@ mod tests {
         // …and every unrelated setting is preserved verbatim.
         assert_eq!(value["theme"], "nordic");
         assert_eq!(value["autoUpdate"], true);
+        assert!(!settings.with_extension("json.native-revert.tmp").exists());
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(crate::atomic_file::STAGING_INFIX)
+        }));
     }
 
     #[test]
@@ -12392,4 +16332,209 @@ mod tests {
         // `required` defaults to true when the worker omits it.
         assert!(pack.addons[0].required);
     }
+}
+
+#[test]
+fn a_live_native_owner_wins_over_its_surviving_pending_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::native_boot::prepare(dir.path(), "ready-child-orphaned-parent").unwrap();
+    let _owner =
+        match crate::native_boot::try_claim_authority(dir.path(), "ready-child-orphaned-parent")
+            .unwrap()
+        {
+            crate::native_boot::AuthorityClaim::Held(guard) => guard,
+            crate::native_boot::AuthorityClaim::AlreadyHeld => panic!("fresh authority was held"),
+        };
+
+    assert!(crate::native_boot::has_pending(dir.path()));
+    assert_eq!(
+        live_native_startup_owner(dir.path()),
+        Some(crate::native_boot::authority_path(dir.path()))
+    );
+}
+
+#[test]
+fn native_launch_lock_wait_observes_handoff_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let pending = crate::native_boot::pending_path(dir.path());
+    let _held = crate::transaction_lock::acquire(
+        &pending,
+        crate::transaction_lock::LockOptions {
+            timeout: Duration::ZERO,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    let cancelled = AtomicBool::new(true);
+
+    let error = match acquire_native_launch_guard(dir.path(), Some(&cancelled)) {
+        Ok(_) => panic!("cancelled launch lock wait unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.contains("cancelled"));
+}
+
+/// The single-instance activation path reveals the window and emits the deep
+/// link only when this process holds UI authority. Releasing authority to a
+/// native child and failing to reclaim leaves the WebView alive but not the
+/// writer; acting on an activation there is what puts two writers on the same
+/// state. Pin the predicate that gate reads.
+#[test]
+fn released_authority_is_reported_as_not_held_until_reclaimed() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Establish authority the way startup does.
+    let guard = match crate::native_boot::try_claim_authority(
+        dir.path(),
+        &crate::native_boot::webview_launch_id(),
+    )
+    .unwrap()
+    {
+        crate::native_boot::AuthorityClaim::Held(guard) => guard,
+        crate::native_boot::AuthorityClaim::AlreadyHeld => {
+            panic!("fresh directory was already locked")
+        }
+    };
+    *webview_authority().lock().unwrap() = Some(guard);
+    assert!(holds_webview_authority());
+
+    // The handoff releases it for the child to take.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    let mut quiesced = false;
+    quiesce_then_release_webview_authority(|| {
+        assert!(
+            holds_webview_authority(),
+            "the WebView must still own authority while it is being quiesced"
+        );
+        quiesced = true;
+        Ok(())
+    })
+    .unwrap();
+    assert!(quiesced);
+    assert!(
+        !holds_webview_authority(),
+        "a WebView that released authority must not claim to hold it"
+    );
+
+    // Reclaiming restores it, and reclaiming again is a no-op.
+    reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+
+    let error = quiesce_then_release_webview_authority(|| Err("cannot hide".to_string()))
+        .expect_err("failed quiescence must prevent authority release");
+    assert_eq!(error, "cannot hide");
+    assert!(holds_webview_authority());
+    reclaim_webview_authority(dir.path()).unwrap();
+    assert!(holds_webview_authority());
+
+    *webview_authority().lock().unwrap() = None;
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+/// The handoff atomics are process-global, so every case lives in one test.
+/// Splitting them would let the parallel test harness race the flags.
+#[test]
+fn a_cancelled_handoff_preserves_the_webview_instead_of_exiting() {
+    // Manual commands are backend-single-flight. A losing invocation must not
+    // reset cancellation belonging to the admitted invocation.
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_IS_STARTUP.store(false, Ordering::SeqCst);
+    begin_native_handoff(false).unwrap();
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(begin_native_handoff(false).is_err());
+    assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    abort_native_handoff();
+
+    // Startup has not claimed WebView authority yet. An activation still
+    // cancels its sidecar launch, but must not try to reclaim a lock this
+    // process never held; the caller buffers the activation until startup
+    // falls back to the WebView and claims normally.
+    *webview_authority().lock().unwrap() = None;
+    begin_native_handoff(true).unwrap();
+    assert!(cancel_native_handoff(|| {
+        panic!("startup cancellation unexpectedly tried to reclaim authority")
+    })
+    .unwrap());
+    assert!(NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst));
+    abort_native_handoff();
+    assert!(!NATIVE_HANDOFF_IS_STARTUP.load(Ordering::SeqCst));
+
+    // Committing a cancelled handoff must refuse to release authority, so the
+    // still-live WebView keeps the activation instead of exiting underneath it.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(commit_native_handoff_authority_release().is_err());
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // Commit cannot pass after an activation enters the authority critical
+    // section but before it publishes cancellation.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let authority = webview_authority().lock().unwrap();
+    let (commit_reached_tx, commit_reached_rx) = std::sync::mpsc::channel();
+    let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+    let commit = std::thread::spawn(move || {
+        assert!(matches!(
+            webview_authority().try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        commit_reached_tx.send(()).unwrap();
+        commit_tx
+            .send(commit_native_handoff_authority_release())
+            .unwrap();
+    });
+    commit_reached_rx.recv().unwrap();
+    assert!(matches!(
+        commit_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    drop(authority);
+    assert!(commit_rx.recv().unwrap().is_err());
+    commit.join().unwrap();
+
+    // ExitRequested outside any handoff must never be prevented.
+    NATIVE_HANDOFF_ACTIVE.store(false, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(false, Ordering::SeqCst);
+    assert!(!finish_native_handoff_exit());
+
+    // An uncancelled handoff commits: the exit proceeds and the flag clears.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    assert!(!finish_native_handoff_exit());
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+
+    // A handoff cancelled after the wait ended prevents the exit exactly once.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    assert!(finish_native_handoff_exit());
+    assert!(!NATIVE_HANDOFF_ACTIVE.load(Ordering::SeqCst));
+    assert!(!NATIVE_HANDOFF_CANCELLED.load(Ordering::SeqCst));
+    assert!(!finish_native_handoff_exit());
+
+    // ExitRequested makes the same serialized decision, so it cannot overtake
+    // an activation that has entered cancellation.
+    NATIVE_HANDOFF_ACTIVE.store(true, Ordering::SeqCst);
+    let authority = webview_authority().lock().unwrap();
+    let (exit_reached_tx, exit_reached_rx) = std::sync::mpsc::channel();
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    let exit = std::thread::spawn(move || {
+        assert!(matches!(
+            webview_authority().try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        exit_reached_tx.send(()).unwrap();
+        exit_tx.send(finish_native_handoff_exit()).unwrap();
+    });
+    exit_reached_rx.recv().unwrap();
+    assert!(matches!(
+        exit_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    NATIVE_HANDOFF_CANCELLED.store(true, Ordering::SeqCst);
+    drop(authority);
+    assert!(exit_rx.recv().unwrap());
+    exit.join().unwrap();
 }

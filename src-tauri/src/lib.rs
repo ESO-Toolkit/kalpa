@@ -1,22 +1,35 @@
+mod atomic_file;
 mod auth;
 /// Heap high-water-mark allocator for the uploader perf benchmark. The
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
 /// so normal builds are unaffected.
 pub mod bench_alloc;
+pub mod client_adopt;
+pub mod client_backup;
+pub mod client_download;
+mod client_health;
+mod client_install;
+pub mod client_signature;
+pub mod client_stack;
+pub mod client_uninstall;
+pub mod client_write;
 mod commands;
 mod edit_backups;
 mod esoui;
 mod file_hashes;
 pub mod game_instances;
+mod install_txn;
 mod installer;
 mod manifest;
 mod manifest_cache;
 mod metadata;
+mod native_boot;
 pub mod platform;
 mod safe_migration;
 mod saved_variables;
 mod settings_store;
 mod token_store;
+mod transaction_lock;
 pub mod uploader;
 
 // Benchmark-only heap tracker (see `bench_alloc`). Installed solely under the
@@ -69,6 +82,13 @@ enum DeepLinkAction {
     InstallPack(String),
 }
 
+static REVERSE_HANDOFF_ACTIVATION: std::sync::OnceLock<Mutex<Option<DeepLinkAction>>> =
+    std::sync::OnceLock::new();
+
+fn reverse_handoff_activation() -> &'static Mutex<Option<DeepLinkAction>> {
+    REVERSE_HANDOFF_ACTIVATION.get_or_init(|| Mutex::new(None))
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingDeepLinkPayload {
@@ -88,17 +108,28 @@ pub struct PendingUpdate {
     pub folder_name: String,
     pub esoui_id: u32,
     pub update_version: String,
-    /// The downloaded ZIP's hash/signature map, computed once during conflict
-    /// detection (`build_conflict_report`) and reused as the post-extraction
-    /// baseline so the apply step doesn't re-decompress and re-hash the whole
-    /// archive a second time. Empty only for entries created before this field
-    /// existed or via paths that didn't compute it; the apply step falls back to
-    /// hashing the ZIP in that case.
+    /// Publication marker from the filedetails response that produced the
+    /// pending ZIP. Zero means this pending entry predates marker tracking.
+    pub artifact_last_update: u64,
+    /// Folder-qualified paths that were genuine conflicts when this pending
+    /// review was created. The frontend also submits synthetic `keep_mine`
+    /// decisions for auto-kept files, so apply-time revalidation cannot infer
+    /// scan-time conflict membership from the decision list alone.
+    pub reviewed_conflicts: Vec<String>,
+    /// Every folder the downloaded ZIP writes, each with its own hash map,
+    /// computed once during conflict detection (`build_conflict_report`) and
+    /// reused as the post-extraction baseline so the apply step doesn't
+    /// re-decompress and re-hash the whole archive a second time. Empty only
+    /// for entries created via paths that didn't compute it; the apply step
+    /// falls back to hashing the ZIP in that case.
     ///
-    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map (and
-    /// the apply step's reuse of this map) is a refcount bump rather than a deep
-    /// copy of a many-entry hash map.
-    pub zip_hashes: Arc<HashMap<String, String>>,
+    /// Archive-wide rather than primary-only: the apply step has to re-derive
+    /// the classification for every folder, or a sibling edited while the user
+    /// was deliberating would be overwritten unnoticed.
+    ///
+    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map is
+    /// a refcount bump rather than a deep copy.
+    pub zip_hashes: Arc<crate::file_hashes::ZipHashSet>,
 }
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);
@@ -411,6 +442,8 @@ mod webview_power {
 }
 
 static INITIAL_MAIN_WINDOW_REVEALED: AtomicBool = AtomicBool::new(false);
+static MAIN_PAGE_LOADED: AtomicBool = AtomicBool::new(false);
+static STARTUP_NATIVE_DECISION_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn reveal_initial_main_window(app: &tauri::AppHandle, reason: &str) {
     if INITIAL_MAIN_WINDOW_REVEALED.swap(true, Ordering::SeqCst) {
@@ -452,6 +485,24 @@ fn schedule_initial_main_window_watchdog(app: &tauri::AppHandle) {
     });
 }
 
+fn emit_buffered_activation(app: &tauri::AppHandle) {
+    if let Ok(mut buffered) = reverse_handoff_activation().lock() {
+        if let Some(action) = buffered.take() {
+            emit_deep_link(app, &action);
+        }
+    }
+}
+
+fn finish_webview_startup_after_authority(app: &tauri::AppHandle) {
+    STARTUP_NATIVE_DECISION_PENDING.store(false, Ordering::SeqCst);
+    if MAIN_PAGE_LOADED.load(Ordering::SeqCst) {
+        reveal_initial_main_window(app, "native startup fallback");
+        emit_buffered_activation(app);
+    } else {
+        schedule_initial_main_window_watchdog(app);
+    }
+}
+
 pub fn run() {
     // msWebView2CodeCache: V8 bytecode caching for the app bundle. wry serves
     // the frontend through WebView2's WebResourceRequested interception, which
@@ -478,6 +529,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(client_write::AllowedGameInstallPath::new())
         .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
@@ -500,10 +552,94 @@ pub fn run() {
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             {
+                MAIN_PAGE_LOADED.store(true, Ordering::SeqCst);
+                if STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Err(error) = commands::complete_webview_handoff(webview.app_handle()) {
+                    eprintln!("Failed to complete WebView handoff: {error}");
+                    webview.app_handle().exit(1);
+                    return;
+                }
                 reveal_initial_main_window(webview.app_handle(), "page load finished");
+                emit_buffered_activation(webview.app_handle());
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // A reverse-handoff child remains hidden and non-authoritative until
+            // its first page load proves ready. Buffer an activation until the
+            // page-ready callback owns authority; never reveal/emit before then.
+            if std::env::var_os(native_boot::WEBVIEW_LAUNCH_ID_ENV).is_some() {
+                for arg in &argv {
+                    if let Some(action) = parse_deep_link(arg) {
+                        if let Ok(mut buffered) = reverse_handoff_activation().lock() {
+                            *buffered = Some(action);
+                        }
+                        break;
+                    }
+                }
+                return;
+            }
+            let startup_pending = STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst);
+            let handoff_cancelled =
+                match commands::cancel_native_handoff_for_activation(app, startup_pending) {
+                    Ok(cancelled) => cancelled,
+                    Err(error) => {
+                        eprintln!("Failed to preserve activation during native handoff: {error}");
+                        false
+                    }
+                };
+            // Startup fallback is not complete until the main-thread closure
+            // clears the pending flag. Even if the worker has already claimed
+            // authority, the page may not have installed its event listeners
+            // yet, so keep the activation buffered until that closure/page-load
+            // path can reveal and emit it safely.
+            if startup_pending && handoff_cancelled {
+                for arg in &argv {
+                    if let Some(action) = parse_deep_link(arg) {
+                        *reverse_handoff_activation()
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(action);
+                        eprintln!(
+                            "[native-shell] buffered activation while startup handoff cancels"
+                        );
+                        break;
+                    }
+                }
+                return;
+            }
+            // Same rule as the reverse-handoff branch above, for the same
+            // reason: never reveal or emit without UI authority. Cancellation
+            // can fail (the native child holds or wedges the lock, or the
+            // reclaim timed out), and revealing anyway would put this WebView
+            // and a live sidecar on the same state as two independent writers.
+            if !commands::holds_webview_authority() {
+                eprintln!(
+                    "[native-shell] ignoring activation: this WebView does not hold UI authority"
+                );
+                return;
+            }
+            // Page-load publishes readiness before taking this mutex to flush
+            // buffered activations. Taking the same mutex before checking the
+            // flag closes the opposite race: either this callback observes a
+            // ready page and emits below, or page-load observes what we buffer.
+            {
+                let mut buffered = reverse_handoff_activation()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !MAIN_PAGE_LOADED.load(Ordering::SeqCst) {
+                    for arg in &argv {
+                        if let Some(action) = parse_deep_link(arg) {
+                            *buffered = Some(action);
+                            eprintln!(
+                                "[native-shell] buffered activation until the main page loads"
+                            );
+                            break;
+                        }
+                    }
+                    return;
+                }
+            }
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
                 webview_power::on_shown(app); // resume before showing (flash-free)
@@ -562,20 +698,52 @@ pub fn run() {
                 }
             }
 
-            if startup_deep_link.is_none() {
-                match commands::try_launch_native_performance_mode_on_startup(app.handle()) {
-                    Ok(Some(_)) => {
-                        app.handle().exit(0);
-                        return Ok(());
+            // The WebView cannot become active while the native shell still
+            // owns the cross-process UI-authority lock. For a deep-link launch,
+            // this requests an observable native shutdown and waits for its OS
+            // lock to be released before showing the WebView.
+            let reverse_handoff = std::env::var_os(native_boot::WEBVIEW_LAUNCH_ID_ENV).is_some();
+            if startup_deep_link.is_none() && !reverse_handoff {
+                // The Windows single-instance callback is delivered through
+                // the UI event loop. Keep setup non-blocking so an activation
+                // can cancel the sidecar handshake while it is in flight.
+                STARTUP_NATIVE_DECISION_PENDING.store(true, Ordering::SeqCst);
+                let startup_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let outcome =
+                        commands::try_launch_native_performance_mode_on_startup(&startup_handle);
+                    if matches!(outcome, Ok(Some(_))) {
+                        return;
                     }
-                    Ok(None) => {}
-                    Err(error) => {
+                    if let Err(error) = &outcome {
                         eprintln!("Failed to start native performance UI: {error}");
                     }
+                    if let Err(error) = commands::claim_webview_authority(&startup_handle) {
+                        eprintln!("Failed to acquire WebView UI authority: {error}");
+                        startup_handle.exit(1);
+                        return;
+                    }
+                    let dispatch_handle = startup_handle.clone();
+                    if let Err(error) = startup_handle.run_on_main_thread(move || {
+                        finish_webview_startup_after_authority(&dispatch_handle);
+                    }) {
+                        eprintln!("Failed to dispatch WebView startup fallback: {error}");
+                        startup_handle.exit(1);
+                    }
+                });
+            } else if !reverse_handoff {
+                if let Err(error) = commands::claim_webview_authority(app.handle()) {
+                    eprintln!("Failed to acquire WebView UI authority: {error}");
+                    return Err(std::io::Error::other(error).into());
                 }
             }
 
-            schedule_initial_main_window_watchdog(app.handle());
+            // A reverse-handoff child must never reveal on the ordinary timeout:
+            // the still-visible Slint parent retains authority until page-ready.
+            // If page load hangs, the parent kills this hidden child and stays up.
+            if !reverse_handoff && !STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst) {
+                schedule_initial_main_window_watchdog(app.handle());
+            }
 
             // Consume the sidecar's re-entry flags, then scrub them from this
             // process's environment: children (including a sidecar launched by
@@ -756,7 +924,21 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            client_health::detect_eso_clients,
+            client_health::validate_eso_client,
+            client_health::inspect_eso_client,
+            commands::is_eso_or_launcher_running,
+            client_write::set_game_install_path,
+            client_write::clear_game_install_path,
+            client_stack::inspect_client_stack,
+            client_adopt::plan_adoption,
+            client_adopt::adopt_stack,
+            client_adopt::forget_stack,
+            client_uninstall::list_managed_client_files,
+            client_uninstall::uninstall_managed_client_files,
+            client_uninstall::emergency_remove_injector,
             commands::set_addons_path,
+            commands::reveal_allowed_path,
             commands::set_text_zoom,
             commands::check_addons_write_access,
             commands::open_ransomware_protection_settings,
@@ -909,7 +1091,12 @@ pub fn run() {
             // save), so detaching here neutralises that non-atomic write. Settings
             // are already persisted atomically on every write, so nothing is
             // flushed here. (Window close hides to tray and never reaches this.)
-            if let tauri::RunEvent::ExitRequested { .. } = &event {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if commands::finish_native_handoff_exit() {
+                    eprintln!("[native-shell] preventing exit for preserved activation");
+                    api.prevent_exit();
+                    return;
+                }
                 settings_store::detach_on_exit(app);
             }
             // On any real process exit, signal every native live session to stop so

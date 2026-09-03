@@ -9,8 +9,14 @@ import type {
   InstallResult,
   ConflictReport,
   FileDecision,
+  InstallProgressEvent,
 } from "../types";
 import { PRESET_TAGS } from "../types";
+import {
+  formatInstallProgress,
+  installProgressFromEvent,
+  type InstallProgress,
+} from "@/lib/install-progress";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -20,12 +26,23 @@ import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/compo
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting } from "@/lib/store";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
+import { PROTECTED_EDITS_UNAVAILABLE } from "@/lib/protected-edits";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-react";
+import {
+  ExternalLink,
+  Trash2,
+  Check,
+  Power,
+  Files,
+  FileText,
+  Globe,
+  ScrollText,
+} from "lucide-react";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
 
@@ -38,6 +55,17 @@ const AddonFileBrowser = lazy(() =>
 
 const UpdateConflictPanel = lazy(() =>
   import("@/components/update-conflict-panel").then((m) => ({ default: m.UpdateConflictPanel }))
+);
+
+// The ESOUI tab pulls in the screenshot carousel and description renderer, and
+// the changelog dialog is only ever opened deliberately — neither belongs in
+// AddonDetail's first paint.
+const EsouiTab = lazy(() =>
+  import("@/components/esoui-tab").then((m) => ({ default: m.EsouiTab }))
+);
+
+const ChangelogDialog = lazy(() =>
+  import("@/components/changelog-dialog").then((m) => ({ default: m.ChangelogDialog }))
 );
 
 function relativeDate(ts: number): string {
@@ -59,6 +87,7 @@ interface AddonDetailProps {
    * App's scan deliberately re-resolves the selected addon across a rescan. */
   onRefresh: () => void;
   onRemoveAddon: (folderName: string) => void;
+  removalBlockedReason?: string;
   onToggleDisable: (folderName: string, currentlyDisabled: boolean) => void;
   updateResult: UpdateCheckResult | null;
   onAddonUpdated: (esouiId: number) => void;
@@ -74,6 +103,7 @@ function AddonDetailBase({
   addonsPath,
   onRefresh,
   onRemoveAddon,
+  removalBlockedReason,
   onToggleDisable,
   updateResult,
   onAddonUpdated,
@@ -89,60 +119,62 @@ function AddonDetailBase({
   const [updateSuccess, setUpdateSuccess] = useState(false);
   const [installingDep, setInstallingDep] = useState<string | null>(null);
   const [justInstalledDeps, setJustInstalledDeps] = useState<Set<string>>(new Set());
-  const [removingDep, setRemovingDep] = useState<string | null>(null);
   const [customTagInput, setCustomTagInput] = useState("");
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
-  const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
-  // Per-file extraction progress for THIS addon's in-flight update, correlated
-  // by operation id. Drives the "Extracting N of M" label and the Stop button.
-  const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
-    null
-  );
+  // The ESOUI tab fetches on mount, so it must not mount until the user actually
+  // opens that tab. Base UI unmounts inactive panels by default, but this flag
+  // makes the "no request on addon select" guarantee independent of that.
+  const [esouiTabOpened, setEsouiTabOpened] = useState(false);
+  const [changelogOpen, setChangelogOpen] = useState(false);
+  const [dismissedConflictSessionId, setDismissedConflictSessionId] = useState<string | null>(null);
+  // Progress for THIS addon's in-flight update, correlated by operation id.
+  // Drives the phase label ("Downloading 4.2 / 19.1 MB", "Extracting N of M")
+  // and the Stop button.
+  const [updateProgress, setUpdateProgress] = useState<InstallProgress | null>(null);
   const [canStopUpdate, setCanStopUpdate] = useState(false);
   // The operation id lives in this component instance. App.tsx mounts AddonDetail
   // with key={folderName}, so selecting a different addon mid-update remounts and
   // drops this ref: the backend update keeps running (it's detached in
   // spawn_blocking) but its Stop control and progress are lost for the rest of
-  // that update. Accepted known limitation — like the batch-flow and
-  // download-phase Stop gaps — kept small here because the hashing fix shrinks the
-  // motivating multi-minute window to seconds; lifting operation tracking into
-  // App.tsx would be the fix if it becomes a real annoyance.
+  // that update. Accepted known limitation — like the batch-flow Stop gap —
+  // kept small here because the hashing fix shrinks the motivating multi-minute
+  // window to seconds; lifting operation tracking into App.tsx would be the fix
+  // if it becomes a real annoyance. (The download phase is no longer part of
+  // that list: it reports bytes and polls the same cancellation flag.)
   const operationIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    // Extraction events can burst far faster than the label can usefully
-    // change. Coalesce to at most one setState per animation frame: keep only
-    // the latest payload and flush it from a single scheduled rAF, so a large
-    // addon's event flood can't queue up hundreds of renders. The flush
+    // Download and extraction events can burst far faster than the label can
+    // usefully change. Coalesce to at most one setState per animation frame:
+    // keep only the latest payload and flush it from a single scheduled rAF, so
+    // a large addon's event flood can't queue up hundreds of renders. The flush
     // re-checks the operation id: a rAF can fire after `endOperation` already
     // reset the UI (completion resolving in the same frame, or the rAF frozen
     // while the window was hidden) and must not resurrect stale progress.
-    let pendingProgress: { done: number; total: number; opId: string } | null = null;
+    let pendingProgress: { progress: InstallProgress; opId: string } | null = null;
     let rafId: number | null = null;
     const flush = () => {
       rafId = null;
       if (pendingProgress !== null && pendingProgress.opId === operationIdRef.current) {
+        // Stop is offered as soon as any phase reports: the download polls the
+        // same cancellation flag the extraction does.
         setCanStopUpdate(true);
-        setExtractProgress({ done: pendingProgress.done, total: pendingProgress.total });
+        setUpdateProgress(pendingProgress.progress);
       }
       pendingProgress = null;
     };
-    void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
-      "update-progress",
-      (event) => {
-        if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
-          pendingProgress = {
-            done: event.payload.fileIndex,
-            total: event.payload.fileTotal,
-            opId: event.payload.operationId,
-          };
-          rafId ??= requestAnimationFrame(flush);
-        }
+    void listen<InstallProgressEvent>("update-progress", (event) => {
+      if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
+        pendingProgress = {
+          progress: installProgressFromEvent(event.payload),
+          opId: event.payload.operationId,
+        };
+        rafId ??= requestAnimationFrame(flush);
       }
-    )
+    })
       .then((un) => {
         if (disposed) un();
         else unlisten = un;
@@ -162,13 +194,13 @@ function AddonDetailBase({
     const id = crypto.randomUUID();
     operationIdRef.current = id;
     setCanStopUpdate(false);
-    setExtractProgress(null);
+    setUpdateProgress(null);
     return id;
   };
   const endOperation = () => {
     operationIdRef.current = null;
     setCanStopUpdate(false);
-    setExtractProgress(null);
+    setUpdateProgress(null);
   };
   const handleStopUpdate = () => {
     const id = operationIdRef.current;
@@ -188,6 +220,7 @@ function AddonDetailBase({
       operationId: beginOperation(),
       dependencyPolicy,
     });
+    reportDependencyFailures(result.failedDeps);
     // Empty unless the policy is "ask". The picker is app-level and owns the
     // install + refresh from here, so this update's busy state can clear. Hand it
     // the same `addonsPath` this update ran against (closure-captured, so it stays
@@ -267,6 +300,12 @@ function AddonDetailBase({
         folderName: addon.folderName,
         esouiId: addon.esouiId,
       });
+
+      // Trust the just-completed preflight over scan-time UI state: the baseline
+      // may have been removed or become invalid since the addon list loaded.
+      if (!report.hasHashBaseline) {
+        toast.warning(PROTECTED_EDITS_UNAVAILABLE);
+      }
 
       if (report.conflicts.length > 0) {
         const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
@@ -383,6 +422,9 @@ function AddonDetailBase({
       const result = await invokeOrThrow<InstallResult>("install_dependency", {
         addonsPath,
         depName,
+        // Same operation id the update flow uses, so this pane's progress
+        // listener picks up the library's download and its own dependencies.
+        operationId: beginOperation(),
       });
       const depCount = result.installedDeps.length;
       if (depCount > 0) {
@@ -392,28 +434,14 @@ function AddonDetailBase({
       } else {
         toast.success(`Installed ${depName}`);
       }
+      reportDependencyFailures(result.failedDeps);
       setJustInstalledDeps((prev) => new Set(prev).add(depName));
       onRefresh(); // refresh addon list, keeping this addon selected
     } catch (e) {
       toast.error(`Failed to install ${depName}: ${getTauriErrorMessage(e)}`);
     } finally {
       setInstallingDep(null);
-    }
-  };
-
-  const handleRemoveDep = async (depName: string) => {
-    setRemovingDep(depName);
-    try {
-      await invokeOrThrow("remove_addon", {
-        addonsPath,
-        folderName: depName,
-      });
-      toast.success(`Removed ${depName}`);
-      onRefresh(); // refresh addon list, keeping this addon selected
-    } catch (e) {
-      toast.error(`Failed to remove ${depName}: ${getTauriErrorMessage(e)}`);
-    } finally {
-      setRemovingDep(null);
+      endOperation();
     }
   };
 
@@ -450,17 +478,24 @@ function AddonDetailBase({
       ) : updateResult?.hasUpdate ? (
         <GlassPanel
           variant="subtle"
-          className="mb-4 flex items-center justify-between gap-3 border-status-warning-strong/20! bg-status-warning-strong/[0.04]! p-3"
+          className="mb-4 flex items-start justify-between gap-3 border-status-warning-strong/20! bg-status-warning-strong/[0.04]! p-3"
         >
-          <span className="text-sm text-status-warning">
-            Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
-          </span>
+          <div className="min-w-0">
+            <p className="text-sm text-status-warning">
+              Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
+            </p>
+            {addon.hasProtectedEditsBaseline !== true && (
+              <p role="status" className="mt-1 max-w-2xl text-xs text-status-warning">
+                <span className="font-semibold">Protected Edits unavailable:</span> this addon has
+                no trusted file baseline, so Kalpa cannot detect which files you changed. Updating
+                may overwrite those edits.
+              </p>
+            )}
+          </div>
           {updating ? (
             <div className="flex items-center gap-2">
               <span className="text-xs tabular-nums text-muted-foreground">
-                {extractProgress && extractProgress.total > 0
-                  ? `Extracting ${extractProgress.done.toLocaleString()} / ${extractProgress.total.toLocaleString()}`
-                  : "Updating…"}
+                {updateProgress ? formatInstallProgress(updateProgress) : "Updating…"}
               </span>
               <Button
                 onClick={handleStopUpdate}
@@ -472,14 +507,54 @@ function AddonDetailBase({
               </Button>
             </div>
           ) : (
-            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-              <Button onClick={handleUpdate} disabled={isOffline} size="sm">
-                Update
-              </Button>
-            </SimpleTooltip>
+            <div className="flex items-center gap-2">
+              {installingDep && (
+                // A dependency install is not an update of THIS addon, so it
+                // keeps the normal action buttons — it just narrates itself
+                // rather than leaving a bare spinner on a tiny icon button.
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {updateProgress
+                    ? formatInstallProgress(updateProgress)
+                    : `Installing ${installingDep}…`}
+                </span>
+              )}
+              {addon.esouiId && (
+                <SimpleTooltip
+                  content={isOffline ? "Changelogs require an internet connection" : ""}
+                >
+                  <Button
+                    onClick={() => setChangelogOpen(true)}
+                    disabled={isOffline}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <ScrollText className="size-4 mr-1.5" />
+                    What&rsquo;s new
+                  </Button>
+                </SimpleTooltip>
+              )}
+              <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+                <Button onClick={handleUpdate} disabled={isOffline} size="sm">
+                  Update
+                </Button>
+              </SimpleTooltip>
+            </div>
           )}
         </GlassPanel>
       ) : null}
+
+      {changelogOpen && addon.esouiId && (
+        <Suspense fallback={null}>
+          <ChangelogDialog
+            esouiId={addon.esouiId}
+            title={addon.title}
+            currentVersion={updateResult?.currentVersion}
+            remoteVersion={updateResult?.remoteVersion}
+            open={changelogOpen}
+            onOpenChange={setChangelogOpen}
+          />
+        </Suspense>
+      )}
 
       {updateError && (
         <Alert variant="destructive" className="mb-4">
@@ -506,57 +581,66 @@ function AddonDetailBase({
         </div>
       )}
 
-      {!conflictReport && pendingConflict && !pendingConflictDismissed && (
-        <div className="mb-4">
-          <Suspense fallback={null}>
-            <UpdateConflictPanel
-              folderName={pendingConflict.folderName}
-              currentVersion={updateResult?.currentVersion ?? addon.version}
-              updateVersion={pendingConflict.updateVersion}
-              conflicts={pendingConflict.conflicts}
-              autoKeptFiles={pendingConflict.autoKeptFiles}
-              safeFileCount={0}
-              sessionId={pendingConflict.sessionId}
-              addonsPath={addonsPath}
-              onResolve={async (decisions) => {
-                if (updating) return;
-                setUpdating(true);
-                setUpdateError(null);
-                if (!(await ensureEsoNotBlocking())) {
-                  setUpdating(false);
-                  return;
-                }
-                try {
-                  await applyUpdate(pendingConflict.sessionId, decisions);
-                  toast.success(`Updated ${addon.title}`);
-                  onConflictResolved?.(addon.folderName);
-                  if (updateResult) onAddonUpdated(updateResult.esouiId);
-                } catch (e) {
-                  if (isCancellation(e)) {
-                    setPendingConflictDismissed(true);
-                    if (onConflictResolved) {
-                      onConflictResolved(addon.folderName);
-                    } else if (updateResult) {
-                      onAddonUpdated(updateResult.esouiId);
-                    }
-                    toast.info(`Stopped updating ${addon.title}`, {
-                      description: "It may be partially updated — run the update again to finish.",
-                    });
-                  } else {
-                    setUpdateError(getTauriErrorMessage(e));
+      {!conflictReport &&
+        pendingConflict &&
+        pendingConflict.sessionId !== dismissedConflictSessionId && (
+          <div className="mb-4">
+            <Suspense fallback={null}>
+              <UpdateConflictPanel
+                key={pendingConflict.sessionId}
+                folderName={pendingConflict.folderName}
+                currentVersion={updateResult?.currentVersion ?? addon.version}
+                updateVersion={pendingConflict.updateVersion}
+                conflicts={pendingConflict.conflicts}
+                autoKeptFiles={pendingConflict.autoKeptFiles}
+                safeFileCount={0}
+                sessionId={pendingConflict.sessionId}
+                addonsPath={addonsPath}
+                onResolve={async (decisions) => {
+                  if (updating) return;
+                  setUpdating(true);
+                  setUpdateError(null);
+                  if (!(await ensureEsoNotBlocking())) {
+                    setUpdating(false);
+                    return;
                   }
-                } finally {
-                  endOperation();
-                  setUpdating(false);
-                }
-              }}
-              onSkip={() => setPendingConflictDismissed(true)}
-            />
-          </Suspense>
-        </div>
-      )}
+                  try {
+                    await applyUpdate(pendingConflict.sessionId, decisions);
+                    toast.success(`Updated ${addon.title}`);
+                    onConflictResolved?.(addon.folderName);
+                    if (updateResult) onAddonUpdated(updateResult.esouiId);
+                  } catch (e) {
+                    if (isCancellation(e)) {
+                      setDismissedConflictSessionId(pendingConflict.sessionId);
+                      if (onConflictResolved) {
+                        onConflictResolved(addon.folderName);
+                      } else if (updateResult) {
+                        onAddonUpdated(updateResult.esouiId);
+                      }
+                      toast.info(`Stopped updating ${addon.title}`, {
+                        description:
+                          "It may be partially updated — run the update again to finish.",
+                      });
+                    } else {
+                      setUpdateError(getTauriErrorMessage(e));
+                    }
+                  } finally {
+                    endOperation();
+                    setUpdating(false);
+                  }
+                }}
+                onSkip={() => setDismissedConflictSessionId(pendingConflict.sessionId)}
+              />
+            </Suspense>
+          </div>
+        )}
 
-      <Tabs defaultValue="details">
+      <Tabs
+        defaultValue="details"
+        onValueChange={(value) => {
+          if (value === "esoui") setEsouiTabOpened(true);
+        }}
+      >
         <TabsList>
           <TabsIndicator />
           <TabsTrigger value="details">Details</TabsTrigger>
@@ -564,6 +648,13 @@ function AddonDetailBase({
             <Files className="h-3.5 w-3.5" />
             Files
           </TabsTrigger>
+          {/* Side-loaded addons have no ESOUI page, so they get no tab at all. */}
+          {addon.esouiId && (
+            <TabsTrigger value="esoui">
+              <Globe className="h-3.5 w-3.5" />
+              ESOUI
+            </TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="details" className="pt-4">
@@ -797,18 +888,27 @@ function AddonDetailBase({
                             </SimpleTooltip>
                           )}
                           {removeTarget && (
-                            <SimpleTooltip content={`Remove ${removeTarget}`}>
-                              <button
-                                className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:opacity-50"
-                                onClick={() => handleRemoveDep(removeTarget)}
-                                disabled={removingDep === removeTarget}
+                            <SimpleTooltip
+                              content={removalBlockedReason ?? `Remove ${removeTarget}`}
+                            >
+                              <span
+                                className="inline-flex"
+                                tabIndex={removalBlockedReason ? 0 : undefined}
+                                aria-label={
+                                  removalBlockedReason
+                                    ? `Remove ${removeTarget} unavailable. ${removalBlockedReason}`
+                                    : undefined
+                                }
                               >
-                                {removingDep === removeTarget ? (
-                                  <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-danger" />
-                                ) : (
+                                <button
+                                  className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:pointer-events-none disabled:opacity-50"
+                                  onClick={() => onRemoveAddon(removeTarget)}
+                                  disabled={Boolean(removalBlockedReason)}
+                                  aria-label={`Remove ${removeTarget}`}
+                                >
                                   <Trash2 className="size-3.5" />
-                                )}
-                              </button>
+                                </button>
+                              </span>
                             </SimpleTooltip>
                           )}
                         </div>
@@ -880,18 +980,25 @@ function AddonDetailBase({
                       </div>
                       {present ? (
                         removeTarget ? (
-                          <SimpleTooltip content={`Remove ${removeTarget}`}>
-                            <button
-                              className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:opacity-50"
-                              onClick={() => handleRemoveDep(removeTarget)}
-                              disabled={removingDep === removeTarget}
+                          <SimpleTooltip content={removalBlockedReason ?? `Remove ${removeTarget}`}>
+                            <span
+                              className="inline-flex"
+                              tabIndex={removalBlockedReason ? 0 : undefined}
+                              aria-label={
+                                removalBlockedReason
+                                  ? `Remove ${removeTarget} unavailable. ${removalBlockedReason}`
+                                  : undefined
+                              }
                             >
-                              {removingDep === removeTarget ? (
-                                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-danger" />
-                              ) : (
+                              <button
+                                className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:pointer-events-none disabled:opacity-50"
+                                onClick={() => onRemoveAddon(removeTarget)}
+                                disabled={Boolean(removalBlockedReason)}
+                                aria-label={`Remove ${removeTarget}`}
+                              >
                                 <Trash2 className="size-3.5" />
-                              )}
-                            </button>
+                              </button>
+                            </span>
                           </SimpleTooltip>
                         ) : null
                       ) : (
@@ -940,6 +1047,27 @@ function AddonDetailBase({
             <AddonFileBrowser addonsPath={addonsPath} folderName={addon.folderName} />
           </Suspense>
         </TabsContent>
+
+        {addon.esouiId && (
+          <TabsContent value="esoui" className="pt-4">
+            {esouiTabOpened && (
+              <Suspense
+                fallback={
+                  <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+                    <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+                    Loading details...
+                  </div>
+                }
+              >
+                <EsouiTab
+                  esouiId={addon.esouiId}
+                  isOffline={isOffline}
+                  installedVersion={updateResult?.currentVersion ?? addon.version}
+                />
+              </Suspense>
+            )}
+          </TabsContent>
+        )}
       </Tabs>
 
       <div className="mt-6 border-t border-structure-06 pt-4 space-y-3">
@@ -970,9 +1098,24 @@ function AddonDetailBase({
             {dependents.length === 1 ? "depends" : "depend"} on this addon.
           </p>
         )}
-        <Button variant="destructive" onClick={() => onRemoveAddon(addon.folderName)}>
-          Remove Addon
-        </Button>
+        <SimpleTooltip content={removalBlockedReason ?? "Remove this addon"}>
+          <span
+            className="inline-flex"
+            tabIndex={removalBlockedReason ? 0 : undefined}
+            aria-label={
+              removalBlockedReason ? `Remove addon unavailable. ${removalBlockedReason}` : undefined
+            }
+          >
+            <Button
+              variant="destructive"
+              disabled={Boolean(removalBlockedReason)}
+              aria-label="Remove addon"
+              onClick={() => onRemoveAddon(addon.folderName)}
+            >
+              Remove Addon
+            </Button>
+          </span>
+        </SimpleTooltip>
       </div>
     </div>
   );

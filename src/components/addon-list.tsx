@@ -72,6 +72,7 @@ interface AddonListProps {
   isOffline?: boolean;
   onUpdateAddon?: (folderName: string) => void;
   onRemoveAddon?: (folderName: string) => void;
+  removalBlockedReason?: string;
   onToggleDisable?: (folderName: string, disabled: boolean) => void;
   onOpenFolder?: (folderName: string) => void;
   onToggleFavorite?: (folderName: string, tags: string[]) => void;
@@ -279,6 +280,260 @@ const FILTERS: [FilterMode, string][] = [
   ["disabled", "Disabled"],
 ];
 
+export function isAddonContextMenuShortcut(key: string, shiftKey: boolean): boolean {
+  return key === "ContextMenu" || (shiftKey && key === "F10");
+}
+
+interface InstalledAddonRowsProps {
+  addons: AddonManifest[];
+  loading: boolean;
+  selectedAddon: AddonManifest | null;
+  selectedFolders: Set<string>;
+  updatesMap: ReadonlyMap<string, UpdateCheckResult>;
+  sortMode: SortMode;
+  searchQuery: string;
+  activeTagFilter: string | null;
+  filterMode: FilterMode;
+  onSelect: (addon: AddonManifest) => void;
+  onToggleSelect: (folderName: string) => void;
+  onRightClick: (addon: AddonManifest, pos: { x: number; y: number }) => void;
+  onSearchChange: (query: string) => void;
+  onFilterChange: (mode: FilterMode) => void;
+  onActiveTagFilterChange: (tag: string | null) => void;
+  onViewModeChange: (mode: ViewMode) => void;
+  onDiscoverTabChange: (tab: DiscoverTab) => void;
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>;
+}
+
+function InstalledAddonRows({
+  addons,
+  loading,
+  selectedAddon,
+  selectedFolders,
+  updatesMap,
+  sortMode,
+  searchQuery,
+  activeTagFilter,
+  filterMode,
+  onSelect,
+  onToggleSelect,
+  onRightClick,
+  onSearchChange,
+  onFilterChange,
+  onActiveTagFilterChange,
+  onViewModeChange,
+  onDiscoverTabChange,
+  scrollContainerRef,
+}: InstalledAddonRowsProps) {
+  const batchMode = selectedFolders.size > 0;
+
+  // Keep the virtualizer in the same component lifecycle as its scroll element.
+  // Discover unmounts this whole component, so returning creates a fresh observer
+  // after AnimatePresence has mounted the new installed-list container.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: addons.length,
+    getScrollElement: () => scrollContainerRef.current,
+    // 52px = 48px row content + 4px gap. Rows are single-line (title truncated
+    // via CSS), so height is stable. measureElement corrects any deviation.
+    estimateSize: () => 52,
+    overscan: 10,
+  });
+
+  const handleListKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (addons.length === 0) return;
+
+      const currentIndex = selectedAddon
+        ? addons.findIndex((a) => a.folderName === selectedAddon.folderName)
+        : -1;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        const nextIndex = currentIndex < addons.length - 1 ? currentIndex + 1 : 0;
+        onSelect(addons[nextIndex]!);
+        rowVirtualizer.scrollToIndex(nextIndex, { align: "auto" });
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        const prevIndex = currentIndex > 0 ? currentIndex - 1 : addons.length - 1;
+        onSelect(addons[prevIndex]!);
+        rowVirtualizer.scrollToIndex(prevIndex, { align: "auto" });
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        if (currentIndex >= 0) onSelect(addons[currentIndex]!);
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        onSelect(addons[0]!);
+        rowVirtualizer.scrollToIndex(0, { align: "start" });
+      } else if (e.key === "End") {
+        e.preventDefault();
+        onSelect(addons[addons.length - 1]!);
+        rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
+      } else if (isAddonContextMenuShortcut(e.key, e.shiftKey)) {
+        e.preventDefault();
+        if (currentIndex >= 0) {
+          const addon = addons[currentIndex]!;
+          const row = document.getElementById(`addon-${addon.folderName}`);
+          const rect = (row ?? e.currentTarget).getBoundingClientRect();
+          onRightClick(addon, { x: rect.left + 24, y: rect.top + 24 });
+        }
+      }
+    },
+    [addons, selectedAddon, onSelect, onRightClick, rowVirtualizer]
+  );
+
+  return (
+    <div
+      ref={scrollContainerRef}
+      role="listbox"
+      aria-label={`Installed addons, ${addons.length} items`}
+      aria-roledescription="addon list"
+      aria-activedescendant={selectedAddon ? `addon-${selectedAddon.folderName}` : undefined}
+      tabIndex={0}
+      onKeyDown={handleListKeyDown}
+      className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
+    >
+      {loading && addons.length === 0 ? (
+        <div className="flex h-full items-center justify-center text-muted-foreground">
+          <div className="size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+        </div>
+      ) : addons.length === 0 ? (
+        <div className="flex h-full flex-col items-center justify-center px-5">
+          {searchQuery || activeTagFilter || filterMode !== "all" ? (
+            <Fade className="flex flex-col items-center gap-3 text-center">
+              <div className="rounded-xl bg-structure-03 border border-structure-06 p-3">
+                <Search className="size-6 text-muted-foreground/30" />
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">No addons match</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {searchQuery
+                    ? `"${searchQuery}"`
+                    : activeTagFilter
+                      ? `tag: ${activeTagFilter}`
+                      : filterMode}
+                </p>
+              </div>
+              <button
+                className="rounded-lg border border-structure-08 bg-structure-04 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-structure-08 hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
+                onClick={() => {
+                  onSearchChange("");
+                  onFilterChange("all");
+                  onActiveTagFilterChange(null);
+                }}
+              >
+                <X className="size-3 inline mr-1 -mt-px" />
+                Clear filters
+              </button>
+            </Fade>
+          ) : (
+            <Fade className="w-full">
+              <GlassPanel variant="subtle" className="relative p-5 overflow-hidden">
+                <div className="absolute -top-10 -right-10 h-[120px] w-[120px] rounded-full bg-primary/[0.03] blur-[40px]" />
+                <div className="flex flex-col items-center gap-4 relative">
+                  <Logo size={36} className="opacity-60" />
+                  <div className="text-center">
+                    <p className="font-heading text-sm font-medium text-foreground">
+                      No addons installed yet
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Get started with one of these options
+                    </p>
+                  </div>
+                  <div className="w-full space-y-2">
+                    <button
+                      onClick={() => {
+                        onViewModeChange("discover");
+                        onDiscoverTabChange("search");
+                      }}
+                      className="flex w-full items-center gap-3 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2.5 text-left transition-colors hover:bg-structure-06 hover:border-structure-10 group"
+                    >
+                      <div className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+                        <Globe className="size-3.5" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium text-foreground group-hover:text-foreground">
+                          Browse the ESOUI catalog
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Search and install from thousands of addons
+                        </p>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => {
+                        onViewModeChange("discover");
+                        onDiscoverTabChange("url");
+                      }}
+                      className="flex w-full items-center gap-3 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2.5 text-left transition-colors hover:bg-structure-06 hover:border-structure-10 group"
+                    >
+                      <div className="flex size-7 items-center justify-center rounded-md bg-accent-sky/10 text-accent-sky">
+                        <Search className="size-3.5" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium text-foreground group-hover:text-foreground">
+                          Paste an ESOUI URL
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Install directly from a link
+                        </p>
+                      </div>
+                    </button>
+                  </div>
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {modKeyLabel()}+B to browse &middot; {modKeyLabel()}+I to install by URL
+                    &middot; ? for all shortcuts
+                  </p>
+                </div>
+              </GlassPanel>
+            </Fade>
+          )}
+        </div>
+      ) : (
+        <div
+          style={{
+            height: `${rowVirtualizer.getTotalSize()}px`,
+            width: "100%",
+            position: "relative",
+          }}
+        >
+          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+            const addon = addons[virtualRow.index];
+            if (!addon) return null;
+            return (
+              <div
+                key={addon.folderName}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+                ref={rowVirtualizer.measureElement}
+                data-index={virtualRow.index}
+                aria-rowindex={virtualRow.index + 1}
+              >
+                <AddonListItem
+                  addon={addon}
+                  isCurrent={selectedAddon?.folderName === addon.folderName}
+                  isSelected={selectedFolders.has(addon.folderName)}
+                  batchMode={batchMode}
+                  hasUpdate={updatesMap.has(addon.folderName)}
+                  sortMode={sortMode}
+                  onSelect={onSelect}
+                  onToggleSelect={onToggleSelect}
+                  onRightClick={onRightClick}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddonListBase({
   addons,
   allAddons,
@@ -308,6 +563,7 @@ function AddonListBase({
   isOffline,
   onUpdateAddon,
   onRemoveAddon,
+  removalBlockedReason,
   onToggleDisable,
   onOpenFolder,
   onToggleFavorite,
@@ -346,6 +602,7 @@ function AddonListBase({
   }, [allAddons]);
 
   const batchMode = selectedFolders.size > 0;
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [ctxMenu, setCtxMenu] = useState<{
     addon: AddonManifest;
@@ -364,7 +621,7 @@ function AddonListBase({
 
     if (hasUpdate && onUpdateAddon) {
       items.push({
-        label: "Update",
+        label: "Review Update",
         icon: RefreshCw,
         onClick: () => onUpdateAddon(addon.folderName),
         disabled: isOffline,
@@ -437,9 +694,10 @@ function AddonListBase({
     if (onRemoveAddon) {
       items.push({ separator: true });
       items.push({
-        label: "Remove",
+        label: removalBlockedReason ? `Remove — ${removalBlockedReason}` : "Remove",
         icon: Trash2,
         destructive: true,
+        disabled: Boolean(removalBlockedReason),
         onClick: () => onRemoveAddon(addon.folderName),
       });
     }
@@ -456,57 +714,8 @@ function AddonListBase({
     onToggleDisable,
     onToggleSelect,
     onRemoveAddon,
+    removalBlockedReason,
   ]);
-
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-
-  // TanStack Virtual intentionally returns imperative functions; keep this hook local
-  // and suppress the React Compiler compatibility warning for this documented API.
-  // eslint-disable-next-line react-hooks/incompatible-library
-  const rowVirtualizer = useVirtualizer({
-    count: addons.length,
-    getScrollElement: () => scrollContainerRef.current,
-    // 52px = 48px row content + 4px gap. Rows are single-line (title truncated
-    // via CSS), so height is stable. measureElement corrects any deviation.
-    estimateSize: () => 52,
-    overscan: 10,
-  });
-
-  const handleListKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (addons.length === 0) return;
-
-      const currentIndex = selectedAddon
-        ? addons.findIndex((a) => a.folderName === selectedAddon.folderName)
-        : -1;
-
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        const nextIndex = currentIndex < addons.length - 1 ? currentIndex + 1 : 0;
-        onSelect(addons[nextIndex]!);
-        rowVirtualizer.scrollToIndex(nextIndex, { align: "auto" });
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        const prevIndex = currentIndex > 0 ? currentIndex - 1 : addons.length - 1;
-        onSelect(addons[prevIndex]!);
-        rowVirtualizer.scrollToIndex(prevIndex, { align: "auto" });
-      } else if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        if (currentIndex >= 0) {
-          onSelect(addons[currentIndex]!);
-        }
-      } else if (e.key === "Home") {
-        e.preventDefault();
-        onSelect(addons[0]!);
-        rowVirtualizer.scrollToIndex(0, { align: "start" });
-      } else if (e.key === "End") {
-        e.preventDefault();
-        onSelect(addons[addons.length - 1]!);
-        rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
-      }
-    },
-    [addons, selectedAddon, onSelect, rowVirtualizer]
-  );
 
   return (
     <div className="flex min-h-0 w-[380px] min-w-[300px] flex-col border-r border-structure-06 bg-[color-mix(in_oklab,var(--bg-base)_60%,transparent)] backdrop-blur-xl backdrop-saturate-[1.2] shadow-[inset_0_1px_0_var(--structure-04)]">
@@ -653,156 +862,26 @@ function AddonListBase({
                 </SelectContent>
               </Select>
             </div>
-            <div
-              ref={scrollContainerRef}
-              role="listbox"
-              aria-label={`Installed addons, ${addons.length} items`}
-              aria-roledescription="addon list"
-              aria-activedescendant={
-                selectedAddon ? `addon-${selectedAddon.folderName}` : undefined
-              }
-              tabIndex={0}
-              onKeyDown={handleListKeyDown}
-              className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
-            >
-              {loading && addons.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-muted-foreground">
-                  <div className="size-5 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
-                </div>
-              ) : addons.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center px-5">
-                  {searchQuery || activeTagFilter || filterMode !== "all" ? (
-                    <Fade className="flex flex-col items-center gap-3 text-center">
-                      <div className="rounded-xl bg-structure-03 border border-structure-06 p-3">
-                        <Search className="size-6 text-muted-foreground/30" />
-                      </div>
-                      <div>
-                        <p className="text-sm text-muted-foreground">No addons match</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">
-                          {searchQuery
-                            ? `"${searchQuery}"`
-                            : activeTagFilter
-                              ? `tag: ${activeTagFilter}`
-                              : filterMode}
-                        </p>
-                      </div>
-                      <button
-                        className="rounded-lg border border-structure-08 bg-structure-04 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-structure-08 hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
-                        onClick={() => {
-                          onSearchChange("");
-                          onFilterChange("all");
-                          onActiveTagFilterChange(null);
-                        }}
-                      >
-                        <X className="size-3 inline mr-1 -mt-px" />
-                        Clear filters
-                      </button>
-                    </Fade>
-                  ) : (
-                    <Fade className="w-full">
-                      <GlassPanel variant="subtle" className="relative p-5 overflow-hidden">
-                        <div className="absolute -top-10 -right-10 h-[120px] w-[120px] rounded-full bg-primary/[0.03] blur-[40px]" />
-                        <div className="flex flex-col items-center gap-4 relative">
-                          <Logo size={36} className="opacity-60" />
-                          <div className="text-center">
-                            <p className="font-heading text-sm font-medium text-foreground">
-                              No addons installed yet
-                            </p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Get started with one of these options
-                            </p>
-                          </div>
-                          <div className="w-full space-y-2">
-                            <button
-                              onClick={() => {
-                                onViewModeChange("discover");
-                                onDiscoverTabChange("search");
-                              }}
-                              className="flex w-full items-center gap-3 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2.5 text-left transition-colors hover:bg-structure-06 hover:border-structure-10 group"
-                            >
-                              <div className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
-                                <Globe className="size-3.5" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-medium text-foreground group-hover:text-foreground">
-                                  Browse the ESOUI catalog
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  Search and install from thousands of addons
-                                </p>
-                              </div>
-                            </button>
-                            <button
-                              onClick={() => {
-                                onViewModeChange("discover");
-                                onDiscoverTabChange("url");
-                              }}
-                              className="flex w-full items-center gap-3 rounded-lg border border-structure-06 bg-structure-02 px-3 py-2.5 text-left transition-colors hover:bg-structure-06 hover:border-structure-10 group"
-                            >
-                              <div className="flex size-7 items-center justify-center rounded-md bg-accent-sky/10 text-accent-sky">
-                                <Search className="size-3.5" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-medium text-foreground group-hover:text-foreground">
-                                  Paste an ESOUI URL
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  Install directly from a link
-                                </p>
-                              </div>
-                            </button>
-                          </div>
-                          <p className="text-xs text-muted-foreground tabular-nums">
-                            {modKeyLabel()}+B to browse &middot; {modKeyLabel()}+I to install by URL
-                            &middot; ? for all shortcuts
-                          </p>
-                        </div>
-                      </GlassPanel>
-                    </Fade>
-                  )}
-                </div>
-              ) : (
-                <div
-                  style={{
-                    height: `${rowVirtualizer.getTotalSize()}px`,
-                    width: "100%",
-                    position: "relative",
-                  }}
-                >
-                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                    const addon = addons[virtualRow.index];
-                    if (!addon) return null;
-                    return (
-                      <div
-                        key={addon.folderName}
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          width: "100%",
-                          transform: `translateY(${virtualRow.start}px)`,
-                        }}
-                        ref={rowVirtualizer.measureElement}
-                        data-index={virtualRow.index}
-                        aria-rowindex={virtualRow.index + 1}
-                      >
-                        <AddonListItem
-                          addon={addon}
-                          isCurrent={selectedAddon?.folderName === addon.folderName}
-                          isSelected={selectedFolders.has(addon.folderName)}
-                          batchMode={batchMode}
-                          hasUpdate={updatesMap.has(addon.folderName)}
-                          sortMode={sortMode}
-                          onSelect={onSelect}
-                          onToggleSelect={onToggleSelect}
-                          onRightClick={handleRightClick}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+            <InstalledAddonRows
+              addons={addons}
+              loading={loading}
+              selectedAddon={selectedAddon}
+              selectedFolders={selectedFolders}
+              updatesMap={updatesMap}
+              sortMode={sortMode}
+              searchQuery={searchQuery}
+              activeTagFilter={activeTagFilter}
+              filterMode={filterMode}
+              onSelect={onSelect}
+              onToggleSelect={onToggleSelect}
+              onRightClick={handleRightClick}
+              onSearchChange={onSearchChange}
+              onFilterChange={onFilterChange}
+              onActiveTagFilterChange={onActiveTagFilterChange}
+              onViewModeChange={onViewModeChange}
+              onDiscoverTabChange={onDiscoverTabChange}
+              scrollContainerRef={scrollContainerRef}
+            />
           </motion.div>
         ) : (
           <motion.div
@@ -828,7 +907,14 @@ function AddonListBase({
       </AnimatePresence>
 
       {ctxMenu && ctxMenuItems.length > 0 && (
-        <ContextMenu items={ctxMenuItems} position={ctxMenu.pos} onClose={() => setCtxMenu(null)} />
+        <ContextMenu
+          items={ctxMenuItems}
+          position={ctxMenu.pos}
+          onClose={() => {
+            setCtxMenu(null);
+            scrollContainerRef.current?.focus();
+          }}
+        />
       )}
     </div>
   );
