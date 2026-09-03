@@ -52,7 +52,7 @@ import {
 } from "lucide-react";
 import { AccountSettings } from "./account-settings";
 import { AppearanceSettings } from "./appearance-settings";
-import { FEATURES, type FeatureId, type ToolsGroup } from "@/lib/features";
+import { FEATURES, toolsMenuFeatures, type FeatureId, type ToolsGroup } from "@/lib/features";
 
 type SettingsTab = "general" | "appearance" | "tools" | "data";
 type PerformanceMode = "webview" | "native-slint";
@@ -72,6 +72,9 @@ interface SettingsProps {
   minionDetected: boolean;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
+  toolbarHidden: FeatureId[];
+  /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
 }
 
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
@@ -96,6 +99,8 @@ export function Settings({
   minionDetected,
   onShowShortcuts,
   onCheckForAppUpdate,
+  toolbarHidden,
+  onToolbarHiddenChange,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [path, setPath] = useState(addonsPath);
@@ -435,6 +440,13 @@ export function Settings({
       (f) =>
         f.placement === "tools" && f.toolsGroup === group && (f.visibleWhen?.(toolsCtx) ?? true)
     );
+  // Pinnable features the user has unpinned from the header toolbar. Without
+  // this block they would appear in NEITHER surface — `toolFeatures` only ever
+  // matches `placement: "tools"` — leaving an unpinned Pack Hub reachable only
+  // by deep link. This tab is the catalog, so it lists them first.
+  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, toolsCtx).filter(
+    (f) => f.pinnableToToolbar
+  );
 
   return (
     <>
@@ -922,7 +934,11 @@ export function Settings({
                   exit={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.08 }}
                 >
-                  <AppearanceSettings onShowShortcuts={onShowShortcuts} />
+                  <AppearanceSettings
+                    onShowShortcuts={onShowShortcuts}
+                    toolbarHidden={toolbarHidden}
+                    onToolbarHiddenChange={onToolbarHiddenChange}
+                  />
                 </motion.div>
               )}
 
@@ -935,6 +951,17 @@ export function Settings({
                   transition={{ duration: 0.08 }}
                   className="space-y-2"
                 >
+                  {unpinnedFeatures.map((f) => (
+                    <ToolItem
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
+                    />
+                  ))}
+                  {unpinnedFeatures.length > 0 && <div className="border-t border-structure-06" />}
                   {toolFeatures("primary").map((f) => (
                     <ToolItem
                       key={f.id}

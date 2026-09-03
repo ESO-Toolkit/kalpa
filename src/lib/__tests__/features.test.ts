@@ -5,6 +5,7 @@ import {
   findFeature,
   visibleToolbar,
   toolsMenuFeatures,
+  sanitizeHiddenIds,
   type FeatureId,
   type FeatureDef,
 } from "../features";
@@ -157,5 +158,61 @@ describe("toolsMenuFeatures", () => {
   it("includes migration-wizard when minion is detected", () => {
     const result = toolsMenuFeatures(FEATURES, [], { minionDetected: true });
     expect(result.map((f) => f.id)).toContain("migration-wizard");
+  });
+});
+
+describe("sanitizeHiddenIds", () => {
+  it("round-trips a valid array of known ids unchanged", () => {
+    expect(sanitizeHiddenIds(["packs", "profiles"])).toEqual(["packs", "profiles"]);
+  });
+
+  it("drops unrecognised id strings (a newer build's ids)", () => {
+    expect(sanitizeHiddenIds(["packs", "some-future-feature"])).toEqual(["packs"]);
+  });
+
+  it("collapses duplicates while preserving first-seen order", () => {
+    expect(sanitizeHiddenIds(["packs", "profiles", "packs"])).toEqual(["packs", "profiles"]);
+  });
+
+  it.each([
+    ["numbers", [1, 2]],
+    ["null entries", [null]],
+    ["plain objects", [{ id: "packs" }]],
+    ["nested arrays", [["packs"]]],
+    ["booleans", [true, false]],
+  ])("drops non-string entries: %s", (_label, input) => {
+    expect(sanitizeHiddenIds(input)).toEqual([]);
+  });
+
+  it("mixes valid and invalid entries, keeping only the valid known ids", () => {
+    expect(sanitizeHiddenIds(["packs", 42, null, "not-real", "profiles", {}])).toEqual([
+      "packs",
+      "profiles",
+    ]);
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["a string", "packs"],
+    ["an object", { packs: true }],
+    ["a number", 5],
+  ])("returns [] for non-array input: %s", (_label, input) => {
+    expect(sanitizeHiddenIds(input)).toEqual([]);
+  });
+
+  it("contains only real FeatureIds", () => {
+    const knownIds = new Set(FEATURES.map((f) => f.id));
+    const result = sanitizeHiddenIds(["packs", "bogus", "profiles"]);
+    for (const id of result) {
+      expect(knownIds.has(id)).toBe(true);
+    }
+  });
+
+  it("does not mutate its input array", () => {
+    const input = ["packs", "bogus", "packs"];
+    const snapshot = [...input];
+    sanitizeHiddenIds(input);
+    expect(input).toEqual(snapshot);
   });
 });

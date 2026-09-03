@@ -5,8 +5,11 @@ import { Check, Plus, ClipboardPaste, Pencil, CopyPlus, Bug, MessageCircle } fro
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { GlassPanel } from "@/components/ui/glass-panel";
+import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
+import { invokeResult } from "@/lib/tauri";
 import { ambientAnimationsEnabled, setAmbientAnimations } from "@/lib/ambient-animations";
+import { FEATURES, type FeatureId } from "@/lib/features";
 import {
   TEXT_ZOOM_CHANGE_EVENT,
   TEXT_ZOOM_STOPS,
@@ -57,7 +60,22 @@ function parseImportedTheme(raw: string): Theme | null {
   };
 }
 
-export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () => void }) {
+export function AppearanceSettings({
+  onShowShortcuts,
+  toolbarHidden,
+  onToolbarHiddenChange,
+}: {
+  onShowShortcuts: () => void;
+  toolbarHidden: FeatureId[];
+  /**
+   * Takes an updater, not a value. `handleToolbarPinChange` below can await a
+   * Tauri round trip before it decides, and by then the `toolbarHidden` prop it
+   * captured may describe a toolbar two toggles old — so the parent applies the
+   * change against its own latest state. The parent stays the only writer;
+   * this component never persists anything itself.
+   */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
+}) {
   const {
     activeThemeId,
     activeTheme,
@@ -72,6 +90,37 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
   // so no load effect is needed.
   const [ambientOn, setAmbientOn] = useState(ambientAnimationsEnabled);
   const [textZoom, setTextZoomState] = useState(textZoomFactor);
+  // Guards unpinning the log uploader while a live session is streaming — the
+  // check is async (a Tauri round trip), so the row disables itself while in
+  // flight to avoid a second click racing the first.
+  const [checkingLogUpload, setCheckingLogUpload] = useState(false);
+
+  const pinnableFeatures = useMemo(() => FEATURES.filter((f) => f.pinnableToToolbar), []);
+
+  const handleToolbarPinChange = async (id: FeatureId, pinned: boolean) => {
+    if (!pinned && id === "log-upload") {
+      setCheckingLogUpload(true);
+      try {
+        const liveActive = await invokeResult<boolean>("uploader_live_active");
+        if (liveActive.ok && liveActive.data) {
+          toast.error("A live log upload is running.", {
+            description:
+              "Stop live logging (or let the session finish) before moving the uploader out of the toolbar.",
+          });
+          return;
+        }
+      } finally {
+        setCheckingLogUpload(false);
+      }
+    }
+    // Derived from `prev` — the parent's latest value — rather than from the
+    // `toolbarHidden` prop this closure captured, which for the log uploader is
+    // a snapshot from before the await above and may have been superseded by a
+    // toggle on another row in the meantime.
+    onToolbarHiddenChange((prev) =>
+      pinned ? prev.filter((hiddenId) => hiddenId !== id) : [...prev.filter((h) => h !== id), id]
+    );
+  };
 
   useEffect(() => {
     const syncTextZoom = () => setTextZoomState(textZoomFactor());
@@ -242,6 +291,55 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
               </p>
             </div>
           </label>
+        </GlassPanel>
+      </section>
+
+      {/* Toolbar */}
+      <section className="space-y-2">
+        <SectionHeader>Toolbar</SectionHeader>
+        <GlassPanel variant="subtle" className="p-3 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Choose which of these appear as buttons in the header. Hiding one doesn&apos;t disable
+            it — it stays listed under Settings › Tools, and its deep links keep working exactly as
+            before.
+          </p>
+          <div className="space-y-2">
+            {pinnableFeatures.map((feature, index) => {
+              const Icon = feature.icon;
+              const hidden = toolbarHidden.includes(feature.id);
+              const rowBusy = feature.id === "log-upload" && checkingLogUpload;
+              return (
+                <label
+                  key={feature.id}
+                  className={`flex items-center gap-3 ${
+                    index > 0 ? "border-t border-structure-06 pt-2" : ""
+                  } ${rowBusy ? "cursor-wait opacity-70" : "cursor-pointer"}`}
+                >
+                  <Checkbox
+                    checked={!hidden}
+                    disabled={rowBusy}
+                    onCheckedChange={(checked) => {
+                      void handleToolbarPinChange(feature.id, checked === true);
+                    }}
+                  />
+                  <Icon className="size-4 shrink-0 text-muted-foreground" />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-foreground">{feature.label}</p>
+                      {rowBusy && (
+                        <span
+                          className="size-3 shrink-0 animate-spin rounded-full border-2 border-structure-10 border-t-primary"
+                          aria-hidden
+                        />
+                      )}
+                      {!rowBusy && hidden && <InfoPill color="muted">In Settings › Tools</InfoPill>}
+                    </div>
+                    <p className="text-xs text-muted-foreground">{feature.description}</p>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
         </GlassPanel>
       </section>
 

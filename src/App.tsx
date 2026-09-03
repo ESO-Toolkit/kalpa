@@ -61,6 +61,8 @@ import {
 import { isModKey, isWindows } from "@/lib/platform";
 import {
   FEATURES,
+  findFeature,
+  sanitizeHiddenIds,
   visibleToolbar,
   type ActiveDialog,
   type DialogId,
@@ -100,10 +102,6 @@ const ACTIVE_BATCH_REMOVAL_MESSAGE =
 const AddonDetail = lazy(() =>
   import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
 );
-
-// `hidden` (persisted toolbarHidden preference) is always empty in this phase —
-// a later phase replaces this with a real preference read.
-const EMPTY_HIDDEN: FeatureId[] = [];
 
 interface PendingDeepLinkPayload {
   packId: string | null;
@@ -193,6 +191,10 @@ function App() {
   const [authVerifying, setAuthVerifying] = useState(true);
   const [uploaderIntroDismissed, setUploaderIntroDismissed] = useState(true);
   const [uploaderIntroHasLog, setUploaderIntroHasLog] = useState(false);
+  // Which pinnable features the user has unpinned from the header toolbar.
+  // Surface-only: the feature stays registered, its shortcut and deep link
+  // still work, and it stays listed in Settings › Tools. See lib/features.ts.
+  const [toolbarHidden, setToolbarHidden] = useState<FeatureId[]>([]);
   const [deepLinkPackId, setDeepLinkPackId] = useState<string | null>(null);
   const [deepLinkShareCode, setDeepLinkShareCode] = useState<string | null>(null);
   const [rosterPackInstallId, setRosterPackInstallId] = useState<string | null>(null);
@@ -275,6 +277,10 @@ function App() {
   >(null);
   const activeDialogRef = useRef<ActiveDialog>(null);
   const setupInstancesRef = useRef<GameInstance[] | null>(null);
+  // Synchronous mirror of `toolbarHidden` for callbacks that must not become a
+  // dependency of `initializeApp` (which is guarded to run once per launch) —
+  // e.g. `refreshUploaderIntroDetection` and the deep-link listeners.
+  const toolbarHiddenRef = useRef<FeatureId[]>([]);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
   // events arrive faster than renders during Update All, and deriving the
   // progress counts inside the state updater would call a second setter from
@@ -293,6 +299,7 @@ function App() {
     batchLatchRef.current.syncRunning(updatingAll);
     activeDialogRef.current = activeDialog;
     setupInstancesRef.current = setupInstances;
+    toolbarHiddenRef.current = toolbarHidden;
   });
 
   useEffect(() => {
@@ -306,13 +313,33 @@ function App() {
     };
   }, []);
 
+  // Deep links (`kalpa://install-pack/{id}`, `kalpa://pack`, `kalpa://share`)
+  // are explicit user intent arriving from a browser and must always open
+  // their target, even when the user has unpinned that feature from the
+  // toolbar. `open` performs the site's existing state-setting behavior
+  // unchanged; this helper only adds a one-line toast so a window that didn't
+  // come from a toolbar click isn't confusing. Reads the hidden set through a
+  // ref rather than the `toolbarHidden` state closure so listeners registered
+  // once on mount still see the current preference.
+  //
+  // Returns whether it actually announced anything, so a caller handling a
+  // payload with several fields can keep the announcement to one toast.
+  const openDeepLinkFeature = useCallback((id: FeatureId, open: () => void): boolean => {
+    open();
+    if (!toolbarHiddenRef.current.includes(id)) return false;
+    const label = findFeature(id)?.label;
+    if (!label) return false;
+    toast.info(`${label} is in Settings › Tools — opened it for this link.`);
+    return true;
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     const cleanups: (() => void)[] = [];
 
     void listen<string>("deep-link-pack", (event) => {
       setDeepLinkPackId(event.payload);
-      setActiveDialog("packs");
+      openDeepLinkFeature("packs", () => setActiveDialog("packs"));
     })
       .then((unlisten) => {
         if (disposed) {
@@ -327,7 +354,11 @@ function App() {
 
     void listen<string>("roster-pack-install", (event) => {
       setRosterPackInstallId(event.payload);
-      setActiveDialog(null); // close packs dialog if open to avoid stacking
+      // Deliberately NOT routed through openDeepLinkFeature. RosterPackInstall
+      // is its own surface, not the Pack Hub dialog, so a "Pack Hub is in
+      // Settings › Tools" toast would be a lie: nothing was opened, and this
+      // line in fact CLOSES the packs dialog to avoid stacking.
+      setActiveDialog(null);
     })
       .then((unlisten) => {
         if (disposed) {
@@ -342,7 +373,7 @@ function App() {
 
     void listen<string>("deep-link-share", (event) => {
       setDeepLinkShareCode(event.payload);
-      setActiveDialog("packs");
+      openDeepLinkFeature("packs", () => setActiveDialog("packs"));
     })
       .then((unlisten) => {
         if (disposed) {
@@ -386,23 +417,47 @@ function App() {
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
+        // One payload can set SEVERAL of these fields at once — the native
+        // sidecar exports KALPA_START_PACK_HUB and KALPA_START_PACK_HUB_ID
+        // together, so `packHub` and `packId` both arrive — and each branch
+        // below opens its own target. Every branch must keep opening, but the
+        // "it's in Settings › Tools" note is about the payload, not the branch,
+        // so announce at most once per payload.
+        let announced = false;
+        const openOnce = (id: FeatureId, open: () => void) => {
+          if (announced) {
+            open();
+            return;
+          }
+          announced = openDeepLinkFeature(id, open);
+        };
+
         if (payload.appUpdate) {
           void checkForAppUpdateRef.current(false);
         }
         if (payload.logUpload) {
-          setActiveDialog("log-upload");
+          openOnce("log-upload", () => setActiveDialog("log-upload"));
         }
         if (payload.packHub) {
-          setActiveDialog("packs");
+          openOnce("packs", () => setActiveDialog("packs"));
         }
         if (payload.installPackId) {
-          setRosterPackInstallId(payload.installPackId);
+          const installPackId = payload.installPackId;
+          // Same as the roster-pack-install listener: this opens RosterPackInstall,
+          // not the Pack Hub dialog, so it gets no toast either.
+          setRosterPackInstallId(installPackId);
         } else if (payload.packId) {
-          setDeepLinkPackId(payload.packId);
-          setActiveDialog("packs");
+          const packId = payload.packId;
+          openOnce("packs", () => {
+            setDeepLinkPackId(packId);
+            setActiveDialog("packs");
+          });
         } else if (payload.shareCode) {
-          setDeepLinkShareCode(payload.shareCode);
-          setActiveDialog("packs");
+          const shareCode = payload.shareCode;
+          openOnce("packs", () => {
+            setDeepLinkShareCode(shareCode);
+            setActiveDialog("packs");
+          });
         }
       })
       .catch((invokeError) => {
@@ -428,7 +483,7 @@ function App() {
       disposed = true;
       for (const fn of cleanups) fn();
     };
-  }, []);
+  }, [openDeepLinkFeature]);
 
   const scanAddons = useCallback(async (path: string, retryAfterStaleEpoch = true) => {
     const seq = ++scanSeqRef.current;
@@ -615,6 +670,16 @@ function App() {
   );
 
   const refreshUploaderIntroDetection = useCallback(async () => {
+    // Unpinning the uploader from the toolbar hides its intro card, so there is
+    // no reason to pay for a filesystem probe on every launch/path-change.
+    // Read via the ref (not the `toolbarHidden` state) so this stable
+    // useCallback — also invoked from `initializeApp` — always sees the
+    // current preference instead of the value from whenever it was created.
+    if (toolbarHiddenRef.current.includes("log-upload")) {
+      setUploaderIntroHasLog(false);
+      return;
+    }
+
     const dismissed = await getSetting<boolean>("uploaderIntroDismissed", false);
     setUploaderIntroDismissed(dismissed === true);
     if (dismissed) {
@@ -690,13 +755,24 @@ function App() {
 
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
-    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed] = await Promise.all([
-      getSetting<string>("sortMode", "name"),
-      getSetting<string>("filterMode", "all"),
-      getSetting<string>("addonsPath", ""),
-      getSetting<boolean>("autoUpdate", false),
-      getSetting<boolean>("uploaderIntroDismissed", false),
-    ]);
+    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed, savedToolbarHidden] =
+      await Promise.all([
+        getSetting<string>("sortMode", "name"),
+        getSetting<string>("filterMode", "all"),
+        getSetting<string>("addonsPath", ""),
+        getSetting<boolean>("autoUpdate", false),
+        getSetting<boolean>("uploaderIntroDismissed", false),
+        // Typed `unknown`, not `FeatureId[]`: settings.json is user-editable and
+        // may contain anything, so sanitizeHiddenIds narrows it below.
+        getSetting<unknown>("toolbarHidden", []),
+      ]);
+    const sanitizedToolbarHidden = sanitizeHiddenIds(savedToolbarHidden);
+    // Write the mirror synchronously, not via the passive ref-sync effect: the
+    // `refreshUploaderIntroDetection()` calls further down read
+    // `toolbarHiddenRef.current`, and whether a commit has landed by then would
+    // otherwise be a race between React scheduling and IPC latency.
+    toolbarHiddenRef.current = sanitizedToolbarHidden;
+    setToolbarHidden(sanitizedToolbarHidden);
 
     // A debug build started with KALPA_ADDONS_DIR runs against a throwaway
     // AddOns folder instead of the real ESO install, which is what lets the e2e
@@ -2153,10 +2229,45 @@ function App() {
   );
 
   const batchMode = selectedFolders.size > 0 && viewMode === "installed";
+  // The hidden set is part of the condition, not just an input to the detection
+  // pass: unpinning the uploader has to hide its intro card on the spot, and
+  // re-pinning has to bring it back (see `handleToolbarHiddenChange`, which
+  // re-runs detection on that transition).
   const showUploaderIntro =
-    uploaderIntroHasLog && authUser === null && !uploaderIntroDismissed && !authVerifying;
+    uploaderIntroHasLog &&
+    authUser === null &&
+    !uploaderIntroDismissed &&
+    !authVerifying &&
+    !toolbarHidden.includes("log-upload");
 
-  const toolbarFeatures = useMemo(() => visibleToolbar(FEATURES, EMPTY_HIDDEN), []);
+  const toolbarFeatures = useMemo(() => visibleToolbar(FEATURES, toolbarHidden), [toolbarHidden]);
+  /**
+   * Single owner of the toolbar preference: state, persistence, and the
+   * synchronous `toolbarHiddenRef` mirror all move here, together.
+   *
+   * Takes an UPDATER, not a value. Callers (the Appearance tab) toggle one
+   * feature at a time, and its log-uploader row awaits a Tauri live-session
+   * check first — long enough for a second toggle to land in between. Computing
+   * the next array from a value the caller captured before its await would
+   * silently discard whatever happened during it; deriving it from the mirror
+   * here cannot go stale, because the mirror is written before this returns.
+   */
+  const handleToolbarHiddenChange = useCallback(
+    (update: (prev: FeatureId[]) => FeatureId[]) => {
+      const previous = toolbarHiddenRef.current;
+      const next = update(previous);
+      toolbarHiddenRef.current = next;
+      setToolbarHidden(next);
+      void setSetting("toolbarHidden", next);
+      // Re-pinning the uploader restores its intro card without a relaunch. The
+      // detection pass is skipped while the feature is hidden, so the "has a
+      // log" flag it feeds is stale (false) until it runs again.
+      if (previous.includes("log-upload") && !next.includes("log-upload")) {
+        void refreshUploaderIntroDetection();
+      }
+    },
+    [refreshUploaderIntroDetection]
+  );
 
   const dismissUploaderIntro = useCallback(() => {
     setUploaderIntroDismissed(true);
@@ -2646,6 +2757,8 @@ function App() {
             onRefresh={handleRefresh}
             onShowDialog={handleOpenDialog}
             updateResults={updateResults}
+            toolbarHidden={toolbarHidden}
+            onToolbarHiddenChange={handleToolbarHiddenChange}
           />
 
           <EsoRunningDialog

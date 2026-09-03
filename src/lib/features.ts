@@ -18,8 +18,8 @@ import type { LucideIcon } from "lucide-react";
  *
  * Kalpa's shell is modular at the SURFACE level only: this file is the single
  * place that says what a feature is called, which icon it wears, and where it
- * may appear (pinned in the header toolbar, or listed in the Tools menu /
- * Settings > Tools tab). It is deliberately NOT a feature-flag system — no
+ * may appear (pinned in the header toolbar, or listed in the Settings > Tools
+ * tab). It is deliberately NOT a feature-flag system — no
  * entry here gates a Tauri command, a Cargo feature, or a build variant. Every
  * feature is always present and reachable; the registry only decides where the
  * user finds it.
@@ -234,7 +234,11 @@ export function visibleToolbar(
 
 /**
  * Everything NOT pinned to the toolbar, filtered by each entry's `visibleWhen`.
- * This is the header Tools menu's contents.
+ *
+ * This is the catalog rendered by the Settings > Tools tab: unpinning a feature
+ * moves it here rather than making it unreachable. There is deliberately no
+ * header overflow menu — a customisable toolbar removes TO the catalog, it does
+ * not sprout a second permanent control.
  */
 export function toolsMenuFeatures(
   features: readonly FeatureDef[],
@@ -243,4 +247,26 @@ export function toolsMenuFeatures(
 ): FeatureDef[] {
   const pinned = new Set(visibleToolbar(features, hidden).map((f) => f.id));
   return features.filter((f) => !pinned.has(f.id) && (f.visibleWhen?.(ctx) ?? true));
+}
+
+/**
+ * Narrow a persisted `toolbarHidden` value into known ids.
+ *
+ * `settings.json` is user-editable and survives downgrades, so this must
+ * tolerate anything: a non-array, nulls, numbers, or ids written by a NEWER
+ * build that this one has never heard of. Unknown entries are dropped rather
+ * than thrown on, so a preference from a newer Kalpa cannot brick an older
+ * one's toolbar — it just falls back to showing those buttons.
+ */
+export function sanitizeHiddenIds(value: unknown): FeatureId[] {
+  if (!Array.isArray(value)) return [];
+  const known = new Set<string>(FEATURES.map((f) => f.id));
+  const seen = new Set<string>();
+  const out: FeatureId[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !known.has(entry) || seen.has(entry)) continue;
+    seen.add(entry);
+    out.push(entry as FeatureId);
+  }
+  return out;
 }

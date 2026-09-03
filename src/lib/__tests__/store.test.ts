@@ -59,6 +59,29 @@ describe("getSetting", () => {
   });
 });
 
+describe("toolbarHidden persistence", () => {
+  it("returns the [] fallback when the key was never written", async () => {
+    const { getSetting } = await import("../store");
+    mockGet.mockResolvedValue(undefined);
+    const result = await getSetting("toolbarHidden", []);
+    expect(result).toEqual([]);
+  });
+
+  it("round-trips a written array through setSetting/getSetting", async () => {
+    const { setSetting, getSetting } = await import("../store");
+    let stored: unknown;
+    mockSet.mockImplementation(async (_key: string, value: unknown) => {
+      stored = value;
+    });
+    mockGet.mockImplementation(async () => stored);
+
+    await expect(setSetting("toolbarHidden", ["packs", "profiles"])).resolves.toBe(true);
+    const result = await getSetting<string[]>("toolbarHidden", []);
+
+    expect(result).toEqual(["packs", "profiles"]);
+  });
+});
+
 describe("setSetting", () => {
   it("sets value in store and reports success", async () => {
     const { setSetting } = await import("../store");
