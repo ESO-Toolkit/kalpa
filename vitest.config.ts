@@ -1,13 +1,16 @@
 import path from "path";
+import { fileURLToPath } from "url";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+
+const configDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
-      "@tauri-apps/api/core": path.resolve(__dirname, "./src/__mocks__/tauri-api-core.ts"),
+      "@": path.resolve(configDir, "./src"),
+      "@tauri-apps/api/core": path.resolve(configDir, "./src/__mocks__/tauri-api-core.ts"),
     },
   },
   test: {
