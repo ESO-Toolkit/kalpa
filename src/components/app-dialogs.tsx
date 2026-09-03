@@ -1,7 +1,7 @@
 import { lazy, memo, Suspense, useState } from "react";
 import type { AddonManifest, AuthUser, GameInstance, UpdateCheckResult } from "@/types";
 import { DIALOG_LABELS } from "@/lib/features";
-import type { ActiveDialog, DialogId } from "@/lib/features";
+import type { ActiveDialog, DialogId, FeatureId } from "@/lib/features";
 import {
   Dialog,
   DialogContent,
@@ -53,6 +53,8 @@ interface AppDialogsProps {
   lastError: string | null;
   logUploaderMounted: boolean;
   minionDetected: boolean;
+  toolbarHidden: FeatureId[];
+  onToolbarHiddenChange: (next: FeatureId[]) => void;
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;
@@ -101,6 +103,8 @@ function AppDialogsBase({
   lastError,
   logUploaderMounted,
   minionDetected,
+  toolbarHidden,
+  onToolbarHiddenChange,
   onAuthChange,
   onCheckForAppUpdate,
   onCloseDialog,
@@ -194,6 +198,8 @@ function AppDialogsBase({
               onClose={onCloseDialog}
               onRefresh={onRefresh}
               minionDetected={minionDetected}
+              toolbarHidden={toolbarHidden}
+              onToolbarHiddenChange={onToolbarHiddenChange}
               onOpenFeature={onShowDialog}
               onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}

@@ -447,26 +447,6 @@ function AppHeaderBase({
             </SimpleTooltip>
             {toolbarFeatures.map((feature) => {
               const Icon = feature.icon;
-              const isUploader = feature.id === "log-upload";
-              if (isUploader) {
-                return (
-                  <SimpleTooltip
-                    key={feature.id}
-                    content={feature.tooltip ?? feature.label}
-                    side="bottom"
-                  >
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={openLogUpload}
-                      aria-label={feature.ariaLabel ?? feature.label}
-                    >
-                      <Icon className="size-3.5" />
-                      <span className="hidden min-[860px]:inline">Upload logs</span>
-                    </Button>
-                  </SimpleTooltip>
-                );
-              }
               return (
                 <SimpleTooltip
                   key={feature.id}
