@@ -73,7 +73,8 @@ interface SettingsProps {
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
   toolbarHidden: FeatureId[];
-  onToolbarHiddenChange: (next: FeatureId[]) => void;
+  /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
 }
 
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [

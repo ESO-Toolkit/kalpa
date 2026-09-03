@@ -54,7 +54,8 @@ interface AppDialogsProps {
   logUploaderMounted: boolean;
   minionDetected: boolean;
   toolbarHidden: FeatureId[];
-  onToolbarHiddenChange: (next: FeatureId[]) => void;
+  /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;

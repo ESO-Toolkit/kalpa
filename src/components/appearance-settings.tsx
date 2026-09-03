@@ -67,7 +67,14 @@ export function AppearanceSettings({
 }: {
   onShowShortcuts: () => void;
   toolbarHidden: FeatureId[];
-  onToolbarHiddenChange: (next: FeatureId[]) => void;
+  /**
+   * Takes an updater, not a value. `handleToolbarPinChange` below can await a
+   * Tauri round trip before it decides, and by then the `toolbarHidden` prop it
+   * captured may describe a toolbar two toggles old — so the parent applies the
+   * change against its own latest state. The parent stays the only writer;
+   * this component never persists anything itself.
+   */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
 }) {
   const {
     activeThemeId,
@@ -106,10 +113,13 @@ export function AppearanceSettings({
         setCheckingLogUpload(false);
       }
     }
-    const next = pinned
-      ? toolbarHidden.filter((hiddenId) => hiddenId !== id)
-      : [...toolbarHidden, id];
-    onToolbarHiddenChange(next);
+    // Derived from `prev` — the parent's latest value — rather than from the
+    // `toolbarHidden` prop this closure captured, which for the log uploader is
+    // a snapshot from before the await above and may have been superseded by a
+    // toggle on another row in the meantime.
+    onToolbarHiddenChange((prev) =>
+      pinned ? prev.filter((hiddenId) => hiddenId !== id) : [...prev.filter((h) => h !== id), id]
+    );
   };
 
   useEffect(() => {

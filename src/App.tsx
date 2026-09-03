@@ -321,14 +321,16 @@ function App() {
   // come from a toolbar click isn't confusing. Reads the hidden set through a
   // ref rather than the `toolbarHidden` state closure so listeners registered
   // once on mount still see the current preference.
-  const openDeepLinkFeature = useCallback((id: FeatureId, open: () => void) => {
+  //
+  // Returns whether it actually announced anything, so a caller handling a
+  // payload with several fields can keep the announcement to one toast.
+  const openDeepLinkFeature = useCallback((id: FeatureId, open: () => void): boolean => {
     open();
-    if (toolbarHiddenRef.current.includes(id)) {
-      const label = findFeature(id)?.label;
-      if (label) {
-        toast.info(`${label} is in Settings › Tools — opened it for this link.`);
-      }
-    }
+    if (!toolbarHiddenRef.current.includes(id)) return false;
+    const label = findFeature(id)?.label;
+    if (!label) return false;
+    toast.info(`${label} is in Settings › Tools — opened it for this link.`);
+    return true;
   }, []);
 
   useEffect(() => {
@@ -415,14 +417,29 @@ function App() {
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
+        // One payload can set SEVERAL of these fields at once — the native
+        // sidecar exports KALPA_START_PACK_HUB and KALPA_START_PACK_HUB_ID
+        // together, so `packHub` and `packId` both arrive — and each branch
+        // below opens its own target. Every branch must keep opening, but the
+        // "it's in Settings › Tools" note is about the payload, not the branch,
+        // so announce at most once per payload.
+        let announced = false;
+        const openOnce = (id: FeatureId, open: () => void) => {
+          if (announced) {
+            open();
+            return;
+          }
+          announced = openDeepLinkFeature(id, open);
+        };
+
         if (payload.appUpdate) {
           void checkForAppUpdateRef.current(false);
         }
         if (payload.logUpload) {
-          openDeepLinkFeature("log-upload", () => setActiveDialog("log-upload"));
+          openOnce("log-upload", () => setActiveDialog("log-upload"));
         }
         if (payload.packHub) {
-          openDeepLinkFeature("packs", () => setActiveDialog("packs"));
+          openOnce("packs", () => setActiveDialog("packs"));
         }
         if (payload.installPackId) {
           const installPackId = payload.installPackId;
@@ -431,13 +448,13 @@ function App() {
           setRosterPackInstallId(installPackId);
         } else if (payload.packId) {
           const packId = payload.packId;
-          openDeepLinkFeature("packs", () => {
+          openOnce("packs", () => {
             setDeepLinkPackId(packId);
             setActiveDialog("packs");
           });
         } else if (payload.shareCode) {
           const shareCode = payload.shareCode;
-          openDeepLinkFeature("packs", () => {
+          openOnce("packs", () => {
             setDeepLinkShareCode(shareCode);
             setActiveDialog("packs");
           });
@@ -749,7 +766,13 @@ function App() {
         // may contain anything, so sanitizeHiddenIds narrows it below.
         getSetting<unknown>("toolbarHidden", []),
       ]);
-    setToolbarHidden(sanitizeHiddenIds(savedToolbarHidden));
+    const sanitizedToolbarHidden = sanitizeHiddenIds(savedToolbarHidden);
+    // Write the mirror synchronously, not via the passive ref-sync effect: the
+    // `refreshUploaderIntroDetection()` calls further down read
+    // `toolbarHiddenRef.current`, and whether a commit has landed by then would
+    // otherwise be a race between React scheduling and IPC latency.
+    toolbarHiddenRef.current = sanitizedToolbarHidden;
+    setToolbarHidden(sanitizedToolbarHidden);
 
     // A debug build started with KALPA_ADDONS_DIR runs against a throwaway
     // AddOns folder instead of the real ESO install, which is what lets the e2e
@@ -2206,14 +2229,45 @@ function App() {
   );
 
   const batchMode = selectedFolders.size > 0 && viewMode === "installed";
+  // The hidden set is part of the condition, not just an input to the detection
+  // pass: unpinning the uploader has to hide its intro card on the spot, and
+  // re-pinning has to bring it back (see `handleToolbarHiddenChange`, which
+  // re-runs detection on that transition).
   const showUploaderIntro =
-    uploaderIntroHasLog && authUser === null && !uploaderIntroDismissed && !authVerifying;
+    uploaderIntroHasLog &&
+    authUser === null &&
+    !uploaderIntroDismissed &&
+    !authVerifying &&
+    !toolbarHidden.includes("log-upload");
 
   const toolbarFeatures = useMemo(() => visibleToolbar(FEATURES, toolbarHidden), [toolbarHidden]);
-  const handleToolbarHiddenChange = useCallback((next: FeatureId[]) => {
-    setToolbarHidden(next);
-    void setSetting("toolbarHidden", next);
-  }, []);
+  /**
+   * Single owner of the toolbar preference: state, persistence, and the
+   * synchronous `toolbarHiddenRef` mirror all move here, together.
+   *
+   * Takes an UPDATER, not a value. Callers (the Appearance tab) toggle one
+   * feature at a time, and its log-uploader row awaits a Tauri live-session
+   * check first — long enough for a second toggle to land in between. Computing
+   * the next array from a value the caller captured before its await would
+   * silently discard whatever happened during it; deriving it from the mirror
+   * here cannot go stale, because the mirror is written before this returns.
+   */
+  const handleToolbarHiddenChange = useCallback(
+    (update: (prev: FeatureId[]) => FeatureId[]) => {
+      const previous = toolbarHiddenRef.current;
+      const next = update(previous);
+      toolbarHiddenRef.current = next;
+      setToolbarHidden(next);
+      void setSetting("toolbarHidden", next);
+      // Re-pinning the uploader restores its intro card without a relaunch. The
+      // detection pass is skipped while the feature is hidden, so the "has a
+      // log" flag it feeds is stale (false) until it runs again.
+      if (previous.includes("log-upload") && !next.includes("log-upload")) {
+        void refreshUploaderIntroDetection();
+      }
+    },
+    [refreshUploaderIntroDetection]
+  );
 
   const dismissUploaderIntro = useCallback(() => {
     setUploaderIntroDismissed(true);

@@ -135,8 +135,19 @@ describe("Settings > Tools is the catalog for unpinned features", () => {
     render(<Settings {...settingsProps({ toolbarHidden: ["log-upload"] })} />);
     await openToolsTab();
 
-    expect(screen.getByText("Log Uploader")).toBeInTheDocument();
-    expect(screen.getByText("Check for App Updates")).toBeInTheDocument();
-    expect(screen.getByText("Safety Center")).toBeInTheDocument();
+    // Presence alone would pass with the unpinned group rendered last or in the
+    // middle, which is the exact regression this guards — so compare positions.
+    const rows = screen.getAllByRole("button").map((button) => button.textContent ?? "");
+    const indexOf = (needle: string) => rows.findIndex((text) => text.includes(needle));
+
+    const unpinned = indexOf("Log Uploader");
+    const appUpdates = indexOf("Check for App Updates");
+    const secondary = indexOf("Safety Center");
+
+    expect(unpinned).toBeGreaterThanOrEqual(0);
+    expect(appUpdates).toBeGreaterThanOrEqual(0);
+    expect(secondary).toBeGreaterThanOrEqual(0);
+    expect(unpinned).toBeLessThan(appUpdates);
+    expect(unpinned).toBeLessThan(secondary);
   });
 });
