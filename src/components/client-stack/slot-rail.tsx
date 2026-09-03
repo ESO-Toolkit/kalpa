@@ -26,11 +26,15 @@ import type { ClientStack } from "./types";
  *   before: no hover state, no pointer cursor, and eight buttons that looked
  *   like a report. The user's words on finding the actions inside them were
  *   "no idea i could click those".
- * - **The rail must not scroll.** Eight 40px rows fit in the body's 348px
- *   budget exactly, which is deliberate: the rail and the pane were once
- *   siblings in one scroller, and since the rail was much the taller, reaching
- *   a low row left the pane 1372px above the viewport. The pane now owns the
- *   only scroller.
+ * - **The rail needs its own bounded scroller.** Eight 40px rows want 348px,
+ *   and the body has 274px on the primary user's 626px-tall window — measured
+ *   in the running app, not estimated. Unbounded, the rail overflowed its own
+ *   box by 74px and painted Preset and Tuning over the dialog footer, clearing
+ *   the bottom of the dialog by seven pixels; a slightly shorter window would
+ *   have put Tuning outside it entirely. What matters is that this scroller is
+ *   *independent* of the pane's. The two were siblings in one scrollport once,
+ *   and because the rail is much the taller, scrolling down to a low row
+ *   carried the pane 1372px above the viewport.
  * - **The names had to be the user's.** "Injector" and "Super Resolution
  *   runtime" describe what a file does to a process. The filename beneath in
  *   `font-mono` is what keeps a forum guide greppable against this screen.
@@ -75,7 +79,7 @@ export function SlotRail({
       role="listbox"
       aria-label="Stack slots"
       onKeyDown={handleKeyDown}
-      className="w-[220px] shrink-0 space-y-1"
+      className="min-h-0 w-[220px] shrink-0 space-y-0.5 overflow-y-auto pr-1"
     >
       {SLOT_ORDER.map((slot) => (
         <SlotRow
@@ -114,7 +118,7 @@ function SlotRow({
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "flex h-10 w-full cursor-pointer items-center gap-2 rounded-lg border border-l-[3px] px-2 text-left",
+        "flex h-9 w-full cursor-pointer items-center gap-2 rounded-lg border border-l-[3px] px-2 text-left",
         "transition-colors duration-150 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         selected
           ? "border-primary/30 border-l-primary bg-primary/[0.04]"

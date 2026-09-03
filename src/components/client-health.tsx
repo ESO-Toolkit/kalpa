@@ -827,6 +827,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         </div>
 
         <DialogFooter>
+          {stack && !stack.is_empty && (
+            <TracksButton
+              plan={plan}
+              inventory={managedInventory}
+              active={effectiveSelection === "records"}
+              onSelect={() => setSelection("records")}
+            />
+          )}
           <Button variant="outline" onClick={onClose}>
             Close
           </Button>
@@ -1035,7 +1043,7 @@ interface StackBodyProps {
  * viewport.
  */
 function StackBody(props: StackBodyProps) {
-  const { stack, plan, effectiveSelection, onSelect } = props;
+  const { stack, effectiveSelection, onSelect } = props;
   const paneScrollRef = useRef<HTMLDivElement>(null);
 
   // The pane would otherwise open at whatever offset the previous selection
@@ -1072,28 +1080,45 @@ function StackBody(props: StackBodyProps) {
           <DetailPane {...props} />
         </div>
       </div>
-
-      {/* Recovery, one click from every state. It used to sit collapsed at the
-          bottom of a scroller, which is the one place a panicking user scrolls
-          past. `plan` is only used to keep the count honest before it loads. */}
-      <div className="flex shrink-0 items-center justify-between gap-2">
-        <Button
-          variant="ghost"
-          size="xs"
-          aria-pressed={effectiveSelection === "records"}
-          onClick={() => onSelect("records")}
-        >
-          <HardDriveIcon />
-          What Kalpa tracks
-          {plan?.already_managed && (
-            <span className="text-muted-foreground">
-              &middot; {props.managedInventory?.files.length ?? 0} file
-              {props.managedInventory?.files.length === 1 ? "" : "s"}
-            </span>
-          )}
-        </Button>
-      </div>
     </div>
+  );
+}
+
+/**
+ * Recovery, one click from every state.
+ *
+ * Lives in the dialog's own footer rather than in a row of its own above it:
+ * as a separate row it cost 117px of a 532px dialog, measured in the running
+ * app, and the pane is where that height belongs. It used to be collapsed at
+ * the bottom of a scroller, which is the one place a panicking user scrolls
+ * straight past.
+ */
+function TracksButton({
+  plan,
+  inventory,
+  active,
+  onSelect,
+}: {
+  plan: AdoptionPlan | null;
+  inventory: ManagedInventory | null;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  const count = inventory?.files.length;
+  return (
+    <Button variant="ghost" size="xs" className="mr-auto" aria-pressed={active} onClick={onSelect}>
+      <HardDriveIcon />
+      What Kalpa tracks
+      {/* The count is withheld until the inventory has actually loaded — it
+          renders "0 files" otherwise, which for an adopted stack is a false
+          statement rather than a pending one. */}
+      {plan?.already_managed && count !== undefined && (
+        <span className="text-muted-foreground">
+          {" "}
+          &middot; {count} file{count === 1 ? "" : "s"}
+        </span>
+      )}
+    </Button>
   );
 }
 
