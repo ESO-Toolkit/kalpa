@@ -675,7 +675,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
             readers via `aria-describedby`; it said what the title says. */}
         <DialogHeader className="shrink-0 pt-4 pb-3">
           <div className="flex h-7 items-center gap-2">
-            <DialogTitle className="shrink-0">Graphics stack</DialogTitle>
+            <DialogTitle className="shrink-0 tracking-[-0.01em]">Graphics stack</DialogTitle>
 
             {clients && clients.length > 0 && (
               <>
@@ -700,7 +700,10 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   </Select>
                 ) : (
                   <p
-                    className="min-w-0 truncate font-heading text-[13px] font-semibold"
+                    // Medium, not semibold. Which install this is sits one rank
+                    // below the panel's own title, and at 13/600 next to a
+                    // 16/600 title the two read as a single compound heading.
+                    className="min-w-0 truncate font-heading text-[13px] font-medium"
                     title={clients[0]!.exe_path}
                   >
                     {shortDirName(clients[0]!.client_dir)}

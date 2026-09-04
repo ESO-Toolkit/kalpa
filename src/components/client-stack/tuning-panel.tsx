@@ -216,7 +216,10 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
 
   return (
     <div className="space-y-3">
-      <p className="text-xs leading-relaxed text-muted-foreground">
+      {/* A measure, not the full 700px of the pane. Nine or ten words a line is
+          the point at which the eye finds the next line without hunting; this
+          paragraph was running to about a hundred and ten characters. */}
+      <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">
         Press Home in ESO to tune Neural Rendering. The overlay is live, knows the real ranges, and
         needs no restart — it is better at this than Kalpa. Use this page when you can&apos;t get
         there: a setting that blacks the screen or stops the overlay opening, or to put the block
@@ -335,15 +338,20 @@ function ReadOnlyValues({ form }: { form: TuningForm }) {
   const orderedFields = GROUP_ORDER.flatMap((group) =>
     form.fields.filter((f) => f.group === group)
   );
-  // Two columns. Eighteen settings stacked singly is ~324px of a pane that has
+  // Two columns. Eighteen settings stacked singly is ~450px of a pane that has
   // ~505px for everything including the overlay lead and the editor button;
-  // paired, the same values are ~162px. Each row is short — a label, a mono key
-  // and a mono value — so the width was going spare in a dialog that is 970px
+  // paired, the same values are ~225px. Each row is short — a label, a mono key
+  // and a mono value — so the width was going spare in a dialog that is 1000px
   // wide and vertically starved.
+  //
+  // The rows sit on a 25px baseline grid (`leading-6` plus a hairline gap)
+  // rather than on whatever line height the pane happened to inherit, and the
+  // columns are 40px apart, because at 24px a value in the left column and a
+  // label in the right one read as a single run of text.
   return (
     <GlassPanel
       variant="subtle"
-      className="grid grid-cols-1 gap-x-6 gap-y-0.5 p-2.5 sm:grid-cols-2"
+      className="grid grid-cols-1 gap-x-10 gap-y-px p-3 text-[12px] sm:grid-cols-2"
     >
       {orderedFields.map((field) => (
         <ReadOnlyRow key={field.key} rawKey={field.key} label={field.label} value={field.current} />
@@ -365,13 +373,22 @@ function ReadOnlyRow({
   value: string | null;
 }) {
   const hasConfirmedLabel = label !== rawKey;
+  // Two faces per row, one rank each. The label was 12px sans and the raw INI
+  // key 11px mono directly beside it — a one-pixel difference between two
+  // typefaces of near-equal colour, so every row asked to be read twice. The
+  // key is the *provenance* of the value, not a second name for it, so it drops
+  // a size and a step of contrast and stops competing.
+  //
+  // `tabular-nums` is the reason the value column exists at all: proportional
+  // digits put `0`, `1.05`, `1.62` and `0.48` on four different right edges
+  // even though every one of them is right-aligned.
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex items-baseline justify-between gap-3 leading-6">
       <span className="min-w-0 truncate">
-        {hasConfirmedLabel && <span className="mr-1.5 truncate text-[12px]">{label}</span>}
-        <span className="font-mono text-[11px] text-muted-foreground">{rawKey}</span>
+        {hasConfirmedLabel && <span className="mr-1.5 truncate font-medium">{label}</span>}
+        <span className="font-mono text-[10px] text-muted-foreground/75">{rawKey}</span>
       </span>
-      <span className="shrink-0 font-mono text-[12px]">{value ?? "—"}</span>
+      <span className="shrink-0 font-mono tabular-nums">{value ?? "—"}</span>
     </div>
   );
 }
@@ -526,7 +543,11 @@ function AdvancedGroup({
         aria-expanded={open}
         className="flex w-full items-center justify-between gap-2 p-3 text-left"
       >
-        <span className="min-w-0 flex-1 text-xs font-semibold text-muted-foreground">
+        {/* Same rank as the `SectionHeader` on every other group, so it takes
+            that face, size and weight. It does not take the uppercasing: this
+            label is a sentence with a parenthetical, and set in caps it becomes
+            a shout nobody reads. */}
+        <span className="min-w-0 flex-1 font-heading text-[11px] font-bold text-muted-foreground">
           {GROUP_LABEL.advanced}
         </span>
         <span className="flex items-center gap-2">

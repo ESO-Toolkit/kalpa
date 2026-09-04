@@ -78,18 +78,27 @@ export function SlotPane({
             SectionHeader — the *least* important type style in the system used
             for the most important text in the pane, so the card headings below
             outranked it and nothing anchored the column. SectionHeader is still
-            right one level down, labelling sub-sections. */}
+            right one level down, labelling sub-sections.
+
+            15px, not 18px. At 18/600 it outranked the dialog's own title
+            ("Graphics stack", 16/600), so the child was louder than the frame
+            containing it. 15/600 still clears the 14/500 card headings beneath
+            it — which is the whole job — without arguing with the header. */}
         <h3
           id={`slot-${slot}`}
-          className="truncate font-heading text-lg font-semibold tracking-[-0.01em]"
+          className="truncate font-heading text-[15px] leading-5 font-semibold tracking-[-0.01em]"
         >
           {SLOT_LABEL[slot]}
         </h3>
         {sourceLabel && (
           // Provenance: whose hand is on this thing. The word is mandatory —
           // on the light themes the status hues collapse towards one near-black
-          // and the label is what actually carries it.
-          <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          // and the label is what actually carries it. Which is why it is set
+          // as a micro-label rather than a whisper of body text: on a theme
+          // where `--primary` lands near the foreground (Elsweyr Moons reseeds
+          // it to a pale blue-white), the glyph tint alone is barely a signal
+          // and this word is the entire provenance axis.
+          <span className="inline-flex shrink-0 items-center gap-1.5 font-heading text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
             <SourceGlyph source={source} className={cn("size-3.5", meta.glyph)} />
             {sourceLabel}
           </span>
@@ -200,12 +209,18 @@ function SlotFinding({
 /* What is in the slot                                                        */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * A slot with nothing in it: one sentence, set as a sentence.
+ *
+ * It used to be a bordered, rounded, padded `GlassPanel` — a container drawn
+ * around a single line of prose, in a pane that already *is* a bordered
+ * container. Two boxes to hold one sentence reads as a placeholder for a
+ * component that has not been built yet, which is the opposite of what this
+ * copy is doing: it is a finished statement of fact. Prose gets a measure
+ * instead of a border.
+ */
 function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <GlassPanel variant="subtle" className="p-3 text-xs leading-relaxed text-muted-foreground">
-      {children}
-    </GlassPanel>
-  );
+  return <p className="max-w-[62ch] text-xs leading-relaxed text-muted-foreground">{children}</p>;
 }
 
 function SlotContents({ slot, stack }: { slot: Slot; stack: ClientStack }) {
@@ -279,8 +294,13 @@ function ItemCard({ item, original }: { item: StackItem; original: PreservedOrig
   return (
     <article className="rounded-lg bg-structure-03 p-4">
       <div className="mb-3 flex items-baseline justify-between gap-3">
-        <h4 className="truncate font-heading text-sm font-medium">{ROLE_LABEL[item.role]}</h4>
-        <span className="shrink-0 font-mono text-[12px] text-muted-foreground">
+        <h4 className="truncate font-heading text-sm font-semibold tracking-[-0.01em]">
+          {ROLE_LABEL[item.role]}
+        </h4>
+        {/* The file name is the card's *subtitle*, not its co-title. At 12px it
+            sat at the same optical weight as the heading and the pair read as
+            two headings on one line. */}
+        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
           {item.file_name}
         </span>
       </div>
@@ -288,7 +308,7 @@ function ItemCard({ item, original }: { item: StackItem; original: PreservedOrig
           came off the PE version resource and was being fetched and thrown
           away — `company`, `description` and `size_bytes` were read by the
           backend and rendered nowhere. */}
-      <dl className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+      <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
         <dt className="text-muted-foreground">Product</dt>
         <dd className="truncate">{item.display_name ?? "no product name"}</dd>
         <dt className="text-muted-foreground">Version</dt>
@@ -318,7 +338,7 @@ function ItemCard({ item, original }: { item: StackItem; original: PreservedOrig
       </dl>
       {original && (
         <div className="mt-3 border-t border-structure-06 pt-3">
-          <dl className="grid grid-cols-[104px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+          <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
             <dt className="text-accent-sky">Your original</dt>
             <dd className="tabular-nums">{original.version ?? "no version info"}</dd>
             <dt className="text-muted-foreground">Kept</dt>
