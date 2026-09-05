@@ -25,8 +25,9 @@ vi.mock("@/lib/tauri", () => ({
 // Deliberately no `@tauri-apps/plugin-dialog` mock. Browsing for a client must
 // go through the native `choose_client_path` command, not the webview dialog
 // plugin -- a path the plugin hands to the frontend proves nothing about what
-// the user actually picked. If the panel ever reaches for the plugin again this
-// file will fail on the unmocked import rather than quietly passing.
+// the user actually picked. If the panel reverts to the plugin, its `open()`
+// resolves undefined against the bare core mock, `choose_client_path` is never
+// invoked, and the assertion below fails.
 vi.mock("@/components/client-stack/preset-panel", () => ({ PresetPanel: () => null }));
 vi.mock("@/components/client-stack/tuning-panel", () => ({ TuningPanel: () => null }));
 vi.mock("@/components/client-stack/runtime-drift-card", () => ({ RuntimeDriftCard: () => null }));

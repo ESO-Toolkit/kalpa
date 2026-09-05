@@ -132,82 +132,6 @@ fn is_detected_addons_path(canonical: &Path) -> bool {
         })
 }
 
-/// File in Kalpa's own app-data directory recording AddOns roots the user has
-/// already approved.
-const APPROVED_ROOTS_FILE: &str = "approved-roots.json";
-
-#[derive(Default, serde::Deserialize, serde::Serialize)]
-struct ApprovedRoots {
-    #[serde(default)]
-    addons: Vec<String>,
-}
-
-/// How many previously-approved roots to remember. Users switch between a
-/// handful of installs at most, and an unbounded list is a slowly growing file
-/// nobody prunes.
-const MAX_REMEMBERED_ROOTS: usize = 8;
-
-fn approved_roots_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Could not resolve the app data directory: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create app data dir: {e}"))?;
-    Ok(dir.join(APPROVED_ROOTS_FILE))
-}
-
-/// A missing, unreadable or corrupt file means "nothing remembered", which
-/// fails closed: the caller then needs a live detection or a fresh native pick.
-fn read_approved_roots_at(path: &Path) -> ApprovedRoots {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
-}
-
-/// Move `entry` to the front, without duplicating it, keeping the list capped.
-fn push_remembered(roots: &mut ApprovedRoots, entry: String) {
-    roots.addons.retain(|existing| existing != &entry);
-    roots.addons.insert(0, entry);
-    roots.addons.truncate(MAX_REMEMBERED_ROOTS);
-}
-
-fn load_approved_roots(app: &AppHandle) -> ApprovedRoots {
-    approved_roots_path(app)
-        .map(|path| read_approved_roots_at(&path))
-        .unwrap_or_default()
-}
-
-fn is_remembered_addons_path(app: &AppHandle, canonical: &Path) -> bool {
-    load_approved_roots(app)
-        .addons
-        .iter()
-        .any(|remembered| Path::new(remembered) == canonical)
-}
-
-/// Record `canonical` as approved so later launches do not have to re-detect it
-/// or reopen the picker.
-///
-/// Only ever called once a path has already passed the native-pick or detection
-/// gate, which is what keeps this from reopening the hole it sits behind: the
-/// webview cannot add an entry, only replay one the user genuinely approved.
-/// The saved settings cannot serve this purpose — the store plugin lets the
-/// frontend write `addonsPath` to any value it likes, so trusting it at boot
-/// would be trusting the caller the gate exists to distrust.
-fn remember_addons_path(app: &AppHandle, canonical: &Path) {
-    let Ok(path) = approved_roots_path(app) else {
-        return;
-    };
-    let mut roots = read_approved_roots_at(&path);
-    push_remembered(&mut roots, canonical.to_string_lossy().into_owned());
-    // Best effort. Failing to remember costs the user one extra trip through
-    // the picker next launch; failing the approval they just made would cost
-    // them this session.
-    if let Ok(bytes) = serde_json::to_vec(&roots) {
-        let _ = crate::atomic_file::atomic_write(&path, &bytes);
-    }
-}
-
 fn consume_matching_addons_path_approval(
     pending: &Mutex<Option<crate::ApprovedAddonsPath>>,
     canonical: &Path,
@@ -284,7 +208,6 @@ pub async fn choose_addons_path(
 /// `require_allowed_path`.
 #[tauri::command]
 pub fn set_addons_path(
-    app: AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
     pending: tauri::State<'_, PendingAddonsPathApproval>,
     addons_path: String,
@@ -334,25 +257,23 @@ pub fn set_addons_path(
 
     let selected_by_user = consume_matching_addons_path_approval(&pending.0, &canonical)?;
 
-    // Boot re-registers the folder from the saved settings, and at that point
-    // this process has no active path and no pending pick. Without a durable
-    // record, the only survivors of a restart would be folders live detection
-    // happens to find — so exactly the users who had to Browse in the first
-    // place, because detection missed their install, would have to Browse again
-    // on every launch. Remembering the approval keeps the gate meaningful (a
-    // path still has to be detected or natively picked *once*) without making
-    // it amnesiac.
-    let remembered = is_remembered_addons_path(&app, &canonical);
-
-    if !already_active && !selected_by_user && !remembered && !is_detected_addons_path(&canonical) {
+    // KNOWN GAP, deliberately not papered over here. Boot re-registers the saved
+    // folder with no active path and no pending pick, so a folder live detection
+    // cannot find has to be re-picked every launch — which is precisely the
+    // users who needed Browse in the first place. The obvious fix, remembering
+    // approvals in a file, does not work while `store:allow-load` stands: the
+    // store plugin opens any path the webview names (`resolve_path` pushes it
+    // onto the base directory unchecked, so `..` and absolute paths escape) and
+    // autosaves a JSON object, which is exactly the shape such a record would
+    // have. Anything the frontend can write cannot authorize the frontend. The
+    // record has to live somewhere the webview cannot reach, or that permission
+    // has to be scoped first; either is a change of its own, not a rider on this
+    // one. Until then the gate stays strict and the folder gets re-picked.
+    if !already_active && !selected_by_user && !is_detected_addons_path(&canonical) {
         return Err(
             "This AddOns folder has not been approved. Select it with the native folder picker."
                 .to_string(),
         );
-    }
-
-    if !remembered {
-        remember_addons_path(&app, &canonical);
     }
 
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
@@ -11467,58 +11388,6 @@ mod tests {
             ensure_eso_not_running_with(|| Err("snapshot failed".to_string())).unwrap_err();
         assert!(unknown.contains("refusing"));
         assert!(unknown.contains("snapshot failed"));
-    }
-
-    #[test]
-    fn a_corrupt_or_missing_approvals_file_remembers_nothing() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("approved-roots.json");
-
-        assert!(read_approved_roots_at(&missing).addons.is_empty());
-
-        std::fs::write(&missing, b"{ not json").unwrap();
-        assert!(
-            read_approved_roots_at(&missing).addons.is_empty(),
-            "an unreadable record must fail closed, not authorize an unknown folder"
-        );
-    }
-
-    #[test]
-    fn remembered_roots_round_trip_through_the_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("approved-roots.json");
-        let mut roots = ApprovedRoots::default();
-        push_remembered(&mut roots, "C:/Games/AddOns".to_string());
-        crate::atomic_file::atomic_write(&path, &serde_json::to_vec(&roots).unwrap()).unwrap();
-
-        let loaded = read_approved_roots_at(&path);
-
-        assert_eq!(loaded.addons, vec!["C:/Games/AddOns".to_string()]);
-    }
-
-    #[test]
-    fn remembering_deduplicates_and_keeps_the_newest_first() {
-        let mut roots = ApprovedRoots::default();
-        push_remembered(&mut roots, "a".to_string());
-        push_remembered(&mut roots, "b".to_string());
-        push_remembered(&mut roots, "a".to_string());
-
-        assert_eq!(roots.addons, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn remembering_is_capped() {
-        let mut roots = ApprovedRoots::default();
-        for i in 0..MAX_REMEMBERED_ROOTS + 5 {
-            push_remembered(&mut roots, format!("root-{i}"));
-        }
-
-        assert_eq!(roots.addons.len(), MAX_REMEMBERED_ROOTS);
-        assert_eq!(
-            roots.addons.first().map(String::as_str),
-            Some(format!("root-{}", MAX_REMEMBERED_ROOTS + 4).as_str()),
-            "the most recent approval must survive the cap"
-        );
     }
 
     #[test]

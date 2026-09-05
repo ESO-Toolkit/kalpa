@@ -701,9 +701,18 @@ pub async fn delete_pack_hub_account(
                     }
                 }
                 401 => return Err("Session expired. Please sign in again.".to_string()),
-                // Only reachable after several rounds in one minute, which
-                // means the deletion was making progress and simply has more
-                // to do than one window allows.
+                // The limiter is keyed by IP and shared with every other
+                // write, so a 429 on the first round means this deletion has
+                // not run at all — someone else behind the same address, or
+                // this user's own recent pack edits, spent the window. Only
+                // once a round has landed is "run it once more" true.
+                429 if round == 0 => {
+                    return Err(
+                        "Pack Hub is busy right now and nothing was deleted. Try again in a \
+                         minute."
+                            .to_string(),
+                    )
+                }
                 429 => return Err(DELETE_INCOMPLETE_MESSAGE.to_string()),
                 status => {
                     let body = response.text().unwrap_or_default();
