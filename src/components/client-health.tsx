@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
+  ActivityIcon,
   AlertCircleIcon,
   AlertTriangleIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  CircleHelpIcon,
   HardDriveIcon,
   PackageCheckIcon,
+  PauseIcon,
   PowerOffIcon,
   RefreshCwIcon,
   SearchIcon,
@@ -44,6 +47,7 @@ import {
   findingsForSlot,
   slotFilled,
   slotLevel,
+  slotNeed,
 } from "@/components/client-stack/slots";
 import type { Slot } from "@/components/client-stack/slots";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
@@ -53,15 +57,18 @@ import type {
   AdoptionOutcome,
   AdoptionPlan,
   ClientHealthPanelProps,
+  ClientHealthReport,
   ClientSource,
   ClientStack,
   EmergencyRemoval,
   EsoClientLocation,
   ForgetOutcome,
+  LogExcerpt,
   ManagedFileState,
   ManagedFileStatus,
   ManagedInventory,
   ManagedKind,
+  NeuralRenderingState,
   OrphanInjector,
   UninstallOutcome,
 } from "@/components/client-stack/types";
@@ -130,14 +137,97 @@ const FILE_STATE_META: Record<
 /* only the panel's own navigation: which slot, or which of the three views    */
 /* that are not slots, is currently open.                                      */
 
-/** A line from ReShade.log or dlss5-feed.log that matched a known failure
- *  signature. These are where a DLSS 5 stack actually announces breakage —
- *  a shader that would not compile, an unsupported parameter — so they stay
- *  in the panel even though they are not a slot anyone chooses. */
-interface LogExcerpt {
-  file: string;
-  rule: string;
-  line: string;
+/**
+ * What the logs said, kept together because the three fields only mean
+ * anything read as one answer.
+ *
+ * This used to be a bare `LogExcerpt[]` declared locally, which quietly encoded
+ * the assumption the rest of this file was built on: that a log has nothing to
+ * say unless it matched a failure. `log_excerpts` is now **fatal-only** — the
+ * six ERROR/WARN lines a *working* RenoDX DLSS-NR setup writes on every launch
+ * are recognised as benign and counted into `log_benign_suppressed` instead —
+ * and `neural_rendering` carries the positive evidence that the stack ran at
+ * all. An empty excerpt list is therefore the absence of known failures, never
+ * proof of health, and the two are not allowed to be confused here again.
+ *
+ * The shape is the read fields of `ClientHealthReport`; `inspect_eso_client`
+ * returns the whole report and this is the part the panel uses.
+ */
+type LogEvidence = Pick<
+  ClientHealthReport,
+  "log_excerpts" | "neural_rendering" | "log_benign_suppressed"
+>;
+
+/**
+ * What a log Kalpa could not read looks like.
+ *
+ * Deliberately `unknown` rather than an empty-but-healthy shape: failing to
+ * read the log is exactly the case where the panel must not claim anything,
+ * and the fallback that says "no findings, so fine" is the bug being fixed.
+ */
+const NO_LOG_EVIDENCE: LogEvidence = {
+  log_excerpts: [],
+  neural_rendering: {
+    state: "unknown",
+    samples: 0,
+    first_evaluation: null,
+    last_evaluation: null,
+  },
+  log_benign_suppressed: 0,
+};
+
+/**
+ * The header's one-glance verdict on the whole install.
+ *
+ * Exported and pure so the gating can be tested without a DOM, because the
+ * gating *is* the feature. The old badge read
+ * `attentionCount > 0 ? "n need attention" : "Everything agrees"`, so
+ * "Everything agrees" was rendered by an empty array — the absence of findings,
+ * never positive evidence that anything ran. That is how it claimed agreement
+ * over a stack that could not work.
+ *
+ * Three gates now, in order, and each one blocks the claim on its own:
+ *
+ * 1. **Findings above `info`.** Unchanged, and still first: a cross-layer
+ *    finding is a diagnosis, which outranks evidence.
+ * 2. **Fatal log lines.** Easy to miss and the reason this is a separate gate:
+ *    no `HealthFinding` is emitted from a log rule at all, by design, so a
+ *    findings-only check sails straight past the `LoadFromDllMain` line — the
+ *    single highest-value signature Kalpa knows.
+ * 3. **Neural Rendering evidence.** Only `running` — the `EvaluateFeature`
+ *    counter found *and climbing* — earns "Everything agrees". `stalled` and
+ *    `unknown` get their own copy and must not be collapsed into each other or
+ *    into failure: `unknown` means the log is absent, truncated by the 400-line
+ *    tail window, or older than the add-on, and rendering that as broken just
+ *    re-creates the same bug pointing the other way.
+ */
+export function stackVerdict(
+  attentionCount: number,
+  evidence: LogEvidence
+): { label: string; color: "amber" | "red" | "emerald" | "muted"; Icon: typeof ShieldCheckIcon } {
+  if (attentionCount > 0) {
+    return {
+      label: `${attentionCount} need attention`,
+      color: "amber",
+      Icon: AlertTriangleIcon,
+    };
+  }
+  const fatal = evidence.log_excerpts.length;
+  if (fatal > 0) {
+    return {
+      label: `${fatal} log failure${fatal === 1 ? "" : "s"}`,
+      color: "red",
+      Icon: AlertCircleIcon,
+    };
+  }
+  switch (evidence.neural_rendering.state) {
+    case "running":
+      return { label: "Everything agrees", color: "emerald", Icon: ShieldCheckIcon };
+    case "stalled":
+      return { label: "Ran, then stopped", color: "amber", Icon: PauseIcon };
+    case "unknown":
+      return { label: "No proof it ran", color: "muted", Icon: CircleHelpIcon };
+  }
 }
 
 /**
@@ -171,7 +261,18 @@ function computeDefaultSelection(
   // A healthy stack opens on ReShade: it is the top of the load order and the
   // one slot every other slot depends on, so it is the most useful thing to be
   // looking at when there is nothing wrong.
-  return firstProblemSlot(stack) ?? SLOT_ORDER.find((slot) => slotFilled(slot, stack)) ?? "reshade";
+  //
+  // "Filled **or** required", not filled alone. Presence stopped being the
+  // whole story when the need axis arrived: on the direct path the motion,
+  // preset and tuning slots are correctly empty, so a filled-only search walks
+  // straight past them — but it also walks past a *required* slot that is empty,
+  // which is the one the user most needs to land on. Requiring either means the
+  // panel opens on something the live path actually cares about.
+  return (
+    firstProblemSlot(stack) ??
+    SLOT_ORDER.find((slot) => slotFilled(slot, stack) || slotNeed(slot, stack) === "required") ??
+    "reshade"
+  );
 }
 
 const Spinner = ({ className }: { className?: string }) => (
@@ -248,7 +349,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   const [forgetConfirming, setForgetConfirming] = useState(false);
   const [forgetting, setForgetting] = useState(false);
   const [forgetError, setForgetError] = useState<string | null>(null);
-  const [logExcerpts, setLogExcerpts] = useState<LogExcerpt[]>([]);
+  const [logEvidence, setLogEvidence] = useState<LogEvidence>(NO_LOG_EVIDENCE);
 
   // Selection + destructive-confirm state for managed uninstall. All of this
   // is per-install: it is reset every time the selected install changes or a
@@ -288,7 +389,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setForgetConfirming(false);
     setForgetting(false);
     setForgetError(null);
-    setLogExcerpts([]);
+    setLogEvidence(NO_LOG_EVIDENCE);
     setSelectedPaths(new Set());
     setRemoveMode(null);
     setRemoving(false);
@@ -339,21 +440,29 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   /** Inspects the stack, then — only when there is something to manage —
    *  loads the adoption plan and Kalpa's own records alongside it. A stock
    *  client never triggers those calls: nothing to plan, nothing recorded. */
-  /** Known-failure lines out of ReShade.log and dlss5-feed.log.
+  /** What ReShade.log and dlss5-feed.log say: fatal matches, how many benign
+   *  lines were suppressed, and whether Neural Rendering can be shown to have
+   *  actually run.
    *
    *  A best-effort extra: a log Kalpa cannot read is not worth an error banner
-   *  when the rest of the panel is fine, so this swallows its own failure and
-   *  simply shows nothing. */
+   *  when the rest of the panel is fine, so this swallows its own failure — but
+   *  it falls back to `NO_LOG_EVIDENCE`, whose Neural Rendering state is
+   *  `unknown`, not to something that reads as healthy. A failed read must
+   *  never be able to earn "Everything agrees". */
   const loadLogs = useCallback(async (clientDir: string, token: number) => {
     try {
-      const report = await invokeOrThrow<{ log_excerpts: LogExcerpt[] }>("inspect_eso_client", {
+      const report = await invokeOrThrow<ClientHealthReport>("inspect_eso_client", {
         clientDir,
       });
       if (runToken.current !== token) return;
-      setLogExcerpts(report.log_excerpts ?? []);
+      setLogEvidence({
+        log_excerpts: report.log_excerpts ?? [],
+        neural_rendering: report.neural_rendering ?? NO_LOG_EVIDENCE.neural_rendering,
+        log_benign_suppressed: report.log_benign_suppressed ?? 0,
+      });
     } catch {
       if (runToken.current !== token) return;
-      setLogExcerpts([]);
+      setLogEvidence(NO_LOG_EVIDENCE);
     }
   }, []);
 
@@ -654,10 +763,24 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [clients, selectedDir]
   );
 
-  /** Findings above `info`, across every slot — the header's one-glance answer. */
+  /**
+   * Findings above `info`, across every slot.
+   *
+   * No longer the header's one-glance answer on its own — it never should have
+   * been. It is the *first* of three gates in `stackVerdict`, which is where
+   * the header's answer is now decided: this count says nothing about the logs
+   * (no finding is ever emitted from a log rule) and nothing about whether
+   * Neural Rendering actually ran, and a zero here was being rendered as
+   * "Everything agrees" over a stack that could not work.
+   */
   const attentionCount = useMemo(
     () => stack?.findings.filter((f) => f.level !== "info" && f.level !== "ok").length ?? 0,
     [stack]
+  );
+
+  const verdict = useMemo(
+    () => stackVerdict(attentionCount, logEvidence),
+    [attentionCount, logEvidence]
   );
 
   const busy = detecting || stackLoading;
@@ -728,10 +851,22 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
             )}
 
             <div className="ml-auto flex shrink-0 items-center gap-2">
+              {/* Icon and word, never colour alone: `status-*` is reseeded per
+                  theme and five shipped themes are light or high-contrast.
+                  Clicking it opens the evidence rather than leaving the user to
+                  work out what "No proof it ran" is based on. */}
               {stack && !stack.is_empty && (
-                <InfoPill color={attentionCount > 0 ? "amber" : "emerald"}>
-                  {attentionCount > 0 ? `${attentionCount} need attention` : "Everything agrees"}
-                </InfoPill>
+                <button
+                  type="button"
+                  className="shrink-0"
+                  onClick={() => setSelection("logs")}
+                  aria-label={`${verdict.label} — show the log evidence`}
+                >
+                  <InfoPill color={verdict.color}>
+                    <verdict.Icon aria-hidden className="size-3" />
+                    {verdict.label}
+                  </InfoPill>
+                </button>
               )}
               <Button
                 variant="ghost"
@@ -828,7 +963,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   managedLoading={managedLoading}
                   managedError={managedError}
                   managedInventory={managedInventory}
-                  logExcerpts={logExcerpts}
+                  logEvidence={logEvidence}
                   hideEmergency={hideEmergency}
                   isManaged={Boolean(plan?.already_managed)}
                   forgetConfirming={forgetConfirming}
@@ -956,7 +1091,7 @@ interface StackBodyProps {
   managedLoading: boolean;
   managedError: string | null;
   managedInventory: ManagedInventory | null;
-  logExcerpts: LogExcerpt[];
+  logEvidence: LogEvidence;
   hideEmergency: boolean;
   isManaged: boolean;
   forgetConfirming: boolean;
@@ -1033,7 +1168,8 @@ function StackBody(props: StackBodyProps) {
         onSelect={onSelect}
         isManaged={props.isManaged}
         trackedCount={props.managedInventory?.files.length ?? null}
-        logCount={props.logExcerpts.length}
+        logCount={props.logEvidence.log_excerpts.length}
+        nrState={props.logEvidence.neural_rendering.state}
       />
       <div ref={paneScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
         <DetailPane {...props} />
@@ -1145,7 +1281,7 @@ function DetailPane(props: StackBodyProps) {
     );
   }
 
-  if (effectiveSelection === "logs") return <LogSignals excerpts={props.logExcerpts} />;
+  if (effectiveSelection === "logs") return <LogSignals evidence={props.logEvidence} />;
   if (effectiveSelection === "records") return <RecordsSection {...props} />;
   if (!effectiveSelection) {
     return <p className="text-xs text-muted-foreground">Pick a slot to see what is in it.</p>;
@@ -1249,45 +1385,140 @@ function AdoptionCard({
 /* Log signals                                                                */
 /* -------------------------------------------------------------------------- */
 
-/** Lines ReShade and the DLSS 5 feed wrote that match a known failure
- *  signature. Deliberately presented as evidence rather than as findings:
- *  Kalpa matched a string in a log, which is a much weaker claim than the
- *  cross-layer checks, and a stale line from a problem already fixed will
- *  still be sitting in the file. */
-function LogSignals({ excerpts }: { excerpts: LogExcerpt[] }) {
+/**
+ * How the three Neural Rendering evidence states are worded.
+ *
+ * They are three genuinely different answers and collapsing any two of them
+ * re-creates the bug this view exists to fix. `running` is the only one that is
+ * proof: `EvaluateFeature succeeded: evaluation=N` advances once per rendered
+ * frame, so a climbing counter cannot be produced by an add-on that merely
+ * loaded. `stalled` is suspicious and nothing more — a single occurrence lands
+ * there. `unknown` is neither working nor failing, and it is by far the most
+ * common: the log may be missing, from a session before the add-on was
+ * installed, or simply longer than the 400-line tail window Kalpa reads.
+ */
+const NR_STATE_COPY: Record<
+  NeuralRenderingState,
+  {
+    title: string;
+    color: "emerald" | "amber" | "muted";
+    Icon: typeof ShieldCheckIcon;
+    body: string;
+  }
+> = {
+  running: {
+    title: "Neural Rendering ran",
+    color: "emerald",
+    Icon: ActivityIcon,
+    body: "ReShade logged its per-frame evaluation counter climbing. That advances once per rendered frame, so it is real proof rather than an add-on that merely loaded.",
+  },
+  stalled: {
+    title: "Neural Rendering started, then stopped",
+    color: "amber",
+    Icon: PauseIcon,
+    body: "The evaluation counter appears but never advances. That is suspicious and it is not proof of anything on its own — one line from the moment the add-on initialised looks exactly like this.",
+  },
+  unknown: {
+    title: "No evidence either way",
+    color: "muted",
+    Icon: CircleHelpIcon,
+    body: "Kalpa found no evaluation line at all. That is not the same as broken: the log may be missing, may be from a session before the add-on was installed, or the line may have scrolled out of the 400 lines Kalpa reads from the end. Launch the game, then refresh.",
+  },
+};
+
+/**
+ * What the logs actually say — positive evidence first, then fatal matches.
+ *
+ * The order is the correction. This view used to be failure matches and nothing
+ * else, so an empty file rendered as an empty page and the rail beside it said
+ * "Nothing matched", which reads as an all-clear. It is not one: no
+ * `HealthFinding` is emitted from a log rule at all, so the log is the *only*
+ * place the `LoadFromDllMain` misconfiguration is visible, and "nothing matched"
+ * over a log Kalpa never managed to read says the same thing as "nothing
+ * matched" over a clean one.
+ *
+ * Benign lines are counted rather than discarded. Six distinct ERROR and WARN
+ * lines appear on a *working* RenoDX DLSS-NR setup — the D3D11 proxy declining,
+ * the absent Streamline interposer, four NVNGX vtable hooks — and surfacing
+ * them is how a healthy stack got triaged as a broken one. Saying how many were
+ * ignored keeps them findable by anyone who opens the raw log and sees them.
+ */
+function LogSignals({ evidence }: { evidence: LogEvidence }) {
   const byFile = useMemo(() => {
     const groups = new Map<string, LogExcerpt[]>();
-    for (const excerpt of excerpts) {
+    for (const excerpt of evidence.log_excerpts) {
       const list = groups.get(excerpt.file) ?? [];
       list.push(excerpt);
       groups.set(excerpt.file, list);
     }
     return Array.from(groups.entries());
-  }, [excerpts]);
+  }, [evidence.log_excerpts]);
+
+  const nr = evidence.neural_rendering;
+  const copy = NR_STATE_COPY[nr.state];
+  const benign = evidence.log_benign_suppressed;
 
   return (
     <section aria-labelledby="client-health-logs" className="space-y-3">
       <SectionHeader id="client-health-logs">Log signals</SectionHeader>
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        Lines in your ReShade and DLSS 5 logs that match a known failure. Logs are append-only, so a
-        line here may be from a problem you have already fixed — check the timestamps in the file
-        before chasing it.
-      </p>
-      {byFile.map(([file, lines]) => (
-        <GlassPanel key={file} variant="subtle" className="space-y-2 p-3">
-          <p className="font-mono text-[11px] text-muted-foreground">{file}</p>
-          <ul className="space-y-1.5">
-            {lines.map((excerpt, index) => (
-              <li key={`${excerpt.rule}-${index}`} className="space-y-0.5">
-                <InfoPill color="amber">{excerpt.rule}</InfoPill>
-                <p className="break-words font-mono text-[11px] text-muted-foreground">
-                  {excerpt.line}
-                </p>
-              </li>
-            ))}
-          </ul>
-        </GlassPanel>
-      ))}
+
+      <GlassPanel variant="subtle" className="space-y-2 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <InfoPill color={copy.color}>
+            <copy.Icon aria-hidden className="size-3" />
+            {copy.title}
+          </InfoPill>
+          {nr.samples > 0 && (
+            <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+              {nr.samples} evaluation line{nr.samples === 1 ? "" : "s"}
+              {nr.first_evaluation !== null &&
+                nr.last_evaluation !== null &&
+                `, counter ${nr.first_evaluation} → ${nr.last_evaluation}`}
+            </span>
+          )}
+        </div>
+        <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">{copy.body}</p>
+      </GlassPanel>
+
+      {byFile.length === 0 ? (
+        // Never "Nothing matched" on its own. The honest statement is what was
+        // checked and what was deliberately ignored, not silence.
+        <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">
+          No known failure signatures in your ReShade and DLSS 5 logs
+          {benign > 0
+            ? `; ${benign} line${benign === 1 ? "" : "s"} that a working setup also writes were ignored.`
+            : "."}{" "}
+          Kalpa only knows the signatures it has been taught, so this is the absence of a known
+          failure rather than a clean bill of health.
+        </p>
+      ) : (
+        <>
+          <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">
+            Lines matching a known failure. Logs are append-only, so a line here may be from a
+            problem you have already fixed — check the timestamps in the file before chasing it.
+            {benign > 0 &&
+              ` ${benign} further line${benign === 1 ? "" : "s"} that a working setup also writes were ignored.`}
+          </p>
+          {byFile.map(([file, lines]) => (
+            <GlassPanel key={file} variant="subtle" className="space-y-2 p-3">
+              <p className="font-mono text-[11px] text-muted-foreground">{file}</p>
+              <ul className="space-y-1.5">
+                {lines.map((excerpt, index) => (
+                  <li key={`${excerpt.rule}-${index}`} className="space-y-0.5">
+                    <InfoPill color="red">
+                      <AlertCircleIcon aria-hidden className="size-3" />
+                      {excerpt.rule}
+                    </InfoPill>
+                    <p className="break-words font-mono text-[11px] text-muted-foreground">
+                      {excerpt.line}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </GlassPanel>
+          ))}
+        </>
+      )}
     </section>
   );
 }
