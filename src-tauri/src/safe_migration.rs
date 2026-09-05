@@ -733,7 +733,7 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
 /// Only writes kalpa.json — does NOT move/delete any addon folders or SavedVariables.
 pub fn execute_migration(
     addons_dir: &Path,
-    expected_plan_digest: Option<&str>,
+    expected_plan_digest: &str,
 ) -> Result<MigrationExecuteOutcome, String> {
     let minion_addons = load_minion_addons_for_migration()?;
     execute_migration_from_addons(addons_dir, &minion_addons, expected_plan_digest)
@@ -742,21 +742,19 @@ pub fn execute_migration(
 fn execute_migration_from_addons(
     addons_dir: &Path,
     minion_addons: &[crate::commands::MinionAddon],
-    expected_plan_digest: Option<&str>,
+    expected_plan_digest: &str,
 ) -> Result<MigrationExecuteOutcome, String> {
     let start = now_timestamp();
 
     let mut store = metadata::load_metadata(addons_dir);
     let plan = build_migration_plan_from_addons(minion_addons, addons_dir, &store);
 
-    if let Some(expected_digest) = expected_plan_digest {
-        if expected_digest != plan.dry_run.plan_digest {
-            return Ok(MigrationExecuteOutcome::PlanChanged {
-                expected_digest: expected_digest.to_string(),
-                actual_digest: plan.dry_run.plan_digest.clone(),
-                fresh_plan: plan.dry_run,
-            });
-        }
+    if expected_plan_digest != plan.dry_run.plan_digest {
+        return Ok(MigrationExecuteOutcome::PlanChanged {
+            expected_digest: expected_plan_digest.to_string(),
+            actual_digest: plan.dry_run.plan_digest.clone(),
+            fresh_plan: plan.dry_run,
+        });
     }
 
     for action in &plan.actions {
@@ -1337,7 +1335,7 @@ mod tests {
         let outcome = execute_migration_from_addons(
             &addons_dir,
             &fresh_addons,
-            Some(&reviewed_plan.dry_run.plan_digest),
+            &reviewed_plan.dry_run.plan_digest,
         )
         .unwrap();
 
@@ -1380,7 +1378,7 @@ mod tests {
         let outcome = execute_migration_from_addons(
             &addons_dir,
             &minion_addons,
-            Some(&reviewed_plan.dry_run.plan_digest),
+            &reviewed_plan.dry_run.plan_digest,
         )
         .unwrap();
 

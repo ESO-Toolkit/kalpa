@@ -7,8 +7,8 @@ use crate::manifest_cache;
 use crate::metadata;
 use crate::phase_timer::PhaseTimer;
 use crate::uploader::native::session::{SessionProvider, StoredSessionProvider};
-use crate::AllowedAddonsPath;
 use crate::MetadataLock;
+use crate::{AllowedAddonsPath, PendingAddonsPathApproval};
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use rayon::prelude::*;
@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalSize, Runtime, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tempfile::NamedTempFile;
 
@@ -121,9 +122,72 @@ pub fn reveal_allowed_path(
         .map_err(|e| format!("Could not reveal the item: {e}"))
 }
 
-/// Called by the frontend to register the approved addons directory.
-/// Stores both the configured and canonicalized paths so commands can validate
-/// symlink/junction targets without losing the configured ESO live directory.
+fn is_detected_addons_path(canonical: &Path) -> bool {
+    crate::game_instances::detect_all_game_instances()
+        .iter()
+        .any(|instance| {
+            PathBuf::from(&instance.addons_path)
+                .canonicalize()
+                .is_ok_and(|candidate| candidate == canonical)
+        })
+}
+
+fn consume_matching_addons_path_approval(
+    pending: &Mutex<Option<crate::ApprovedAddonsPath>>,
+    canonical: &Path,
+) -> Result<bool, String> {
+    let mut guard = pending
+        .lock()
+        .map_err(|_| "Internal approval lock error.".to_string())?;
+    if guard
+        .as_ref()
+        .is_some_and(|approved| approved.canonical == canonical)
+    {
+        guard.take();
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Open the operating system folder picker and retain the selected path as a
+/// one-session approval. The follow-up `set_addons_path` call must still match
+/// this exact canonical path. This deliberately lives behind a Rust command:
+/// the general dialog plugin returns a path to the webview but cannot establish
+/// that the native authorization boundary saw the user's selection.
+#[tauri::command]
+pub fn choose_addons_path(
+    app: AppHandle,
+    pending: tauri::State<'_, PendingAddonsPathApproval>,
+) -> Result<Option<String>, String> {
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_title("Select ESO AddOns Folder")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| "The folder dialog did not return a local path.".to_string())?;
+    let display_path = path.to_string_lossy().into_owned();
+    let (configured, canonical) = validate_addons_path(&display_path)?;
+    let mut guard = pending
+        .0
+        .lock()
+        .map_err(|_| "Internal approval lock error.".to_string())?;
+    *guard = Some(crate::ApprovedAddonsPath {
+        configured,
+        canonical,
+    });
+    Ok(Some(display_path))
+}
+
+/// Register an AddOns directory only when native code independently detected
+/// it, it is already the active path, or the user selected it through
+/// `choose_addons_path`. Stores configured and canonicalized forms so later
+/// commands can validate junction targets without losing the displayed path.
 ///
 /// While a sandbox override is active this is also an enforcement point for it:
 /// see the `#[cfg(debug_assertions)]` block below. Refusing here is what keeps a
@@ -140,6 +204,7 @@ pub fn reveal_allowed_path(
 #[tauri::command]
 pub fn set_addons_path(
     state: tauri::State<'_, AllowedAddonsPath>,
+    pending: tauri::State<'_, PendingAddonsPathApproval>,
     addons_path: String,
 ) -> Result<(), String> {
     let (configured, canonical) = validate_addons_path(&addons_path)?;
@@ -169,6 +234,29 @@ pub fn set_addons_path(
                 resolved.display()
             ));
         }
+
+        let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+        *guard = Some(crate::ApprovedAddonsPath {
+            configured,
+            canonical,
+        });
+        return Ok(());
+    }
+
+    let already_active = state
+        .0
+        .lock()
+        .map_err(|_| "Internal error.".to_string())?
+        .as_ref()
+        .is_some_and(|approved| approved.canonical == canonical);
+
+    let selected_by_user = consume_matching_addons_path_approval(&pending.0, &canonical)?;
+
+    if !already_active && !selected_by_user && !is_detected_addons_path(&canonical) {
+        return Err(
+            "This AddOns folder has not been approved. Select it with the native folder picker."
+                .to_string(),
+        );
     }
 
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
@@ -8613,15 +8701,6 @@ pub struct MinionAddon {
     pub addons_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MinionMigrationResult {
-    pub found: bool,
-    pub addon_count: u32,
-    pub imported: u32,
-    pub already_tracked: u32,
-}
-
 pub fn find_minion_xml() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".minion").join("minion.xml");
@@ -8724,42 +8803,7 @@ pub fn detect_minion() -> Result<bool, String> {
     Ok(find_minion_xml().is_some())
 }
 
-/// Legacy migration command — delegates to the safe_migration implementation
-/// to avoid duplicating the import logic.
-#[tauri::command]
-pub async fn migrate_from_minion(
-    state: tauri::State<'_, AllowedAddonsPath>,
-    meta_lock: tauri::State<'_, MetadataLock>,
-    addons_path: String,
-) -> Result<MinionMigrationResult, String> {
-    let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let lock = meta_lock.0.clone();
-    tokio::task::spawn_blocking(move || {
-        // The import is a kalpa.json read-modify-write; a batch update holding
-        // the lock would otherwise lose either its versions or these entries.
-        let _guard = lock
-            .lock()
-            .map_err(|_| "Internal metadata lock error".to_string())?;
-        match safe_migration::execute_migration(&addons_dir, None)? {
-            safe_migration::MigrationExecuteOutcome::Applied { result } => {
-                Ok(MinionMigrationResult {
-                    found: true,
-                    addon_count: result.addon_count,
-                    imported: result.imported,
-                    already_tracked: result.already_tracked,
-                })
-            }
-            safe_migration::MigrationExecuteOutcome::PlanChanged { .. } => {
-                Err("Migration plan changed unexpectedly.".to_string())
-            }
-        }
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
-}
-
 // ─── Safe Migration Commands ────────────────────────────────────────
-
 use crate::safe_migration;
 
 /// Blocking pool: the ESO/Minion checks spawn `tasklist` (or `pgrep`) up to four
@@ -8805,16 +8849,17 @@ pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
-    expected_plan_digest: Option<String>,
+    expected_plan_digest: String,
 ) -> Result<safe_migration::MigrationExecuteOutcome, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
-        // See `migrate_from_minion`: the import rewrites kalpa.json.
+        // The import rewrites kalpa.json, so serialize it with every other
+        // metadata read-modify-write operation.
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        safe_migration::execute_migration(&addons_dir, expected_plan_digest.as_deref())
+        safe_migration::execute_migration(&addons_dir, &expected_plan_digest)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8852,6 +8897,7 @@ pub async fn restore_snapshot(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
         let _transaction = crate::install_txn::lock_and_recover(&addons_dir)?;
+        ensure_eso_not_running_for_settings_write()?;
         safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
     })
     .await
@@ -9412,6 +9458,7 @@ pub async fn write_saved_variable(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+        ensure_eso_not_running_for_settings_write()?;
         sv_io::write_saved_variable_blocking(&addons_dir, &file_name, &tree, &stamp)
     })
     .await
@@ -9449,9 +9496,12 @@ pub async fn restore_sv_backup(
         return Err("Only .lua files can be restored.".to_string());
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || sv_io::restore_backup_file(&addons_dir, &file_name))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        ensure_eso_not_running_for_settings_write()?;
+        sv_io::restore_backup_file(&addons_dir, &file_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -9486,6 +9536,7 @@ pub async fn copy_sv_profile(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+        ensure_eso_not_running_for_settings_write()?;
         crate::saved_variables::profile::copy_sv_profile_blocking(
             &addons_dir,
             &file_name,
@@ -9516,22 +9567,40 @@ pub fn is_portable_update_supported() -> bool {
 
 #[tauri::command]
 pub async fn is_eso_running() -> Result<bool, String> {
-    tokio::task::spawn_blocking(|| {
-        #[cfg(target_os = "windows")]
-        {
-            is_eso_running_windows(is_eso_client_process_name)
-        }
+    tokio::task::spawn_blocking(is_eso_running_blocking)
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            // Proton/Wine runs the Windows binary, so `eso64.exe` shows up in
-            // the wine loader's command line; the native Mac client's binary
-            // is `eso64`. `pgrep -if` matches both case-insensitively.
-            Ok(crate::platform::unix_process_running("eso64"))
+fn is_eso_running_blocking() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        is_eso_running_windows(is_eso_client_process_name)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Proton/Wine runs the Windows binary, so `eso64.exe` shows up in
+        // the wine loader's command line; the native Mac client's binary
+        // is `eso64`. `pgrep -if` matches both case-insensitively.
+        crate::platform::unix_process_running("eso64")
+    }
+}
+
+fn ensure_eso_not_running_with(check: impl FnOnce() -> Result<bool, String>) -> Result<(), String> {
+    match check() {
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            Err("ESO is running. Close the game before changing SavedVariables.".to_string())
         }
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
+        Err(error) => Err(format!(
+            "Could not verify that ESO is closed; refusing to change SavedVariables: {error}"
+        )),
+    }
+}
+
+pub(crate) fn ensure_eso_not_running_for_settings_write() -> Result<(), String> {
+    ensure_eso_not_running_with(is_eso_running_blocking)
 }
 
 /// Like [`is_eso_running`], but also true while the ZOS/Bethesda launcher is
@@ -9574,9 +9643,9 @@ pub fn is_eso_or_launcher_running_blocking() -> Result<bool, String> {
     #[cfg(not(target_os = "windows"))]
     {
         // Same substring-match caveat as `is_eso_running`'s unix branch.
-        Ok(crate::platform::unix_process_running("eso64")
-            || crate::platform::unix_process_running("bethesda.net_launcher")
-            || crate::platform::unix_process_running("esolauncher"))
+        Ok(crate::platform::unix_process_running("eso64")?
+            || crate::platform::unix_process_running("bethesda.net_launcher")?
+            || crate::platform::unix_process_running("esolauncher")?)
     }
 }
 
@@ -9691,6 +9760,7 @@ pub async fn delete_saved_variables(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+        ensure_eso_not_running_for_settings_write()?;
         let result = sv_io::delete_saved_variables_blocking(&addons_dir, &file_names);
         if result.is_ok() {
             // Keep only the 3 most recent auto-cleanup snapshots to prevent
@@ -11280,6 +11350,40 @@ mod tests {
         assert!(is_eso_or_launcher_process_name("esolauncher.exe"));
         assert!(!is_eso_or_launcher_process_name("notepad.exe"));
         assert!(!is_eso_or_launcher_process_name("resolve.exe"));
+    }
+
+    #[test]
+    fn settings_write_gate_allows_only_a_confirmed_closed_client() {
+        assert!(ensure_eso_not_running_with(|| Ok(false)).is_ok());
+
+        let running = ensure_eso_not_running_with(|| Ok(true)).unwrap_err();
+        assert!(running.contains("ESO is running"));
+
+        let unknown =
+            ensure_eso_not_running_with(|| Err("snapshot failed".to_string())).unwrap_err();
+        assert!(unknown.contains("refusing"));
+        assert!(unknown.contains("snapshot failed"));
+    }
+
+    #[test]
+    fn native_addons_path_approval_is_exact_and_single_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let approved = temp.path().join("approved");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&approved).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let approved = dunce::canonicalize(approved).unwrap();
+        let other = dunce::canonicalize(other).unwrap();
+        let pending = Mutex::new(Some(crate::ApprovedAddonsPath {
+            configured: approved.clone(),
+            canonical: approved.clone(),
+        }));
+
+        assert!(!consume_matching_addons_path_approval(&pending, &other).unwrap());
+        assert!(pending.lock().unwrap().is_some());
+        assert!(consume_matching_addons_path_approval(&pending, &approved).unwrap());
+        assert!(pending.lock().unwrap().is_none());
+        assert!(!consume_matching_addons_path_approval(&pending, &approved).unwrap());
     }
 
     #[test]

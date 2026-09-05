@@ -72,6 +72,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Deploy to Cloudflare
+        id: deploy
         run: npx wrangler deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -80,18 +81,25 @@ jobs:
       - name: Post-deploy health check
         run: |
           sleep 5
-          HEALTH=$(curl -sf https://kalpa-pack-hub.eso-toolkit.workers.dev/health || true)
+          HEALTH=$(curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 15 \
+            --retry 3 --retry-delay 2 --retry-connrefused \
+            https://kalpa-pack-hub.eso-toolkit.workers.dev/health)
           echo "$HEALTH"
-          STATUS=$(echo "$HEALTH" | jq -r '.status // empty' 2>/dev/null || true)
-          KV=$(echo "$HEALTH" | jq -r '.kv // empty' 2>/dev/null || true)
+          STATUS=$(echo "$HEALTH" | jq -r '.status // empty')
+          KV=$(echo "$HEALTH" | jq -r '.kv // empty')
           if [ "$STATUS" != "ok" ] || [ "$KV" != "true" ]; then
             echo "::error::Health check failed! status=$STATUS kv=$KV"
-            if ! npx wrangler rollback "${{ steps.pre_deploy.outputs.version_id }}" --yes --message "Automatic rollback after failed health check"; then
-              echo "::error::Rollback failed; manual intervention is required."
-            fi
             exit 1
           fi
           echo "Health check passed."
+
+      # A separate always-evaluated step still runs when curl itself fails or
+      # emits malformed JSON. Keeping rollback inside the health script missed
+      # both cases under bash's fail-fast behavior.
+      - name: Roll back failed deployment
+        if: ${{ failure() && steps.deploy.outcome == 'success' && steps.pre_deploy.outputs.version_id != '' }}
+        run: npx wrangler rollback "${{ steps.pre_deploy.outputs.version_id }}" --yes --message "Automatic rollback after failed post-deploy validation"
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

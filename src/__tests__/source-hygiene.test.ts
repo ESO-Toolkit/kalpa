@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 /**
  * A single raw control byte in a source file makes Git and ripgrep classify the
@@ -211,6 +211,15 @@ function scanRepo(): { scanned: string[]; offenders: string[] } {
 }
 
 describe("source hygiene", () => {
+  let repositoryScan: ReturnType<typeof scanRepo>;
+
+  beforeAll(() => {
+    // A repository-wide synchronous scan can exceed Vitest's five-second test
+    // default on a busy Windows runner. Perform it once, with a bounded budget,
+    // so the coverage and offender assertions inspect the same snapshot.
+    repositoryScan = scanRepo();
+  }, 30_000);
+
   it("detects the byte it exists to detect", () => {
     // Proves the scan below is capable of failing. The alternative — writing a
     // NUL into a real source file and watching the suite go red — is the same
@@ -252,7 +261,7 @@ describe("source hygiene", () => {
     // been weaker than it read. These four are asserted against the files whose
     // bytes were READ, so neither a shrunken listing nor a skipped read can
     // satisfy it.
-    const read = new Set(scanRepo().scanned);
+    const read = new Set(repositoryScan.scanned);
 
     expect(read).toContain("src/lib/removal-queue.ts");
     expect(read).toContain("src-tauri/src/commands.rs");
@@ -263,7 +272,7 @@ describe("source hygiene", () => {
   });
 
   it("has no raw control bytes that would make a file read as binary", () => {
-    const { offenders } = scanRepo();
+    const { offenders } = repositoryScan;
     expect(offenders, offenders.join("\n")).toEqual([]);
   });
 });

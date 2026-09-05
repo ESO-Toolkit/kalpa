@@ -22,9 +22,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const LOCK_SUFFIX: &str = ".kalpa.lock";
+#[cfg(windows)]
+const LOCK_FILE_SHARE_MODE: u32 = 0x0000_0001 | 0x0000_0002; // READ | WRITE, deliberately no DELETE
 
 #[derive(Clone, Copy)]
 pub(crate) struct LockOptions<'a> {
@@ -368,16 +373,19 @@ fn acquire_key(
             source,
         })?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&key.lock_path)
-        .map_err(|source| LockError::Io {
-            path: key.target.clone(),
-            source,
-        })?;
+    let mut open = OpenOptions::new();
+    open.create(true).read(true).write(true).truncate(false);
+    // Rust's Windows default includes FILE_SHARE_DELETE. That lets another
+    // process atomically replace the persistent coordination file while it is
+    // locked; a later opener then locks a different file identity and enters
+    // the same transaction concurrently. Denying delete sharing keeps the
+    // pathname bound to this kernel object for every owner's full lifetime.
+    #[cfg(windows)]
+    open.share_mode(LOCK_FILE_SHARE_MODE);
+    let file = open.open(&key.lock_path).map_err(|source| LockError::Io {
+        path: key.target.clone(),
+        source,
+    })?;
 
     loop {
         if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
@@ -414,7 +422,11 @@ fn acquire_shared_key_if_present(
     timeout: Duration,
     cancel: Option<&AtomicBool>,
 ) -> Result<Option<OsLockGuard>, LockError> {
-    let file = match OpenOptions::new().read(true).open(&key.lock_path) {
+    let mut open = OpenOptions::new();
+    open.read(true);
+    #[cfg(windows)]
+    open.share_mode(LOCK_FILE_SHARE_MODE);
+    let file = match open.open(&key.lock_path) {
         Ok(file) => file,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
@@ -764,6 +776,34 @@ mod tests {
         )
         .expect("OS must release the lock when its owner dies");
         assert!(LockKey::for_path(&target).unwrap().lock_path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_lock_file_cannot_be_atomically_replaced_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("kalpa.json");
+        let ready = dir.path().join("ready");
+        let mut owner = spawn_helper("hold", &target, Some(&ready));
+        wait_for(&ready);
+        let lock_path = LockKey::for_path(&target).unwrap().lock_path;
+
+        let replacement = crate::atomic_file::atomic_write(&lock_path, b"replacement");
+        assert!(
+            replacement.is_err(),
+            "a live coordination pathname must remain bound to the locked file identity"
+        );
+        let contender = acquire(
+            &target,
+            LockOptions {
+                timeout: Duration::from_millis(150),
+                cancel: None,
+            },
+        );
+        assert!(matches!(contender, Err(LockError::Timeout { .. })));
+
+        owner.kill().unwrap();
+        owner.wait().unwrap();
     }
 
     #[test]

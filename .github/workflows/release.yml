@@ -13,7 +13,34 @@ permissions:
   contents: write
 
 jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Configure this environment with required reviewers. The repository-side
+    # commit check below still fails closed if someone can push a tag but cannot
+    # merge to main.
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag targets the current main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          tagged_commit=$(git rev-parse HEAD^{commit})
+          main_commit=$(git rev-parse origin/main^{commit})
+          if [ "$tagged_commit" != "$main_commit" ]; then
+            echo "::error::Release tag targets ${tagged_commit}, but origin/main is ${main_commit}."
+            exit 1
+          fi
+
   build:
+    needs: authorize
     strategy:
       fail-fast: false
       # Serialize the matrix: tauri-action merges each platform's entry into the

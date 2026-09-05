@@ -305,7 +305,7 @@ fn backup_existing_in(
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create backup subdirectory: {e}"))?;
     }
-    fs::copy(&source, &destination)
+    crate::atomic_file::atomic_copy(&source, &destination)
         .map_err(|e| format!("Failed to back up {relative_path}: {e}"))?;
     Ok(Some(id))
 }
@@ -402,7 +402,7 @@ fn move_into_place_with(
 /// failing the placement because a temp file lingered would be worse than the
 /// leak.
 fn copy_then_remove(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::copy(source, destination).map_err(|e| {
+    crate::atomic_file::atomic_copy(source, destination).map_err(|e| {
         format!(
             "Failed to place {}: {e}",
             destination
@@ -2001,9 +2001,12 @@ mod tests {
     fn move_into_place_reports_an_error_when_the_fallback_also_fails() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let source = tmp.path().join("source.bin");
-        // Parent does not exist, so the copy cannot succeed either.
-        let destination = tmp.path().join("missing").join("destination.bin");
+        // A regular file cannot be used as a parent directory, so the atomic
+        // copy cannot create its same-directory staging file.
+        let blocked_parent = tmp.path().join("not-a-directory");
+        let destination = blocked_parent.join("destination.bin");
         std::fs::write(&source, b"payload").expect("write source");
+        std::fs::write(&blocked_parent, b"blocker").expect("write blocker");
 
         let err = move_into_place_with(&source, &destination, not_same_device)
             .expect_err("should surface the copy failure");

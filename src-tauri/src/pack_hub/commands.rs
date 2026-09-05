@@ -1221,6 +1221,7 @@ pub async fn import_sv_settings(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || {
+        crate::commands::ensure_eso_not_running_for_settings_write()?;
         let sv_dir = sv_io::saved_variables_dir(&addons_dir);
         fs::create_dir_all(&sv_dir)
             .map_err(|e| format!("Failed to create SavedVariables directory: {e}"))?;
@@ -1291,6 +1292,13 @@ pub async fn import_sv_settings(
             }
 
             let dest = sv_dir.join(format!("{folder}.lua"));
+
+            // Re-check at the point of each write. An import can spend long
+            // enough validating earlier files for ESO to start mid-operation.
+            if let Err(error) = crate::commands::ensure_eso_not_running_for_settings_write() {
+                errors.push(format!("{folder}: {error}"));
+                break;
+            }
 
             // Create .bak before overwriting
             if dest.is_file() {
