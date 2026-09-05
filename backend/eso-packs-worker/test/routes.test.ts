@@ -1929,6 +1929,11 @@ describe("DELETE /account", () => {
   });
 
 
+  // 20s: this test chains a full delete-account, a create, a real scheduled
+  // backup run, and an admin restore, each doing its own D1 mirror round trip.
+  // Observed timing out at the 5s default on Windows CI while passing on
+  // Linux and macOS, so it gets real headroom instead of a value that just
+  // clears one bad run.
   it("includes new packs from a returning deleted author in backups and restores", async () => {
     await ensureD1MirrorTables();
     const oldPackId = "returning-author-old-pack";
@@ -2008,7 +2013,7 @@ describe("DELETE /account", () => {
       author_id: String(TEST_USER.id),
     });
     expect((await getCanonicalIndex(e)).packs.map((pack) => pack.id)).toContain(newPackId);
-  });
+  }, 20_000);
 
   it("leaves backup:latest untouched when the user has nothing in it", async () => {
     const theirs = makePack("theirs-only", {
