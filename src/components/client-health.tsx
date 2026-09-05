@@ -190,7 +190,7 @@ const NO_LOG_EVIDENCE: LogEvidence = {
  * never positive evidence that anything ran. That is how it claimed agreement
  * over a stack that could not work.
  *
- * Three gates now, in order, and each one blocks the claim on its own:
+ * Four gates now, in order, and each one blocks the claim on its own:
  *
  * 1. **Findings above `info`.** Unchanged, and still first: a cross-layer
  *    finding is a diagnosis, which outranks evidence.
@@ -198,16 +198,31 @@ const NO_LOG_EVIDENCE: LogEvidence = {
  *    no `HealthFinding` is emitted from a log rule at all, by design, so a
  *    findings-only check sails straight past the `LoadFromDllMain` line — the
  *    single highest-value signature Kalpa knows.
- * 3. **Neural Rendering evidence.** Only `running` — the `EvaluateFeature`
- *    counter found *and climbing* — earns "Everything agrees". `stalled` and
- *    `unknown` get their own copy and must not be collapsed into each other or
- *    into failure: `unknown` means the log is absent, truncated by the 400-line
- *    tail window, or older than the add-on, and rendering that as broken just
- *    re-creates the same bug pointing the other way.
+ * 3. **The stack must actually be able to run.** `running` on its own is not
+ *    enough: it is derived from `ReShade.log`, and ReShade truncates that file
+ *    on *every* launch, so it only ever describes the most recent session —
+ *    never the state on disk right now. A user who parks `dxgi.dll` from the
+ *    power card, or deletes the add-on by hand, leaves that log completely
+ *    unchanged, so stale "it ran" evidence is the common case, not an edge
+ *    case. This gate requires `is_disabled === false` and `active_path` to be
+ *    one of `"direct" | "feed" | "both"` before a `running` state is allowed
+ *    to mean anything; `"neither"`, `"unknown"`, and a not-yet-loaded stack
+ *    (`null`) all fail it.
+ * 4. **Neural Rendering evidence.** Only `running` — the `EvaluateFeature`
+ *    counter found *and climbing*, on a stack that gate 3 confirmed could be
+ *    live — earns "Everything agrees". `stalled` and `unknown` get their own
+ *    copy and must not be collapsed into each other or into failure:
+ *    `unknown` means the log is absent, truncated by the 400-line tail
+ *    window, older than the add-on, or — now — describing a stack that is off
+ *    or missing, and rendering that as broken just re-creates the same bug
+ *    pointing the other way. That is deliberate: turning the stack off is a
+ *    user choice, not a failure, so it falls through to `unknown` rather than
+ *    inventing a new state for it.
  */
 export function stackVerdict(
   attentionCount: number,
-  evidence: LogEvidence
+  evidence: LogEvidence,
+  stack: ClientStack | null
 ): { label: string; color: "amber" | "red" | "emerald" | "muted"; Icon: typeof ShieldCheckIcon } {
   if (attentionCount > 0) {
     return {
@@ -224,7 +239,17 @@ export function stackVerdict(
       Icon: AlertCircleIcon,
     };
   }
-  switch (evidence.neural_rendering.state) {
+  const stackCouldRun =
+    stack !== null &&
+    !stack.is_disabled &&
+    (stack.active_path === "direct" ||
+      stack.active_path === "feed" ||
+      stack.active_path === "both");
+  const state =
+    evidence.neural_rendering.state === "running" && !stackCouldRun
+      ? "unknown"
+      : evidence.neural_rendering.state;
+  switch (state) {
     case "running":
       return { label: "Everything agrees", color: "emerald", Icon: ShieldCheckIcon };
     case "stalled":
@@ -893,8 +918,8 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   );
 
   const verdict = useMemo(
-    () => stackVerdict(attentionCount, logEvidence),
-    [attentionCount, logEvidence]
+    () => stackVerdict(attentionCount, logEvidence, stack),
+    [attentionCount, logEvidence, stack]
   );
 
   const busy = detecting || stackLoading || browsing || mutationPending;
@@ -1625,8 +1650,9 @@ function LogSignals({ evidence }: { evidence: LogEvidence }) {
       ) : (
         <>
           <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">
-            Lines matching a known failure. Logs are append-only, so a line here may be from a
-            problem you have already fixed — check the timestamps in the file before chasing it.
+            Lines matching a known failure. ReShade truncates its log on every launch, so a line
+            here describes only your most recent session — it may be from before your latest change
+            rather than the current setup.
             {benign > 0 &&
               ` ${benign} further line${benign === 1 ? "" : "s"} that a working setup also writes were ignored.`}
           </p>
