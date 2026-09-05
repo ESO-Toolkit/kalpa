@@ -53,6 +53,7 @@ function emptyStack(overrides: Partial<ClientStack> = {}): ClientStack {
     tuning: [],
     tuning_section: null,
     tuning_owner: "unknown",
+    tuning_blocks: [],
     disabled_addons: [],
     load_from_dll_main: [],
     active_path: "direct",
@@ -166,16 +167,43 @@ describe("tuning names the section the backend found", () => {
       tuning: [{ key: "NeuralUplift", value: "0" }],
       tuning_section: "RENODX-DLSS",
       tuning_owner: "live",
+      tuning_blocks: [
+        {
+          section: "RENODX-DLSS",
+          owner: "renodx-dlss.addon64",
+          provenance: "live",
+          values: [{ key: "NeuralUplift", value: "0" }],
+        },
+        // The feed's block is still carried beside it, and must not become the
+        // headline: this is the direct path.
+        {
+          section: "RenoDX.DLSS5",
+          owner: "renodx-dlss5.addon64",
+          provenance: "fossil",
+          values: [{ key: "NeuralUplift", value: "0" }],
+        },
+      ],
       slots: slotStatuses({ tuning: { need: "required" } }),
     });
     expect(slotRailLine("tuning", stack).id).toBe("[RENODX-DLSS]");
   });
 
   it("marks a fossil as not in use rather than as current tuning", () => {
+    // The backend falls back to a fossil for the headline only when nothing is
+    // live, so this is a direct-path install whose direct add-on has never
+    // saved a block. The row still names the section it did find.
     const stack = emptyStack({
       tuning: [{ key: "NeuralUplift", value: "0" }],
       tuning_section: "RenoDX.DLSS5",
       tuning_owner: "fossil",
+      tuning_blocks: [
+        {
+          section: "RenoDX.DLSS5",
+          owner: "renodx-dlss5.addon64",
+          provenance: "fossil",
+          values: [{ key: "NeuralUplift", value: "0" }],
+        },
+      ],
       slots: slotStatuses({
         tuning: {
           need: "installed_unused",
