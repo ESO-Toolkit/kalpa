@@ -43,6 +43,24 @@
 //! technique at all and the question does not arise — which is why the ordering
 //! and provider checks are gated on the path rather than on file presence.
 //!
+//! # Tuning follows the path too
+//!
+//! The same reasoning reaches the last row, and it took a second pass to get
+//! there. Until 2026-09-04 this module read `[RenoDX.DLSS5]` unconditionally —
+//! the *feed* path's block — so on the primary user's direct install the panel
+//! reported a parked add-on's saved settings and said they were "history, not
+//! this install's live tuning", while ~30 live keys in `[RENODX-DLSS]` and
+//! `[RENODX-DLSS-preset1]` went unread. Every word of that sentence was true
+//! and the row as a whole was misleading: it implied there was no live tuning.
+//! Worse, `client_tuning`'s form *did* read all three sections, so the two
+//! panels disagreed about whether this install had live tuning at all.
+//!
+//! So the sections are now read by `client_tuning::read_form` — the tuning
+//! panel's own reader, over `client_tuning::SECTIONS` — and the live one is
+//! selected by [`ActivePath`]. Every block found is carried, live and fossil
+//! alike, because the feed add-ons cannot be refetched and a user's parked
+//! settings are their only copy. See [`TuningBlock`].
+//!
 //! # Present, active, needed
 //!
 //! Three questions, not one. A file can be **present** (on disk), **active**
@@ -82,6 +100,11 @@
 //! `OverlayCollapsed` mapping, which is the only place some addon names exist.
 
 use crate::client_health::{file_version, version_string, HealthFinding, HealthLevel};
+// The section table, and the reader that turns `ReShade.ini` into sections, are
+// `client_tuning`'s. Reading them from here rather than keeping a second copy
+// is the whole point: the two panels answer "which tuning is live?" out of one
+// function, so they cannot drift apart the way they had by 2026-09-03.
+use crate::client_tuning::{read_form, RenoDxPath, TuningSection, SECTIONS};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -479,19 +502,49 @@ pub struct PresetInfo {
     pub mv_provider: Option<MvProvider>,
 }
 
-/// One tunable read out of the `[RenoDX.DLSS5]` block in `ReShade.ini`.
+/// One tunable read out of a RenoDX block in `ReShade.ini`.
 ///
-/// **That section belongs to `renodx-dlss5.addon64`, the feed path's add-on.**
-/// The direct path's `renodx-dlss.addon64` writes `[RENODX-DLSS]` and
-/// `[RENODX-DLSS-preset1]` with `DirectNeuralRendering*` keys instead, and this
-/// module does not read those — `client_tuning.rs` owns the editable form. So
-/// on a direct-path install these values are a fossil of a parked add-on, and
-/// [`ClientStack::tuning_owner`] says so rather than leaving the UI to present
-/// a dead `NeuralUplift=0` as this install's live tuning.
+/// Which block is [`TuningBlock::section`]'s business, and there is more than
+/// one: `renodx-dlss5.addon64` writes `[RenoDX.DLSS5]`, `renodx-dlss.addon64`
+/// writes `[RENODX-DLSS]` and a `[RENODX-DLSS-preset*]` family. This module
+/// used to read the first of those and nothing else, so on the primary user's
+/// direct-path install a dead `NeuralUplift=0` was the only tuning the panel
+/// knew about while ~30 live keys sat unread — the fossil bug, in the one place
+/// it was hardest to see. Every known block is now read, by
+/// `client_tuning`'s own reader; see [`ClientStack::tuning_blocks`].
+///
+/// Values are verbatim. Keys are the file's own spelling, except for the keys
+/// `client_tuning` has a verified field table for, which come back in that
+/// table's canonical spelling.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TuningValue {
     pub key: String,
     pub value: String,
+}
+
+/// One RenoDX tuning section that is actually in `ReShade.ini`, labelled with
+/// whether it is in force.
+///
+/// Every block Kalpa knows about and finds is carried, live and fossil alike.
+/// That is deliberate and it is a data-loss rule, not a presentation one: the
+/// feed add-ons are Discord-distributed with no stable URL, so a user's parked
+/// `[RenoDX.DLSS5]` is the only copy of the settings they would come back to if
+/// they ever switch paths. Kalpa showing only the live block would quietly turn
+/// the panel into a claim that those settings no longer exist.
+///
+/// [`ClientStack::tuning`], [`ClientStack::tuning_section`] and
+/// [`ClientStack::tuning_owner`] are the *headline* block picked out of this
+/// list for the one-line rail; the list is what lets the UI also say "and this
+/// one belongs to a parked add-on".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TuningBlock {
+    /// The section name as `ReShade.ini` spells it, e.g. `RENODX-DLSS-preset1`.
+    pub section: String,
+    /// The add-on file that writes this section, so the UI can name the thing
+    /// that is or is not loaded rather than only the block it left behind.
+    pub owner: String,
+    pub provenance: TuningProvenance,
+    pub values: Vec<TuningValue>,
 }
 
 /// The shader tree.
@@ -547,17 +600,37 @@ pub struct ClientStack {
     pub is_disabled: bool,
     pub shaders: ShaderTree,
     pub preset: Option<PresetInfo>,
+    /// The **headline** block's values: the live one when there is a live one.
+    ///
+    /// This field used to be `[RenoDX.DLSS5]` unconditionally, which is the
+    /// *feed* path's section. On the primary user's direct-path install that
+    /// made the panel report a parked add-on's saved settings as this install's
+    /// tuning while `[RENODX-DLSS]`'s live keys went unread — and made the
+    /// stack panel and the tuning panel disagree about whether live tuning
+    /// existed at all. The selection now follows [`ClientStack::active_path`],
+    /// by the same rule and the same code as `client_tuning`; see
+    /// [`ClientStack::tuning_blocks`].
     pub tuning: Vec<TuningValue>,
     /// The ini section [`ClientStack::tuning`] came from, so the UI does not
     /// hardcode a section name that belongs to only one of the two paths.
-    /// `None` when there is no tuning section — this field, not a provenance
-    /// variant, is where absence is recorded. See [`TuningProvenance`].
+    /// `None` when there is no known tuning section in the file at all — this
+    /// field, not a provenance variant, is where absence is recorded. See
+    /// [`TuningProvenance`].
     pub tuning_section: Option<String>,
-    /// Whether `[RenoDX.DLSS5]` is in force, answered whether or not the
-    /// section is present: it is a fact about which add-on is loaded, and the
-    /// panel needs it to say "no section, and the add-on that writes one is
-    /// parked" rather than only half of that.
+    /// Whether [`ClientStack::tuning_section`] is in force, answered whether or
+    /// not any section is present: it is a fact about which add-on is loaded,
+    /// and the panel needs it to say "no section, and the add-on that would
+    /// write one is parked" rather than only half of that. With no section
+    /// present it describes the live path's own add-on — see
+    /// [`tuning_owner_without_a_section`].
     pub tuning_owner: TuningProvenance,
+    /// Every known tuning section present in `ReShade.ini`, in
+    /// `client_tuning::SECTIONS` order, each carrying its own provenance.
+    ///
+    /// The headline three fields above are one entry from this list; this is
+    /// the rest, and it is how a fossil stays visible instead of being dropped
+    /// the moment a live block exists. See [`TuningBlock`].
+    pub tuning_blocks: Vec<TuningBlock>,
     /// Addon file names ReShade has been told not to load.
     pub disabled_addons: Vec<String>,
     /// `[ADDON] LoadFromDllMain` — the add-ons ReShade loads early enough for
@@ -680,9 +753,48 @@ const FEED_SOURCE: &str = "dlss5_feed.fx";
 /// the file it comes from.
 const LAUNCHPAD_SOURCE: &str = "martysmods_launchpad.fx";
 
-/// The `ReShade.ini` section `renodx-dlss5.addon64` saves its tunables to. The
-/// direct add-on uses `[RENODX-DLSS]` instead; see [`TuningValue`].
-const TUNING_SECTION: &str = "RenoDX.DLSS5";
+/// The section the live path's add-on saves its tunables to, and the add-on
+/// that writes it — or `None` on the paths where no add-on is loaded to write
+/// one.
+///
+/// Taken from `client_tuning::SECTIONS` rather than restated here. A `const
+/// TUNING_SECTION: &str = "RenoDX.DLSS5"` used to live in this module beside an
+/// identical one over there, and this module then read *only* that section: two
+/// copies of one name, one of which belonged to the path the primary user does
+/// not run. One table, consulted by both panels, is what makes the two of them
+/// unable to disagree.
+///
+/// [`ActivePath::Both`] answers `Direct` for the same reason `SECTIONS` lists
+/// the direct path first: both add-ons are loaded and both sections are live,
+/// so this is a choice of which one to *name first*, never a claim that the
+/// other is a fossil. See [`build_slots`]'s tuning arm.
+fn expected_tuning_section(path: ActivePath) -> Option<(&'static str, &'static str)> {
+    let want = match path {
+        ActivePath::Direct | ActivePath::Both => RenoDxPath::Direct,
+        ActivePath::Feed => RenoDxPath::Feed,
+        ActivePath::Neither | ActivePath::Unknown => return None,
+    };
+    SECTIONS
+        .iter()
+        .find(|spec| spec.path == want && !spec.prefix_match)
+        .map(|spec| (spec.name, spec.owner))
+}
+
+/// What [`ClientStack::tuning_owner`] says when `ReShade.ini` holds no known
+/// tuning section at all.
+///
+/// Provenance is a fact about whether the *owning add-on* is loaded, and it is
+/// answered whether or not the section exists — so with no section the question
+/// becomes "is the add-on that would write one loaded?". On a live path it is,
+/// and the block is simply one the user has not caused it to save yet. On
+/// `Neither` nothing is loaded, and on `Unknown` Kalpa did not look.
+fn tuning_owner_without_a_section(path: ActivePath) -> TuningProvenance {
+    match path {
+        ActivePath::Unknown => TuningProvenance::Unknown,
+        ActivePath::Neither => TuningProvenance::Fossil,
+        ActivePath::Direct | ActivePath::Feed | ActivePath::Both => TuningProvenance::Live,
+    }
+}
 
 /// LaunchPad's marker file in the shader tree, for the "installed but unused"
 /// note on the direct path.
@@ -963,19 +1075,6 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     let shaders = read_shader_tree(client_dir, &ini);
     let preset = read_preset(client_dir, &ini);
 
-    let tuning: Vec<TuningValue> = ini
-        .get(&TUNING_SECTION.to_ascii_lowercase())
-        .map(|block| {
-            block
-                .iter()
-                .map(|(key, value)| TuningValue {
-                    key: key.clone(),
-                    value: value.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
     let disabled_addons: Vec<String> = comma_list(ini_get(&ini, "ADDON", "DisabledAddons"));
     let load_from_dll_main: Vec<String> = comma_list(ini_get(&ini, "ADDON", "LoadFromDllMain"));
 
@@ -999,9 +1098,10 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
         is_disabled,
         shaders,
         preset,
-        tuning,
+        tuning: Vec::new(),
         tuning_section: None,
         tuning_owner: TuningProvenance::Unknown,
+        tuning_blocks: Vec::new(),
         disabled_addons,
         load_from_dll_main,
         active_path: ActivePath::Unknown,
@@ -1021,19 +1121,77 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     } else {
         ActivePath::Unknown
     };
-    // Presence is `tuning_section`; provenance is a fact about the folder and
-    // is answered either way. See [`TuningProvenance`].
-    stack.tuning_owner = match stack.active_path {
-        ActivePath::Unknown => TuningProvenance::Unknown,
-        _ if addon_is_live(&stack, FEED_ADDON_STEMS[0]) => TuningProvenance::Live,
-        _ => TuningProvenance::Fossil,
-    };
-    if !stack.tuning.is_empty() {
-        stack.tuning_section = Some(TUNING_SECTION.to_string());
+    // Tuning second, because which block is live is a function of the path —
+    // and read through `client_tuning::read_form`, not through this module's
+    // own `ini` map, so the stack panel and the tuning panel are looking at one
+    // answer rather than two. `read_form` is pure over `(text, path)`, so this
+    // costs a second parse of a file already in memory and buys agreement.
+    let form = read_form(
+        &reshade_ini,
+        &stack.client_dir,
+        stack.active_path,
+        Vec::new(),
+    );
+    stack.tuning_blocks = form
+        .sections
+        .iter()
+        .filter(|section| section.present)
+        .map(|section| TuningBlock {
+            section: section.section.clone(),
+            owner: section.owner.clone(),
+            provenance: section.provenance,
+            values: section_values(section),
+        })
+        .collect();
+    // The headline is the first **live** block, and only falls back to the
+    // first present one when nothing is live — which is what keeps a fossil on
+    // the rail when a fossil is all there is, without ever letting one outrank
+    // live tuning. `SECTIONS` order decides ties, so `Both` names the direct
+    // path's block first; see [`expected_tuning_section`].
+    let headline = stack
+        .tuning_blocks
+        .iter()
+        .find(|block| block.provenance == TuningProvenance::Live)
+        .or_else(|| stack.tuning_blocks.first())
+        .cloned();
+    match headline {
+        Some(block) => {
+            stack.tuning_section = Some(block.section);
+            stack.tuning_owner = block.provenance;
+            stack.tuning = block.values;
+        }
+        // Presence is `tuning_section`; provenance is answered either way. See
+        // [`TuningProvenance`].
+        None => stack.tuning_owner = tuning_owner_without_a_section(stack.active_path),
     }
     stack.slots = build_slots(&stack);
     stack.findings = build_findings(&stack);
     stack
+}
+
+/// Flatten one of `client_tuning`'s sections back to plain `key=value` pairs.
+///
+/// That module splits a section in two: keys it has a verified field table for
+/// become typed `fields`, everything else stays a raw `entry`. The stack panel
+/// renders neither — it counts and lists — so both halves come back here, typed
+/// ones first in the add-on's own order. A field whose `current` is `None` is a
+/// key the file does not have, and is dropped: this list is what is *in*
+/// `ReShade.ini`, never what could be.
+fn section_values(section: &TuningSection) -> Vec<TuningValue> {
+    section
+        .fields
+        .iter()
+        .filter_map(|field| {
+            field.current.as_ref().map(|value| TuningValue {
+                key: field.key.clone(),
+                value: value.clone(),
+            })
+        })
+        .chain(section.entries.iter().map(|entry| TuningValue {
+            key: entry.key.clone(),
+            value: entry.value.clone(),
+        }))
+        .collect()
 }
 
 /// Split a ReShade comma list, dropping the empties `DisabledAddons=` produces.
@@ -1471,6 +1629,11 @@ fn keep_link_only(what: &str, where_from: &str) -> String {
     )
 }
 
+/// One sentence for every row on [`ActivePath::Unknown`], shared by
+/// [`build_slots`] and [`tuning_slot`] so the two rows cannot say it
+/// differently.
+const UNREADABLE_ROW: &str = "Kalpa could not read this client folder, so it cannot tell which \n                              Neural Rendering path is live or whether anything is missing here.";
+
 /// The need axis, one entry per frontend slot, always all eight.
 ///
 /// Read the module doc first. The short version: a slot that is empty because
@@ -1493,20 +1656,11 @@ fn build_slots(stack: &ClientStack) -> Vec<SlotStatus> {
         }
     };
 
-    // One sentence for every row on [`ActivePath::Unknown`]. The folder could
-    // not be read, so Kalpa knows nothing about this row — and says so, rather
-    // than borrowing `Neither`'s copy, which asserts that an empty slot is the
-    // correct answer.
-    let unreadable = |slot: StackSlot| {
-        make(
-            slot,
-            SlotNeed::Unknown,
-            "Kalpa could not read this client folder, so it cannot tell which Neural \
-             Rendering path is live or whether anything is missing here."
-                .to_string(),
-            None,
-        )
-    };
+    // The folder could not be read, so Kalpa knows nothing about this row — and
+    // says so, rather than borrowing `Neither`'s copy, which asserts that an
+    // empty slot is the correct answer. See [`UNREADABLE_ROW`].
+    let unreadable =
+        |slot: StackSlot| make(slot, SlotNeed::Unknown, UNREADABLE_ROW.to_string(), None);
 
     let launchpad_keep = || {
         launchpad.then(|| {
@@ -1721,65 +1875,122 @@ fn build_slots(stack: &ClientStack) -> Vec<SlotStatus> {
             ),
             ActivePath::Unknown => unreadable(StackSlot::Preset),
         },
-        // Presence first, then provenance: a section that is not in the file at
-        // all is a different row from one that is there and not in force, and
-        // [`TuningProvenance`] deliberately has no variant for the former.
-        match (stack.tuning_section.is_some(), path, stack.tuning_owner) {
-            (true, _, TuningProvenance::Live) => make(
+        tuning_slot(stack, path, make),
+    ]
+}
+
+/// The Tuning row.
+///
+/// Lifted out of [`build_slots`]'s vector because it is the one row that has to
+/// look up its own block first, and because its copy is where the fossil bug
+/// used to be written down in words: this arm said `[RenoDX.DLSS5]` "is
+/// history, not this install's live tuning" on a direct-path install that had
+/// ~30 live keys in `[RENODX-DLSS]` sitting unmentioned. Every sentence in it
+/// is now about the block Kalpa actually selected.
+fn tuning_slot(
+    stack: &ClientStack,
+    path: ActivePath,
+    make: impl Fn(StackSlot, SlotNeed, String, Option<String>) -> SlotStatus,
+) -> SlotStatus {
+    let headline = stack
+        .tuning_section
+        .as_deref()
+        .and_then(|name| stack.tuning_blocks.iter().find(|b| b.section == name));
+
+    // Named, never counted, and never advice to delete: the feed add-ons come
+    // from a Discord with no stable URL, so a parked path's saved settings are
+    // the user's only copy of them. See [`SlotStatus::keep_because`].
+    let fossils: Vec<&str> = stack
+        .tuning_blocks
+        .iter()
+        .filter(|block| block.provenance == TuningProvenance::Fossil)
+        .map(|block| block.section.as_str())
+        .collect();
+    let fossil_keep = (!fossils.is_empty()).then(|| {
+        let (is, they) = if fossils.len() == 1 {
+            ("is", "it is")
+        } else {
+            ("are", "they are")
+        };
+        format!(
+            "[{}] {is} also in ReShade.ini and left exactly as saved — {they} what the parked \
+             add-on would come back to if you ever switch paths.",
+            fossils.join("] and [")
+        )
+    });
+
+    // Presence first, then provenance: a section that is not in the file at all
+    // is a different row from one that is there and not in force, and
+    // [`TuningProvenance`] deliberately has no variant for the former.
+    match (headline, path) {
+        (Some(block), _) => match block.provenance {
+            TuningProvenance::Live => make(
                 StackSlot::Tuning,
                 SlotNeed::Required,
                 format!(
-                    "renodx-dlss5.addon64 saves its Neural Rendering settings to [{}] in \
-                     ReShade.ini, and that add-on is loaded.",
-                    TUNING_SECTION
+                    "{} saves its Neural Rendering settings to [{}] in ReShade.ini, and that \
+                     add-on is loaded.",
+                    block.owner, block.section
                 ),
-                None,
+                fossil_keep,
             ),
-            (true, _, TuningProvenance::Unknown) => make(
+            TuningProvenance::Unknown => make(
                 StackSlot::Tuning,
                 SlotNeed::Unknown,
                 format!(
-                    "[{}] is in ReShade.ini, but Kalpa could not read the client folder and \
-                     so cannot tell whether the add-on that wrote it is loaded. The values \
-                     are shown as they are on disk and nothing here is edited.",
-                    TUNING_SECTION
+                    "[{}] is in ReShade.ini, but Kalpa could not read the client folder and so \
+                     cannot tell whether {} is loaded. The values are shown as they are on \
+                     disk and nothing here is edited.",
+                    block.section, block.owner
                 ),
                 None,
             ),
-            (true, _, TuningProvenance::Fossil) => make(
+            // Only reachable when *nothing* is live: the headline falls back to
+            // a fossil only if there is no live block to prefer.
+            TuningProvenance::Fossil => make(
                 StackSlot::Tuning,
                 SlotNeed::InstalledUnused,
                 format!(
-                    "[{}] belongs to renodx-dlss5.addon64, which is not the add-on running \
-                     here. These values describe the feed path; they are history, not this \
-                     install's live tuning.",
-                    TUNING_SECTION
+                    "[{}] belongs to {}, which is not loaded here. These values are history, \
+                     not this install's live tuning.",
+                    block.section, block.owner
                 ),
                 Some(
-                    "Left exactly as saved. They are the settings the feed path would come \
-                     back to if you ever switch to it."
+                    "Left exactly as saved. They are the settings that path would come back to \
+                     if you ever switch to it."
                         .to_string(),
                 ),
             ),
-            (false, ActivePath::Direct, _) => make(
+        },
+        (None, ActivePath::Unknown) => make(
+            StackSlot::Tuning,
+            SlotNeed::Unknown,
+            UNREADABLE_ROW.to_string(),
+            None,
+        ),
+        // A live path with nothing saved yet is not a gap: these add-ons write
+        // their section the first time a setting is changed in their own
+        // overlay, so a fresh install correctly has no block at all.
+        (None, ActivePath::Direct | ActivePath::Feed | ActivePath::Both) => {
+            let (section, owner) = expected_tuning_section(path)
+                .expect("every live path has a section owner in SECTIONS");
+            make(
                 StackSlot::Tuning,
                 SlotNeed::NotOnThisPath,
                 format!(
-                    "renodx-dlss.addon64 saves to [RENODX-DLSS], not the [{}] block this row \
-                     reads, so there is correctly nothing here.",
-                    TUNING_SECTION
+                    "{owner} saves its settings to [{section}] in ReShade.ini and has not \
+                     written that block here yet, so there is correctly nothing to show."
                 ),
                 None,
-            ),
-            (false, ActivePath::Unknown, _) => unreadable(StackSlot::Tuning),
-            (false, _, _) => make(
-                StackSlot::Tuning,
-                SlotNeed::NotOnThisPath,
-                "No add-on has saved a tuning block to ReShade.ini.".to_string(),
-                None,
-            ),
-        },
-    ]
+            )
+        }
+        (None, ActivePath::Neither) => make(
+            StackSlot::Tuning,
+            SlotNeed::NotOnThisPath,
+            "No add-on has saved a tuning block to ReShade.ini.".to_string(),
+            None,
+        ),
+    }
 }
 
 // ── Findings ─────────────────────────────────────────────────────────────
@@ -2703,6 +2914,10 @@ PresetPath=.\\ReShadePreset.ini
         assert!(preset.available.len() >= 3);
     }
 
+    /// Keys come back in `client_tuning`'s canonical spelling now that its
+    /// reader is the one doing the reading. They used to be lower-cased by this
+    /// module's own `parse_ini`, so the panel showed `nrlocalstructure` where
+    /// the add-on's own overlay says `NRLocalStructure`.
     #[test]
     fn the_tuning_block_is_read() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2712,7 +2927,7 @@ PresetPath=.\\ReShadePreset.ini
         let structure = stack
             .tuning
             .iter()
-            .find(|t| t.key == "nrlocalstructure")
+            .find(|t| t.key == "NRLocalStructure")
             .expect("NRLocalStructure should be read");
         assert_eq!(structure.value, "1.4");
         assert_eq!(stack.tuning.len(), 4);
@@ -3124,14 +3339,45 @@ PresetPath=.\\ReShadePreset.ini
     /// One folder, two panels, and before the merge two rules that could
     /// disagree about it. The tuning panel's verdict and the stack panel's are
     /// now the same function's answer, and this is what says so.
+    ///
+    /// Two questions, not one, because agreeing on the *path* was never enough:
+    /// the stack panel agreed the direct path was live and then read
+    /// `[RenoDX.DLSS5]` anyway, so the two surfaces still disagreed about
+    /// whether this install had live tuning. The second half pins which section
+    /// each panel calls live, section by section, over a file that has all
+    /// three.
     #[test]
     fn the_tuning_panel_and_the_stack_panel_agree_on_one_folder() {
         for build in [direct_path_stack as fn(&Path), healthy_stack as fn(&Path)] {
             let tmp = tempfile::tempdir().unwrap();
             build(tmp.path());
+            let header = std::fs::read_to_string(tmp.path().join("ReShade.ini")).unwrap();
+            write(tmp.path(), "ReShade.ini", &all_three_sections(&header));
             let ini = std::fs::read_to_string(tmp.path().join("ReShade.ini")).unwrap();
+
             let form = crate::client_tuning::read_form_for_dir(tmp.path(), &ini);
-            assert_eq!(form.active_path, inspect_stack(tmp.path()).active_path);
+            let stack = inspect_stack(tmp.path());
+            assert_eq!(form.active_path, stack.active_path);
+
+            for section in form.sections.iter().filter(|section| section.present) {
+                let block = block(&stack, &section.section);
+                assert_eq!(
+                    block.provenance, section.provenance,
+                    "the two panels disagree about [{}]",
+                    section.section
+                );
+                assert_eq!(block.owner, section.owner);
+            }
+
+            // And the one the stack panel puts on its rail is one the tuning
+            // panel calls live.
+            let headline = stack.tuning_section.as_deref().expect("a headline block");
+            let matching = form
+                .sections
+                .iter()
+                .find(|section| section.section == headline)
+                .expect("the headline is one of the form's sections");
+            assert_eq!(matching.provenance, TuningProvenance::Live);
         }
     }
 
@@ -3531,9 +3777,15 @@ PresetPath=.\\ReShadePreset.ini
         );
         let stack = inspect_stack(tmp.path());
 
+        // The direct add-on has saved nothing here, so the feed's block is all
+        // there is — and it is still shown, still named, and still labelled as
+        // not in force. Compare
+        // `the_direct_path_shows_its_own_live_tuning_not_the_feed_fossil`,
+        // where a live `[RENODX-DLSS]` outranks it.
         assert_eq!(stack.tuning.len(), 1);
         assert_eq!(stack.tuning_owner, TuningProvenance::Fossil);
         assert_eq!(stack.tuning_section.as_deref(), Some("RenoDX.DLSS5"));
+        assert_eq!(stack.tuning_blocks.len(), 1);
 
         let tuning = slot(&stack, StackSlot::Tuning);
         assert_eq!(tuning.need, SlotNeed::InstalledUnused);
@@ -3555,8 +3807,15 @@ PresetPath=.\\ReShadePreset.ini
         assert_eq!(slot(&stack, StackSlot::Tuning).need, SlotNeed::Required);
     }
 
-    /// No section at all, on the path whose add-on does not write one, is not a
-    /// gap — it is the direct add-on saving somewhere else.
+    /// A live path that has simply never saved a block is not a gap.
+    ///
+    /// This fixture has the direct add-on live and no RenoDX section in
+    /// `ReShade.ini` at all, so the row names `[RENODX-DLSS]` and the add-on
+    /// that would write it. The provenance flipped from `Fossil` to `Live` when
+    /// tuning started following the active path: with no section present,
+    /// provenance answers "is the add-on that would write one loaded?", and on
+    /// the direct path it is. It read `Fossil` before only because the field
+    /// was hardcoded to ask about `renodx-dlss5.addon64` — the parked one.
     #[test]
     fn no_tuning_block_on_the_direct_path_is_not_a_gap() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3564,14 +3823,279 @@ PresetPath=.\\ReShadePreset.ini
         let stack = inspect_stack(tmp.path());
 
         assert!(stack.tuning.is_empty());
+        assert!(stack.tuning_blocks.is_empty());
         // Absence is `tuning_section`, not a provenance variant: there is no
-        // section here, *and* the add-on that would own one is parked, and
+        // section here, *and* the add-on that would own one is loaded, and
         // those are two separate facts the panel is entitled to state
         // together. See [`TuningProvenance`].
         assert_eq!(stack.tuning_section, None);
-        assert_eq!(stack.tuning_owner, TuningProvenance::Fossil);
+        assert_eq!(stack.tuning_owner, TuningProvenance::Live);
         let tuning = slot(&stack, StackSlot::Tuning);
         assert_eq!(tuning.need, SlotNeed::NotOnThisPath);
         assert!(tuning.reason.contains("RENODX-DLSS"), "{}", tuning.reason);
+        assert!(
+            tuning.reason.contains("renodx-dlss.addon64"),
+            "{}",
+            tuning.reason
+        );
+    }
+
+    // ── Tuning follows the active path ───────────────────────────────────
+
+    /// The keys the direct add-on writes to `[RENODX-DLSS]`.
+    ///
+    /// The *count* is the load-bearing part and it is the real one: the primary
+    /// user's `ReShade.ini` has 22 keys here and 8 more in
+    /// `[RENODX-DLSS-preset1]`, none of which this module read before. The
+    /// spellings are representative — `renodx-dlss.addon64` is closed-source,
+    /// and Kalpa shows these read-only precisely because nobody has verified
+    /// what each one does.
+    const DIRECT_KEYS: [&str; 22] = [
+        "DirectNeuralRendering",
+        "DirectNeuralRenderingIntensity",
+        "DirectNeuralRenderingStyle",
+        "DirectNeuralRenderingEncoding",
+        "DirectNeuralRenderingDiffuseWhiteNits",
+        "DirectNeuralRenderingPeakNits",
+        "DirectNeuralRenderingAutoMask",
+        "DirectNeuralRenderingUICorrection",
+        "DirectNeuralRenderingLocalTone",
+        "DirectNeuralRenderingLocalStructure",
+        "DirectNeuralRenderingSkinStructure",
+        "DirectNeuralRenderingColorStrength",
+        "DirectNeuralRenderingTransferStrength",
+        "DirectNeuralRenderingDepthMode",
+        "DirectNeuralRenderingToggleKey",
+        "DLSSQualityMode",
+        "DLSSPreset",
+        "StreamlinePeakNits",
+        "StreamlineDiffuseWhiteNits",
+        "ToneMapType",
+        "ColorGradeExposure",
+        "SwapChainCustomColorSpace",
+    ];
+
+    const PRESET_KEYS: [&str; 8] = [
+        "DirectNeuralRenderingIntensity",
+        "DirectNeuralRenderingStyle",
+        "DirectNeuralRenderingLocalTone",
+        "DirectNeuralRenderingLocalStructure",
+        "DLSSQualityMode",
+        "ToneMapType",
+        "ColorGradeExposure",
+        "ColorGradeSaturation",
+    ];
+
+    /// Sixteen keys of `[RenoDX.DLSS5]`, all of them from `client_tuning`'s
+    /// verified field table, because on the feed path this is the one section
+    /// Kalpa may write and those typed fields are how it does it.
+    const FEED_KEYS: [&str; 16] = [
+        "NeuralUplift",
+        "NREnableUpscaling",
+        "NRPreset",
+        "NRStyle",
+        "NRIntensity",
+        "NRLocalTone",
+        "NRLocalStructure",
+        "NRSkinStructure",
+        "NRAutoMask",
+        "NRUICorrection",
+        "NRPaperWhiteScale",
+        "NRTransferStrength",
+        "NRColorStrength",
+        "NRToggleKey",
+        "NRScreenshotKey",
+        "NRDepthMode",
+    ];
+
+    /// A `ReShade.ini` carrying all three RenoDX sections at once, which is the
+    /// primary user's real file: they ran the feed path first, switched to the
+    /// direct add-on, and the feed's saved block stayed behind.
+    fn all_three_sections(header: &str) -> String {
+        let mut out = header.to_string();
+        for (name, keys) in [
+            ("RENODX-DLSS", &DIRECT_KEYS[..]),
+            ("RENODX-DLSS-preset1", &PRESET_KEYS[..]),
+            ("RenoDX.DLSS5", &FEED_KEYS[..]),
+        ] {
+            out.push_str(&format!("\n[{name}]\n"));
+            for (index, key) in keys.iter().enumerate() {
+                out.push_str(&format!("{key}={index}\n"));
+            }
+        }
+        out
+    }
+
+    fn block<'a>(stack: &'a ClientStack, section: &str) -> &'a TuningBlock {
+        stack
+            .tuning_blocks
+            .iter()
+            .find(|block| block.section == section)
+            .unwrap_or_else(|| panic!("[{section}] should be carried: {:?}", stack.tuning_blocks))
+    }
+
+    /// The primary user's real shape, and the bug in one test: 22 live keys in
+    /// `[RENODX-DLSS]`, 8 more in `[RENODX-DLSS-preset1]`, and a 16-key
+    /// `[RenoDX.DLSS5]` left behind by the add-on they parked. The panel used
+    /// to read only the last of those and call it "history, not this install's
+    /// live tuning" — true of that block, and a silent claim that this install
+    /// had no live tuning at all while 30 keys of it sat unread.
+    #[test]
+    fn the_direct_path_shows_its_own_live_tuning_not_the_feed_fossil() {
+        let tmp = tempfile::tempdir().unwrap();
+        direct_path_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &all_three_sections(DIRECT_RESHADE_INI),
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.active_path, ActivePath::Direct);
+        assert_eq!(stack.tuning_section.as_deref(), Some("RENODX-DLSS"));
+        assert_eq!(stack.tuning_owner, TuningProvenance::Live);
+        assert_eq!(stack.tuning.len(), DIRECT_KEYS.len());
+
+        // Nothing is dropped to reach that headline: all three blocks are
+        // carried, each labelled, and the preset family is live too.
+        assert_eq!(stack.tuning_blocks.len(), 3);
+        assert_eq!(
+            block(&stack, "RENODX-DLSS").provenance,
+            TuningProvenance::Live
+        );
+        let preset = block(&stack, "RENODX-DLSS-preset1");
+        assert_eq!(preset.provenance, TuningProvenance::Live);
+        assert_eq!(preset.values.len(), PRESET_KEYS.len());
+
+        // And the fossil keeps every one of its values. They are the user's
+        // only copy of the feed path's settings — see [`TuningBlock`].
+        let fossil = block(&stack, "RenoDX.DLSS5");
+        assert_eq!(fossil.provenance, TuningProvenance::Fossil);
+        assert_eq!(fossil.values.len(), FEED_KEYS.len());
+        assert_eq!(fossil.owner, crate::client_tuning::FEED_NR_ADDON);
+
+        let tuning = slot(&stack, StackSlot::Tuning);
+        assert_eq!(
+            tuning.need,
+            SlotNeed::Required,
+            "live tuning is not an unused install: {}",
+            tuning.reason
+        );
+        assert!(tuning.reason.contains("[RENODX-DLSS]"), "{}", tuning.reason);
+        assert!(
+            tuning.reason.contains("renodx-dlss.addon64"),
+            "{}",
+            tuning.reason
+        );
+        assert!(
+            !tuning.reason.contains("history"),
+            "the fossil's disclaimer must not be the live row's sentence: {}",
+            tuning.reason
+        );
+        // The fossil is still spoken for, on the axis meant for it.
+        let keep = tuning
+            .keep_because
+            .as_deref()
+            .expect("the fossil needs saying");
+        assert!(keep.contains("[RenoDX.DLSS5]"), "{keep}");
+    }
+
+    /// The feed path, given the same three-section file: now the direct add-on
+    /// is the parked one and its two blocks are the fossils.
+    #[test]
+    fn the_feed_path_makes_its_own_section_the_live_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &all_three_sections(REAL_RESHADE_INI),
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.active_path, ActivePath::Feed);
+        assert_eq!(stack.tuning_section.as_deref(), Some("RenoDX.DLSS5"));
+        assert_eq!(stack.tuning_owner, TuningProvenance::Live);
+        assert_eq!(stack.tuning.len(), FEED_KEYS.len());
+        assert_eq!(
+            block(&stack, "RENODX-DLSS").provenance,
+            TuningProvenance::Fossil
+        );
+        assert_eq!(slot(&stack, StackSlot::Tuning).need, SlotNeed::Required);
+    }
+
+    /// Both add-ons loaded: **every** section is live, because both add-ons
+    /// will read theirs. The headline names the direct path's block, which is a
+    /// choice about what fits on a one-line rail and nothing more — no block is
+    /// labelled a fossil here and `tuning_blocks` carries all three. Picking a
+    /// winner and disclaiming the other would be Kalpa calling live
+    /// configuration history, which is the bug this row was fixed for.
+    #[test]
+    fn both_addons_live_makes_every_tuning_block_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(tmp.path(), "renodx-dlss.addon64", "");
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &all_three_sections(REAL_RESHADE_INI),
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.active_path, ActivePath::Both);
+        assert!(
+            stack
+                .tuning_blocks
+                .iter()
+                .all(|block| block.provenance == TuningProvenance::Live),
+            "{:?}",
+            stack.tuning_blocks
+        );
+        assert_eq!(stack.tuning_section.as_deref(), Some("RENODX-DLSS"));
+        assert_eq!(stack.tuning_owner, TuningProvenance::Live);
+
+        let tuning = slot(&stack, StackSlot::Tuning);
+        assert_eq!(tuning.need, SlotNeed::Required);
+        assert_eq!(
+            tuning.keep_because, None,
+            "nothing here is a fossil to keep: {tuning:?}"
+        );
+    }
+
+    /// An unreadable folder may not claim anything is in force. The provenance
+    /// comes from `client_tuning`'s reader, so this pins it at the source as
+    /// well as on the row.
+    #[test]
+    fn an_unknown_path_never_calls_tuning_live() {
+        let ini = all_three_sections(DIRECT_RESHADE_INI);
+        let form = read_form(&ini, "C:/client", ActivePath::Unknown, Vec::new());
+        assert!(
+            form.sections
+                .iter()
+                .all(|section| section.provenance == TuningProvenance::Unknown),
+            "no section may be Live when Kalpa could not look"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        direct_path_stack(tmp.path());
+        write(tmp.path(), "ReShade.ini", &ini);
+        let mut stack = inspect_stack(tmp.path());
+        stack.active_path = ActivePath::Unknown;
+        stack.tuning_owner = TuningProvenance::Unknown;
+        for block in &mut stack.tuning_blocks {
+            block.provenance = TuningProvenance::Unknown;
+        }
+
+        let slots = build_slots(&stack);
+        let tuning = slots
+            .iter()
+            .find(|entry| entry.slot == StackSlot::Tuning)
+            .expect("every slot is always present");
+        assert_eq!(tuning.need, SlotNeed::Unknown);
+        assert!(
+            tuning.reason.contains("could not read"),
+            "{}",
+            tuning.reason
+        );
     }
 }

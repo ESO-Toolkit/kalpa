@@ -180,6 +180,11 @@ const GUIDE_URL: &str = "https://esotk.com/docs/dlss5-neural-rendering/";
 /// lines. Startup-time signatures can therefore scroll out of the window
 /// entirely, which is the other reason an empty scan means *unknown* rather
 /// than *healthy*.
+///
+/// `dlss5-feed.log` is the FEED path's own log, written by `dlss5-feed-host64.exe`: it is
+/// absent on a direct-path install (which is why it once looked like dead weight) and is the
+/// only log that exists when the feed pipeline is what is running. Path-specific, not
+/// obsolete — keep it.
 const LOG_FILES: [&str; 2] = ["ReShade.log", "dlss5-feed.log"];
 
 // The log rules are split three ways — benign, fatal, positive — because a

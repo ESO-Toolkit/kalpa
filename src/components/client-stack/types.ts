@@ -315,9 +315,40 @@ export interface PresetInfo {
   mv_provider: MvProvider | null;
 }
 
+/**
+ * One tunable out of a RenoDX block in `ReShade.ini`.
+ *
+ * Which block is `TuningBlock["section"]`'s business, and there is more than
+ * one: `renodx-dlss5.addon64` writes `[RenoDX.DLSS5]`, `renodx-dlss.addon64`
+ * writes `[RENODX-DLSS]` and a `[RENODX-DLSS-preset*]` family. Keys are the
+ * file's own spelling, values verbatim.
+ */
 export interface TuningValue {
   key: string;
   value: string;
+}
+
+/**
+ * One RenoDX tuning section that is actually in `ReShade.ini`, labelled with
+ * whether it is in force.
+ *
+ * Every block the backend knows about and finds is carried, live and fossil
+ * alike. That is a data rule rather than a presentation one: the feed add-ons
+ * are Discord-distributed with no stable URL, so a parked `[RenoDX.DLSS5]` is
+ * the user's only copy of the settings they would come back to. A UI that
+ * showed only the live block would quietly claim the others no longer exist.
+ *
+ * `ClientStack["tuning"]`, `["tuning_section"]` and `["tuning_owner"]` are the
+ * headline block picked out of this list for the rail; this list is what lets a
+ * pane also say "and this one belongs to a parked add-on".
+ */
+export interface TuningBlock {
+  /** The section name as `ReShade.ini` spells it, e.g. `RENODX-DLSS-preset1`. */
+  section: string;
+  /** The add-on file that writes this section. */
+  owner: string;
+  provenance: TuningProvenance;
+  values: TuningValue[];
 }
 
 export interface ShaderTree {
@@ -348,14 +379,29 @@ export interface ClientStack {
   is_disabled: boolean;
   shaders: ShaderTree;
   preset: PresetInfo | null;
+  /**
+   * The **headline** block's values: the live one when there is a live one.
+   *
+   * This used to be `[RenoDX.DLSS5]` unconditionally, which is the *feed*
+   * path's section — so on a direct-path install the panel showed a parked
+   * add-on's saved settings while `[RENODX-DLSS]`'s live keys went unread, and
+   * disagreed with the tuning panel about whether live tuning existed. The
+   * selection follows `active_path` now. See `tuning_blocks`.
+   */
   tuning: TuningValue[];
   /** The ini section `tuning` came from, so no row hardcodes a section name
-   *  that belongs to only one of the two paths. Null when there is none —
-   *  this field, not a provenance member, is where absence lives. */
+   *  that belongs to only one of the two paths. Null when the file holds no
+   *  known section at all — this field, not a provenance member, is where
+   *  absence lives. */
   tuning_section: string | null;
-  /** Whether `[RenoDX.DLSS5]` is in force, answered whether or not the section
-   *  is present: it is a fact about which add-on is loaded. */
+  /** Whether `tuning_section` is in force, answered whether or not any section
+   *  is present: it is a fact about which add-on is loaded. With no section
+   *  present it describes the live path's own add-on. */
   tuning_owner: TuningProvenance;
+  /** Every known tuning section present in `ReShade.ini`, each with its own
+   *  provenance. The three fields above are one entry out of this list; this is
+   *  how a fossil stays visible once a live block exists. */
+  tuning_blocks: TuningBlock[];
   disabled_addons: string[];
   /** `[ADDON] LoadFromDllMain` — the add-ons ReShade loads early enough for
    *  their hooks to land. See `stack-addon-not-in-dllmain`. */

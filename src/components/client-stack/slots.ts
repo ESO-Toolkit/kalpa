@@ -659,13 +659,16 @@ export function slotSubLine(slot: Slot, stack: ClientStack): SlotSubLine | null 
       // add-on's block — so on a direct-path install the rail put a parked
       // add-on's section name under the word "Tuning" and a `NeuralUplift=0`
       // that had not been in force for months read as this install's current
-      // setting. It misled the user and the diagnosis both.
+      // setting. It misled the user and the diagnosis both. The backend now
+      // picks that section by the live path, so on the direct path this reads
+      // `[RENODX-DLSS]` — and `tuning_blocks` still carries the feed's block
+      // for a pane that wants to show it as the parked add-on's.
       //
       // Whether those values are live is `tuning_owner`, and it is not said
-      // here: it lands on the need axis (a fossil is `installed_unused`), so
-      // `slotRailLine` overwrites `meta` with "not used here" and the pane
-      // states the whole reason. Saying it twice in 190px would cost the
-      // section name its width.
+      // here: it lands on the need axis (a block that is all Kalpa has and is
+      // not in force is `installed_unused`), so `slotRailLine` overwrites
+      // `meta` with "not used here" and the pane states the whole reason.
+      // Saying it twice in 190px would cost the section name its width.
       if (stack.tuning.length === 0) return null;
       const count = `${stack.tuning.length} value${stack.tuning.length === 1 ? "" : "s"}`;
       return {
