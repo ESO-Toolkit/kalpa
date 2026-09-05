@@ -155,6 +155,18 @@ jobs:
           # draft to published — a tagged release is NOT done until that job is
           # green. If it fails, the draft is left in place for inspection.
           releaseDraft: true
+          # MUST stay false, including for -beta.N tags. The updater fetches
+          # releases/latest/download/latest.json, and GitHub's releases/latest
+          # endpoint skips every release with the "pre-release" flag set — so
+          # flipping this to true does not just mislabel a beta, it silently
+          # breaks auto-update for every existing install the moment this tag
+          # is no longer the newest non-prerelease release. A `-beta.N` version
+          # string is just this project's versioning convention; it has no
+          # bearing on GitHub's separate "pre-release" release flag, and the
+          # two must not be conflated when editing this block. The publish job's
+          # "Guard against a mis-flagged prerelease" step fails the run if this
+          # ever ends up true, but do not rely on that catch — it exists only
+          # to backstop this line.
           prerelease: false
 
   # Gate + publish: a release only goes live after every platform built and the
@@ -260,6 +272,26 @@ jobs:
             --data-binary @SHA256SUMS.txt > /dev/null
 
           echo "SHA256SUMS.txt attached to ${TAG}."
+
+      # The build job hardcodes prerelease: false and explains why at length,
+      # but nothing there stops a future edit (or a manually-created release
+      # for this tag) from setting it anyway. GitHub's releases/latest
+      # endpoint — which is what the updater's
+      # releases/latest/download/latest.json fetch resolves against — skips
+      # every prerelease-flagged release, so publishing one here would go
+      # live while silently breaking auto-update for every existing install.
+      # Check the real release object (by id, not `gh release view "$TAG"`:
+      # per the comment above, drafts are not addressable by tag) before the
+      # next step ever flips it to published.
+      - name: Guard against a mis-flagged prerelease
+        run: |
+          set -euo pipefail
+          is_prerelease=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '.prerelease')
+          if [ "$is_prerelease" = "true" ]; then
+            echo "::error::Release ${TAG} is flagged as a GitHub pre-release. GitHub's releases/latest endpoint skips prereleases, and the Kalpa updater reads releases/latest/download/latest.json — publishing this would silently break auto-update for every existing install. A -beta.N version string does not require the GitHub pre-release flag; unset it on the release (or on the tauri-action prerelease input) and re-run." >&2
+            exit 1
+          fi
+          echo "Release ${TAG} is not flagged as a pre-release — safe to publish."
 
       - name: Publish the release
         run: |
