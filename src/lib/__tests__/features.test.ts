@@ -204,6 +204,37 @@ describe("pinnedWhen", () => {
     );
   });
 
+  /**
+   * The address that does not move. `pinnedWhen` makes the header button come
+   * and go with the contents of a game folder; if the Tools row went with it,
+   * plugging in a ReShade setup would RELOCATE the panel out from under a user
+   * who had just learned where it lived.
+   */
+  it("keeps a permanent Tools row in both pin states", () => {
+    for (const ctx of [NO_STACK, STACK]) {
+      const feature = findFeature("client-health");
+      expect(feature?.toolsGroup).toBe("secondary");
+      // The catalog block is selected by toolsGroup, so it is present whether or
+      // not the toolbar is currently showing the button.
+      expect(FEATURES.filter((f) => f.toolsGroup === "secondary").map((f) => f.id)).toContain(
+        "client-health"
+      );
+      expect(visibleToolbar(FEATURES, [], ctx).length).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * ...and exactly once. The Tools tab renders the unpinned-pinnables block
+   * above the grouped blocks, so a feature that qualifies for both would print
+   * twice in one list.
+   */
+  it("is not double-listed when unpinned", () => {
+    const unpinnedCatalog = toolsMenuFeatures(FEATURES, [], NO_STACK).filter(
+      (f) => f.pinnableToToolbar && !f.toolsGroup
+    );
+    expect(unpinnedCatalog.map((f) => f.id)).not.toContain("client-health");
+  });
+
   it("leaves features without the predicate pinned in every context", () => {
     for (const ctx of [NO_STACK, STACK]) {
       expect(visibleToolbar(FEATURES, [], ctx).map((f) => f.id)).toContain("packs");

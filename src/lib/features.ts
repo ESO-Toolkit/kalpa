@@ -63,10 +63,18 @@ export interface FeatureContext {
 }
 
 /**
- * Which block of the Settings > Tools tab a `placement: "tools"` feature renders
- * in. The tab interleaves two static entries ("Check for App Updates" and the
- * feedback group) between the two blocks, so the registry cannot be mapped as
- * one contiguous list.
+ * Which block of the Settings > Tools tab a feature renders in. The tab
+ * interleaves two static entries ("Check for App Updates" and the feedback
+ * group) between the two blocks, so the registry cannot be mapped as one
+ * contiguous list.
+ *
+ * Setting this means the feature has a PERMANENT row in the Tools catalog, and
+ * that is independent of `placement`. A toolbar feature may also carry one: the
+ * graphics stack is pinned to the header only when there is a stack to manage
+ * (see `pinnedWhen`), and a feature that appears and disappears from the header
+ * with the contents of a game folder still needs one address that never moves.
+ * Without this, detecting a stack would *remove* the panel from the only place
+ * a user had learned to look for it.
  *
  * `"appearance"` means the feature is reachable from the Appearance tab instead
  * (currently only the keyboard-shortcuts link) and must NOT be rendered as a
@@ -228,6 +236,10 @@ export const FEATURES: readonly FeatureDef[] = [
     pinnableToToolbar: true,
     ariaLabel: "Graphics stack",
     tooltip: "Graphics stack",
+    // A permanent Tools row as well as a conditional toolbar button. The two
+    // are not redundant: the header slot comes and goes with `pinnedWhen`, so
+    // the catalog row is the address that does not move.
+    toolsGroup: "secondary",
     pinnedWhen: (ctx) => ctx.graphicsStackDetected,
   },
   {
