@@ -221,6 +221,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
 /// staging file has been flushed and synced, immediately before publication.
 /// If reading, writing, syncing, or renaming fails, an existing target remains
 /// untouched and the private staging file is removed on drop.
+#[allow(dead_code)] // Used by Tauri; this module is also compiled into the Slint binary.
 pub fn atomic_copy(source: &Path, target: &Path) -> io::Result<u64> {
     let mut source_file = File::open(source)?;
     let permissions = source_file.metadata()?.permissions();
