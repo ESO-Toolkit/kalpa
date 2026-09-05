@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   InfoIcon,
   AlertTriangleIcon,
@@ -196,7 +196,7 @@ function RuntimeRow({
  */
 export function RuntimeDriftCard({
   clientDir,
-  onChanged,
+  mutation,
   filePaths,
 }: StackPanelProps & {
   /** File names shown on the surrounding stage, so the card reports only those. */
@@ -207,18 +207,23 @@ export function RuntimeDriftCard({
   const [error, setError] = useState<string | null>(null);
   const [reapplyingPath, setReapplyingPath] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<ReapplyOutcome | null>(null);
+  const requestToken = useRef(0);
+  const mutationToken = useRef(0);
 
   const load = useCallback(async () => {
+    const token = ++requestToken.current;
     setLoading(true);
     setError(null);
     try {
       const next = await invokeOrThrow<RuntimeReport>("inspect_client_runtimes", { clientDir });
+      if (requestToken.current !== token) return;
       setReport(next);
     } catch (e) {
+      if (requestToken.current !== token) return;
       setReport(null);
       setError(getTauriErrorMessage(e));
     } finally {
-      setLoading(false);
+      if (requestToken.current === token) setLoading(false);
     }
   }, [clientDir]);
 
@@ -230,29 +235,37 @@ export function RuntimeDriftCard({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOutcome(null);
     void load();
+    return () => {
+      requestToken.current += 1;
+      mutationToken.current += 1;
+    };
   }, [load]);
 
   const handleReapply = useCallback(
     async (relativePath: string) => {
+      const token = ++mutationToken.current;
       setReapplyingPath(relativePath);
       setError(null);
       setOutcome(null);
       try {
-        await approveClientWrites(clientDir);
-        const result = await invokeOrThrow<ReapplyOutcome>("reapply_client_runtimes", {
-          clientDir,
-          relativePaths: [relativePath],
+        const result = await mutation.run("Restoring a managed runtime", clientDir, async () => {
+          await approveClientWrites(clientDir);
+          return invokeOrThrow<ReapplyOutcome>("reapply_client_runtimes", {
+            clientDir,
+            relativePaths: [relativePath],
+          });
         });
-        setOutcome(result);
-        await onChanged();
+        if (mutationToken.current !== token || result.status !== "committed") return;
+        setOutcome(result.value);
         await load();
       } catch (e) {
+        if (mutationToken.current !== token) return;
         setError(getTauriErrorMessage(e));
       } finally {
-        setReapplyingPath(null);
+        if (mutationToken.current === token) setReapplyingPath(null);
       }
     },
-    [clientDir, load, onChanged]
+    [clientDir, load, mutation]
   );
 
   if (loading && !report) {
@@ -293,7 +306,7 @@ export function RuntimeDriftCard({
           <RuntimeRow
             key={runtime.relative_path}
             runtime={runtime}
-            reapplying={reapplyingPath === runtime.relative_path}
+            reapplying={mutation.pending || reapplyingPath === runtime.relative_path}
             onReapply={(path) => void handleReapply(path)}
           />
         ))}

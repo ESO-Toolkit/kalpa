@@ -475,20 +475,36 @@ pub async fn emergency_remove_injector(
 ) -> Result<EmergencyRemoval, String> {
     let root = client_write::begin_write(&state, &client_dir).await?;
     let manifest_path = client_backup::manifest_path(&app)?;
+    let backup_root = client_backup::backup_root(&app)?;
     let quarantine_root = client_backup::quarantine_root(&app)?;
 
     tokio::task::spawn_blocking(move || {
-        let manifest = client_backup::load_manifest_at(&manifest_path);
-        let orphan = vet_emergency_removal(root.path(), &manifest, &file_name, &confirmation)?;
-        // The vetting above hashes files and can take real time; re-assert
-        // idleness immediately before the move so a client that started
-        // mid-vet is still caught.
-        root.reassert_idle()?;
-        let destination = quarantine_file(root.path(), &quarantine_root, &orphan.file_name)?;
-        Ok(EmergencyRemoval {
-            file_name: orphan.file_name,
-            quarantine_path: destination.to_string_lossy().to_string(),
-        })
+        client_backup::run_managed_transaction_in(
+            &manifest_path,
+            &backup_root,
+            &root,
+            |transaction| {
+                let manifest = transaction.load_manifest();
+                let orphan = vet_emergency_removal(
+                    transaction.client_root(),
+                    &manifest,
+                    &file_name,
+                    &confirmation,
+                )?;
+                // Hashing can take real time. Revalidate again immediately
+                // before the move while the transaction lock remains held.
+                root.reassert_write_allowed()?;
+                let destination = quarantine_file(
+                    transaction.client_root(),
+                    &quarantine_root,
+                    &orphan.file_name,
+                )?;
+                Ok(EmergencyRemoval {
+                    file_name: orphan.file_name,
+                    quarantine_path: destination.to_string_lossy().to_string(),
+                })
+            },
+        )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowRightIcon,
   CheckCircle2Icon,
@@ -60,7 +60,7 @@ function techniqueName(entry: string): string {
  * the game actually renders, so picking a row (or requesting the reorder)
  * only arms the action — a second, explicit click applies it.
  */
-export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
+export function PresetPanel({ clientDir, mutation }: StackPanelProps) {
   const [options, setOptions] = useState<PresetOptions | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -74,18 +74,23 @@ export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
   const [fixing, setFixing] = useState(false);
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixOutcome, setFixOutcome] = useState<PresetChangeOutcome | null>(null);
+  const requestToken = useRef(0);
+  const mutationToken = useRef(0);
 
   const load = useCallback(async () => {
+    const token = ++requestToken.current;
     setLoading(true);
     setLoadError(null);
     try {
       const next = await invokeOrThrow<PresetOptions>("list_client_presets", { clientDir });
+      if (requestToken.current !== token) return;
       setOptions(next);
     } catch (e) {
+      if (requestToken.current !== token) return;
       setOptions(null);
       setLoadError(getTauriErrorMessage(e));
     } finally {
-      setLoading(false);
+      if (requestToken.current === token) setLoading(false);
     }
   }, [clientDir]);
 
@@ -104,6 +109,10 @@ export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
     setFixError(null);
     setFixOutcome(null);
     void load();
+    return () => {
+      requestToken.current += 1;
+      mutationToken.current += 1;
+    };
   }, [load]);
 
   const handleRequestSwitch = useCallback((choice: PresetChoice) => {
@@ -120,24 +129,28 @@ export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
 
   const handleConfirmSwitch = useCallback(async () => {
     if (!pendingChoice) return;
+    const token = ++mutationToken.current;
     setSwitching(true);
     setSwitchError(null);
     try {
-      await approveClientWrites(clientDir);
-      const outcome = await invokeOrThrow<PresetChangeOutcome>("set_client_preset", {
-        clientDir,
-        relativePath: pendingChoice.relative_path,
+      const result = await mutation.run("Switching the active preset", clientDir, async () => {
+        await approveClientWrites(clientDir);
+        return invokeOrThrow<PresetChangeOutcome>("set_client_preset", {
+          clientDir,
+          relativePath: pendingChoice.relative_path,
+        });
       });
-      setSwitchOutcome(outcome);
+      if (mutationToken.current !== token || result.status !== "committed") return;
+      setSwitchOutcome(result.value);
       setPendingChoice(null);
-      await onChanged();
       await load();
     } catch (e) {
+      if (mutationToken.current !== token) return;
       setSwitchError(getTauriErrorMessage(e));
     } finally {
-      setSwitching(false);
+      if (mutationToken.current === token) setSwitching(false);
     }
-  }, [clientDir, load, onChanged, pendingChoice]);
+  }, [clientDir, load, mutation, pendingChoice]);
 
   const handleRequestFix = useCallback(() => {
     setFixError(null);
@@ -151,23 +164,27 @@ export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
   }, []);
 
   const handleConfirmFix = useCallback(async () => {
+    const token = ++mutationToken.current;
     setFixing(true);
     setFixError(null);
     try {
-      await approveClientWrites(clientDir);
-      const outcome = await invokeOrThrow<PresetChangeOutcome>("fix_client_technique_order", {
-        clientDir,
+      const result = await mutation.run("Fixing preset technique order", clientDir, async () => {
+        await approveClientWrites(clientDir);
+        return invokeOrThrow<PresetChangeOutcome>("fix_client_technique_order", {
+          clientDir,
+        });
       });
-      setFixOutcome(outcome);
+      if (mutationToken.current !== token || result.status !== "committed") return;
+      setFixOutcome(result.value);
       setFixConfirming(false);
-      await onChanged();
       await load();
     } catch (e) {
+      if (mutationToken.current !== token) return;
       setFixError(getTauriErrorMessage(e));
     } finally {
-      setFixing(false);
+      if (mutationToken.current === token) setFixing(false);
     }
-  }, [clientDir, load, onChanged]);
+  }, [clientDir, load, mutation]);
 
   if (loading && !options) {
     return (
@@ -200,6 +217,7 @@ export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
         options={options}
         pendingChoice={pendingChoice}
         switching={switching}
+        mutationPending={mutation.pending}
         switchError={switchError}
         switchOutcome={switchOutcome}
         onRequest={handleRequestSwitch}
@@ -211,6 +229,7 @@ export function PresetPanel({ clientDir, onChanged }: StackPanelProps) {
           fix={options.fix}
           confirming={fixConfirming}
           fixing={fixing}
+          mutationPending={mutation.pending}
           fixError={fixError}
           fixOutcome={fixOutcome}
           onRequest={handleRequestFix}
@@ -230,6 +249,7 @@ function SwitchPresetCard({
   options,
   pendingChoice,
   switching,
+  mutationPending,
   switchError,
   switchOutcome,
   onRequest,
@@ -239,6 +259,7 @@ function SwitchPresetCard({
   options: PresetOptions;
   pendingChoice: PresetChoice | null;
   switching: boolean;
+  mutationPending: boolean;
   switchError: string | null;
   switchOutcome: PresetChangeOutcome | null;
   onRequest: (choice: PresetChoice) => void;
@@ -267,7 +288,7 @@ function SwitchPresetCard({
               <li key={choice.relative_path}>
                 <button
                   type="button"
-                  disabled={choice.is_active || switching}
+                  disabled={choice.is_active || switching || mutationPending}
                   onClick={() => onRequest(choice)}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors duration-150",
@@ -312,11 +333,16 @@ function SwitchPresetCard({
             what ReShade renders in this game. {RELOAD_NOTE}
           </p>
           <div className="flex items-center gap-2">
-            <Button size="sm" disabled={switching} onClick={onConfirm}>
+            <Button size="sm" disabled={switching || mutationPending} onClick={onConfirm}>
               {switching ? <Spinner className="size-3.5" /> : <SlidersHorizontalIcon />}
               {switching ? "Switching..." : "Confirm switch"}
             </Button>
-            <Button size="sm" variant="outline" disabled={switching} onClick={onCancel}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={switching || mutationPending}
+              onClick={onCancel}
+            >
               Cancel
             </Button>
           </div>
@@ -374,6 +400,7 @@ function FixOrderCard({
   fix,
   confirming,
   fixing,
+  mutationPending,
   fixError,
   fixOutcome,
   onRequest,
@@ -383,6 +410,7 @@ function FixOrderCard({
   fix: OrderFix;
   confirming: boolean;
   fixing: boolean;
+  mutationPending: boolean;
   fixError: string | null;
   fixOutcome: PresetChangeOutcome | null;
   onRequest: () => void;
@@ -437,7 +465,12 @@ function FixOrderCard({
       )}
 
       {!confirming && !fixOutcome && (
-        <Button size="sm" variant="outline" disabled={fixing} onClick={onRequest}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={fixing || mutationPending}
+          onClick={onRequest}
+        >
           <ArrowRightIcon />
           Fix technique order
         </Button>
@@ -449,11 +482,16 @@ function FixOrderCard({
             {fix.summary} This changes how this preset renders. {RELOAD_NOTE}
           </p>
           <div className="flex items-center gap-2">
-            <Button size="sm" disabled={fixing} onClick={onConfirm}>
+            <Button size="sm" disabled={fixing || mutationPending} onClick={onConfirm}>
               {fixing ? <Spinner className="size-3.5" /> : <ListOrderedIcon />}
               {fixing ? "Fixing..." : "Confirm fix"}
             </Button>
-            <Button size="sm" variant="outline" disabled={fixing} onClick={onCancel}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={fixing || mutationPending}
+              onClick={onCancel}
+            >
               Cancel
             </Button>
           </div>

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   ActivityIcon,
   AlertTriangleIcon,
@@ -104,27 +104,46 @@ export function SlotRail({
 }) {
   const railRef = useRef<HTMLDivElement>(null);
 
+  // Refreshes replace the stack data but not the slot model. If selection is
+  // adjusted while keyboard focus is in the rail, keep focus on the new roving
+  // tab stop rather than stranding it on an option that is no longer selected.
+  useEffect(() => {
+    const container = railRef.current;
+    if (!container || !container.contains(document.activeElement)) return;
+    const tabStop = container.querySelector<HTMLElement>('[role="option"][tabindex="0"]');
+    tabStop?.focus();
+  }, [selected]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
     const container = railRef.current;
     if (!container) return;
     const items = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'));
     if (items.length === 0) return;
     e.preventDefault();
     const idx = items.indexOf(document.activeElement as HTMLElement);
-    const nextIdx =
-      idx === -1
-        ? 0
-        : e.key === "ArrowDown"
-          ? Math.min(idx + 1, items.length - 1)
-          : Math.max(idx - 1, 0);
-    items[nextIdx]?.focus();
+    let nextIdx = idx === -1 ? 0 : idx;
+    if (e.key === "Home") nextIdx = 0;
+    else if (e.key === "End") nextIdx = items.length - 1;
+    else if (e.key === "ArrowDown") nextIdx = Math.min(nextIdx + 1, items.length - 1);
+    else nextIdx = Math.max(nextIdx - 1, 0);
+
+    const next = items[nextIdx];
+    next?.focus();
+    next?.click();
   }, []);
 
   const power = powerState(stack);
+  const tabStop = selected ?? SLOT_ORDER[0];
 
   return (
-    <div ref={railRef} onKeyDown={handleKeyDown} className="flex w-[200px] shrink-0 flex-col">
+    <div
+      ref={railRef}
+      role="listbox"
+      aria-label="Graphics stack views"
+      onKeyDown={handleKeyDown}
+      className="flex w-[200px] shrink-0 flex-col"
+    >
       {/* The spine: a hairline behind the glyph nodes, so eight rows read as an
           ordered route rather than eight equal options — which is what the
           stack actually is. ReShade loads first, the preset picks the
@@ -134,7 +153,7 @@ export function SlotRail({
           Grouping is rhythm, not labels: binaries the game loads, then content
           ReShade runs, then configuration. Three more headings in a 200px
           column would cost more than they explain. */}
-      <div role="listbox" aria-label="Stack slots" className="min-h-0 flex-1 overflow-y-auto pr-1">
+      <div role="presentation" className="min-h-0 flex-1 overflow-y-auto pr-1">
         {/* The spine hangs off this inner wrapper rather than the scroll
             container. On the container it stretched to the full flex height and
             ran on past the last node into empty space, which reads as a route
@@ -147,6 +166,7 @@ export function SlotRail({
                 slot={slot}
                 stack={stack}
                 selected={selected === slot}
+                tabIndex={tabStop === slot ? 0 : -1}
                 onSelect={() => onSelect(slot)}
               />
             </div>
@@ -156,7 +176,7 @@ export function SlotRail({
 
       <div className="my-2 shrink-0 border-t border-structure-06" />
 
-      <div role="listbox" aria-label="Whole stack" className="shrink-0 space-y-0.5 pr-1">
+      <div role="presentation" className="shrink-0 space-y-0.5 pr-1">
         <RailRow
           Icon={power === "on" ? PowerIcon : power === "off" ? PowerOffIcon : AlertTriangleIcon}
           tone={
@@ -169,6 +189,7 @@ export function SlotRail({
           label="Power"
           id={POWER_COPY[power].state}
           selected={selected === "power"}
+          tabIndex={tabStop === "power" ? 0 : -1}
           onSelect={() => onSelect("power")}
         />
         <RailRow
@@ -187,6 +208,7 @@ export function SlotRail({
           // this panel, and a bare glyph would make colour the only signal.
           pill={isManaged ? null : <InfoPill color="amber">Not managed</InfoPill>}
           selected={selected === "records"}
+          tabIndex={tabStop === "records" ? 0 : -1}
           onSelect={() => onSelect("records")}
         />
         <RailRow
@@ -199,6 +221,7 @@ export function SlotRail({
               : "Nothing matched"
           }
           selected={selected === "logs"}
+          tabIndex={tabStop === "logs" ? 0 : -1}
           onSelect={() => onSelect("logs")}
         />
       </div>
@@ -227,6 +250,7 @@ function RailRow({
   meta,
   pill,
   selected,
+  tabIndex,
   accent,
   node,
   onSelect,
@@ -240,6 +264,7 @@ function RailRow({
   meta?: string;
   pill?: React.ReactNode;
   selected: boolean;
+  tabIndex: 0 | -1;
   /** Severity border and tint, when this row carries a finding. */
   accent?: { border: string; tint: string };
   /** Whether the glyph sits on the pipeline spine. The pinned whole-stack rows
@@ -253,6 +278,7 @@ function RailRow({
       type="button"
       role="option"
       aria-selected={selected}
+      tabIndex={tabIndex}
       onClick={onSelect}
       className={cn(
         "flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left",
@@ -302,11 +328,13 @@ function SlotRow({
   slot,
   stack,
   selected,
+  tabIndex,
   onSelect,
 }: {
   slot: Slot;
   stack: ClientStack;
   selected: boolean;
+  tabIndex: 0 | -1;
   onSelect: () => void;
 }) {
   const level = slotLevel(slot, stack);
@@ -337,6 +365,7 @@ function SlotRow({
         </>
       }
       selected={selected}
+      tabIndex={tabIndex}
       onSelect={onSelect}
     />
   );
