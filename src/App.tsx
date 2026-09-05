@@ -765,7 +765,10 @@ function App() {
     // every install it finds; the first is what the panel opens on by default,
     // so it is the one the toolbar slot would be for.
     void invokeResult<EsoClientLocation[]>("detect_eso_clients").then(async (result) => {
-      if (!result.ok || result.data.length === 0) return;
+      // `ok` does not imply data. `invokeResult` reports success for a command
+      // that resolves to null, which is what an unstubbed command returns under
+      // test — and what a backend that finds nothing may return in production.
+      if (!result.ok || !result.data || result.data.length === 0) return;
       const first = result.data[0];
       if (!first) return;
       const stack = await invokeResult<ClientStack>("inspect_client_stack", {
