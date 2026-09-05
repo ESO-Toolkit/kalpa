@@ -13,11 +13,19 @@ const stack: ClientStack = {
   items: [],
   preserved_originals: [],
   parked: [],
+  // Neutral: this fixture is about rail focus/selection, not tuning or user parking.
+  user_parked: [],
   is_disabled: false,
   shaders: { present: false, effect_count: 0, texture_count: 0, effect_search_paths: null },
   preset: null,
   tuning: [],
+  tuning_section: null,
+  tuning_owner: "unknown",
+  tuning_blocks: [],
   disabled_addons: [],
+  load_from_dll_main: [],
+  active_path: "unknown",
+  slots: [],
   is_empty: false,
   findings: [],
 };
@@ -32,6 +40,7 @@ function ControlledRail({ value = stack }: { value?: ClientStack }) {
       isManaged={false}
       trackedCount={null}
       logCount={0}
+      nrState="unknown"
     />
   );
 }

@@ -41,11 +41,104 @@ export interface ClientHealthPanelProps {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Data contract — the diagnostic report                                     */
+/* -------------------------------------------------------------------------- */
+/* These mirror `src-tauri/src/client_health.rs`.                              */
+
+/** A DLL found next to `eso64.exe`. `version` is null when the version
+ *  resource is missing or unreadable — unknown, not an error. */
+export interface DllInfo {
+  name: string;
+  version: string | null;
+}
+
+/**
+ * A log line that matched a known **fatal** failure signature.
+ *
+ * Only fatal matches reach this type. The six ERROR/WARN lines a *working*
+ * RenoDX DLSS-NR setup emits on every launch are recognised as benign, counted
+ * into `log_benign_suppressed`, and never turned into an excerpt — surfacing
+ * them is how a healthy stack got triaged as a broken one.
+ */
+export interface LogExcerpt {
+  /** Source file name, e.g. `ReShade.log`. */
+  file: string;
+  /** Slug of the log rule that matched. Deliberately **not** a
+   *  `HealthFinding["id"]`: no finding is raised from a log line. */
+  rule: string;
+  line: string;
+}
+
+/**
+ * Whether the log proves Neural Rendering is actually running.
+ *
+ * The three states are genuinely different and **must not be collapsed** — the
+ * panel used to treat "no evidence" as "fine", which is the bug this union
+ * exists to fix.
+ *
+ * - `running` — the `EvaluateFeature succeeded: evaluation=N` counter was found
+ *   **and is climbing**. It advances once per rendered frame, so a rising
+ *   sequence cannot be faked by an add-on that merely loaded. This is the only
+ *   real proof.
+ * - `stalled` — the counter was found but never advanced across the scanned
+ *   window. Suspicious, and explicitly **not proof**. A single occurrence lands
+ *   here too.
+ * - `unknown` — no evaluation line at all. This is **unknown, not broken**: the
+ *   log may be absent, the session may predate the add-on, or the signature may
+ *   simply have scrolled out of the 400-line tail window. Never render it as
+ *   working, and never render it as failing.
+ */
+export type NeuralRenderingState = "running" | "stalled" | "unknown";
+
+/** Positive evidence, or the documented absence of it, that Neural Rendering
+ *  ran during the logged session. */
+export interface NeuralRenderingSignal {
+  state: NeuralRenderingState;
+  /** How many `EvaluateFeature succeeded` lines were seen. Not a frame count:
+   *  the scanned window is capped, so this saturates on any real session. */
+  samples: number;
+  /** First and last counter values parsed, in file order, so the UI can say
+   *  *how far* it climbed rather than only that it did. Null when none. */
+  first_evaluation: number | null;
+  last_evaluation: number | null;
+}
+
+export interface ClientHealthReport {
+  location: EsoClientLocation;
+  /** The ReShade/injector proxy DLL. `d3d11.dll` for a stock install, `dxgi.dll`
+   *  for setups needing DXGI-level add-on hooks; which is correct is
+   *  setup-dependent and deliberately not asserted. */
+  injector: DllInfo | null;
+  /** ESO's bundled DLSS super-resolution runtime (2.2.16, unchanged since 2021). */
+  dlss: DllInfo | null;
+  /** The D3D shader compiler ESO ships — a 2013 build that wins DLL search order. */
+  d3dcompiler: DllInfo | null;
+  reshade_preset: string | null;
+  findings: HealthFinding[];
+  /** Fatal log matches only. */
+  log_excerpts: LogExcerpt[];
+  /** The "everything agrees" claim has to be earned by `state === "running"`
+   *  here, **not** by an empty findings list. */
+  neural_rendering: NeuralRenderingSignal;
+  /** How many lines matched a *benign* signature and were suppressed. Shown so
+   *  the panel can say "6 known-harmless lines ignored" rather than silently
+   *  discarding them — a suppressed line is still one somebody may go looking
+   *  for in the raw log. */
+  log_benign_suppressed: number;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Data contract — the stack                                                 */
 /* -------------------------------------------------------------------------- */
 /* These mirror `src-tauri/src/client_stack.rs`. A DLSS 5 Neural Rendering     */
 /* setup is a pipeline of layers, not three DLLs — see that file's module      */
 /* doc for why the cross-layer findings below exist.                          */
+/*                                                                            */
+/* There are TWO such pipelines and they are mutually exclusive: see           */
+/* `ActivePath`. Rendering either one's layers as universally required is how  */
+/* the panel came to report "Everything agrees" over a stack that could not    */
+/* work, so `active_path` and `slots` have to be read before any row decides   */
+/* what an empty slot means.                                                   */
 
 export type StackRole =
   | "injector"
@@ -73,13 +166,132 @@ export interface PreservedOriginal {
   size_bytes: number;
 }
 
-/** A file Kalpa parked (`.kalpa-off`) so the stack does not load. */
+/**
+ * Whose hand parked a file.
+ *
+ * Re-enabling a user-parked file is not the same act as re-enabling a
+ * Kalpa-parked one. `.kalpa-off` is a name only Kalpa writes, so a file
+ * carrying it is one Kalpa moved and can move back. `.off` is the user's own
+ * switch: Kalpa did not choose the name and cannot claim to know why it was
+ * flipped, so it reports the state and offers nothing.
+ */
+export type ParkedBy = "kalpa" | "user";
+
+/**
+ * A file renamed aside so the stack does not load it.
+ *
+ * Not a `PreservedOriginal`. A backup suffix marks a displaced *original*; a
+ * park suffix marks a **live file that was switched off** — the same bytes that
+ * run again the moment the name goes back.
+ */
 export interface ParkedFile {
   file_name: string;
   restores: string;
   size_bytes: number;
   target_present: boolean;
+  /** The suffix actually on disk, verbatim — `.kalpa-off` or `.off`. */
+  suffix: string;
+  parked_by: ParkedBy;
 }
+
+/**
+ * Which of the two mutually exclusive Neural Rendering setups is live.
+ *
+ * - `direct` — `renodx-dlss.addon64` hooks `nvngx_dlssnr.dll` itself. No feed
+ *   add-on, no host process, no motion-vector provider, and an **empty
+ *   `Techniques=` is correct**.
+ * - `feed` — `renodx-dlss5.addon64` + `dlss5-feed.addon64` +
+ *   `dlss5-feed-host64.exe`, with `DLSS5_Feed` enabled and a motion-vector
+ *   provider ordered above it.
+ * - `both` — both add-ons are loaded. ReShade loads both, Kalpa does not guess
+ *   which one wins, and **both paths' checks apply**: the feed pipeline is live
+ *   here, so its technique order, provider and preset are all still checked. An
+ *   earlier three-variant version reported this as `direct` and gated every
+ *   feed finding away over a live feed — do not re-collapse it.
+ * - `neither` — no Neural Rendering add-on is loaded. Entirely ordinary; a
+ *   plain ReShade install is the common case and nothing about it is wrong.
+ * - `unknown` — the client folder could not be read. **Not the same as
+ *   `neither`**: that one asserts an empty slot is correct, this one says Kalpa
+ *   could not look. Every tuning section reads as `unknown` provenance and
+ *   nothing is writable, because a module that writes must never guess in the
+ *   direction of writing.
+ *
+ * Computed from which add-on is *loaded*, never from what is on disk: liveness
+ * is "a file named exactly like the add-on is present and not in
+ * `disabled_addons`", so every rename aside — `.off`, `.kalpa-off`, anything —
+ * is inert whether or not Kalpa has heard of the suffix.
+ */
+export type ActivePath = "direct" | "feed" | "both" | "neither" | "unknown";
+
+/**
+ * One panel row, named to match the `Slot` union in `slots.ts` exactly.
+ *
+ * Deliberately the same vocabulary rather than a parallel one. The need axis is
+ * a backend answer — only the backend knows which path is live — but it has to
+ * land on a row the frontend already renders, and a mapping table between two
+ * spellings is exactly the thing that lets them drift.
+ */
+export type StackSlot =
+  "reshade" | "addons" | "nr" | "sr" | "shaders" | "motion" | "preset" | "tuning";
+
+/**
+ * Whether a slot is *wanted* on the live path — the third axis beside present
+ * and active.
+ *
+ * - `required` — the live path needs this; empty here is a real gap.
+ * - `not_on_this_path` — correctly absent. Render `reason` affirmatively.
+ *   **Never as an empty row and never as an Info-level finding**: an empty
+ *   motion-vector slot on the direct path is the right answer, and painting it
+ *   as an absence is the bug this axis exists to fix.
+ * - `installed_unused` — present, and not used on this path. Never a fault and
+ *   never advice to remove it; see `keep_because`.
+ * - `unknown` — Kalpa could not read the client folder, so it cannot say
+ *   whether this slot is wanted. Only reachable when `active_path` is
+ *   `unknown`, and deliberately not `not_on_this_path`: that one *asserts* the
+ *   slot is correctly empty, and asserting it from a folder Kalpa could not
+ *   read is a guess wearing a verdict's clothes.
+ */
+export type SlotNeed = "required" | "not_on_this_path" | "installed_unused" | "unknown";
+
+export interface SlotStatus {
+  slot: StackSlot;
+  need: SlotNeed;
+  /** A complete sentence, shown verbatim. */
+  reason: string;
+  /**
+   * Why to keep something installed but unused. Kalpa refetches none of this
+   * stack's optional pieces — iMMERSE LaunchPad is link-only by licence, the
+   * `renodx-dlss5` / `dlss5-feed` add-ons come from a Discord with no stable
+   * URL — so a user's existing copy is their only fallback, and "you could
+   * delete this" would be advice Kalpa cannot undo. Null when nothing needs
+   * saying.
+   */
+  keep_because: string | null;
+}
+
+/**
+ * Whether an INI section's contents are configuration **in force**, or
+ * leftovers from a path that is no longer running.
+ *
+ * `[RenoDX.DLSS5]` is written by `renodx-dlss5.addon64`, the **feed** path's
+ * add-on. On a direct-path install that add-on is parked, so the section is a
+ * `fossil`: real values, saved by a real add-on, describing a configuration
+ * that is not running. Presented as live tuning it misled the user once
+ * already — a dead `NeuralUplift=0` read as this install's current setting.
+ * `unknown` means liveness could not be determined at all (see
+ * `ActivePath["unknown"]`), and is never writable.
+ *
+ * One union for both panels: the stack's `tuning_owner` and each tuning
+ * section's `provenance` are the same verdict, and two spellings of it is how
+ * they came to disagree.
+ *
+ * **Provenance is not presence.** There is deliberately no `absent` member —
+ * "the section is not in the file" is carried separately, by
+ * `ClientStack["tuning_section"]` being null and by `TuningSection["present"]`,
+ * so the panel can state both facts at once ("no section, *and* the add-on that
+ * would write one is parked").
+ */
+export type TuningProvenance = "live" | "fossil" | "unknown";
 
 export interface Technique {
   name: string;
@@ -103,9 +315,40 @@ export interface PresetInfo {
   mv_provider: MvProvider | null;
 }
 
+/**
+ * One tunable out of a RenoDX block in `ReShade.ini`.
+ *
+ * Which block is `TuningBlock["section"]`'s business, and there is more than
+ * one: `renodx-dlss5.addon64` writes `[RenoDX.DLSS5]`, `renodx-dlss.addon64`
+ * writes `[RENODX-DLSS]` and a `[RENODX-DLSS-preset*]` family. Keys are the
+ * file's own spelling, values verbatim.
+ */
 export interface TuningValue {
   key: string;
   value: string;
+}
+
+/**
+ * One RenoDX tuning section that is actually in `ReShade.ini`, labelled with
+ * whether it is in force.
+ *
+ * Every block the backend knows about and finds is carried, live and fossil
+ * alike. That is a data rule rather than a presentation one: the feed add-ons
+ * are Discord-distributed with no stable URL, so a parked `[RenoDX.DLSS5]` is
+ * the user's only copy of the settings they would come back to. A UI that
+ * showed only the live block would quietly claim the others no longer exist.
+ *
+ * `ClientStack["tuning"]`, `["tuning_section"]` and `["tuning_owner"]` are the
+ * headline block picked out of this list for the rail; this list is what lets a
+ * pane also say "and this one belongs to a parked add-on".
+ */
+export interface TuningBlock {
+  /** The section name as `ReShade.ini` spells it, e.g. `RENODX-DLSS-preset1`. */
+  section: string;
+  /** The add-on file that writes this section. */
+  owner: string;
+  provenance: TuningProvenance;
+  values: TuningValue[];
 }
 
 export interface ShaderTree {
@@ -119,13 +362,54 @@ export interface ClientStack {
   client_dir: string;
   items: StackItem[];
   preserved_originals: PreservedOriginal[];
+  /**
+   * Files **Kalpa** parked — `.kalpa-off` and nothing else.
+   *
+   * `powerState()` in `slots.ts` reads "on" from this being empty and the
+   * toggle plans an unpark for every entry, and both are statements about
+   * Kalpa's own work. A file the user renamed by hand must never join this
+   * list: it would report a working install as partly switched off.
+   */
   parked: ParkedFile[];
-  /** True when the injector is parked — ESO is back to stock. */
+  /** Files the **user** switched off themselves (`.off`). Read-only knowledge:
+   *  Kalpa still parks only as `.kalpa-off` and removes only that suffix. */
+  user_parked: ParkedFile[];
+  /** True when **Kalpa** parked the injector — ESO is back to stock. Not fed by
+   *  `user_parked`, because the copy attached to it claims work Kalpa did. */
   is_disabled: boolean;
   shaders: ShaderTree;
   preset: PresetInfo | null;
+  /**
+   * The **headline** block's values: the live one when there is a live one.
+   *
+   * This used to be `[RenoDX.DLSS5]` unconditionally, which is the *feed*
+   * path's section — so on a direct-path install the panel showed a parked
+   * add-on's saved settings while `[RENODX-DLSS]`'s live keys went unread, and
+   * disagreed with the tuning panel about whether live tuning existed. The
+   * selection follows `active_path` now. See `tuning_blocks`.
+   */
   tuning: TuningValue[];
+  /** The ini section `tuning` came from, so no row hardcodes a section name
+   *  that belongs to only one of the two paths. Null when the file holds no
+   *  known section at all — this field, not a provenance member, is where
+   *  absence lives. */
+  tuning_section: string | null;
+  /** Whether `tuning_section` is in force, answered whether or not any section
+   *  is present: it is a fact about which add-on is loaded. With no section
+   *  present it describes the live path's own add-on. */
+  tuning_owner: TuningProvenance;
+  /** Every known tuning section present in `ReShade.ini`, each with its own
+   *  provenance. The three fields above are one entry out of this list; this is
+   *  how a fossil stays visible once a live block exists. */
+  tuning_blocks: TuningBlock[];
   disabled_addons: string[];
+  /** `[ADDON] LoadFromDllMain` — the add-ons ReShade loads early enough for
+   *  their hooks to land. See `stack-addon-not-in-dllmain`. */
+  load_from_dll_main: string[];
+  /** Read this before deciding what an empty slot means. */
+  active_path: ActivePath;
+  /** Always all eight, in slot order, so a row never falls back to "unknown". */
+  slots: SlotStatus[];
   is_empty: boolean;
   findings: HealthFinding[];
 }
@@ -278,12 +562,64 @@ export interface TuningField {
   slider_max: number | null;
 }
 
+/** Which of the two mutually exclusive RenoDX integrations a section belongs
+ *  to. `direct` writes `[RENODX-DLSS]` and `[RENODX-DLSS-preset*]`; `feed`
+ *  writes `[RenoDX.DLSS5]`. */
+export type RenoDxPath = "direct" | "feed";
+
+/** A raw `key=value` pair, exactly as `ReShade.ini` has it. */
+export interface TuningEntry {
+  key: string;
+  value: string;
+}
+
+/**
+ * One section of `ReShade.ini`.
+ *
+ * A fossil is never hidden and never deleted — the user may well switch paths
+ * back, and silently dropping their saved settings would be the worse failure.
+ * It is **labelled**, and it is not writable while it is a fossil.
+ */
+export interface TuningSection {
+  /** The name as it appears in the file when present, else the canonical
+   *  spelling. */
+  section: string;
+  path: RenoDxPath;
+  /** The add-on file that writes this section. */
+  owner: string;
+  /** Whether `ReShade.ini` has this section at all. False means the add-on has
+   *  never run here — say so rather than offering to write one from nothing. */
+  present: boolean;
+  provenance: TuningProvenance;
+  /** True only when Kalpa has a verified field table for the section *and* its
+   *  owning add-on is live *and* the section already exists. */
+  writable: boolean;
+  /** Why it is not writable, in the panel's own words. Empty when it is, and
+   *  never empty when `writable` is false. Shown verbatim. */
+  read_only_reason: string;
+  /** Typed, verified controls. Empty for every section but `[RenoDX.DLSS5]`:
+   *  the direct path's keys are closed-source and read-only by design, and
+   *  inventing labels for them is how a working install gets corrupted. */
+  fields: TuningField[];
+  /** Every key no field spec describes, verbatim and in file order. For the
+   *  direct path's sections that is all of them. */
+  entries: TuningEntry[];
+}
+
 export interface TuningForm {
   client_dir: string;
-  section_present: boolean;
-  fields: TuningField[];
-  /** `[key, value]` pairs Kalpa does not recognise. Read-only. */
-  unknown: [string, string][];
+  /** Decides every section's provenance. Read it before rendering any value as
+   *  current. */
+  active_path: ActivePath;
+  /** Plain-English observations behind `active_path`, naming the files that
+   *  were and were not found. Shown rather than asking the user to take the
+   *  verdict on trust. */
+  path_evidence: string[];
+  sections: TuningSection[];
+  /** Shown beside the apply button. ReShade reads these values when the add-on
+   *  initialises, so a change lands at the *next* launch — the status after an
+   *  apply is "Applies at next launch", never "Saved". */
+  apply_note: string;
 }
 
 export interface TuningEdit {
@@ -294,6 +630,9 @@ export interface TuningEdit {
 export interface TuningApplyOutcome {
   changed: string[];
   backup_id: string | null;
+  /** The same timing note. "Changed 3 settings" on its own reads as "done
+   *  now", which is exactly what it is not. */
+  note: string;
 }
 
 /* -------------------------------------------------------------------------- */

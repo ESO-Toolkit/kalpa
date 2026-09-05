@@ -34,6 +34,7 @@ import {
   isDependencySkipped,
   setDependencyPolicy,
 } from "@/lib/dependency-policy";
+import type { ClientStack, EsoClientLocation } from "@/components/client-stack/types";
 import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { DependencyPromptProvider, type ResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import {
@@ -160,6 +161,11 @@ function App() {
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
   const [minionDetected, setMinionDetected] = useState(false);
+  // Whether there is a graphics-mod stack worth a toolbar slot. Only decides
+  // WHERE the button lives (see `pinnedWhen` in features.ts); the panel itself
+  // is always reachable from Settings > Tools, so a false here — including a
+  // detect that simply failed — never hides the feature.
+  const [graphicsStackDetected, setGraphicsStackDetected] = useState(false);
   const [logUploaderMounted, setLogUploaderMounted] = useState(false);
   const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -750,6 +756,26 @@ function App() {
     void invokeResult<boolean>("detect_minion").then((result) => {
       if (result.ok) {
         setMinionDetected(result.data);
+      }
+    });
+
+    // Same shape, same reason: once at startup, never polled. Kalpa's stack
+    // rules forbid background scraping, and this only decides whether a header
+    // button appears — it is not worth a watcher. `detect_eso_clients` returns
+    // every install it finds; the first is what the panel opens on by default,
+    // so it is the one the toolbar slot would be for.
+    void invokeResult<EsoClientLocation[]>("detect_eso_clients").then(async (result) => {
+      // `ok` does not imply data. `invokeResult` reports success for a command
+      // that resolves to null, which is what an unstubbed command returns under
+      // test — and what a backend that finds nothing may return in production.
+      if (!result.ok || !result.data || result.data.length === 0) return;
+      const first = result.data[0];
+      if (!first) return;
+      const stack = await invokeResult<ClientStack>("inspect_client_stack", {
+        clientDir: first.client_dir,
+      });
+      if (stack.ok) {
+        setGraphicsStackDetected(!stack.data.is_empty);
       }
     });
 
@@ -2240,7 +2266,14 @@ function App() {
     !authVerifying &&
     !toolbarHidden.includes("log-upload");
 
-  const toolbarFeatures = useMemo(() => visibleToolbar(FEATURES, toolbarHidden), [toolbarHidden]);
+  const featureCtx = useMemo(
+    () => ({ minionDetected, graphicsStackDetected }),
+    [minionDetected, graphicsStackDetected]
+  );
+  const toolbarFeatures = useMemo(
+    () => visibleToolbar(FEATURES, toolbarHidden, featureCtx),
+    [toolbarHidden, featureCtx]
+  );
   /**
    * Single owner of the toolbar preference: state, persistence, and the
    * synchronous `toolbarHiddenRef` mirror all move here, together.
@@ -2748,6 +2781,7 @@ function App() {
             isOffline={isOffline}
             lastError={error}
             logUploaderMounted={logUploaderMounted}
+            graphicsStackDetected={graphicsStackDetected}
             minionDetected={minionDetected}
             onAuthChange={handleAuthChange}
             onCheckForAppUpdate={handleCheckForAppUpdateClick}

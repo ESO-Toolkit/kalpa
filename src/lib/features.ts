@@ -48,17 +48,33 @@ export type FeatureId =
 export type DialogId = FeatureId | "settings" | "support";
 export type ActiveDialog = DialogId | null;
 
-/** Inputs a feature's `visibleWhen` predicate may consult. */
+/** Inputs a feature's `visibleWhen` / `pinnedWhen` predicates may consult. */
 export interface FeatureContext {
   /** A Minion install was detected on this machine. */
   minionDetected: boolean;
+  /**
+   * The selected ESO client has a recognisable graphics-mod stack.
+   *
+   * Sourced once at startup like [`FeatureContext.minionDetected`], never
+   * polled — an "on open plus an explicit Refresh" feature must not grow a
+   * background probe just to decide where its own button goes.
+   */
+  graphicsStackDetected: boolean;
 }
 
 /**
- * Which block of the Settings > Tools tab a `placement: "tools"` feature renders
- * in. The tab interleaves two static entries ("Check for App Updates" and the
- * feedback group) between the two blocks, so the registry cannot be mapped as
- * one contiguous list.
+ * Which block of the Settings > Tools tab a feature renders in. The tab
+ * interleaves two static entries ("Check for App Updates" and the feedback
+ * group) between the two blocks, so the registry cannot be mapped as one
+ * contiguous list.
+ *
+ * Setting this means the feature has a PERMANENT row in the Tools catalog, and
+ * that is independent of `placement`. A toolbar feature may also carry one: the
+ * graphics stack is pinned to the header only when there is a stack to manage
+ * (see `pinnedWhen`), and a feature that appears and disappears from the header
+ * with the contents of a game folder still needs one address that never moves.
+ * Without this, detecting a stack would *remove* the panel from the only place
+ * a user had learned to look for it.
  *
  * `"appearance"` means the feature is reachable from the Appearance tab instead
  * (currently only the keyboard-shortcuts link) and must NOT be rendered as a
@@ -89,6 +105,28 @@ export interface FeatureDef {
   accent?: "gold";
   shortcut?: { key: string; mod: boolean; spoken: string };
   visibleWhen?: (ctx: FeatureContext) => boolean;
+  /**
+   * Whether a pinnable feature actually earns its toolbar slot right now.
+   *
+   * `pinnableToToolbar` says a feature *may* live in the header; this says it
+   * is worth the space *today*. The distinction exists because the toolbar is
+   * the one surface with a hard budget — every button there is permanent prime
+   * real estate — and some features only matter to the subset of users who have
+   * the thing they manage. The graphics stack is the case in point: most ESO
+   * players run no ReShade at all, and `client_stack.rs` treats that as the
+   * common case, so pinning it unconditionally would spend a header slot to
+   * open an empty state.
+   *
+   * Falling out of the toolbar does NOT make a feature unreachable: it lands in
+   * the Settings > Tools catalog, which lists unpinned pinnables first. That is
+   * what makes this safe to be false.
+   *
+   * Deliberately separate from `visibleWhen`, which decides whether a feature is
+   * offered at all. Conflating them would hide the panel from someone whose
+   * stack Kalpa merely failed to detect — exactly the "absence read as a
+   * verdict" mistake the stack panel itself was built to stop making.
+   */
+  pinnedWhen?: (ctx: FeatureContext) => boolean;
 }
 
 export const FEATURES: readonly FeatureDef[] = [
@@ -182,13 +220,27 @@ export const FEATURES: readonly FeatureDef[] = [
     toolsGroup: "secondary",
   },
   {
+    // Named for what the user is looking at, not for what the code checks.
+    // The registry called this "Client Health" while the dialog it opens is
+    // titled "Graphics stack", so someone hunting for their ReShade setup had
+    // to already know the two were the same thing — the likeliest reason the
+    // panel felt buried. `dialogTitle` is unset because the two now agree.
     id: "client-health",
-    label: "Client Health",
-    description: "Check the ESO game client and injected DLLs, and remove what Kalpa placed",
+    label: "Graphics stack",
+    description: "Manage the ReShade and DLSS setup in your ESO game folder",
     icon: Stethoscope,
-    placement: "tools",
-    pinnableToToolbar: false,
+    // Pinnable, but only pinned once there is a stack to manage — see
+    // `pinnedWhen` on FeatureDef for why that is a toolbar-budget decision
+    // rather than a visibility one.
+    placement: "toolbar",
+    pinnableToToolbar: true,
+    ariaLabel: "Graphics stack",
+    tooltip: "Graphics stack",
+    // A permanent Tools row as well as a conditional toolbar button. The two
+    // are not redundant: the header slot comes and goes with `pinnedWhen`, so
+    // the catalog row is the address that does not move.
     toolsGroup: "secondary",
+    pinnedWhen: (ctx) => ctx.graphicsStackDetected,
   },
   {
     id: "shortcuts",
@@ -223,13 +275,22 @@ export function findFeature(id: FeatureId): FeatureDef | undefined {
  * Pure: same inputs -> same output, no reads of settings or DOM. `hidden` is the
  * persisted `toolbarHidden` preference; unknown ids in it are ignored, so a
  * preference written by a newer build cannot break an older one.
+ *
+ * Two different reasons a pinnable feature is absent, and they compose: the user
+ * unpinned it (`hidden`), or it has not earned the slot right now
+ * (`pinnedWhen`). Either way it falls through to the Settings > Tools catalog
+ * rather than out of the app — `toolsMenuFeatures` derives its list from this
+ * one, so the two surfaces cannot disagree about what is pinned.
  */
 export function visibleToolbar(
   features: readonly FeatureDef[],
-  hidden: readonly FeatureId[]
+  hidden: readonly FeatureId[],
+  ctx: FeatureContext
 ): FeatureDef[] {
   const hiddenSet = new Set<string>(hidden);
-  return features.filter((f) => f.pinnableToToolbar && !hiddenSet.has(f.id));
+  return features.filter(
+    (f) => f.pinnableToToolbar && !hiddenSet.has(f.id) && (f.pinnedWhen?.(ctx) ?? true)
+  );
 }
 
 /**
@@ -245,7 +306,11 @@ export function toolsMenuFeatures(
   hidden: readonly FeatureId[],
   ctx: FeatureContext
 ): FeatureDef[] {
-  const pinned = new Set(visibleToolbar(features, hidden).map((f) => f.id));
+  // Derived from `visibleToolbar` rather than re-deriving "is it pinned?" here,
+  // so a feature held back by `pinnedWhen` lands in this catalog automatically.
+  // Two copies of that rule would be two chances for the toolbar and this list
+  // to disagree about the same feature — which is how they drifted apart before.
+  const pinned = new Set(visibleToolbar(features, hidden, ctx).map((f) => f.id));
   return features.filter((f) => !pinned.has(f.id) && (f.visibleWhen?.(ctx) ?? true));
 }
 
