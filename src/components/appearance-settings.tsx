@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { Check, Plus, ClipboardPaste, Pencil, CopyPlus, Bug, MessageCircle } from "lucide-react";
@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
-import { invokeResult } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeResult, type TauriResult } from "@/lib/tauri";
 import { ambientAnimationsEnabled, setAmbientAnimations } from "@/lib/ambient-animations";
 import { FEATURES, type FeatureId } from "@/lib/features";
 import {
@@ -94,15 +94,35 @@ export function AppearanceSettings({
   // check is async (a Tauri round trip), so the row disables itself while in
   // flight to avoid a second click racing the first.
   const [checkingLogUpload, setCheckingLogUpload] = useState(false);
+  const logUploadCheckInFlight = useRef(false);
 
   const pinnableFeatures = useMemo(() => FEATURES.filter((f) => f.pinnableToToolbar), []);
 
   const handleToolbarPinChange = async (id: FeatureId, pinned: boolean) => {
     if (!pinned && id === "log-upload") {
+      // The checkbox is disabled after the first render, but keep the guard in
+      // the handler too: an already queued DOM event must not create a second
+      // safety check that can race the first one.
+      if (logUploadCheckInFlight.current) return;
+      logUploadCheckInFlight.current = true;
       setCheckingLogUpload(true);
       try {
-        const liveActive = await invokeResult<boolean>("uploader_live_active");
-        if (liveActive.ok && liveActive.data) {
+        let liveActive: TauriResult<boolean>;
+        try {
+          liveActive = await invokeResult<boolean>("uploader_live_active");
+        } catch (error) {
+          toast.error("Couldn't verify live log upload status.", {
+            description: getTauriErrorMessage(error),
+          });
+          return;
+        }
+        if (!liveActive.ok) {
+          toast.error("Couldn't verify live log upload status.", {
+            description: liveActive.error,
+          });
+          return;
+        }
+        if (liveActive.data) {
           toast.error("A live log upload is running.", {
             description:
               "Stop live logging (or let the session finish) before moving the uploader out of the toolbar.",
@@ -110,6 +130,7 @@ export function AppearanceSettings({
           return;
         }
       } finally {
+        logUploadCheckInFlight.current = false;
         setCheckingLogUpload(false);
       }
     }

@@ -411,74 +411,70 @@ pub async fn reapply_client_runtimes(
     let backup_root = crate::client_backup::backup_root(&app)?;
 
     tokio::task::spawn_blocking(move || {
-        let client_root = root.path();
-        let manifest = crate::client_backup::load_manifest_at(&manifest_path);
-        let managed = manifest
-            .installs
-            .get(&crate::client_backup::install_key(client_root))
-            .cloned()
-            .unwrap_or_default();
-        // Recomputed fresh, never trusted from the caller: a report built
-        // minutes ago describes a folder that may have changed, and only a
-        // path that is *currently* recoverable may be re-applied.
-        let report = inspect_runtimes(&managed, &backup_root, client_root);
-        let plan = plan_reapply(&report, &relative_paths);
+        crate::client_backup::run_managed_transaction_in(
+            &manifest_path,
+            &backup_root,
+            &root,
+            |transaction| {
+                let client_root = transaction.client_root();
+                let manifest = transaction.load_manifest();
+                let managed = manifest
+                    .installs
+                    .get(&crate::client_backup::install_key(client_root))
+                    .cloned()
+                    .unwrap_or_default();
+                // Recomputed fresh while the transaction is held: a report
+                // built minutes ago describes a folder that may have changed.
+                let report = inspect_runtimes(&managed, &backup_root, client_root);
+                let plan = plan_reapply(&report, &relative_paths);
+                let mut outcome = ReapplyOutcome {
+                    restored: Vec::new(),
+                    skipped: Vec::new(),
+                };
 
-        let mut outcome = ReapplyOutcome {
-            restored: Vec::new(),
-            skipped: Vec::new(),
-        };
-
-        for step in plan {
-            let Some(kind) = managed
-                .iter()
-                .find(|file| file.relative_path == step.relative_path)
-                .map(|file| file.kind)
-            else {
-                outcome
-                    .skipped
-                    .push(format!("{}: no longer a managed file", step.relative_path));
-                continue;
-            };
-
-            let source =
-                match kept_copy_path(&backup_root, &step.kept_backup_id, &step.relative_path) {
-                    Ok(path) => path,
-                    Err(error) => {
+                for step in plan {
+                    let Some(kind) = managed
+                        .iter()
+                        .find(|file| file.relative_path == step.relative_path)
+                        .map(|file| file.kind)
+                    else {
                         outcome
                             .skipped
-                            .push(format!("{}: {error}", step.relative_path));
+                            .push(format!("{}: no longer a managed file", step.relative_path));
+                        continue;
+                    };
+                    let source = match kept_copy_path(
+                        &backup_root,
+                        &step.kept_backup_id,
+                        &step.relative_path,
+                    ) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            outcome
+                                .skipped
+                                .push(format!("{}: {error}", step.relative_path));
+                            continue;
+                        }
+                    };
+                    if !source.is_file() {
+                        outcome.skipped.push(format!(
+                            "{}: the kept copy is no longer on disk",
+                            step.relative_path
+                        ));
                         continue;
                     }
-                };
-            if !source.is_file() {
-                outcome.skipped.push(format!(
-                    "{}: the kept copy is no longer on disk",
-                    step.relative_path
-                ));
-                continue;
-            }
 
-            // Best-effort: one unreadable kept copy must not abandon the rest
-            // of the batch. `edit_managed_file_from` preserves the entry's
-            // origin (Adopted), so re-applying never re-records the user's own
-            // runtime as something Kalpa placed.
-            match crate::client_backup::edit_managed_file_from_in(
-                &manifest_path,
-                &backup_root,
-                &root,
-                &step.relative_path,
-                kind,
-                &source,
-            ) {
-                Ok(_) => outcome.restored.push(step.relative_path),
-                Err(error) => outcome
-                    .skipped
-                    .push(format!("{}: {error}", step.relative_path)),
-            }
-        }
+                    match transaction.edit_file_from(&step.relative_path, kind, &source) {
+                        Ok(_) => outcome.restored.push(step.relative_path),
+                        Err(error) => outcome
+                            .skipped
+                            .push(format!("{}: {error}", step.relative_path)),
+                    }
+                }
 
-        Ok(outcome)
+                Ok(outcome)
+            },
+        )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -535,9 +531,7 @@ mod tests {
         /// Adopt the current shape of the client folder, matching what
         /// `client_adopt::adopt_in` writes for a real stack.
         fn adopt(&self) {
-            let stack = crate::client_stack::inspect_stack(&self.client);
-            let plan = crate::client_adopt::plan_adoption_for(&stack, false);
-            crate::client_adopt::adopt_in(&self.manifest, &self.backups, &self.root(), &plan, true)
+            crate::client_adopt::adopt_in(&self.manifest, &self.backups, &self.root(), true)
                 .expect("adoption should succeed");
         }
 
@@ -729,9 +723,7 @@ mod tests {
     fn drift_with_no_kept_copy_is_unrecoverable_and_unplannable() {
         let h = Harness::new();
         // Adopt without keeping copies.
-        let stack = h.stack();
-        let plan = crate::client_adopt::plan_adoption_for(&stack, false);
-        crate::client_adopt::adopt_in(&h.manifest, &h.backups, &h.root(), &plan, false)
+        crate::client_adopt::adopt_in(&h.manifest, &h.backups, &h.root(), false)
             .expect("adoption should succeed");
 
         std::fs::write(h.client.join("nvngx_dlss.dll"), "eso's own 2.2.16").unwrap();

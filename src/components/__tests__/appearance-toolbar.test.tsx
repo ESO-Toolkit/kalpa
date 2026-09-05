@@ -1,16 +1,17 @@
 import type * as React from "react";
 import { useCallback, useRef, useState } from "react";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FeatureId } from "@/lib/features";
+import type { TauriResult } from "@/lib/tauri";
 import { AppearanceSettings } from "../appearance-settings";
 
 const mocks = vi.hoisted(() => ({
   getSetting: vi.fn(async (_key: string, fallback: unknown) => fallback),
   setSetting: vi.fn(async () => {}),
-  invokeResult: vi.fn(async () => ({ ok: true, data: false })),
+  invokeResult: vi.fn(async (): Promise<TauriResult<boolean>> => ({ ok: true, data: false })),
   toastError: vi.fn(),
 }));
 
@@ -182,6 +183,59 @@ describe("Settings > Appearance > Toolbar", () => {
     // The preference must be untouched, not merely re-rendered as checked.
     expect(onApplied).not.toHaveBeenCalled();
     expect(within(featureRow("Log Uploader")).queryByText("In Settings › Tools")).toBeNull();
+  });
+
+  it("keeps the uploader pinned when the live-session check returns an error", async () => {
+    mocks.invokeResult.mockResolvedValue({ ok: false, error: "IPC unavailable" });
+    const onApplied = vi.fn();
+    const user = userEvent.setup();
+    render(<ToolbarOwner onApplied={onApplied} />);
+
+    await user.click(featureCheckbox("Log Uploader"));
+
+    expect(onApplied).not.toHaveBeenCalled();
+    expect(mocks.toastError).toHaveBeenCalledWith("Couldn't verify live log upload status.", {
+      description: "IPC unavailable",
+    });
+    expect(within(featureRow("Log Uploader")).queryByText("In Settings › Tools")).toBeNull();
+  });
+
+  it("keeps the uploader pinned when the live-session check rejects", async () => {
+    mocks.invokeResult.mockRejectedValue(new Error("bridge disconnected"));
+    const onApplied = vi.fn();
+    const user = userEvent.setup();
+    render(<ToolbarOwner onApplied={onApplied} />);
+
+    await user.click(featureCheckbox("Log Uploader"));
+
+    expect(onApplied).not.toHaveBeenCalled();
+    expect(mocks.toastError).toHaveBeenCalledWith("Couldn't verify live log upload status.", {
+      description: "bridge disconnected",
+    });
+    expect(within(featureRow("Log Uploader")).queryByText("In Settings › Tools")).toBeNull();
+  });
+
+  it("coalesces concurrent uploader unpin attempts while status is unknown", async () => {
+    let resolveLiveCheck: (value: { ok: true; data: boolean }) => void = () => {};
+    mocks.invokeResult.mockReturnValue(
+      new Promise((resolve) => {
+        resolveLiveCheck = resolve;
+      })
+    );
+    const onApplied = vi.fn();
+    render(<ToolbarOwner onApplied={onApplied} />);
+
+    const checkbox = featureCheckbox("Log Uploader");
+    fireEvent.click(checkbox);
+    fireEvent.click(checkbox);
+    expect(mocks.invokeResult).toHaveBeenCalledExactlyOnceWith("uploader_live_active");
+    expect(onApplied).not.toHaveBeenCalled();
+
+    resolveLiveCheck({ ok: true, data: false });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onApplied).toHaveBeenCalledExactlyOnceWith(["log-upload"]);
   });
 
   it("does not lose a toggle made while the uploader's live check is in flight", async () => {

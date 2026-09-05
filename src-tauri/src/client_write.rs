@@ -41,15 +41,13 @@
 //! to name a client directory to `client_backup::apply_placements` or
 //! `client_backup::revert_placements` is to have gone through every gate here.
 //!
-//! That alone would still only prove the game was idle *at some point*, which
-//! is the weaker claim — a caller can pass every gate, download for five
-//! minutes, and place files into a directory the client has since opened. So
-//! the token also carries the running check itself, and the placement path
-//! calls [`ApprovedRoot::reassert_idle`] from inside its own critical section,
-//! immediately before it touches the filesystem. The check is an injected
-//! closure rather than a direct call so tests can drive both answers, and so
-//! "the client started mid-batch" is a case with coverage rather than a
-//! comment.
+//! That alone would still only prove the mutable gates held *at some point*: a
+//! caller can pass them, wait behind another transaction, and then write after
+//! the user selected a different installation or the client started. The token
+//! therefore carries both checks and the transaction path calls
+//! [`ApprovedRoot::reassert_write_allowed`] from inside its critical section,
+//! immediately before it touches the filesystem. The checks are injected
+//! closures so tests can drive each stale-token case deterministically.
 //!
 //! # Reversibility
 //!
@@ -78,13 +76,19 @@ pub struct ApprovedClientPath {
     pub canonical: PathBuf,
 }
 
+#[derive(Debug, Default)]
+struct GameInstallApproval {
+    current: Option<ApprovedClientPath>,
+    generation: u64,
+}
+
 /// Managed state holding the single approved client directory, mirroring
 /// `AllowedAddonsPath`. `None` until the user approves one this session.
-pub struct AllowedGameInstallPath(pub Mutex<Option<ApprovedClientPath>>);
+pub struct AllowedGameInstallPath(Arc<Mutex<GameInstallApproval>>);
 
 impl AllowedGameInstallPath {
     pub fn new() -> Self {
-        Self(Mutex::new(None))
+        Self(Arc::new(Mutex::new(GameInstallApproval::default())))
     }
 }
 
@@ -410,12 +414,19 @@ pub fn require_allowed_client_path(
     state: &tauri::State<'_, AllowedGameInstallPath>,
     client_dir: &str,
 ) -> Result<PathBuf, String> {
+    resolve_allowed_client_path(state, client_dir).map(|(configured, _, _)| configured)
+}
+
+fn resolve_allowed_client_path(
+    state: &AllowedGameInstallPath,
+    client_dir: &str,
+) -> Result<(PathBuf, PathBuf, u64), String> {
     let location = validate_client_dir(Path::new(client_dir))?;
     let canonical = dunce::canonicalize(&location.client_dir)
         .map_err(|e| format!("Could not resolve the client folder: {e}"))?;
 
     let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
-    let Some(approved) = &*guard else {
+    let Some(approved) = &guard.current else {
         return Err(
             "No ESO client folder has been approved for changes in this session.".to_string(),
         );
@@ -423,7 +434,11 @@ pub fn require_allowed_client_path(
     if canonical != approved.canonical {
         return Err("Client folder does not match the approved folder.".to_string());
     }
-    Ok(approved.configured.clone())
+    Ok((
+        approved.configured.clone(),
+        approved.canonical.clone(),
+        guard.generation,
+    ))
 }
 
 /// Refuse client writes while the e2e sandbox override is active.
@@ -449,6 +464,7 @@ fn refuse_under_sandbox() -> Result<(), String> {
 /// Injected into [`ApprovedRoot`] rather than called directly so the
 /// client-started-mid-batch path is testable without a running game.
 pub type ClientActiveCheck = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
+type WriteAuthorityCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// The message shown whenever gate 4 refuses. One constant so the initial
 /// check and every re-assertion say the same thing.
@@ -457,7 +473,7 @@ const CLIENT_ACTIVE_MESSAGE: &str =
      client files — the launcher's patcher writes to this folder too.";
 
 /// Proof that a client directory passed every gate in this module, and the
-/// means to re-prove the one gate that can go stale.
+/// means to re-prove every gate that can go stale.
 ///
 /// This is the capability token for client-directory writes. Its fields are
 /// private and [`begin_write`] is its only non-test constructor, so a function
@@ -465,12 +481,11 @@ const CLIENT_ACTIVE_MESSAGE: &str =
 /// of the token *is* the evidence that the sandbox check, the approved-root
 /// check and the running check all ran.
 ///
-/// Three of the four gates are stable once checked — the approved root does not
-/// move, containment and filename policy are properties of the paths, and the
-/// sandbox override does not appear mid-session. The running check is the one
-/// that decays, because minting a token and placing files are separated by a
-/// download. So the token keeps the check rather than the answer, and the
-/// placement re-runs it via [`reassert_idle`](Self::reassert_idle).
+/// Containment and filename policy are stable properties of paths, and the
+/// sandbox override does not appear mid-session. Approval and client-idle state
+/// can both decay while a token waits, so the token keeps the checks rather
+/// than their answers and the transaction re-runs them via
+/// [`reassert_write_allowed`](Self::reassert_write_allowed).
 ///
 /// Cloning is deliberately allowed: a clone re-checks like the original, so it
 /// carries no stale authority.
@@ -478,6 +493,7 @@ const CLIENT_ACTIVE_MESSAGE: &str =
 pub struct ApprovedRoot {
     root: PathBuf,
     is_client_active: ClientActiveCheck,
+    is_authority_current: WriteAuthorityCheck,
 }
 
 impl std::fmt::Debug for ApprovedRoot {
@@ -508,6 +524,17 @@ impl ApprovedRoot {
         Ok(())
     }
 
+    /// Re-prove that the approval which minted this token is still current.
+    pub fn reassert_authority(&self) -> Result<(), String> {
+        (self.is_authority_current)()
+    }
+
+    /// Re-run every gate that can change after this token is minted.
+    pub fn reassert_write_allowed(&self) -> Result<(), String> {
+        self.reassert_authority()?;
+        self.reassert_idle()
+    }
+
     /// Mint a token with an arbitrary root and running check.
     ///
     /// Test-only, and `#[cfg(test)]` rather than `#[doc(hidden)]` on purpose:
@@ -519,6 +546,19 @@ impl ApprovedRoot {
         Self {
             root,
             is_client_active,
+            is_authority_current: Arc::new(|| Ok(())),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_tests_with_authority(
+        root: PathBuf,
+        is_authority_current: WriteAuthorityCheck,
+    ) -> Self {
+        Self {
+            root,
+            is_client_active: Arc::new(|| Ok(false)),
+            is_authority_current,
         }
     }
 
@@ -541,7 +581,27 @@ pub async fn begin_write(
     client_dir: &str,
 ) -> Result<ApprovedRoot, String> {
     refuse_under_sandbox()?;
-    let root = require_allowed_client_path(state, client_dir)?;
+    let (root, canonical, generation) = resolve_allowed_client_path(state, client_dir)?;
+    let approval = Arc::clone(&state.0);
+    let authority_root = root.clone();
+    let is_authority_current: WriteAuthorityCheck = Arc::new(move || {
+        let current_canonical = dunce::canonicalize(&authority_root)
+            .map_err(|e| format!("The approved client folder is no longer available: {e}"))?;
+        let guard = approval.lock().map_err(|_| "Internal error.".to_string())?;
+        let Some(current) = &guard.current else {
+            return Err("Write access to this client folder has been revoked.".to_string());
+        };
+        if guard.generation != generation
+            || current.canonical != canonical
+            || current_canonical != canonical
+        {
+            return Err(
+                "The approved client folder changed while this operation was waiting. Try again."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    });
     // Deliberately the launcher-aware check, not `is_eso_running`. The ZOS
     // launcher's patcher rewrites files in the client directory during a game
     // update or a Repair — including `nvngx_dlss.dll` — so writing while it is
@@ -552,12 +612,13 @@ pub async fn begin_write(
     let approved = ApprovedRoot {
         root,
         is_client_active: Arc::new(crate::commands::is_eso_or_launcher_running_blocking),
+        is_authority_current,
     };
     // The first assertion goes to the blocking pool because `begin_write` is
     // called from async command handlers; later re-assertions are synchronous
     // because they happen inside placement work that is already blocking.
     let probe = approved.clone();
-    tokio::task::spawn_blocking(move || probe.reassert_idle())
+    tokio::task::spawn_blocking(move || probe.reassert_write_allowed())
         .await
         .map_err(|e| format!("Task failed: {e}"))??;
     Ok(approved)
@@ -578,7 +639,8 @@ pub fn set_game_install_path(
     let canonical = dunce::canonicalize(&location.client_dir)
         .map_err(|e| format!("Could not resolve the client folder: {e}"))?;
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
-    *guard = Some(ApprovedClientPath {
+    guard.generation = guard.generation.wrapping_add(1);
+    guard.current = Some(ApprovedClientPath {
         configured: location.client_dir.clone(),
         canonical,
     });
@@ -591,7 +653,8 @@ pub fn clear_game_install_path(
     state: tauri::State<'_, AllowedGameInstallPath>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
-    *guard = None;
+    guard.generation = guard.generation.wrapping_add(1);
+    guard.current = None;
     Ok(())
 }
 

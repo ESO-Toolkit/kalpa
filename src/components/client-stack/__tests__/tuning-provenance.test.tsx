@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TuningPanel } from "../tuning-panel";
+import type { StackMutationCoordinator, StackMutationResult } from "../panel-props";
 import type {
   ActivePath,
   ClientStack,
@@ -121,8 +122,30 @@ function form(active: ActivePath, sections: TuningSection[]): TuningForm {
 
 const STACK = { client_dir: "C:/ESO/game/client" } as ClientStack;
 
+// The panel no longer publishes its own mutation results: the page owns
+// installation identity and re-inspects it before a write is considered
+// committed. This test double just runs the operation inline and reports it
+// committed — none of these tests exercise staleness or busy-state, only
+// what provenance the panel renders, so the coordinator itself stays inert.
+function inertMutation(): StackMutationCoordinator {
+  return {
+    pending: false,
+    pendingLabel: null,
+    async run<T>(
+      _label: string,
+      _clientDir: string,
+      operation: () => Promise<T>
+    ): Promise<StackMutationResult<T>> {
+      const value = await operation();
+      return { status: "committed", value };
+    },
+  };
+}
+
 function renderPanel() {
-  return render(<TuningPanel clientDir="C:/ESO/game/client" stack={STACK} onChanged={vi.fn()} />);
+  return render(
+    <TuningPanel clientDir="C:/ESO/game/client" stack={STACK} mutation={inertMutation()} />
+  );
 }
 
 describe("TuningPanel provenance", () => {

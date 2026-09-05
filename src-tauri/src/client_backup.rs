@@ -47,10 +47,10 @@
 //! path to here by construction.
 //!
 //! Both functions also call
-//! [`reassert_idle`](crate::client_write::ApprovedRoot::reassert_idle) as their
-//! first act inside `MANIFEST_LOCK`, before a single byte moves. The token
-//! proves the client was idle when it was minted; a download can easily put
-//! minutes between that and the write.
+//! [`reassert_write_allowed`](crate::client_write::ApprovedRoot::reassert_write_allowed)
+//! as their first act inside the transaction lock, before a single byte moves.
+//! The token proves approval and client-idle state held when it was minted;
+//! either can change while an operation waits.
 //!
 //! Restore is done by copying the backup *over* the placed file rather than
 //! deleting and then copying. A half-failed overwrite leaves wrong bytes; a
@@ -68,7 +68,7 @@ use crate::client_write::{ApprovedRoot, FileOrigin, ManagedFile, ManagedKind, Ma
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Serializes every manifest read-modify-write sequence in this module.
@@ -84,21 +84,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// [`prune_unreferenced_backups`] eventually deletes the user's displaced
 /// original out from under them.
 ///
-/// This is module-level rather than Tauri-managed state (the pattern used
-/// elsewhere in this codebase, see `MetadataLock` in `lib.rs`) because this
-/// module may only be edited in isolation from `lib.rs` and `commands.rs`
-/// while this fix lands; a `static Mutex` gives the same process-wide
-/// exclusion without threading a new managed value through the app builder
-/// or any command signature.
-///
-/// **Known limit**: this is a single process's lock. It does nothing to
-/// protect a client directory against two separate Kalpa processes (two app
-/// windows, or a stray second instance) racing the same manifest file. That
-/// is a pre-existing gap this change does not attempt to close.
+/// The mutex handles threads in this process. Every acquisition also takes an
+/// OS-backed lock next to the manifest, so a second Kalpa process cannot enter
+/// the same transaction. The coordination file is persistent: its existence
+/// does not imply ownership, stale files are never guessed at or deleted, and
+/// the kernel releases ownership automatically when a process exits or crashes.
 static MANIFEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// Take the process-wide manifest lock, recovering from poisoning instead of
-/// propagating it.
+/// One manifest transaction guard. Field order is intentional: release the OS
+/// lock before publishing the local mutex as available to another thread.
+struct ManifestGuard {
+    _os: crate::transaction_lock::LockGuard,
+    _local: MutexGuard<'static, ()>,
+}
+
+/// Take both layers of the manifest lock, recovering the local mutex from
+/// poisoning instead of propagating it.
 ///
 /// The data this lock protects is a file on disk, re-read fresh from disk on
 /// every acquisition — there is no in-memory invariant that a panicking
@@ -107,10 +108,19 @@ static MANIFEST_LOCK: Mutex<()> = Mutex::new(());
 /// read-modify-write because of that would brick placement/revert entirely,
 /// which is a worse outcome than proceeding with a guard over a value nobody
 /// actually reads (`()`).
-fn lock_manifest() -> std::sync::MutexGuard<'static, ()> {
-    MANIFEST_LOCK
+fn lock_manifest(manifest_path: &Path) -> Result<ManifestGuard, String> {
+    let local = MANIFEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let os = crate::transaction_lock::acquire(
+        manifest_path,
+        crate::transaction_lock::LockOptions::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ManifestGuard {
+        _os: os,
+        _local: local,
+    })
 }
 
 /// File name of the managed-file manifest inside the app data directory.
@@ -675,7 +685,7 @@ fn apply_placements_in_with(
     placements: Vec<Placement>,
     restore: impl Fn(&Path, &Path) -> std::io::Result<u64>,
 ) -> Result<Vec<ManagedFile>, String> {
-    let _guard = lock_manifest();
+    let _guard = lock_manifest(manifest_path)?;
     apply_placements_in_with_locked(manifest_path, backup_root, root, placements, restore)
 }
 
@@ -694,7 +704,7 @@ fn apply_placements_in_with_locked(
     // is the last point before any byte is written, and it is inside
     // MANIFEST_LOCK, so no concurrent batch can slip a write in between the
     // check and the placement.
-    root.reassert_idle()?;
+    root.reassert_write_allowed()?;
     let client_root = root.path();
 
     let mut placed: Vec<PlacedRecord> = Vec::new();
@@ -821,7 +831,16 @@ pub fn record_adopted(
     client_root: &Path,
     entries: Vec<ManagedFile>,
 ) -> Result<(), String> {
-    let _guard = lock_manifest();
+    let _guard = lock_manifest(manifest_path)?;
+    record_adopted_locked(manifest_path, client_root, entries)
+}
+
+/// Body of [`record_adopted`]; the caller holds both manifest locks.
+fn record_adopted_locked(
+    manifest_path: &Path,
+    client_root: &Path,
+    entries: Vec<ManagedFile>,
+) -> Result<(), String> {
     let mut manifest = load_manifest_at(manifest_path);
     let bucket = manifest
         .installs
@@ -865,7 +884,7 @@ pub struct ForgetOutcome {
 /// alone, because those still describe real writes that uninstall must be able
 /// to reverse.
 pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<ForgetOutcome, String> {
-    let _guard = lock_manifest();
+    let _guard = lock_manifest(manifest_path)?;
     let mut manifest = load_manifest_at(manifest_path);
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get_mut(&key) else {
@@ -972,7 +991,7 @@ pub fn revert_placements_in(
     root: &ApprovedRoot,
     relative_paths: &[String],
 ) -> Result<Vec<String>, String> {
-    let _guard = lock_manifest();
+    let _guard = lock_manifest(manifest_path)?;
     revert_placements_in_locked(manifest_path, backup_root, root, relative_paths)
 }
 
@@ -988,7 +1007,7 @@ fn revert_placements_in_locked(
     // on Windows anyway, but restoring a displaced original under a live
     // client is the case worth refusing: the game would be reading a file
     // mid-rewrite.
-    root.reassert_idle()?;
+    root.reassert_write_allowed()?;
     let client_root = root.path();
 
     let mut manifest = load_manifest_at(manifest_path);
@@ -1001,6 +1020,7 @@ fn revert_placements_in_locked(
     let mut skipped: Vec<String> = Vec::new();
     let mut reverted: Vec<String> = Vec::new();
     let mut emptied_dirs: Vec<PathBuf> = Vec::new();
+    let mut changed: Vec<PlacedRecord> = Vec::new();
 
     for relative in relative_paths {
         let Some(entry) = bucket.iter().find(|file| &file.relative_path == relative) else {
@@ -1036,28 +1056,74 @@ fn revert_placements_in_locked(
         };
 
         if resolved.is_file() {
-            let current = hash_file(&resolved)?;
+            let current = match hash_file(&resolved) {
+                Ok(hash) => hash,
+                Err(error) => {
+                    return Err(rollback_revert_batch(backup_root, &changed, error));
+                }
+            };
             if current != entry.sha256 {
                 // Someone else's bytes. Leave them, and say so.
                 skipped.push(relative.clone());
                 continue;
             }
-            fs::remove_file(&resolved).map_err(|e| format!("Failed to remove {relative}: {e}"))?;
         }
 
-        if let Some(id) = &entry.displaced_backup {
-            let backup = backup_file_path(backup_root, id, relative)?;
-            if backup.is_file() {
+        let original = match &entry.displaced_backup {
+            Some(id) => match backup_file_path(backup_root, id, relative) {
+                Ok(path) if path.is_file() => Some(path),
+                Ok(path) => {
+                    let error = format!(
+                        "Cannot restore {relative}: its backup is missing at {}.",
+                        path.display()
+                    );
+                    return Err(rollback_revert_batch(backup_root, &changed, error));
+                }
+                Err(error) => {
+                    return Err(rollback_revert_batch(backup_root, &changed, error));
+                }
+            },
+            None => None,
+        };
+
+        // Keep the exact pre-revert bytes until the manifest commit succeeds.
+        // This turns every subsequent filesystem or manifest error into a
+        // reversible batch failure instead of a partial uninstall.
+        let snapshot = match backup_existing_in(backup_root, client_root, relative) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(rollback_revert_batch(backup_root, &changed, error)),
+        };
+        changed.push(PlacedRecord {
+            relative_path: relative.clone(),
+            kind: entry.kind,
+            resolved: resolved.clone(),
+            displaced_backup: snapshot,
+        });
+
+        let mutation = (|| -> Result<(), String> {
+            if resolved.is_file() {
+                fs::remove_file(&resolved)
+                    .map_err(|e| format!("Failed to remove {relative}: {e}"))?;
+            }
+            if let Some(backup) = &original {
                 if let Some(parent) = resolved.parent() {
                     fs::create_dir_all(parent)
                         .map_err(|e| format!("Failed to create directory: {e}"))?;
                 }
-                fs::copy(&backup, &resolved)
+                fs::copy(backup, &resolved)
                     .map_err(|e| format!("Failed to restore {relative}: {e}"))?;
             }
-        } else if let Some(parent) = resolved.parent() {
-            // Only a path that left nothing behind can free its directories.
-            collect_ancestors(client_root, parent, &mut emptied_dirs);
+            Ok(())
+        })();
+        if let Err(error) = mutation {
+            return Err(rollback_revert_batch(backup_root, &changed, error));
+        }
+
+        if original.is_none() {
+            if let Some(parent) = resolved.parent() {
+                // Only a path that left nothing behind can free its directories.
+                collect_ancestors(client_root, parent, &mut emptied_dirs);
+            }
         }
 
         reverted.push(relative.clone());
@@ -1070,11 +1136,38 @@ fn revert_placements_in_locked(
                 manifest.installs.remove(&key);
             }
         }
-        save_manifest_at(manifest_path, &manifest)?;
+        if let Err(error) = save_manifest_at(manifest_path, &manifest) {
+            return Err(rollback_revert_batch(backup_root, &changed, error));
+        }
         remove_created_dirs(emptied_dirs);
     }
 
     Ok(skipped)
+}
+
+/// Restore every path changed by a revert whose filesystem or manifest commit
+/// failed. The old manifest is still on disk, so a successful rollback makes
+/// it truthful again; a failed rollback is reported as mixed state and the
+/// snapshots are retained for manual recovery.
+fn rollback_revert_batch(backup_root: &Path, changed: &[PlacedRecord], cause: String) -> String {
+    let failed = roll_back_with(backup_root, changed, Vec::new(), |from, to| {
+        fs::copy(from, to)
+    });
+    if failed.is_empty() {
+        return format!("{cause}\n\nNothing was changed - every earlier revert step was undone.");
+    }
+
+    let affected = failed
+        .iter()
+        .filter_map(|index| changed.get(*index))
+        .map(|record| record.relative_path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{cause}\n\nRollback was incomplete, so the client folder is in a mixed state. \
+         Affected file(s): {affected}. The pre-revert bytes remain in Kalpa's backup folder; \
+         refresh before making another change."
+    )
 }
 
 /// Every directory from `start` up to (but excluding) `client_root`.
@@ -1197,7 +1290,7 @@ pub fn run_planned_file_ops_in(
     root: &ApprovedRoot,
     plan: impl FnOnce() -> Result<Vec<FileOp>, String>,
 ) -> Result<FileOpOutcome, String> {
-    let _guard = lock_manifest();
+    let _guard = lock_manifest(manifest_path)?;
     let ops = plan()?;
     run_file_ops_locked(
         manifest_path,
@@ -1222,7 +1315,7 @@ fn run_file_ops_in_with(
     ops: &[FileOp],
     record: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<FileOpOutcome, String> {
-    let _guard = lock_manifest();
+    let _guard = lock_manifest(manifest_path)?;
     run_file_ops_locked(manifest_path, backup_root, root, ops, record)
 }
 
@@ -1238,7 +1331,7 @@ fn run_file_ops_locked(
     // Gate 4, re-asserted inside the lock and before any byte moves. Renaming
     // the proxy DLL out from under a running client is exactly the case this
     // exists for.
-    root.reassert_idle()?;
+    root.reassert_write_allowed()?;
     let client_root = root.path();
 
     let mut outcome = FileOpOutcome::default();
@@ -1529,6 +1622,108 @@ pub struct EditOutcome {
     pub manifest_updated: bool,
 }
 
+/// A client-stack mutation with authority, process-local exclusion, and the
+/// cross-process manifest lock held for its entire read/plan/write sequence.
+///
+/// Callers may inspect current disk and manifest state through this value, then
+/// perform one or more edits without releasing the transaction in between.
+/// That makes it impossible for two callers to calculate changes from the same
+/// stale `ReShade.ini`, or for adoption/runtime planning to race a file move.
+pub struct ManagedTransaction<'a> {
+    manifest_path: &'a Path,
+    backup_root: &'a Path,
+    root: &'a ApprovedRoot,
+}
+
+impl ManagedTransaction<'_> {
+    pub fn client_root(&self) -> &Path {
+        self.root.path()
+    }
+
+    pub fn load_manifest(&self) -> ManagedManifest {
+        load_manifest_at(self.manifest_path)
+    }
+
+    pub fn edit_file(
+        &mut self,
+        relative_path: &str,
+        kind: ManagedKind,
+        contents: &[u8],
+    ) -> Result<EditOutcome, String> {
+        edit_managed_file_with_locked(
+            self.manifest_path,
+            self.backup_root,
+            self.root,
+            relative_path,
+            kind,
+            |target| {
+                crate::atomic_file::atomic_write(target, contents)
+                    .map_err(|e| format!("Failed to write {}: {e}", target.display()))
+            },
+        )
+    }
+
+    pub fn edit_file_from(
+        &mut self,
+        relative_path: &str,
+        kind: ManagedKind,
+        source: &Path,
+    ) -> Result<EditOutcome, String> {
+        edit_managed_file_with_locked(
+            self.manifest_path,
+            self.backup_root,
+            self.root,
+            relative_path,
+            kind,
+            |target| {
+                let mut reader = fs::File::open(source)
+                    .map_err(|e| format!("Failed to open {}: {e}", source.display()))?;
+                let mut writer = crate::atomic_file::AtomicFile::create(target)
+                    .map_err(|e| format!("Failed to stage {}: {e}", target.display()))?;
+                std::io::copy(&mut reader, &mut writer)
+                    .map_err(|e| format!("Failed to copy into {}: {e}", target.display()))?;
+                writer
+                    .commit()
+                    .map_err(|e| format!("Failed to publish {}: {e}", target.display()))
+            },
+        )
+    }
+
+    pub fn record_adopted(&mut self, entries: Vec<ManagedFile>) -> Result<(), String> {
+        record_adopted_locked(self.manifest_path, self.root.path(), entries)
+    }
+}
+
+/// Run a managed client-stack mutation under one complete transaction.
+pub fn run_managed_transaction<R>(
+    app: &tauri::AppHandle,
+    root: &ApprovedRoot,
+    operation: impl FnOnce(&mut ManagedTransaction<'_>) -> Result<R, String>,
+) -> Result<R, String> {
+    let manifest = manifest_path(app)?;
+    let backups = backup_root(app)?;
+    run_managed_transaction_in(&manifest, &backups, root, operation)
+}
+
+/// Explicit-path form of [`run_managed_transaction`], used by tests and by
+/// commands that already resolved app-data paths before entering a worker.
+pub fn run_managed_transaction_in<R>(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    operation: impl FnOnce(&mut ManagedTransaction<'_>) -> Result<R, String>,
+) -> Result<R, String> {
+    let _guard = lock_manifest(manifest_path)?;
+    // Revalidate approval and game-idle state after both lock layers are held.
+    root.reassert_write_allowed()?;
+    let mut transaction = ManagedTransaction {
+        manifest_path,
+        backup_root,
+        root,
+    };
+    operation(&mut transaction)
+}
+
 /// Rewrite a file that is **already** in the client directory, preserving how
 /// it got there.
 ///
@@ -1644,11 +1839,23 @@ fn edit_managed_file_with(
     kind: ManagedKind,
     write: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<EditOutcome, String> {
-    let _guard = lock_manifest();
+    run_managed_transaction_in(manifest_path, backup_root, root, move |_| {
+        edit_managed_file_with_locked(manifest_path, backup_root, root, relative_path, kind, write)
+    })
+}
 
+/// Body of an in-place edit; the caller holds both manifest locks.
+fn edit_managed_file_with_locked(
+    manifest_path: &Path,
+    backup_root: &Path,
+    root: &ApprovedRoot,
+    relative_path: &str,
+    kind: ManagedKind,
+    write: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<EditOutcome, String> {
     // Gate 4 inside the lock, before anything moves. ReShade rewrites this file
     // on exit, so editing it under a live client is a straight race.
-    root.reassert_idle()?;
+    root.reassert_write_allowed()?;
     let client_root = root.path();
 
     crate::client_write::validate_placement(kind, relative_path)?;
@@ -1674,12 +1881,31 @@ fn edit_managed_file_with(
                 .find(|file| file.relative_path == relative_path)
         })
     {
-        entry.sha256 = hash_file(&target)?;
+        entry.sha256 = match hash_file(&target) {
+            Ok(hash) => hash,
+            Err(error) => {
+                return Err(rollback_edited_file(
+                    backup_root,
+                    &target,
+                    relative_path,
+                    backup_id.as_deref(),
+                    error,
+                ));
+            }
+        };
         entry.placed_at = rfc3339_now();
         manifest_updated = true;
     }
     if manifest_updated {
-        save_manifest_at(manifest_path, &manifest)?;
+        if let Err(error) = save_manifest_at(manifest_path, &manifest) {
+            return Err(rollback_edited_file(
+                backup_root,
+                &target,
+                relative_path,
+                backup_id.as_deref(),
+                error,
+            ));
+        }
     }
 
     Ok(EditOutcome {
@@ -1687,6 +1913,43 @@ fn edit_managed_file_with(
         backup_id,
         manifest_updated,
     })
+}
+
+/// Restore the pre-edit bytes after a post-write failure. The manifest save is
+/// atomic, so a failure there leaves the previous manifest in place; restoring
+/// the file brings disk and manifest back into agreement. If restoration also
+/// fails, report the mixed state and the retained backup explicitly.
+fn rollback_edited_file(
+    backup_root: &Path,
+    target: &Path,
+    relative_path: &str,
+    backup_id: Option<&str>,
+    cause: String,
+) -> String {
+    let Some(backup_id) = backup_id else {
+        return format!(
+            "{cause} The new {relative_path} may be present, and there was no previous file to restore."
+        );
+    };
+
+    let restore = backup_file_path(backup_root, backup_id, relative_path).and_then(|backup| {
+        let mut reader = fs::File::open(&backup)
+            .map_err(|e| format!("Failed to open rollback copy {}: {e}", backup.display()))?;
+        let mut writer = crate::atomic_file::AtomicFile::create(target)
+            .map_err(|e| format!("Failed to stage rollback for {}: {e}", target.display()))?;
+        std::io::copy(&mut reader, &mut writer)
+            .map_err(|e| format!("Failed to restore {}: {e}", target.display()))?;
+        writer
+            .commit()
+            .map_err(|e| format!("Failed to publish rollback for {}: {e}", target.display()))
+    });
+
+    match restore {
+        Ok(()) => format!("{cause} The previous {relative_path} was restored."),
+        Err(rollback_error) => format!(
+            "{cause} Rollback also failed ({rollback_error}). The previous bytes remain in backup {backup_id}; refresh before making another change."
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2042,6 +2305,46 @@ mod tests {
             "directories emptied by the revert should be cleaned up"
         );
         assert!(h.entries().is_empty());
+    }
+
+    #[test]
+    fn revert_rolls_back_earlier_files_when_a_later_backup_is_missing() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-original-dll").expect("seed");
+        h.apply(vec![
+            h.placement("reshade-shaders/Shaders/Bloom.fx", "// bloom"),
+            h.placement("dxgi.dll", "kalpas-new-dll"),
+        ])
+        .expect("placement should succeed");
+
+        let entry = h
+            .entries()
+            .into_iter()
+            .find(|entry| entry.relative_path == "dxgi.dll")
+            .expect("managed injector");
+        let backup = backup_file_path(
+            &h.backups,
+            entry.displaced_backup.as_deref().expect("original backup"),
+            "dxgi.dll",
+        )
+        .expect("backup path");
+        fs::remove_file(backup).expect("simulate missing original backup");
+
+        let error = h
+            .revert(&[
+                "reshade-shaders/Shaders/Bloom.fx".to_string(),
+                "dxgi.dll".to_string(),
+            ])
+            .expect_err("the batch must refuse without the displaced original");
+
+        assert!(error.contains("backup is missing"), "{error}");
+        assert!(
+            error.contains("every earlier revert step was undone"),
+            "{error}"
+        );
+        assert_eq!(h.read("reshade-shaders/Shaders/Bloom.fx"), "// bloom");
+        assert_eq!(h.read("dxgi.dll"), "kalpas-new-dll");
+        assert_eq!(h.entries().len(), 2, "the old manifest remains truthful");
     }
 
     #[test]
@@ -3173,6 +3476,143 @@ mod tests {
         assert_eq!(
             after.sha256,
             hash_file(&h.client.join("ReShade.ini")).unwrap()
+        );
+    }
+
+    /// Preset and tuning commands used to read `ReShade.ini` before taking
+    /// the manifest lock, so two successful read/modify/write operations could
+    /// both transform the same original and the last writer silently erased
+    /// the first. The channels force one transaction to pause after its read
+    /// while the other operation is started; the second read must observe the
+    /// first completed edit.
+    #[test]
+    fn managed_read_modify_write_transactions_lose_no_updates() {
+        let h = EditHarness::new();
+        h.adopt_reshade_ini();
+        let first_root = ApprovedRoot::for_tests_idle(h.client.clone());
+        let second_root = ApprovedRoot::for_tests_idle(h.client.clone());
+        let (first_read_tx, first_read_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| {
+            let manifest = &h.manifest;
+            let backups = &h.backups;
+            let first = scope.spawn(move || {
+                run_managed_transaction_in(manifest, backups, &first_root, |transaction| {
+                    let mut contents =
+                        std::fs::read_to_string(transaction.client_root().join("ReShade.ini"))
+                            .expect("first read");
+                    first_read_tx.send(()).expect("announce first read");
+                    release_rx.recv().expect("release first transaction");
+                    contents.push_str("Preset=A\n");
+                    transaction.edit_file(
+                        "ReShade.ini",
+                        ManagedKind::ReShadeConfig,
+                        contents.as_bytes(),
+                    )
+                })
+            });
+
+            first_read_rx
+                .recv()
+                .expect("first transaction reached read");
+            let manifest = &h.manifest;
+            let backups = &h.backups;
+            let second = scope.spawn(move || {
+                second_started_tx.send(()).expect("announce second attempt");
+                run_managed_transaction_in(manifest, backups, &second_root, |transaction| {
+                    let mut contents =
+                        std::fs::read_to_string(transaction.client_root().join("ReShade.ini"))
+                            .expect("second read");
+                    contents.push_str("Tuning=B\n");
+                    transaction.edit_file(
+                        "ReShade.ini",
+                        ManagedKind::ReShadeConfig,
+                        contents.as_bytes(),
+                    )
+                })
+            });
+
+            second_started_rx.recv().expect("second operation started");
+            release_tx.send(()).expect("let first transaction finish");
+            first
+                .join()
+                .expect("first thread")
+                .expect("first edit succeeds");
+            second
+                .join()
+                .expect("second thread")
+                .expect("second edit succeeds");
+        });
+
+        let contents =
+            std::fs::read_to_string(h.client.join("ReShade.ini")).expect("read final config");
+        assert!(
+            contents.contains("Preset=A"),
+            "first update was lost: {contents}"
+        );
+        assert!(
+            contents.contains("Tuning=B"),
+            "second update was lost: {contents}"
+        );
+        assert_eq!(
+            h.entry().expect("managed entry").sha256,
+            hash_file(&h.client.join("ReShade.ini")).expect("final hash")
+        );
+    }
+
+    /// A token may wait behind another transaction after its installation was
+    /// approved. Revoking that approval while it waits must stop the queued
+    /// closure before it reads or writes the old installation.
+    #[test]
+    fn managed_transaction_revalidates_authority_after_lock_acquisition() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let h = EditHarness::new();
+        h.adopt_reshade_ini();
+        let authority_current = Arc::new(AtomicBool::new(true));
+        let authority_probe = Arc::clone(&authority_current);
+        let root = ApprovedRoot::for_tests_with_authority(
+            h.client.clone(),
+            Arc::new(move || {
+                authority_probe
+                    .load(Ordering::SeqCst)
+                    .then_some(())
+                    .ok_or_else(|| {
+                        "Write access to this client folder has been revoked.".to_string()
+                    })
+            }),
+        );
+        let operation_ran = Arc::new(AtomicBool::new(false));
+        let operation_probe = Arc::clone(&operation_ran);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let guard = lock_manifest(&h.manifest).expect("hold transaction lock");
+
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                started_tx.send(()).expect("announce attempt");
+                run_managed_transaction_in(&h.manifest, &h.backups, &root, |_| {
+                    operation_probe.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            });
+
+            started_rx.recv().expect("operation attempted");
+            authority_current.store(false, Ordering::SeqCst);
+            drop(guard);
+            let error = worker
+                .join()
+                .expect("worker thread")
+                .expect_err("revoked authority must refuse");
+            assert!(error.contains("revoked"), "{error}");
+        });
+
+        assert!(!operation_ran.load(Ordering::SeqCst));
+        assert_eq!(
+            std::fs::read_to_string(h.client.join("ReShade.ini")).expect("read unchanged file"),
+            "[GENERAL]\nOld=1\n"
         );
     }
 

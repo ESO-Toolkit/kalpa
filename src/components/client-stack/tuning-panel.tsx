@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveIcon,
   ChevronDownIcon,
@@ -201,7 +201,7 @@ function groupFields(fields: TuningField[]): { group: TuningGroup; fields: Tunin
  * panel is a recovery tool for when a bad value is blocking the overlay itself,
  * and it is the only place a parked path's settings can be seen at all.
  */
-export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
+export function TuningPanel({ clientDir, mutation }: StackPanelProps) {
   const [form, setForm] = useState<TuningForm | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -213,24 +213,33 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applied, setApplied] = useState(false);
+  const requestToken = useRef(0);
   const [lastBackupId, setLastBackupId] = useState<string | null>(null);
 
-  const load = useCallback(async (dir: string) => {
-    setLoading(true);
-    setLoadError(null);
-    setApplyError(null);
-    setApplied(false);
-    try {
-      const next = await invokeOrThrow<TuningForm>("read_client_tuning", { clientDir: dir });
-      setForm(next);
-      setDraft(buildDraft(allFields(next)));
-    } catch (e) {
-      setForm(null);
-      setLoadError(getTauriErrorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (resetApplied = true): Promise<boolean> => {
+      const token = ++requestToken.current;
+      setLoading(true);
+      setLoadError(null);
+      setApplyError(null);
+      if (resetApplied) setApplied(false);
+      try {
+        const next = await invokeOrThrow<TuningForm>("read_client_tuning", { clientDir });
+        if (requestToken.current !== token) return false;
+        setForm(next);
+        setDraft(buildDraft(allFields(next)));
+        return true;
+      } catch (e) {
+        if (requestToken.current !== token) return false;
+        setForm(null);
+        setLoadError(getTauriErrorMessage(e));
+        return false;
+      } finally {
+        if (requestToken.current === token) setLoading(false);
+      }
+    },
+    [clientDir]
+  );
 
   useEffect(() => {
     // `load` flips the loading flag before its first await, which the rule
@@ -238,9 +247,12 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
     // the spinner has to appear on the same commit `clientDir` changes — and
     // matches the existing pattern in `client-health.tsx`.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load(clientDir);
+    void load();
     setLastBackupId(null);
     setEditorOpen(false);
+    return () => {
+      requestToken.current += 1;
+    };
   }, [clientDir, load]);
 
   const setFieldValue = useCallback((key: string, value: string) => {
@@ -278,25 +290,29 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
 
   const handleApply = useCallback(async () => {
     if (dirtyEdits.length === 0) return;
+    const token = ++requestToken.current;
     setApplying(true);
     setApplyError(null);
     setApplied(false);
     try {
-      await approveClientWrites(clientDir);
-      const outcome = await invokeOrThrow<TuningApplyOutcome>("apply_client_tuning", {
-        clientDir,
-        edits: dirtyEdits,
+      const result = await mutation.run("Applying client tuning", clientDir, async () => {
+        await approveClientWrites(clientDir);
+        return invokeOrThrow<TuningApplyOutcome>("apply_client_tuning", {
+          clientDir,
+          edits: dirtyEdits,
+        });
       });
-      setApplied(true);
-      setLastBackupId(outcome.backup_id);
-      await onChanged();
-      await load(clientDir);
+      if (requestToken.current !== token || result.status !== "committed") return;
+      setLastBackupId(result.value.backup_id);
+      setApplying(false);
+      if (await load(false)) setApplied(true);
     } catch (e) {
+      if (requestToken.current !== token) return;
       setApplyError(getTauriErrorMessage(e));
     } finally {
-      setApplying(false);
+      if (requestToken.current === token) setApplying(false);
     }
-  }, [clientDir, dirtyEdits, load, onChanged]);
+  }, [clientDir, dirtyEdits, load, mutation]);
 
   if (loading) {
     return (
@@ -360,7 +376,7 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
           <div className="flex flex-wrap items-center gap-2">
             <Button
               size="sm"
-              disabled={dirtyEdits.length === 0 || applying}
+              disabled={dirtyEdits.length === 0 || applying || mutation.pending}
               onClick={() => void handleApply()}
             >
               {applying ? (
@@ -376,7 +392,7 @@ export function TuningPanel({ clientDir, onChanged }: StackPanelProps) {
             <Button
               variant="outline"
               size="sm"
-              disabled={dirtyEdits.length === 0 || applying}
+              disabled={dirtyEdits.length === 0 || applying || mutation.pending}
               onClick={handleDiscard}
             >
               Discard changes

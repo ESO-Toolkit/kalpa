@@ -2,8 +2,10 @@
 //!
 //! Every caller follows one order: existing process-local mutex first, then
 //! these OS locks in canonical sorted order, then read/mutate/atomic publish.
-//! Do not acquire a local mutex, perform network/archive/directory-scan work,
-//! or invoke UI/plugin callbacks while an OS guard is alive.
+//! Keep critical sections bounded to local validation and filesystem work; do
+//! not perform network/archive work or invoke UI/plugin callbacks while an OS
+//! guard is alive. A directory scan that supplies the state being mutated must
+//! happen inside the guard, or another mutation can invalidate it before use.
 //!
 //! Lock files are persistent coordination objects. Their bytes and names do
 //! not indicate ownership, they are never deleted as "stale", and process

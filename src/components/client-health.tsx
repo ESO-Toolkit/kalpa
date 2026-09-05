@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   ActivityIcon,
@@ -52,6 +52,10 @@ import {
 import type { Slot } from "@/components/client-stack/slots";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import type {
+  StackMutationCoordinator,
+  StackMutationResult,
+} from "@/components/client-stack/panel-props";
 
 import type {
   AdoptionOutcome,
@@ -374,6 +378,43 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   // refreshed or picked a different install must not overwrite newer state.
   // Bumped by every load entry point.
   const runToken = useRef(0);
+  const selectedDirRef = useRef<string | null>(selectedDir);
+  const openRef = useRef(open);
+  const mountedRef = useRef(true);
+  const mutationId = useRef(0);
+  const pendingMutationRef = useRef<{
+    id: number;
+    clientDir: string;
+    generation: number;
+    label: string;
+  } | null>(null);
+  const [pendingMutation, setPendingMutation] = useState<{
+    id: number;
+    clientDir: string;
+    generation: number;
+    label: string;
+  } | null>(null);
+
+  // Event handlers consult refs so two clicks in the same render cannot both
+  // start, while state mirrors the lock for accessible disabled controls. A
+  // layout effect keeps prop/state mirrors current before any promise
+  // continuation from the committed UI can run.
+  useLayoutEffect(() => {
+    selectedDirRef.current = selectedDir;
+    openRef.current = open;
+  }, [open, selectedDir]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      runToken.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!open) runToken.current += 1;
+  }, [open]);
 
   /** Clears every per-install control latch: rail selection/expand state,
    *  adoption dismissal and its checkbox, and the managed-file confirm/
@@ -496,15 +537,69 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [loadLogs, loadManaged, loadPlan]
   );
 
-  /** Re-read the folder after a management action changed it. Every write in
-   *  the panels below alters what `inspect_client_stack` would report, and the
-   *  rail *is* the inventory, so a stale one is a lie about the user's game. */
-  const reloadInstall = useCallback(async () => {
-    if (!selectedDir) return;
-    await loadInstall(selectedDir, ++runToken.current);
-  }, [loadInstall, selectedDir]);
+  const isCurrentMutation = useCallback(
+    (pending: { id: number; clientDir: string; generation: number }) =>
+      mountedRef.current &&
+      openRef.current &&
+      pendingMutationRef.current?.id === pending.id &&
+      selectedDirRef.current === pending.clientDir &&
+      runToken.current === pending.generation,
+    []
+  );
+
+  /** Serialize all client-stack writes and bind their completion to one
+   * installation generation. The synchronous ref is the lock; React state is
+   * only its UI projection. A successful command is not exposed to a child
+   * until the same installation has been re-inspected. */
+  const runMutation = useCallback(
+    async <T,>(
+      label: string,
+      clientDir: string,
+      operation: () => Promise<T>
+    ): Promise<StackMutationResult<T>> => {
+      if (!mountedRef.current || !openRef.current || selectedDirRef.current !== clientDir) {
+        return { status: "stale" };
+      }
+      if (pendingMutationRef.current) return { status: "busy" };
+
+      const pending = {
+        id: ++mutationId.current,
+        clientDir,
+        generation: runToken.current,
+        label,
+      };
+      pendingMutationRef.current = pending;
+      setPendingMutation(pending);
+
+      try {
+        const value = await operation();
+        if (!isCurrentMutation(pending)) return { status: "stale" };
+
+        // Invalidate every read begun before the write and make the reload the
+        // authoritative generation for this completion.
+        pending.generation = ++runToken.current;
+        await loadInstall(clientDir, pending.generation);
+        if (!isCurrentMutation(pending)) return { status: "stale" };
+        return { status: "committed", value };
+      } finally {
+        if (pendingMutationRef.current?.id === pending.id) {
+          pendingMutationRef.current = null;
+          if (mountedRef.current) setPendingMutation(null);
+        }
+      }
+    },
+    [isCurrentMutation, loadInstall]
+  );
+
+  const mutation: StackMutationCoordinator = {
+    pending: pendingMutation !== null,
+    pendingLabel: pendingMutation?.label ?? null,
+    run: runMutation,
+  };
+  const mutationPending = pendingMutation !== null;
 
   const detect = useCallback(async () => {
+    if (pendingMutationRef.current) return;
     const token = ++runToken.current;
     setDetecting(true);
     setDetectError(null);
@@ -517,12 +612,14 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       if (runToken.current !== token) return;
       setClients(found);
       const first = found[0];
+      selectedDirRef.current = first ? first.client_dir : null;
       setSelectedDir(first ? first.client_dir : null);
       setDetecting(false);
       if (first) await loadInstall(first.client_dir, token);
     } catch (e) {
       if (runToken.current !== token) return;
       setClients([]);
+      selectedDirRef.current = null;
       setSelectedDir(null);
       setDetectError(getTauriErrorMessage(e));
       setDetecting(false);
@@ -557,16 +654,19 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 
   const handleSelect = useCallback(
     (clientDir: string) => {
-      if (clientDir === selectedDir) return;
+      if (pendingMutationRef.current || clientDir === selectedDirRef.current) return;
       const token = ++runToken.current;
+      selectedDirRef.current = clientDir;
       setSelectedDir(clientDir);
       resetInstallUiState();
       void loadInstall(clientDir, token);
     },
-    [loadInstall, resetInstallUiState, selectedDir]
+    [loadInstall, resetInstallUiState]
   );
 
   const handleBrowse = useCallback(async () => {
+    if (pendingMutationRef.current) return;
+    let token: number | null = null;
     setBrowsing(true);
     setBrowseError(null);
     try {
@@ -577,23 +677,31 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         filters: [{ name: "ESO client", extensions: ["exe"] }],
       });
       if (typeof picked !== "string") return;
-      const token = ++runToken.current;
+      if (pendingMutationRef.current) return;
+      token = ++runToken.current;
       const validated = await invokeOrThrow<EsoClientLocation>("validate_eso_client", {
         path: picked,
       });
-      if (runToken.current !== token) return;
+      if (runToken.current !== token || pendingMutationRef.current) return;
       setClients((prev) => {
         const rest = (prev ?? []).filter((c) => c.client_dir !== validated.client_dir);
         return [validated, ...rest];
       });
+      selectedDirRef.current = validated.client_dir;
       setSelectedDir(validated.client_dir);
       setDetectError(null);
       resetInstallUiState();
       await loadInstall(validated.client_dir, token);
     } catch (e) {
+      if (
+        !mountedRef.current ||
+        pendingMutationRef.current ||
+        (token !== null && runToken.current !== token)
+      )
+        return;
       setBrowseError(getTauriErrorMessage(e));
     } finally {
-      setBrowsing(false);
+      if (mountedRef.current) setBrowsing(false);
     }
   }, [loadInstall, resetInstallUiState]);
 
@@ -612,25 +720,25 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 
   const handleAdopt = useCallback(async () => {
     if (!selectedDir) return;
-    const token = runToken.current;
     setAdopting(true);
     setAdoptError(null);
     try {
-      await approveForWrite(selectedDir);
-      await invokeOrThrow<AdoptionOutcome>("adopt_stack", {
-        clientDir: selectedDir,
-        keepCopies,
+      const result = await runMutation("Managing this client stack", selectedDir, async () => {
+        await approveForWrite(selectedDir);
+        return invokeOrThrow<AdoptionOutcome>("adopt_stack", {
+          clientDir: selectedDir,
+          keepCopies,
+        });
       });
-      if (runToken.current !== token) return;
+      if (result.status !== "committed") return;
       setSelection(null);
-      await Promise.all([loadPlan(selectedDir, token), loadManaged(selectedDir, token)]);
     } catch (e) {
-      if (runToken.current !== token) return;
+      if (!mountedRef.current || !openRef.current || selectedDirRef.current !== selectedDir) return;
       setAdoptError(getTauriErrorMessage(e));
     } finally {
-      if (runToken.current === token) setAdopting(false);
+      if (mountedRef.current && selectedDirRef.current === selectedDir) setAdopting(false);
     }
-  }, [approveForWrite, keepCopies, loadManaged, loadPlan, selectedDir]);
+  }, [approveForWrite, keepCopies, runMutation, selectedDir]);
 
   const handleDismissAdoption = useCallback(() => {
     setAdoptionDismissed(true);
@@ -645,24 +753,24 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
    *  so the stack keeps working exactly as it did. */
   const handleForget = useCallback(async () => {
     if (!selectedDir) return;
-    const token = runToken.current;
     setForgetting(true);
     setForgetError(null);
     try {
-      await invokeOrThrow<ForgetOutcome>("forget_stack", { clientDir: selectedDir });
-      if (runToken.current !== token) return;
+      const result = await runMutation("Forgetting this managed stack", selectedDir, () =>
+        invokeOrThrow<ForgetOutcome>("forget_stack", { clientDir: selectedDir })
+      );
+      if (result.status !== "committed") return;
       setForgetConfirming(false);
       // Re-listing is what flips the panel back to the unmanaged view, so the
       // adoption card must be offerable again rather than staying dismissed.
       setAdoptionDismissed(false);
-      await Promise.all([loadPlan(selectedDir, token), loadManaged(selectedDir, token)]);
     } catch (e) {
-      if (runToken.current !== token) return;
+      if (!mountedRef.current || !openRef.current || selectedDirRef.current !== selectedDir) return;
       setForgetError(getTauriErrorMessage(e));
     } finally {
-      if (runToken.current === token) setForgetting(false);
+      if (mountedRef.current && selectedDirRef.current === selectedDir) setForgetting(false);
     }
-  }, [loadManaged, loadPlan, selectedDir]);
+  }, [runMutation, selectedDir]);
 
   const handleToggleSelect = useCallback((relativePath: string) => {
     setSelectedPaths((prev) => {
@@ -693,56 +801,62 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   const handleConfirmRemove = useCallback(
     async (paths: string[]) => {
       if (!selectedDir || paths.length === 0) return;
-      const token = runToken.current;
       setRemoving(true);
       setRemoveError(null);
       try {
-        await approveForWrite(selectedDir);
-        const outcome = await invokeOrThrow<UninstallOutcome>("uninstall_managed_client_files", {
-          clientDir: selectedDir,
-          relativePaths: paths,
+        const result = await runMutation("Removing managed client files", selectedDir, async () => {
+          await approveForWrite(selectedDir);
+          return invokeOrThrow<UninstallOutcome>("uninstall_managed_client_files", {
+            clientDir: selectedDir,
+            relativePaths: paths,
+          });
         });
-        if (runToken.current !== token) return;
-        setRemoveOutcome(outcome);
+        if (result.status !== "committed") return;
+        setRemoveOutcome(result.value);
         setRemoveMode(null);
         setSelectedPaths(new Set());
-        await loadManaged(selectedDir, token);
       } catch (e) {
-        if (runToken.current !== token) return;
+        if (!mountedRef.current || !openRef.current || selectedDirRef.current !== selectedDir)
+          return;
         setRemoveError(getTauriErrorMessage(e));
       } finally {
-        if (runToken.current === token) setRemoving(false);
+        if (mountedRef.current && selectedDirRef.current === selectedDir) setRemoving(false);
       }
     },
-    [approveForWrite, loadManaged, selectedDir]
+    [approveForWrite, runMutation, selectedDir]
   );
 
   const handleEmergencyRemove = useCallback(
     async (fileName: string) => {
       if (!selectedDir) return;
-      const token = runToken.current;
       setEmergencyBusy(true);
       setEmergencyError(null);
       try {
-        await approveForWrite(selectedDir);
-        const result = await invokeOrThrow<EmergencyRemoval>("emergency_remove_injector", {
-          clientDir: selectedDir,
-          fileName,
-          confirmation: emergencyConfirmInput,
-        });
-        if (runToken.current !== token) return;
-        setEmergencyResult(result);
+        const result = await runMutation(
+          "Removing an unmanaged injector",
+          selectedDir,
+          async () => {
+            await approveForWrite(selectedDir);
+            return invokeOrThrow<EmergencyRemoval>("emergency_remove_injector", {
+              clientDir: selectedDir,
+              fileName,
+              confirmation: emergencyConfirmInput,
+            });
+          }
+        );
+        if (result.status !== "committed") return;
+        setEmergencyResult(result.value);
         setEmergencyTarget(null);
         setEmergencyConfirmInput("");
-        await loadManaged(selectedDir, token);
       } catch (e) {
-        if (runToken.current !== token) return;
+        if (!mountedRef.current || !openRef.current || selectedDirRef.current !== selectedDir)
+          return;
         setEmergencyError(getTauriErrorMessage(e));
       } finally {
-        if (runToken.current === token) setEmergencyBusy(false);
+        if (mountedRef.current && selectedDirRef.current === selectedDir) setEmergencyBusy(false);
       }
     },
-    [approveForWrite, emergencyConfirmInput, loadManaged, selectedDir]
+    [approveForWrite, emergencyConfirmInput, runMutation, selectedDir]
   );
 
   const effectiveSelection = useMemo(
@@ -783,11 +897,17 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     [attentionCount, logEvidence]
   );
 
-  const busy = detecting || stackLoading;
+  const busy = detecting || stackLoading || browsing || mutationPending;
+  const handleClose = useCallback(() => {
+    if (!pendingMutationRef.current) onClose();
+  }, [onClose]);
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="flex h-[calc(100dvh-2rem)] max-h-[760px] flex-col gap-0 sm:max-w-5xl">
+    <Dialog open={open} onOpenChange={(next) => !next && handleClose()}>
+      <DialogContent
+        className="flex h-[calc(100dvh-2rem)] flex-col gap-0 sm:max-w-5xl"
+        showCloseButton={!mutationPending}
+      >
         {/* One header row instead of three stacked ones.
 
             The panel used to spend 184px before any content appeared: a
@@ -808,6 +928,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   // could cost 128px on its own. A select costs 24.
                   <Select
                     value={selectedDir ?? undefined}
+                    disabled={browsing || mutationPending}
                     onValueChange={(next) => next && handleSelect(next)}
                   >
                     <SelectTrigger size="sm" className="h-6 w-auto max-w-[220px] gap-1 text-xs">
@@ -841,7 +962,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
                   variant="ghost"
                   size="xs"
                   className="shrink-0"
-                  disabled={browsing}
+                  disabled={browsing || mutationPending}
                   onClick={() => void handleBrowse()}
                 >
                   {browsing ? <Spinner className="size-3.5" /> : <SearchIcon />}
@@ -890,6 +1011,15 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
             scrolling here would put the rail and the pane back in one
             scrollport, which is the bug this replaced. */}
         <div className="flex min-h-0 flex-1 flex-col gap-3 pt-3">
+          {mutationPending && (
+            <div
+              className="flex shrink-0 items-center gap-2 rounded-lg border border-status-info/20 bg-status-info/[0.04] px-3 py-2 text-xs text-muted-foreground"
+              role="status"
+            >
+              <Spinner className="size-3.5" />
+              <span>{pendingMutation?.label}… Client controls are temporarily locked.</span>
+            </div>
+          )}
           {detecting && (
             <div className="flex items-center gap-3 py-10 text-sm text-muted-foreground">
               <Spinner />
@@ -947,56 +1077,58 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
               )}
 
               {!stackLoading && !stackError && stack && !stack.is_empty && (
-                <StackBody
-                  stack={stack}
-                  plan={plan}
-                  planLoading={planLoading}
-                  planError={planError}
-                  effectiveSelection={effectiveSelection}
-                  onSelect={(key) => setSelection(key)}
-                  keepCopies={keepCopies}
-                  onToggleKeepCopies={() => setKeepCopies((v) => !v)}
-                  adopting={adopting}
-                  adoptError={adoptError}
-                  onAdopt={() => void handleAdopt()}
-                  onDismissAdoption={handleDismissAdoption}
-                  managedLoading={managedLoading}
-                  managedError={managedError}
-                  managedInventory={managedInventory}
-                  logEvidence={logEvidence}
-                  hideEmergency={hideEmergency}
-                  isManaged={Boolean(plan?.already_managed)}
-                  forgetConfirming={forgetConfirming}
-                  forgetting={forgetting}
-                  forgetError={forgetError}
-                  onRequestForget={() => setForgetConfirming(true)}
-                  onCancelForget={() => setForgetConfirming(false)}
-                  onConfirmForget={() => void handleForget()}
-                  selectedPaths={selectedPaths}
-                  onToggleSelect={handleToggleSelect}
-                  removeMode={removeMode}
-                  removing={removing}
-                  removeOutcome={removeOutcome}
-                  removeError={removeError}
-                  onRequestRemove={handleRequestRemove}
-                  onCancelRemove={handleCancelRemove}
-                  onConfirmRemove={handleConfirmRemove}
-                  emergencyOpen={emergencyOpen}
-                  onToggleEmergencyOpen={() => setEmergencyOpen((v) => !v)}
-                  emergencyTarget={emergencyTarget}
-                  onSetEmergencyTarget={(name) => {
-                    setEmergencyTarget(name);
-                    setEmergencyConfirmInput("");
-                    setEmergencyError(null);
-                  }}
-                  emergencyConfirmInput={emergencyConfirmInput}
-                  onEmergencyConfirmInputChange={setEmergencyConfirmInput}
-                  emergencyBusy={emergencyBusy}
-                  emergencyError={emergencyError}
-                  emergencyResult={emergencyResult}
-                  onEmergencyRemove={handleEmergencyRemove}
-                  onStackChanged={reloadInstall}
-                />
+                <fieldset disabled={mutationPending || browsing} className="contents">
+                  <StackBody
+                    stack={stack}
+                    plan={plan}
+                    planLoading={planLoading}
+                    planError={planError}
+                    effectiveSelection={effectiveSelection}
+                    onSelect={(key) => setSelection(key)}
+                    keepCopies={keepCopies}
+                    onToggleKeepCopies={() => setKeepCopies((v) => !v)}
+                    adopting={adopting}
+                    adoptError={adoptError}
+                    onAdopt={() => void handleAdopt()}
+                    onDismissAdoption={handleDismissAdoption}
+                    managedLoading={managedLoading}
+                    managedError={managedError}
+                    managedInventory={managedInventory}
+                    logEvidence={logEvidence}
+                    hideEmergency={hideEmergency}
+                    isManaged={Boolean(plan?.already_managed)}
+                    forgetConfirming={forgetConfirming}
+                    forgetting={forgetting}
+                    forgetError={forgetError}
+                    onRequestForget={() => setForgetConfirming(true)}
+                    onCancelForget={() => setForgetConfirming(false)}
+                    onConfirmForget={() => void handleForget()}
+                    selectedPaths={selectedPaths}
+                    onToggleSelect={handleToggleSelect}
+                    removeMode={removeMode}
+                    removing={removing}
+                    removeOutcome={removeOutcome}
+                    removeError={removeError}
+                    onRequestRemove={handleRequestRemove}
+                    onCancelRemove={handleCancelRemove}
+                    onConfirmRemove={handleConfirmRemove}
+                    emergencyOpen={emergencyOpen}
+                    onToggleEmergencyOpen={() => setEmergencyOpen((v) => !v)}
+                    emergencyTarget={emergencyTarget}
+                    onSetEmergencyTarget={(name) => {
+                      setEmergencyTarget(name);
+                      setEmergencyConfirmInput("");
+                      setEmergencyError(null);
+                    }}
+                    emergencyConfirmInput={emergencyConfirmInput}
+                    onEmergencyConfirmInputChange={setEmergencyConfirmInput}
+                    emergencyBusy={emergencyBusy}
+                    emergencyError={emergencyError}
+                    emergencyResult={emergencyResult}
+                    onEmergencyRemove={handleEmergencyRemove}
+                    mutation={mutation}
+                  />
+                </fieldset>
               )}
             </>
           )}
@@ -1119,8 +1251,7 @@ interface StackBodyProps {
   emergencyError: string | null;
   emergencyResult: EmergencyRemoval | null;
   onEmergencyRemove: (fileName: string) => void | Promise<void>;
-  /** Re-read the stack after a management action changed the folder. */
-  onStackChanged: () => Promise<void>;
+  mutation: StackMutationCoordinator;
 }
 
 /**
@@ -1142,14 +1273,16 @@ interface StackBodyProps {
  * taller of the two, scrolling to a low row carried the pane 1372px above the
  * viewport.
  */
-function StackBody(props: StackBodyProps) {
+export function StackBody(props: StackBodyProps) {
   const { stack, effectiveSelection, onSelect } = props;
   const paneScrollRef = useRef<HTMLDivElement>(null);
 
   // The pane would otherwise open at whatever offset the previous selection
   // left behind, which for a long slot reads as a blank pane.
   useEffect(() => {
-    paneScrollRef.current?.scrollTo({ top: 0 });
+    if (paneScrollRef.current) {
+      paneScrollRef.current.scrollTop = 0;
+    }
   }, [effectiveSelection]);
 
   // The rail owns the whole-stack views too now, so the only thing between the
@@ -1240,9 +1373,7 @@ function DetailPane(props: StackBodyProps) {
   const { stack, plan, planLoading, planError, effectiveSelection } = props;
 
   if (effectiveSelection === "power") {
-    return (
-      <StackPowerCard clientDir={stack.client_dir} stack={stack} onChanged={props.onStackChanged} />
-    );
+    return <StackPowerCard clientDir={stack.client_dir} stack={stack} mutation={props.mutation} />;
   }
 
   if (effectiveSelection === "adoption") {
@@ -1291,7 +1422,7 @@ function DetailPane(props: StackBodyProps) {
     <SlotPane
       slot={effectiveSelection}
       stack={stack}
-      onStackChanged={props.onStackChanged}
+      mutation={props.mutation}
       onOpenGuide={(url) => void openGuide(url)}
     />
   );

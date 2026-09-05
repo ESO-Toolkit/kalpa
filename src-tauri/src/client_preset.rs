@@ -390,36 +390,35 @@ pub async fn set_client_preset(
     let root = crate::client_write::begin_write(&state, &client_dir).await?;
 
     tokio::task::spawn_blocking(move || {
-        let client_root = root.path().to_path_buf();
+        crate::client_backup::run_managed_transaction(&app, &root, |transaction| {
+            let client_root = transaction.client_root();
+            let choices = find_presets(client_root, None);
+            if !choices
+                .iter()
+                .any(|choice| choice.relative_path == relative_path)
+            {
+                return Err(format!(
+                    "{relative_path} is not one of the presets in this folder."
+                ));
+            }
 
-        let choices = find_presets(&client_root, None);
-        if !choices
-            .iter()
-            .any(|choice| choice.relative_path == relative_path)
-        {
-            return Err(format!(
-                "{relative_path} is not one of the presets in this folder."
-            ));
-        }
+            let reshade_ini = client_root.join("ReShade.ini");
+            let contents = std::fs::read_to_string(&reshade_ini)
+                .map_err(|e| format!("Failed to read ReShade.ini: {e}"))?;
+            let preset_path_value = to_preset_path(&relative_path);
+            let updated =
+                replace_ini_value(&contents, "GENERAL", "PresetPath", &preset_path_value)?;
+            let outcome = transaction.edit_file(
+                "ReShade.ini",
+                ManagedKind::ReShadeConfig,
+                updated.as_bytes(),
+            )?;
 
-        let reshade_ini = client_root.join("ReShade.ini");
-        let contents = std::fs::read_to_string(&reshade_ini)
-            .map_err(|e| format!("Failed to read ReShade.ini: {e}"))?;
-        let preset_path_value = to_preset_path(&relative_path);
-        let updated = replace_ini_value(&contents, "GENERAL", "PresetPath", &preset_path_value)?;
-
-        let outcome = crate::client_backup::edit_managed_file(
-            &app,
-            &root,
-            "ReShade.ini",
-            ManagedKind::ReShadeConfig,
-            updated.as_bytes(),
-        )?;
-
-        Ok(PresetChangeOutcome {
-            relative_path: "ReShade.ini".to_string(),
-            backup_id: outcome.backup_id,
-            summary: format!("Switched the active preset to {relative_path}."),
+            Ok(PresetChangeOutcome {
+                relative_path: "ReShade.ini".to_string(),
+                backup_id: outcome.backup_id,
+                summary: format!("Switched the active preset to {relative_path}."),
+            })
         })
     })
     .await
@@ -439,42 +438,36 @@ pub async fn fix_client_technique_order(
     let root = crate::client_write::begin_write(&state, &client_dir).await?;
 
     tokio::task::spawn_blocking(move || {
-        let client_root = root.path().to_path_buf();
-        let stack = crate::client_stack::inspect_stack(&client_root);
+        crate::client_backup::run_managed_transaction(&app, &root, |transaction| {
+            let client_root = transaction.client_root();
+            let stack = crate::client_stack::inspect_stack(client_root);
 
-        let preset = stack
-            .preset
-            .as_ref()
-            .ok_or_else(|| "This client folder has no active preset.".to_string())?;
-        if !preset.exists {
-            return Err("The active preset file does not exist.".to_string());
-        }
-        let relative = from_preset_path(&preset.path);
+            let preset = stack
+                .preset
+                .as_ref()
+                .ok_or_else(|| "This client folder has no active preset.".to_string())?;
+            if !preset.exists {
+                return Err("The active preset file does not exist.".to_string());
+            }
+            let relative = from_preset_path(&preset.path);
 
-        // Same reasoning as `list_client_presets`: `PresetPath` is untrusted
-        // text, and `Path::join` would happily follow it out of the folder.
-        let preset_file = crate::client_write::safe_relative_join(&client_root, &relative)?;
-        let contents = std::fs::read_to_string(&preset_file)
-            .map_err(|e| format!("Failed to read {relative}: {e}"))?;
+            // Same reasoning as `list_client_presets`: `PresetPath` is untrusted
+            // text, and `Path::join` would happily follow it out of the folder.
+            let preset_file = crate::client_write::safe_relative_join(client_root, &relative)?;
+            let contents = std::fs::read_to_string(&preset_file)
+                .map_err(|e| format!("Failed to read {relative}: {e}"))?;
+            let fix = plan_order_fix(&stack, &contents).ok_or_else(|| {
+                "The active preset's technique order does not need a fix.".to_string()
+            })?;
+            let updated = replace_ini_value(&contents, "", "Techniques", &fix.after)?;
+            let outcome =
+                transaction.edit_file(&relative, ManagedKind::Preset, updated.as_bytes())?;
 
-        let fix = plan_order_fix(&stack, &contents).ok_or_else(|| {
-            "The active preset's technique order does not need a fix.".to_string()
-        })?;
-
-        let updated = replace_ini_value(&contents, "", "Techniques", &fix.after)?;
-
-        let outcome = crate::client_backup::edit_managed_file(
-            &app,
-            &root,
-            &relative,
-            ManagedKind::Preset,
-            updated.as_bytes(),
-        )?;
-
-        Ok(PresetChangeOutcome {
-            relative_path: relative,
-            backup_id: outcome.backup_id,
-            summary: fix.summary,
+            Ok(PresetChangeOutcome {
+                relative_path: relative,
+                backup_id: outcome.backup_id,
+                summary: fix.summary,
+            })
         })
     })
     .await

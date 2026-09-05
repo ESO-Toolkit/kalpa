@@ -1,5 +1,24 @@
 import type { ClientStack } from "@/components/client-stack/types";
 
+export type StackMutationResult<T> =
+  { status: "committed"; value: T } | { status: "stale" } | { status: "busy" };
+
+/**
+ * The page owns installation identity and serializes every stack write. Child
+ * panels must not publish mutation results independently: a successful
+ * operation is committed only after the page has re-inspected the same
+ * installation generation. A panel may then refresh its own derived view.
+ */
+export interface StackMutationCoordinator {
+  pending: boolean;
+  pendingLabel: string | null;
+  run<T>(
+    label: string,
+    clientDir: string,
+    operation: () => Promise<T>
+  ): Promise<StackMutationResult<T>>;
+}
+
 /**
  * What every management panel under this folder needs.
  *
@@ -14,9 +33,6 @@ export interface StackPanelProps {
   clientDir: string;
   /** The inventory the surrounding panel was rendered from. */
   stack: ClientStack;
-  /**
-   * Re-run the surrounding panel's inspection. Call after any successful write:
-   * every one of these actions changes what `inspect_client_stack` would say.
-   */
-  onChanged: () => void | Promise<void>;
+  /** Page-level serialization and stale-completion protection for writes. */
+  mutation: StackMutationCoordinator;
 }
