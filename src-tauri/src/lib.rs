@@ -510,6 +510,44 @@ fn finish_webview_startup_after_authority(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(all(windows, debug_assertions))]
+fn e2e_webview_data_directory(token: &str) -> Result<PathBuf, &'static str> {
+    if token.is_empty() {
+        return Err("the E2E token is empty");
+    }
+    if token.len() > 128 {
+        return Err("the E2E token is longer than 128 bytes");
+    }
+    if !token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("the E2E token contains characters unsafe for a profile directory");
+    }
+
+    Ok(PathBuf::from("kalpa-e2e").join(token))
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn configure_e2e_webview_profile(context: &mut tauri::Context<tauri::Wry>) {
+    let Some(token) = std::env::var_os("KALPA_E2E_TOKEN") else {
+        return;
+    };
+    let token = token
+        .into_string()
+        .expect("KALPA_E2E_TOKEN must contain valid Unicode");
+    let data_directory = e2e_webview_data_directory(&token)
+        .unwrap_or_else(|error| panic!("Invalid KALPA_E2E_TOKEN: {error}"));
+
+    // WEBVIEW2_USER_DATA_FOLDER cannot isolate Tauri's profile because Tauri
+    // supplies WebView2's userDataFolder itself. Configure the generated window
+    // definitions instead. The sandbox token makes this unique per owned run;
+    // normal debug launches and every release build retain their usual profile.
+    for window in &mut context.config_mut().app.windows {
+        window.data_directory = Some(data_directory.clone());
+    }
+}
+
 pub fn run() {
     // msWebView2CodeCache: V8 bytecode caching for the app bundle. wry serves
     // the frontend through WebView2's WebResourceRequested interception, which
@@ -533,6 +571,10 @@ pub fn run() {
 
     clear_webview_cache_on_upgrade();
     cleanup_orphaned_pending_zips();
+
+    let mut context = tauri::generate_context!();
+    #[cfg(all(windows, debug_assertions))]
+    configure_e2e_webview_profile(&mut context);
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
@@ -1100,7 +1142,7 @@ pub fn run() {
             #[cfg(debug_assertions)]
             commands::debug_install_fixture_zip,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             // On a real app exit, detach settings.json from the plugin registry so
@@ -1133,6 +1175,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn e2e_webview_profile_is_scoped_to_a_safe_relative_directory() {
+        assert_eq!(
+            e2e_webview_data_directory("123-abc_DEF").unwrap(),
+            PathBuf::from("kalpa-e2e").join("123-abc_DEF")
+        );
+
+        for invalid in ["", ".", "..", "with/slash", "with\\slash", "with space"] {
+            assert!(
+                e2e_webview_data_directory(invalid).is_err(),
+                "accepted unsafe token {invalid:?}"
+            );
+        }
+        assert!(e2e_webview_data_directory(&"a".repeat(129)).is_err());
+    }
 
     #[test]
     fn parse_install_pack() {

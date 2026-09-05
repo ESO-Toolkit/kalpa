@@ -55,6 +55,14 @@ async function invoke<T>(page: Page, command: string, args: Record<string, unkno
 const row = (page: Page) =>
   addonList(page).locator(`[role="option"][aria-label^="${fixtureTitle}"]`);
 
+/** Select the fixture through the listbox's keyboard contract. */
+async function selectFixture(page: Page): Promise<void> {
+  const list = addonList(page);
+  await list.focus();
+  await list.press("Home");
+  await expect(row(page), "fixture row was not selected").toHaveAttribute("aria-selected", "true");
+}
+
 /**
  * Is the fixture's folder actually on disk?
  *
@@ -84,7 +92,7 @@ async function showAllAddons(page: Page): Promise<void> {
   const allTab = addonFilterTab(page, "All");
   await expect(allTab, '"All" filter tab not found').toBeVisible({ timeout: 10_000 });
   if ((await allTab.getAttribute("aria-selected")) !== "true") {
-    await allTab.click();
+    await allTab.press("Enter");
   }
   await expect(allTab, "could not select the All filter").toHaveAttribute("aria-selected", "true", {
     timeout: 5_000,
@@ -185,12 +193,16 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     await expect(row(page), "fixture row is missing").toBeVisible({ timeout: 5_000 });
 
     // --- the destructive part ---
-    await row(page).click();
+    // Use the listbox interaction model here. Pointer actionability waits for a
+    // virtualized row's hover transition to become geometrically stable, which
+    // is unrelated to the remove/undo contract and can remain unsettled under
+    // WebView2/CDP even though the option is already visible and enabled.
+    await selectFixture(page);
     const removeButton = page.getByRole("button", { name: "Remove Addon" });
     await expect(removeButton, "detail pane has no Remove Addon button").toBeVisible({
       timeout: 5_000,
     });
-    await removeButton.click();
+    await removeButton.press("Enter");
 
     await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
 
@@ -203,7 +215,7 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     // is covered by the unit tests on `restoreUpdateResult`, not here.
     const undo = page.getByRole("button", { name: "Undo" });
     await expect(undo, "no Undo affordance on the removal toast").toBeVisible({ timeout: 2_000 });
-    await undo.click();
+    await undo.press("Enter");
 
     await expectAddonListCount(page, 1, "undo did not restore the removed addon");
     await expect(row(page), "restored fixture row is missing").toBeVisible({ timeout: 5_000 });
@@ -218,8 +230,6 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     // The rescan then confirms the app agrees with the disk.
     await page.keyboard.press("Control+r");
     await expectAddonListCount(page, 1, "rescan lost the restored addon");
-
-    await page.screenshot({ path: "e2e/screenshots/addon-lifecycle-restored.png" });
   });
 
   test("a committed removal actually deletes the folder", async () => {
@@ -227,8 +237,8 @@ test.describe.serial("Addon lifecycle @sandbox", () => {
     await expect(row(page), "fixture should still be installed").toBeVisible({ timeout: 5_000 });
     expect(fixtureOnDisk(), "fixture folder missing before the removal").toBe(true);
 
-    await row(page).click();
-    await page.getByRole("button", { name: "Remove Addon" }).click();
+    await selectFixture(page);
+    await page.getByRole("button", { name: "Remove Addon" }).press("Enter");
     await expectAddonListCount(page, 0, "removing the fixture did not hide its row");
 
     // Let the undo window lapse so the removal commits, then prove it reached
