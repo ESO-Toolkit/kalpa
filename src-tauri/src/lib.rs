@@ -572,9 +572,13 @@ pub fn run() {
     clear_webview_cache_on_upgrade();
     cleanup_orphaned_pending_zips();
 
-    let mut context = tauri::generate_context!();
+    let context = tauri::generate_context!();
     #[cfg(all(windows, debug_assertions))]
-    configure_e2e_webview_profile(&mut context);
+    let context = {
+        let mut context = context;
+        configure_e2e_webview_profile(&mut context);
+        context
+    };
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
