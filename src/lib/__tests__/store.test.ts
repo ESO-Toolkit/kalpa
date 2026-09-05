@@ -98,8 +98,10 @@ describe("setSetting", () => {
     const plugin = await import("@tauri-apps/plugin-store");
     // `load` would let the webview name any path; the capability no longer
     // grants it. Only the lookup is used, and only for the one known file.
+    // That `load` is unreachable is enforced by the ACL, not by this mock, and
+    // is asserted against a real app in e2e/packaged-settings-store.spec.ts —
+    // an assertion here could only inspect the mock's own shape.
     expect(plugin.getStore).toHaveBeenCalledWith("settings.json");
-    expect("load" in plugin && typeof plugin.load === "function").toBe(false);
     // Persistence is the atomic command, never the plugin's save().
     expect(mockInvoke).toHaveBeenCalledWith("flush_settings", {
       entries: { theme: "dark" },

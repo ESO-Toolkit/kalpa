@@ -86,9 +86,11 @@ function getStore() {
       .then(async (store) => {
         if (store) return store;
         // Setup is the only opener now, so if its open failed nothing else
-        // would ever retry. `ensure_settings_store` takes no path — it reopens
-        // the one file Rust names — so asking for a retry here cannot turn into
-        // the arbitrary-path open this change removed.
+        // would ever try again. `ensure_settings_store` takes no path — it
+        // reopens the one file Rust names — so asking here cannot turn into the
+        // arbitrary-path open this change removed. It is a narrow recovery: the
+        // native open fails on conditions that mostly recur, so treat this as
+        // reporting the state rather than as a likely repair.
         await invoke("ensure_settings_store");
         const reopened = await lookUpNativeStore(STORE_PATH);
         if (!reopened) {
