@@ -1312,13 +1312,50 @@ fn find_shader_source(shader_dir: &Path, source: &str) -> Option<std::path::Path
     if direct.is_file() {
         return Some(direct);
     }
+    if let Some(hit) = case_insensitive_file(shader_dir, source) {
+        return Some(hit);
+    }
     std::fs::read_dir(shader_dir).ok()?.flatten().find_map(|e| {
         let dir = e.path();
         if !dir.is_dir() {
             return None;
         }
         let nested = crate::client_write::safe_relative_join(&dir, source).ok()?;
-        nested.is_file().then_some(nested)
+        if nested.is_file() {
+            return Some(nested);
+        }
+        case_insensitive_file(&dir, source)
+    })
+}
+
+/// Find a file in `dir` whose name matches `file_name` ignoring case.
+///
+/// The lookup above asks the *filesystem* whether a name matches, which makes
+/// the answer depend on which filesystem it is. That is not a portability
+/// nicety here, it is a correctness bug with a real install behind it:
+/// [`LAUNCHPAD_SOURCE`] is spelled lowercase in this file while the effect
+/// iMMERSE actually ships is `MartysMods_LAUNCHPAD.fx`, so the join resolved on
+/// Windows and macOS and failed on Linux — where Kalpa runs ESO through Proton.
+/// LaunchPad went invisible there, and the Shaders slot silently downgraded
+/// from `InstalledUnused` (keep this, Kalpa cannot refetch it) to
+/// `NotOnThisPath` (nothing to see). Linux CI caught it; the two case-folding
+/// platforms never could.
+///
+/// Only ever called with a bare file name — the caller's `safe_relative_join`
+/// stays the guard against a preset pointing somewhere outside the shader tree,
+/// and a `source` carrying any separator is refused here rather than walked.
+fn case_insensitive_file(dir: &Path, file_name: &str) -> Option<std::path::PathBuf> {
+    if file_name.contains(['/', '\\', ':']) {
+        return None;
+    }
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        (path.is_file()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(file_name))
+        .then_some(path)
     })
 }
 
@@ -3719,6 +3756,37 @@ PresetPath=.\\ReShadePreset.ini
         assert_eq!(slot(&stack, StackSlot::Nr).need, SlotNeed::Required);
         assert_eq!(slot(&stack, StackSlot::Sr).need, SlotNeed::Required);
         assert_eq!(slot(&stack, StackSlot::Addons).need, SlotNeed::Required);
+    }
+
+    /// A shader is found whatever case its name is written in.
+    ///
+    /// This test passes for free on Windows and macOS, whose filesystems fold
+    /// case themselves — it earns its keep on Linux, where CI caught
+    /// `find_shader_source` failing to see `MartysMods_LAUNCHPAD.fx` through
+    /// the lowercase [`LAUNCHPAD_SOURCE`] and quietly downgrading the Shaders
+    /// slot. Kalpa runs ESO through Proton there, so it is a real install.
+    #[test]
+    fn a_shader_is_found_whatever_case_its_name_is_written_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shaders = tmp.path().join("reshade-shaders").join("Shaders");
+        std::fs::create_dir_all(&shaders).unwrap();
+        std::fs::write(shaders.join("MartysMods_LAUNCHPAD.fx"), "").unwrap();
+
+        assert!(shader_source_exists(&shaders, LAUNCHPAD_SOURCE));
+        assert!(shader_source_exists(&shaders, "MARTYSMODS_LAUNCHPAD.FX"));
+        assert!(!shader_source_exists(&shaders, "NotHere.fx"));
+
+        // The nested layout shader packs actually ship in.
+        let nested = shaders.join("MartysMods");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("MartysMods_LAUNCHPAD.fx"), "").unwrap();
+        assert!(shader_source_exists(&shaders, LAUNCHPAD_SOURCE));
+
+        // The traversal guard is not weakened by the case-folding fallback.
+        assert!(!shader_source_exists(
+            &shaders,
+            "../MartysMods_LAUNCHPAD.fx"
+        ));
     }
 
     /// Installed-but-unused is shown as exactly that, **with the reason to keep
