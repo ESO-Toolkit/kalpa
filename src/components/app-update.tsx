@@ -39,6 +39,12 @@ export function useAppUpdate() {
     })();
   }, []);
 
+  // Guards against overlapping `check()` calls. Now that a check can be
+  // triggered from three places (mount, interval, focus) rather than just
+  // one, a slow network response to one must not let a second fire on top of
+  // it — e.g. a focus event landing mid-request from the interval.
+  const isCheckingRef = useRef(false);
+
   const checkForAppUpdate = useCallback(
     async (silent = true) => {
       // A download in flight, or an installer already staged, owns the state
@@ -56,6 +62,14 @@ export function useAppUpdate() {
         return;
       }
 
+      // Only background checks are suppressed. A user-initiated check
+      // (silent === false) must always run: App.tsx calls it that way from the
+      // deep link and from the Check-for-updates action, and swallowing one
+      // would leave the button the user just pressed with no toast and no
+      // visible effect at all.
+      if (silent && isCheckingRef.current) return;
+      isCheckingRef.current = true;
+
       try {
         const update = await check();
         if (update) {
@@ -67,6 +81,8 @@ export function useAppUpdate() {
         if (!silent) {
           toast.error(`Update check failed: ${e}`);
         }
+      } finally {
+        isCheckingRef.current = false;
       }
     },
     [applyState]
@@ -131,10 +147,53 @@ export function useAppUpdate() {
     await relaunch();
   }, []);
 
+  // Timestamp of the last check (of any origin), used to throttle the focus
+  // trigger below. A ref, not state — it must not cause a render.
+  const lastCheckedAtRef = useRef(0);
+
   // Check on mount (silent) — scheduled to avoid synchronous setState in effect
   useEffect(() => {
-    const id = setTimeout(() => checkForAppUpdate(true), 0);
-    return () => clearTimeout(id);
+    const id = setTimeout(() => {
+      lastCheckedAtRef.current = Date.now();
+      void checkForAppUpdate(true);
+    }, 0);
+
+    // Kalpa is a desktop app people leave open for days at a stretch, and the
+    // mount check above only ever fires once per session — a long-lived
+    // window would otherwise never learn a new version shipped. Re-check
+    // periodically as a floor under that. Every 8 hours lands comfortably
+    // inside the 6-12h window CLAUDE.md's no-background-spam rule implies:
+    // frequent enough that a multi-day session still notices a release within
+    // the same day, infrequent enough that it reads as "occasional", not
+    // polling.
+    const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+    const intervalId = setInterval(() => {
+      lastCheckedAtRef.current = Date.now();
+      void checkForAppUpdate(true);
+    }, EIGHT_HOURS_MS);
+
+    // The moment a user tabs/alt-tabs back into a long-running window is the
+    // moment a fresh check is most useful — it's exactly when they'd notice
+    // (and act on) an update banner. But window focus fires on every
+    // alt-tab, so without a floor this would turn into exactly the
+    // background-spam the interval above tries to stay clear of: rapidly
+    // refocusing must not fire a check per focus. Skip if the last check
+    // (mount, interval, or a prior focus) was within the last 30 minutes —
+    // long enough that normal window-switching never re-triggers it, short
+    // enough that coming back after a lunch break does.
+    const FOCUS_THROTTLE_MS = 30 * 60 * 1000;
+    const onFocus = () => {
+      if (Date.now() - lastCheckedAtRef.current < FOCUS_THROTTLE_MS) return;
+      lastCheckedAtRef.current = Date.now();
+      void checkForAppUpdate(true);
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      clearTimeout(id);
+      clearInterval(intervalId);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [checkForAppUpdate]);
 
   return { state, checkForAppUpdate, downloadAndInstall, restartApp };
