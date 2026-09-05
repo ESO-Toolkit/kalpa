@@ -10,6 +10,16 @@ import {
   type FeatureDef,
 } from "../features";
 
+/**
+ * A context in which every conditional feature is on.
+ *
+ * The toolbar assertions below are about `hidden` and registry order, not about
+ * `pinnedWhen`, so they need a context that does not silently drop a pinnable
+ * feature out from under them. `pinnedWhen`'s own behaviour is asserted
+ * separately, with a context that turns it off.
+ */
+const CTX = { minionDetected: true, graphicsStackDetected: true };
+
 // Exhaustiveness map: adding an id to the `FeatureId` union without adding a
 // matching `FEATURES` entry fails to type-check here.
 const ID_EXHAUSTIVENESS_MAP: Record<FeatureId, true> = {
@@ -87,29 +97,52 @@ describe("findFeature", () => {
 
 describe("visibleToolbar", () => {
   it("returns exactly the pinnable entries, in registry order, when nothing is hidden", () => {
-    const result = visibleToolbar(FEATURES, []);
-    expect(result.map((f) => f.id)).toEqual(["packs", "profiles", "saved-variables", "log-upload"]);
+    const result = visibleToolbar(FEATURES, [], CTX);
+    expect(result.map((f) => f.id)).toEqual([
+      "packs",
+      "profiles",
+      "saved-variables",
+      "log-upload",
+      "client-health",
+    ]);
   });
 
   it("removes exactly the hidden id", () => {
-    const result = visibleToolbar(FEATURES, ["profiles"]);
-    expect(result.map((f) => f.id)).toEqual(["packs", "saved-variables", "log-upload"]);
+    const result = visibleToolbar(FEATURES, ["profiles"], CTX);
+    expect(result.map((f) => f.id)).toEqual([
+      "packs",
+      "saved-variables",
+      "log-upload",
+      "client-health",
+    ]);
   });
 
   it("ignores unknown ids in hidden rather than throwing", () => {
-    expect(() => visibleToolbar(FEATURES, ["not-a-real-id" as FeatureId])).not.toThrow();
-    const result = visibleToolbar(FEATURES, ["not-a-real-id" as FeatureId]);
-    expect(result.map((f) => f.id)).toEqual(["packs", "profiles", "saved-variables", "log-upload"]);
+    expect(() => visibleToolbar(FEATURES, ["not-a-real-id" as FeatureId], CTX)).not.toThrow();
+    const result = visibleToolbar(FEATURES, ["not-a-real-id" as FeatureId], CTX);
+    expect(result.map((f) => f.id)).toEqual([
+      "packs",
+      "profiles",
+      "saved-variables",
+      "log-upload",
+      "client-health",
+    ]);
   });
 
   it("is a no-op when hiding a non-pinnable id", () => {
-    const result = visibleToolbar(FEATURES, ["backups"]);
-    expect(result.map((f) => f.id)).toEqual(["packs", "profiles", "saved-variables", "log-upload"]);
+    const result = visibleToolbar(FEATURES, ["backups"], CTX);
+    expect(result.map((f) => f.id)).toEqual([
+      "packs",
+      "profiles",
+      "saved-variables",
+      "log-upload",
+      "client-health",
+    ]);
   });
 
   it("is pure: repeated calls with the same inputs deep-equal each other", () => {
-    const a = visibleToolbar(FEATURES, ["profiles"]);
-    const b = visibleToolbar(FEATURES, ["profiles"]);
+    const a = visibleToolbar(FEATURES, ["profiles"], CTX);
+    const b = visibleToolbar(FEATURES, ["profiles"], CTX);
     expect(a).toEqual(b);
   });
 
@@ -119,23 +152,82 @@ describe("visibleToolbar", () => {
     const hidden: FeatureId[] = ["profiles"];
     const hiddenSnapshot = [...hidden];
 
-    visibleToolbar(features as FeatureDef[], hidden);
+    visibleToolbar(features as FeatureDef[], hidden, CTX);
 
     expect(JSON.stringify(features.map((f) => f.id))).toBe(featuresSnapshot);
     expect(hidden).toEqual(hiddenSnapshot);
   });
 
   it("never touches module state (calling it twice with different inputs doesn't cross-contaminate)", () => {
-    const first = visibleToolbar(FEATURES, ["packs"]);
-    const second = visibleToolbar(FEATURES, []);
-    expect(first.map((f) => f.id)).toEqual(["profiles", "saved-variables", "log-upload"]);
-    expect(second.map((f) => f.id)).toEqual(["packs", "profiles", "saved-variables", "log-upload"]);
+    const first = visibleToolbar(FEATURES, ["packs"], CTX);
+    const second = visibleToolbar(FEATURES, [], CTX);
+    expect(first.map((f) => f.id)).toEqual([
+      "profiles",
+      "saved-variables",
+      "log-upload",
+      "client-health",
+    ]);
+    expect(second.map((f) => f.id)).toEqual([
+      "packs",
+      "profiles",
+      "saved-variables",
+      "log-upload",
+      "client-health",
+    ]);
+  });
+});
+
+describe("pinnedWhen", () => {
+  const NO_STACK = { minionDetected: false, graphicsStackDetected: false };
+  const STACK = { minionDetected: false, graphicsStackDetected: true };
+
+  it("keeps a conditional feature out of the toolbar until it earns the slot", () => {
+    expect(visibleToolbar(FEATURES, [], NO_STACK).map((f) => f.id)).not.toContain("client-health");
+    expect(visibleToolbar(FEATURES, [], STACK).map((f) => f.id)).toContain("client-health");
+  });
+
+  /**
+   * The safety property. Falling out of the toolbar must never make a feature
+   * unreachable — an unpinned pinnable belongs to the Settings > Tools catalog,
+   * and for the graphics stack that is the ONLY surface a stock-client user
+   * would ever see it on.
+   */
+  it("moves it to the Tools catalog rather than out of the app", () => {
+    expect(toolsMenuFeatures(FEATURES, [], NO_STACK).map((f) => f.id)).toContain("client-health");
+  });
+
+  it("still honours an explicit unpin when the condition holds", () => {
+    const ids = visibleToolbar(FEATURES, ["client-health"], STACK).map((f) => f.id);
+    expect(ids).not.toContain("client-health");
+    expect(toolsMenuFeatures(FEATURES, ["client-health"], STACK).map((f) => f.id)).toContain(
+      "client-health"
+    );
+  });
+
+  it("leaves features without the predicate pinned in every context", () => {
+    for (const ctx of [NO_STACK, STACK]) {
+      expect(visibleToolbar(FEATURES, [], ctx).map((f) => f.id)).toContain("packs");
+    }
+  });
+
+  /**
+   * `pinnedWhen` is about the toolbar budget; `visibleWhen` is about whether a
+   * feature is offered at all. Conflating them would hide the panel from anyone
+   * whose stack Kalpa merely failed to detect.
+   */
+  it("is not a visibility gate", () => {
+    const feature = findFeature("client-health");
+    expect(feature?.pinnedWhen).toBeTypeOf("function");
+    expect(feature?.visibleWhen).toBeUndefined();
   });
 });
 
 describe("toolsMenuFeatures", () => {
   it("excludes ids that are currently pinned to the toolbar", () => {
-    const result = toolsMenuFeatures(FEATURES, [], { minionDetected: false });
+    const result = toolsMenuFeatures(FEATURES, [], {
+      minionDetected: false,
+      graphicsStackDetected: true,
+    });
     expect(result.map((f) => f.id)).not.toContain("packs");
     expect(result.map((f) => f.id)).not.toContain("profiles");
     expect(result.map((f) => f.id)).not.toContain("saved-variables");
@@ -145,18 +237,27 @@ describe("toolsMenuFeatures", () => {
   });
 
   it("re-surfaces a hidden pinnable id in the tools menu (it is no longer pinned)", () => {
-    const result = toolsMenuFeatures(FEATURES, ["packs"], { minionDetected: false });
+    const result = toolsMenuFeatures(FEATURES, ["packs"], {
+      minionDetected: false,
+      graphicsStackDetected: true,
+    });
     expect(result.map((f) => f.id)).toContain("packs");
     expect(result.map((f) => f.id)).not.toContain("profiles");
   });
 
   it("excludes migration-wizard when minion is not detected", () => {
-    const result = toolsMenuFeatures(FEATURES, [], { minionDetected: false });
+    const result = toolsMenuFeatures(FEATURES, [], {
+      minionDetected: false,
+      graphicsStackDetected: true,
+    });
     expect(result.map((f) => f.id)).not.toContain("migration-wizard");
   });
 
   it("includes migration-wizard when minion is detected", () => {
-    const result = toolsMenuFeatures(FEATURES, [], { minionDetected: true });
+    const result = toolsMenuFeatures(FEATURES, [], {
+      minionDetected: true,
+      graphicsStackDetected: true,
+    });
     expect(result.map((f) => f.id)).toContain("migration-wizard");
   });
 });

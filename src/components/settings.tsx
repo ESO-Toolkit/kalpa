@@ -69,6 +69,7 @@ interface SettingsProps {
   onRefresh: () => void;
   onOpenLogUpload: () => void;
   onOpenFeature: (id: FeatureId) => void;
+  graphicsStackDetected: boolean;
   minionDetected: boolean;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
@@ -96,6 +97,7 @@ export function Settings({
   onRefresh,
   onOpenLogUpload,
   onOpenFeature,
+  graphicsStackDetected,
   minionDetected,
   onShowShortcuts,
   onCheckForAppUpdate,
@@ -434,7 +436,7 @@ export function Settings({
 
   const pathDirty = path.trim() !== addonsPath;
 
-  const toolsCtx = { minionDetected };
+  const toolsCtx = { minionDetected, graphicsStackDetected };
   const toolFeatures = (group: ToolsGroup) =>
     FEATURES.filter(
       (f) =>

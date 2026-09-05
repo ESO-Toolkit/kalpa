@@ -82,6 +82,7 @@ function settingsProps(overrides: Partial<SettingsProps> = {}): SettingsProps {
     onRefresh: vi.fn(),
     onOpenLogUpload: vi.fn(),
     onOpenFeature: vi.fn(),
+    graphicsStackDetected: false,
     minionDetected: false,
     onShowShortcuts: vi.fn(),
     onCheckForAppUpdate: vi.fn(),
