@@ -905,7 +905,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   return (
     <Dialog open={open} onOpenChange={(next) => !next && handleClose()}>
       <DialogContent
-        className="flex h-[calc(100dvh-2rem)] flex-col gap-0 sm:max-w-5xl"
+        className="flex h-[calc(100dvh-2rem)] max-h-[760px] flex-col gap-0 sm:max-w-5xl"
         showCloseButton={!mutationPending}
       >
         {/* One header row instead of three stacked ones.
