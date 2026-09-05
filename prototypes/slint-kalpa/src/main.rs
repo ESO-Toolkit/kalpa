@@ -10018,7 +10018,7 @@ fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
             ui.set_status_error_message("Run the migration preview before importing.".into());
             return;
         };
-        match safe_migration::execute_migration(&addons_root, Some(&expected_digest)) {
+        match safe_migration::execute_migration(&addons_root, &expected_digest) {
             Ok(safe_migration::MigrationExecuteOutcome::Applied { result }) => {
                 ui.set_migration_result_summary(
                     format!(

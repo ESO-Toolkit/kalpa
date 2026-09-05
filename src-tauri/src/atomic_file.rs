@@ -216,10 +216,89 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
     replacement.commit()
 }
 
+/// Copy one file through a same-directory staging file, then atomically publish
+/// the complete bytes. The source permissions are applied only after the
+/// staging file has been flushed and synced, immediately before publication.
+/// If reading, writing, syncing, or renaming fails, an existing target remains
+/// untouched and the private staging file is removed on drop.
+#[allow(dead_code)] // Used by Tauri; this module is also compiled into the Slint binary.
+pub fn atomic_copy(source: &Path, target: &Path) -> io::Result<u64> {
+    let mut source_file = File::open(source)?;
+    let permissions = source_file.metadata()?.permissions();
+    atomic_copy_from(&mut source_file, target, Some(permissions))
+}
+
+fn atomic_copy_from(
+    source: &mut impl Read,
+    target: &Path,
+    permissions: Option<fs::Permissions>,
+) -> io::Result<u64> {
+    let mut replacement = AtomicFile::create(target)?;
+    let copied = io::copy(source, &mut replacement)?;
+    replacement.commit_with(|staging| {
+        if let Some(permissions) = permissions {
+            fs::set_permissions(staging, permissions)?;
+        }
+        Ok(())
+    })?;
+    Ok(copied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::sync::{Arc, Barrier};
+
+    struct FailsAfterOneChunk {
+        returned_data: bool,
+    }
+
+    impl Read for FailsAfterOneChunk {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.returned_data {
+                return Err(io::Error::other("injected read failure"));
+            }
+            self.returned_data = true;
+            let bytes = b"partial";
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    #[test]
+    fn failed_atomic_copy_keeps_the_previous_complete_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("backup.bin");
+        fs::write(&target, b"old-complete-bytes").unwrap();
+        let mut source = FailsAfterOneChunk {
+            returned_data: false,
+        };
+
+        let error = atomic_copy_from(&mut source, &target, None).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&target).unwrap(), b"old-complete-bytes");
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(STAGING_INFIX)
+        }));
+    }
+
+    #[test]
+    fn atomic_copy_publishes_all_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("backup.bin");
+        let mut source = Cursor::new(b"new-complete-bytes");
+
+        let copied = atomic_copy_from(&mut source, &target, None).unwrap();
+
+        assert_eq!(copied, 18);
+        assert_eq!(fs::read(&target).unwrap(), b"new-complete-bytes");
+    }
 
     #[test]
     fn staging_paths_are_unique_and_drop_cleans_only_the_owner() {

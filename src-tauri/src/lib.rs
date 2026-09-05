@@ -71,6 +71,11 @@ pub struct ApprovedAddonsPath {
 
 pub struct AllowedAddonsPath(pub Mutex<Option<ApprovedAddonsPath>>);
 
+/// A path selected through the native folder dialog but not yet committed by
+/// the frontend. Keeping this approval in native memory means a compromised
+/// webview cannot bless an arbitrary path merely by invoking `set_addons_path`.
+pub struct PendingAddonsPathApproval(pub Mutex<Option<ApprovedAddonsPath>>);
+
 /// Guards all load_metadata → modify → save_metadata sequences against
 /// concurrent access (TOCTOU). Wrap every read-modify-write cycle in
 /// `let _guard = lock.0.lock()…;` before touching the metadata store.
@@ -582,7 +587,9 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(PendingAddonsPathApproval(Mutex::new(None)))
         .manage(client_write::AllowedGameInstallPath::new())
+        .manage(client_write::NativeClientPicks::new())
         .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
@@ -981,6 +988,7 @@ pub fn run() {
             client_health::validate_eso_client,
             client_health::inspect_eso_client,
             commands::is_eso_or_launcher_running,
+            client_write::choose_client_path,
             client_write::set_game_install_path,
             client_write::clear_game_install_path,
             client_stack::inspect_client_stack,
@@ -1002,6 +1010,7 @@ pub fn run() {
             client_uninstall::uninstall_managed_client_files,
             client_uninstall::emergency_remove_injector,
             commands::set_addons_path,
+            commands::choose_addons_path,
             commands::reveal_allowed_path,
             commands::set_text_zoom,
             commands::check_addons_write_access,
@@ -1049,7 +1058,6 @@ pub fn run() {
             commands::list_characters,
             commands::backup_character_settings,
             commands::detect_minion,
-            commands::migrate_from_minion,
             commands::migration_check_preconditions,
             commands::migration_create_snapshot,
             commands::migration_dry_run,

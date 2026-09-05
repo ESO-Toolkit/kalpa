@@ -79,7 +79,7 @@ impl InstallTransaction {
         fs::create_dir_all(&staging)
             .map_err(|e| format!("Failed to create installer staging directory: {e}"))?;
         let root = create_transaction_root(&staging)?;
-        let prepared = ["stage", "tombstone", "hashes"]
+        let prepared = ["stage", "tombstone", "hashes", "hash-tombstone"]
             .into_iter()
             .try_for_each(|child| fs::create_dir(root.join(child)))
             .map_err(|e| format!("Failed to prepare installer transaction: {e}"))
@@ -294,7 +294,23 @@ impl InstallTransaction {
             ));
         }
         phase.mark("renames");
-        promote_hashes(&self.addons_dir, &self.root, &journal.hash_folders)?;
+        if let Err(error) = promote_hashes(&self.addons_dir, &self.root, &journal.hash_folders) {
+            let rollback = rollback_hashes(&self.addons_dir, &self.root, &journal.hash_folders)
+                .and_then(|()| rollback_root_files(&self, &landed_root_files))
+                .and_then(|()| rollback_landed(&self, &landed));
+            if rollback.is_ok() {
+                let _ = fs::remove_dir_all(&self.root);
+                cleanup_empty_staging(&self.addons_dir);
+                self.finished = true;
+            }
+            let rollback = rollback
+                .err()
+                .map(|e| format!(" Rollback also failed: {e}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "Failed to publish addon hash baselines: {error}.{rollback}"
+            ));
+        }
         phase.mark("promote hashes");
         journal.phase = Phase::Promoted;
         finish_committed_transaction(&self.addons_dir, &self.root, &journal);
@@ -401,22 +417,12 @@ fn recover_staging_locked(addons_dir: &Path) -> Result<(), String> {
         match journal {
             Some(journal) if journal.phase == Phase::Swapped => {
                 validate_journal(&journal)?;
-                let rename_lost = journal.folders.iter().any(|folder| {
-                    root.join("stage").join(folder).exists()
-                        || !addons_dir.join(folder).exists()
-                        || (journal.pre_existing.contains(folder)
-                            && !root.join("tombstone").join(folder).exists())
-                }) || journal.root_files.iter().any(|relative| {
-                    root.join("stage").join(relative).exists()
-                        || !addons_dir.join(relative).is_file()
-                        || (journal.pre_existing_root_files.contains(relative)
-                            && !root.join("tombstone").join(relative).is_file())
-                });
-                if rename_lost {
-                    rollback_journal(addons_dir, &root, &journal)?;
-                } else {
-                    promote_hashes(addons_dir, &root, &journal.hash_folders)?;
-                }
+                // The caller writes install metadata only after commit returns.
+                // A crash or hash-publication failure in this phase therefore
+                // must restore the old folders *and* old hash baselines rather
+                // than silently completing an install the caller saw as failed.
+                rollback_hashes(addons_dir, &root, &journal.hash_folders)?;
+                rollback_journal(addons_dir, &root, &journal)?;
             }
             Some(journal) if journal.phase == Phase::Staged => {
                 validate_journal(&journal)?;
@@ -629,17 +635,74 @@ fn promote_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> Re
         return Ok(());
     }
     let source_dir = root.join("hashes");
+    let tombstone_dir = root.join("hash-tombstone");
     let destination = addons_dir.join(HASHES_DIR);
     fs::create_dir_all(&destination)
         .map_err(|e| format!("Failed to create hash baseline directory: {e}"))?;
     for folder in hash_folders {
-        let path = source_dir.join(format!("{folder}.json"));
-        let bytes = fs::read(&path)
-            .map_err(|e| format!("Failed to read staged hash baseline for {folder}: {e}"))?;
-        atomic_file::atomic_write(&destination.join(format!("{folder}.json")), &bytes)
-            .map_err(|e| format!("Failed to promote hash baseline: {e}"))?;
+        let file_name = format!("{folder}.json");
+        let source = source_dir.join(&file_name);
+        let live = destination.join(&file_name);
+        let tombstone = tombstone_dir.join(&file_name);
+
+        // Renames preserve both the old and new baseline until the transaction
+        // is finalized. This makes a partially promoted set fully reversible.
+        if source.is_file() {
+            if tombstone.is_file() {
+                if live.exists() {
+                    return Err(format!(
+                        "Conflicting live and tombstoned hash baselines for {folder}."
+                    ));
+                }
+            } else if live.is_file() {
+                rename_with_retries(&live, &tombstone).map_err(|e| {
+                    format!("Failed to preserve the previous hash baseline for {folder}: {e}")
+                })?;
+            } else if live.exists() {
+                return Err(format!("Hash baseline path for {folder} is not a file."));
+            }
+            rename_with_retries(&source, &live)
+                .map_err(|e| format!("Failed to promote hash baseline for {folder}: {e}"))?;
+        } else if !live.is_file() {
+            return Err(format!("Staged hash baseline for {folder} is missing."));
+        }
     }
     Ok(())
+}
+
+fn rollback_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> Result<(), String> {
+    let source_dir = root.join("hashes");
+    let tombstone_dir = root.join("hash-tombstone");
+    let destination = addons_dir.join(HASHES_DIR);
+    let mut first_error = None;
+
+    for folder in hash_folders.iter().rev() {
+        let file_name = format!("{folder}.json");
+        let source = source_dir.join(&file_name);
+        let live = destination.join(&file_name);
+        let tombstone = tombstone_dir.join(&file_name);
+
+        // If the staged file was already promoted, move it back into the
+        // transaction first. Keeping that marker makes rollback idempotent if
+        // recovery itself is interrupted and retried.
+        if !source.is_file() && live.is_file() {
+            if let Err(error) = rename_with_retries(&live, &source) {
+                first_error.get_or_insert_with(|| {
+                    format!("Failed to withdraw new hash baseline for {folder}: {error}")
+                });
+                continue;
+            }
+        }
+        if tombstone.is_file() && !live.exists() {
+            if let Err(error) = rename_with_retries(&tombstone, &live) {
+                first_error.get_or_insert_with(|| {
+                    format!("Failed to restore hash baseline for {folder}: {error}")
+                });
+            }
+        }
+    }
+
+    first_error.map_or(Ok(()), Err)
 }
 
 fn write_journal(root: &Path, journal: &Journal) -> Result<(), String> {
@@ -744,7 +807,7 @@ mod tests {
 
     fn prepare_root(addons_dir: &Path, name: &str) -> PathBuf {
         let root = addons_dir.join(STAGING_DIR).join(name);
-        for child in ["stage", "tombstone", "hashes"] {
+        for child in ["stage", "tombstone", "hashes", "hash-tombstone"] {
             fs::create_dir_all(root.join(child)).expect("create transaction directory");
         }
         root
@@ -935,14 +998,23 @@ mod tests {
     }
 
     #[test]
-    fn recovery_finishes_hash_promotion_after_all_swaps_landed() {
+    fn recovery_rolls_back_hashes_after_all_swaps_landed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let addons_dir = temp.path().join("AddOns");
         let root = prepare_root(&addons_dir, "swapped");
         write_addon(&addons_dir.join("Example"), "new");
         write_addon(&root.join("tombstone/Example"), "old");
-        fs::write(root.join("hashes/Example.json"), br#"{"version":"2"}"#)
-            .expect("write staged hash baseline");
+        fs::create_dir_all(addons_dir.join(".kalpa-hashes")).expect("create hashes directory");
+        fs::write(
+            root.join("hash-tombstone/Example.json"),
+            br#"{"version":"1"}"#,
+        )
+        .expect("write old hash tombstone");
+        fs::write(
+            addons_dir.join(".kalpa-hashes/Example.json"),
+            br#"{"version":"2"}"#,
+        )
+        .expect("write promoted hash baseline");
         write_journal(
             &root,
             &Journal {
@@ -960,11 +1032,11 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(addons_dir.join("Example/main.lua")).expect("read live addon"),
-            "new"
+            "old"
         );
         assert_eq!(
             fs::read(addons_dir.join(".kalpa-hashes/Example.json")).expect("read hash baseline"),
-            br#"{"version":"2"}"#
+            br#"{"version":"1"}"#
         );
         assert!(!addons_dir.join(STAGING_DIR).exists());
     }
@@ -1054,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_refuses_to_bless_a_swapped_install_with_missing_hash_baseline() {
+    fn recovery_rolls_back_a_swapped_install_with_missing_hash_baseline() {
         let temp = tempfile::tempdir().expect("tempdir");
         let addons_dir = temp.path().join("AddOns");
         let root = prepare_root(&addons_dir, "missing-hash");
@@ -1073,14 +1145,12 @@ mod tests {
         )
         .expect("write journal");
 
-        let error = recover_staging(&addons_dir).expect_err("missing hash must fail closed");
-
-        assert!(error.contains("Failed to read staged hash baseline for Example"));
+        recover_staging(&addons_dir).expect("recover transaction");
         assert_eq!(
             fs::read_to_string(addons_dir.join("Example/main.lua")).expect("read live addon"),
-            "new"
+            "old"
         );
-        assert!(root.exists());
+        assert!(!root.exists());
         assert!(!addons_dir.join(".kalpa-hashes/Example.json").exists());
     }
 
