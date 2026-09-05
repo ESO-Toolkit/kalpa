@@ -13,6 +13,7 @@ import {
   FINDING_IMPACT,
   LEVEL_META,
   MV_PROVIDER_LABEL,
+  NEED_META,
   ROLE_LABEL,
   ROLE_TO_SLOT,
   SLOT_LABEL,
@@ -20,9 +21,11 @@ import {
   SOURCE_LABEL,
   SOURCE_META,
   findingsForSlot,
+  slotFilled,
+  slotStatus,
 } from "./slots";
 import type { Slot, SlotSource } from "./slots";
-import type { ClientStack, HealthFinding, PreservedOriginal, StackItem } from "./types";
+import type { ClientStack, HealthFinding, PreservedOriginal, SlotStatus, StackItem } from "./types";
 
 /**
  * What is in one slot, what is wrong with it, and what could be there instead.
@@ -40,6 +43,14 @@ import type { ClientStack, HealthFinding, PreservedOriginal, StackItem } from ".
  * that cannot be offered. That is why `SOURCE_LABEL` is on screen from the
  * start: "Bring your own" is a true and complete statement about the DLSS slot
  * today, where a disabled "Install…" button would be a promise.
+ *
+ * One thing comes before state, and only when it has something to say: what the
+ * **live path** wants in this slot. On the direct path the motion, preset and
+ * tuning panes have no gap to report and never had; they were reporting one
+ * anyway, in Info blue, which is how a working install read as five-eighths
+ * broken. `SlotNeedNote` states the path's answer first, and where that answer
+ * is "correctly nothing here" it also *replaces* the empty-state copy below
+ * rather than sitting above a contradiction.
  */
 export function SlotPane({
   slot,
@@ -57,6 +68,16 @@ export function SlotPane({
   const sourceLabel = SOURCE_LABEL[source];
 
   const meta = SOURCE_META[source];
+
+  const status = slotStatus(slot, stack);
+  const need = status?.need ?? "required";
+  // The empty-state copy asserts an absence ("No shader tree here"). That is a
+  // true and useful sentence when the live path wants something here and it is
+  // missing, and a false framing when the path wants nothing — and an outright
+  // guess when Kalpa could not read the folder at all, since `items` is then
+  // empty for a reason that has nothing to do with the user's install. So the
+  // need note carries those two cases alone.
+  const showContents = slotFilled(slot, stack) || need === "required";
 
   return (
     // The pane is an *object*, not a region.
@@ -106,7 +127,9 @@ export function SlotPane({
       </header>
 
       <div className="flex-1 space-y-4 p-4">
-        <SlotContents slot={slot} stack={stack} />
+        {status && <SlotNeedNote status={status} />}
+
+        {showContents && <SlotContents slot={slot} stack={stack} />}
 
         {findings.length > 0 && (
           <ul className="space-y-2">
@@ -122,6 +145,73 @@ export function SlotPane({
         <SlotActions slot={slot} stack={stack} onStackChanged={onStackChanged} />
       </div>
     </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* What the live path wants here                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The slot's place on the live path, stated before anything else in the pane.
+ *
+ * This is the fix for the bug the whole `SlotNeed` axis exists for. There are
+ * two mutually exclusive Neural Rendering setups; on the direct one, motion,
+ * preset and tuning are correctly empty, and the panel rendered all three as
+ * Info-tinted "nothing here" rows and then announced that everything agreed.
+ * Both halves were wrong from the same cause: nothing on screen knew which
+ * shape the stack was supposed to be.
+ *
+ * Three things this deliberately does **not** do:
+ *
+ * - It does not render for `required`. That is the default reading of a pane
+ *   and a note on all eight rows is a note on none.
+ * - It does not paraphrase. `reason` comes from the backend as a finished
+ *   sentence and is shown verbatim; only the backend knows which files it
+ *   found, and a frontend re-wording is a second copy that drifts.
+ * - It does not suggest removing anything. `keep_because` is shown, not
+ *   collapsed behind a disclosure, because the things it describes are
+ *   irreplaceable by Kalpa: iMMERSE LaunchPad is link-only by licence and the
+ *   parked `renodx-dlss5` / `dlss5-feed` add-ons come from a Discord with no
+ *   stable URL. If the live path breaks, the user's existing copy is the only
+ *   fallback that exists, so "you could delete this" would be advice Kalpa
+ *   cannot undo. Reading the row as permission to tidy up is the failure mode
+ *   worth spending vertical space to prevent.
+ *
+ * Colour follows `NEED_META`: structural plates for the two states that are
+ * *correct*, and the `info` treatment for `unknown` alone, which is the only
+ * one that is genuinely an absence — of knowledge. A word and a glyph carry it
+ * on every theme; three shipped themes are light and two high-contrast, and the
+ * `status-*` tokens are reseeded per theme, so colour is never the only signal.
+ */
+function SlotNeedNote({ status }: { status: SlotStatus }) {
+  const meta = NEED_META[status.need];
+  if (!meta.word) return null;
+  const { Icon } = meta;
+
+  return (
+    <div className={cn("flex items-start gap-2 rounded-lg p-3", meta.plate)}>
+      <Icon aria-hidden className={cn("mt-0.5 size-4 shrink-0", meta.glyph)} />
+      <div className="min-w-0 flex-1">
+        <p
+          className={cn(
+            "font-heading text-[11px] font-semibold uppercase tracking-[0.06em]",
+            meta.glyph
+          )}
+        >
+          {meta.word}
+        </p>
+        <p className="mt-1 max-w-[62ch] text-xs leading-relaxed">{status.reason}</p>
+        {status.keep_because && (
+          // Not a footnote and not a tooltip. "Keep it" is the instruction; the
+          // sentence after it is why Kalpa cannot get this back for you.
+          <p className="mt-2 max-w-[62ch] text-xs leading-relaxed text-muted-foreground">
+            <span className="font-semibold text-accent-sky">Keep it: </span>
+            {status.keep_because}
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -238,8 +328,16 @@ function SlotContents({ slot, stack }: { slot: Slot; stack: ClientStack }) {
   }
 }
 
-/** Copy for a slot with nothing in it. Each says something specific: "not
- *  present" tells the user nothing they could act on. */
+/**
+ * Copy for a slot with nothing in it. Each says something specific: "not
+ * present" tells the user nothing they could act on.
+ *
+ * Every line here is written for a slot the live path **wants** — it reports a
+ * gap, and that is only ever the right sentence under `SlotNeed.required`.
+ * `SlotPane` gates on exactly that, so none of these reaches a direct-path
+ * install's motion or preset row, where the same absence is the correct answer
+ * and `SlotNeedNote` says so instead.
+ */
 const EMPTY_COPY: Partial<Record<Slot, string>> = {
   reshade: "No ReShade in this folder. ESO is running stock.",
   addons:
@@ -460,12 +558,32 @@ function PresetContents({ stack }: { stack: ClientStack }) {
   );
 }
 
+/**
+ * The tuning slot's empty state, without naming a section it does not own.
+ *
+ * This used to be hardcoded "ReShade.ini has no [RenoDX.DLSS5] section yet".
+ * `[RenoDX.DLSS5]` is written by `renodx-dlss5.addon64` — the **feed** path's
+ * add-on, which on this machine is parked — so on a direct-path install the
+ * pane named a dead section as though it were the one that mattered, and its
+ * saved `NeuralUplift=0` read as live tuning. That single wrong string misled
+ * the user and the diagnosis with them.
+ *
+ * The section name now comes from `tuning_section`, and whether its values are
+ * in force comes from `tuning_owner` by way of `SlotNeedNote` above — which
+ * says the whole thing properly, in the backend's own words, and names the
+ * parked add-on the values belong to. Nothing is deleted or hidden either way:
+ * the user may well switch paths back, and a fossil is the settings the feed
+ * path would return to.
+ */
 function TuningContents({ stack }: { stack: ClientStack }) {
   if (stack.tuning.length === 0) {
-    return (
+    return stack.tuning_section ? (
       <Empty>
-        RenoDX DLSS 5 has never run here — ReShade.ini has no [RenoDX.DLSS5] section yet.
+        <span className="font-mono">[{stack.tuning_section}]</span> is in ReShade.ini with no values
+        in it.
       </Empty>
+    ) : (
+      <Empty>No add-on has saved a tuning block to ReShade.ini yet.</Empty>
     );
   }
   // Nothing here on purpose. `TuningPanel` below leads with the overlay and
