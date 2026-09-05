@@ -1,4 +1,5 @@
-import { load } from "@tauri-apps/plugin-store";
+import { getStore as lookUpNativeStore } from "@tauri-apps/plugin-store";
+import type { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 
 const STORE_PATH = "settings.json";
@@ -15,7 +16,7 @@ const STORE_RELOADED_SIGNAL = "settings-store-reloaded";
  * rolled back or reported as a failed save. Keep in sync with Rust. */
 const STORE_COMMITTED_SIGNAL = "settings-store-committed";
 
-let storePromise: ReturnType<typeof load> | null = null;
+let storePromise: Promise<Store> | null = null;
 
 /** Serializes all writes (set + save) so they never interleave. Because autoSave
  * is off, every write ends in an explicit save() that flushes the WHOLE store; if
@@ -74,13 +75,33 @@ function getStore() {
     // autosave could otherwise flush a key in the middle of a multi-key batch
     // (e.g. the forced-default migration marker before its active-theme reset),
     // leaving the store durably inconsistent.
-    // NOTE: plugin-store caches one instance per path and the FIRST opener's
-    // options win. The Rust side opens settings.json first (token_store.rs) and
-    // also disables autosave, so this option must stay in sync with it.
-    storePromise = load(STORE_PATH, { autoSave: false, defaults: {} }).catch((err) => {
-      storePromise = null;
-      throw err;
-    });
+    // `getStore` is a lookup, not an open: it returns only stores native code
+    // has already registered. That is deliberate. `load` takes any path and the
+    // plugin resolves it by pushing it onto the app-data directory unchecked, so
+    // `..` and absolute paths escape — granting the webview `store:allow-load`
+    // would hand it a JSON write to anywhere on disk. The capability grants
+    // `store:allow-get-store` instead, and `settings_store::ensure_open` opens
+    // this one path (autosave off) during setup, before the webview loads.
+    storePromise = lookUpNativeStore(STORE_PATH)
+      .then(async (store) => {
+        if (store) return store;
+        // Setup is the only opener now, so if its open failed nothing else
+        // would ever try again. `ensure_settings_store` takes no path — it
+        // reopens the one file Rust names — so asking here cannot turn into the
+        // arbitrary-path open this change removed. It is a narrow recovery: the
+        // native open fails on conditions that mostly recur, so treat this as
+        // reporting the state rather than as a likely repair.
+        await invoke("ensure_settings_store");
+        const reopened = await lookUpNativeStore(STORE_PATH);
+        if (!reopened) {
+          throw new Error("Settings are unavailable: the settings store could not be opened.");
+        }
+        return reopened;
+      })
+      .catch((err) => {
+        storePromise = null;
+        throw err;
+      });
   }
   return storePromise;
 }
