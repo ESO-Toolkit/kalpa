@@ -6,8 +6,9 @@ name: Slint Prototype CI
 # would roughly double CI time if built on every PR. Path-filter it instead:
 # any PR touching the prototype or its packaging wiring gets the full gate.
 on:
+  # Every base, not just main -- see the note in ci.yml. The path filter below
+  # is what keeps the cost down, not the branch filter.
   pull_request:
-    branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
       # The sidecar includes a number of src-tauri modules with #[path]. Run

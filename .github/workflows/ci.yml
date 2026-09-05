@@ -3,8 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+  # No `branches:` filter. With one, a PR based on anything other than main --
+  # a stacked PR, or a feature branch collecting work before it goes up -- ran
+  # no checks at all, and GitHub reported "no checks reported" rather than a
+  # failure. That reads as neutral, so unverified code looks the same as passing
+  # code right up until it is merged into a PR that IS checked. Run everywhere
+  # and let the base branch be the reviewer's concern, not the gate's.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
