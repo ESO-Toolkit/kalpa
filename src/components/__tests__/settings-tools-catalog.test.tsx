@@ -151,4 +151,21 @@ describe("Settings > Tools is the catalog for unpinned features", () => {
     expect(unpinned).toBeLessThan(appUpdates);
     expect(unpinned).toBeLessThan(secondary);
   });
+
+  // "Graphics stack" carries both `pinnedWhen` and a permanent `toolsGroup`. Its
+  // header button comes and goes with `graphicsStackDetected`, but the Tools tab
+  // must always show exactly one row for it — never zero, never two.
+  it("lists Graphics stack exactly once when it is unpinned from the toolbar", async () => {
+    render(<Settings {...settingsProps({ graphicsStackDetected: false })} />);
+    await openToolsTab();
+
+    expect(screen.getAllByText("Graphics stack")).toHaveLength(1);
+  });
+
+  it("still lists Graphics stack exactly once when it is pinned to the toolbar", async () => {
+    render(<Settings {...settingsProps({ graphicsStackDetected: true })} />);
+    await openToolsTab();
+
+    expect(screen.getAllByText("Graphics stack")).toHaveLength(1);
+  });
 });
