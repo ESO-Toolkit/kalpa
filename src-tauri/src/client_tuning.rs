@@ -1218,41 +1218,41 @@ pub async fn apply_client_tuning(
     let root = crate::client_write::begin_write(&state, &client_dir).await?;
 
     tokio::task::spawn_blocking(move || {
-        let ini_path = tuning_file_path(root.path());
-        let contents = std::fs::read_to_string(&ini_path)
-            .map_err(|e| format!("Could not read {TUNING_FILE}: {e}"))?;
+        crate::client_backup::run_managed_transaction(&app, &root, |transaction| {
+            let ini_path = tuning_file_path(transaction.client_root());
+            let contents = std::fs::read_to_string(&ini_path)
+                .map_err(|e| format!("Could not read {TUNING_FILE}: {e}"))?;
 
-        // The liveness guard, and the reason this read happens on the write
-        // side rather than trusting whatever the panel last saw. The panel's
-        // copy of the form can be minutes old; the add-on could have been
-        // parked in between. Provenance is re-derived from the folder and the
-        // file as they are *now*, and a fossil section is refused with the same
-        // sentence the panel shows beside it.
-        let form = read_form_for_dir(root.path(), &contents);
-        if form.writable_section().is_none() {
-            return Err(form
-                .sections
-                .iter()
-                .find(|section| section.section.eq_ignore_ascii_case(TUNING_SECTION))
-                .map(|section| section.read_only_reason.clone())
-                .filter(|reason| !reason.is_empty())
-                .unwrap_or_else(|| {
-                    format!("Kalpa will not write [{TUNING_SECTION}] in this client folder.")
-                }));
-        }
+            // The liveness guard, and the reason this read happens on the write
+            // side rather than trusting whatever the panel last saw. The panel's
+            // copy of the form can be minutes old; the add-on could have been
+            // parked in between. Provenance is re-derived from the folder and the
+            // file as they are *now*, and a fossil section is refused with the same
+            // sentence the panel shows beside it.
+            let form = read_form_for_dir(transaction.client_root(), &contents);
+            if form.writable_section().is_none() {
+                return Err(form
+                    .sections
+                    .iter()
+                    .find(|section| section.section.eq_ignore_ascii_case(TUNING_SECTION))
+                    .map(|section| section.read_only_reason.clone())
+                    .filter(|reason| !reason.is_empty())
+                    .unwrap_or_else(|| {
+                        format!("Kalpa will not write [{TUNING_SECTION}] in this client folder.")
+                    }));
+            }
 
-        let updated = apply_edits(&contents, &edits)?;
-        let outcome = crate::client_backup::edit_managed_file(
-            &app,
-            &root,
-            TUNING_FILE,
-            crate::client_write::ManagedKind::ReShadeConfig,
-            updated.as_bytes(),
-        )?;
-        Ok(TuningApplyOutcome {
-            changed: edits.into_iter().map(|edit| edit.key).collect(),
-            backup_id: outcome.backup_id,
-            note: APPLY_TIMING_NOTE.to_string(),
+            let updated = apply_edits(&contents, &edits)?;
+            let outcome = transaction.edit_file(
+                TUNING_FILE,
+                crate::client_write::ManagedKind::ReShadeConfig,
+                updated.as_bytes(),
+            )?;
+            Ok(TuningApplyOutcome {
+                changed: edits.into_iter().map(|edit| edit.key).collect(),
+                backup_id: outcome.backup_id,
+                note: APPLY_TIMING_NOTE.to_string(),
+            })
         })
     })
     .await

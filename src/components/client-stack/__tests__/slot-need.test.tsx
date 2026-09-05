@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { SlotRail } from "../slot-rail";
@@ -265,10 +265,19 @@ describe("the rail", () => {
     // Elsweyr Moons reseeds `--primary` to within a couple of dE of
     // `--foreground`, so the tint alone marks nothing at all on that theme.
     // `SOURCE_META` has always had the word; nothing displayed it.
+    //
+    // The rail's single `listbox` (nested listboxes are invalid ARIA) wraps
+    // two `role="presentation"` groups: the slots and the whole-stack rows.
+    // Querying `[role=option]` off the outer listbox would also catch the
+    // whole-stack rows, so this scopes to the slot group specifically —
+    // identified by its `flex-1` class (the whole-stack group is `shrink-0`)
+    // rather than by DOM order, so it cannot quietly latch onto the wrong
+    // group. If the group stops existing the null check fails the test outright.
     renderRail();
-    const rows = screen
-      .getByRole("listbox", { name: "Stack slots" })
-      .querySelectorAll("[role=option]");
+    const rail = screen.getByRole("listbox", { name: "Graphics stack views" });
+    const slotGroup = rail.querySelector<HTMLElement>('[role="presentation"].flex-1');
+    expect(slotGroup).not.toBeNull();
+    const rows = within(slotGroup as HTMLElement).getAllByRole("option");
     expect(rows).toHaveLength(SLOT_ORDER.length);
     SLOT_ORDER.forEach((slot, i) => {
       expect(rows[i]?.textContent).toContain(SOURCE_META[SLOT_SOURCE[slot]].word);

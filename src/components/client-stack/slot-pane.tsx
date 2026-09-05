@@ -9,6 +9,7 @@ import { PresetPanel } from "./preset-panel";
 import { RuntimeDriftCard } from "./runtime-drift-card";
 import { ShaderPacksPanel } from "./shader-packs-panel";
 import { TuningPanel } from "./tuning-panel";
+import type { StackMutationCoordinator } from "./panel-props";
 import {
   FINDING_IMPACT,
   LEVEL_META,
@@ -55,12 +56,12 @@ import type { ClientStack, HealthFinding, PreservedOriginal, SlotStatus, StackIt
 export function SlotPane({
   slot,
   stack,
-  onStackChanged,
+  mutation,
   onOpenGuide,
 }: {
   slot: Slot;
   stack: ClientStack;
-  onStackChanged: () => Promise<void>;
+  mutation: StackMutationCoordinator;
   onOpenGuide: (url: string) => void;
 }) {
   const findings = findingsForSlot(slot, stack);
@@ -142,7 +143,7 @@ export function SlotPane({
         {/* The controls that act on this slot, mounted in the slot they act on —
             once each. They used to render on both tabs, which meant two copies
             fetching the same state independently. */}
-        <SlotActions slot={slot} stack={stack} onStackChanged={onStackChanged} />
+        <SlotActions slot={slot} stack={stack} mutation={mutation} />
       </div>
     </section>
   );
@@ -599,11 +600,11 @@ function TuningContents({ stack }: { stack: ClientStack }) {
 function SlotActions({
   slot,
   stack,
-  onStackChanged,
+  mutation,
 }: {
   slot: Slot;
   stack: ClientStack;
-  onStackChanged: () => Promise<void>;
+  mutation: StackMutationCoordinator;
 }) {
   // The drift card is scoped to the runtime files of its own slot. It used to
   // be handed every managed path from the overview as well as the per-layer
@@ -616,21 +617,19 @@ function SlotActions({
       <RuntimeDriftCard
         clientDir={stack.client_dir}
         stack={stack}
-        onChanged={onStackChanged}
+        mutation={mutation}
         filePaths={filePaths}
       />
     );
   }
   if (slot === "shaders") {
-    return (
-      <ShaderPacksPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />
-    );
+    return <ShaderPacksPanel clientDir={stack.client_dir} stack={stack} mutation={mutation} />;
   }
   if (slot === "preset") {
-    return <PresetPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />;
+    return <PresetPanel clientDir={stack.client_dir} stack={stack} mutation={mutation} />;
   }
   if (slot === "tuning") {
-    return <TuningPanel clientDir={stack.client_dir} stack={stack} onChanged={onStackChanged} />;
+    return <TuningPanel clientDir={stack.client_dir} stack={stack} mutation={mutation} />;
   }
   return null;
 }

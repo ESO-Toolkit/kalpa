@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangleIcon,
   ArchiveIcon,
@@ -75,25 +75,35 @@ function PlannedOpRow({ op }: { op: PlannedOp }) {
  * stays disabled until that plan has loaded — a user cannot approve a list they
  * have not been shown.
  */
-export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps) {
+export function StackPowerCard({ clientDir, stack, mutation }: StackPanelProps) {
   const [plan, setPlan] = useState<TogglePlan | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<FileOpOutcome | null>(null);
+  const requestToken = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      requestToken.current += 1;
+    };
+  }, [clientDir]);
 
   const handleRequest = useCallback(async () => {
+    const token = ++requestToken.current;
     setError(null);
     setOutcome(null);
     setPlanLoading(true);
     try {
       const next = await invokeOrThrow<TogglePlan>("plan_client_toggle", { clientDir });
+      if (requestToken.current !== token) return;
       setPlan(next);
     } catch (e) {
+      if (requestToken.current !== token) return;
       setPlan(null);
       setError(getTauriErrorMessage(e));
     } finally {
-      setPlanLoading(false);
+      if (requestToken.current === token) setPlanLoading(false);
     }
   }, [clientDir]);
 
@@ -104,23 +114,27 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
 
   const handleConfirm = useCallback(async () => {
     if (!plan) return;
+    const token = ++requestToken.current;
     setApplying(true);
     setError(null);
     try {
-      await approveClientWrites(clientDir);
-      const result = await invokeOrThrow<FileOpOutcome>("apply_client_toggle", {
-        clientDir,
-        expected: plan.action,
+      const result = await mutation.run("Switching the client stack", clientDir, async () => {
+        await approveClientWrites(clientDir);
+        return invokeOrThrow<FileOpOutcome>("apply_client_toggle", {
+          clientDir,
+          expected: plan.action,
+        });
       });
-      setOutcome(result);
+      if (requestToken.current !== token || result.status !== "committed") return;
+      setOutcome(result.value);
       setPlan(null);
-      await onChanged();
     } catch (e) {
+      if (requestToken.current !== token) return;
       setError(getTauriErrorMessage(e));
     } finally {
-      setApplying(false);
+      if (requestToken.current === token) setApplying(false);
     }
-  }, [clientDir, onChanged, plan]);
+  }, [clientDir, mutation, plan]);
 
   if (stack.is_empty) return null;
 
@@ -168,7 +182,7 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
           <Button
             variant="outline"
             size="sm"
-            disabled={planLoading}
+            disabled={planLoading || mutation.pending}
             onClick={() => void handleRequest()}
           >
             {planLoading ? (
@@ -218,7 +232,7 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
             <Button
               size="sm"
               variant={plan.action === "disable" ? "destructive" : "default"}
-              disabled={applying || plan.blockers.length > 0}
+              disabled={applying || mutation.pending || plan.blockers.length > 0}
               onClick={() => void handleConfirm()}
             >
               {applying ? <Spinner className="size-3.5" /> : <PowerIcon />}
@@ -228,7 +242,12 @@ export function StackPowerCard({ clientDir, stack, onChanged }: StackPanelProps)
                   ? "Confirm switch off"
                   : "Confirm switch on"}
             </Button>
-            <Button size="sm" variant="outline" disabled={applying} onClick={handleCancel}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={applying || mutation.pending}
+              onClick={handleCancel}
+            >
               Cancel
             </Button>
           </div>

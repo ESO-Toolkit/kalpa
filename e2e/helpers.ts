@@ -82,15 +82,29 @@ async function connectToTauriAt(
     seen = candidates.map((p) => p.url());
     for (const candidate of candidates) {
       if (!isAppUrl(candidate.url())) continue;
+      let hasIpc = false;
       try {
         await candidate.waitForLoadState("domcontentloaded");
-        const hasIpc = await candidate.evaluate(
+        hasIpc = await candidate.evaluate(
           () => "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>)
         );
-        if (hasIpc) return { browser, page: candidate };
       } catch {
         // A target that vanished or refuses evaluation is not the app page.
       }
+      if (!hasIpc) continue;
+
+      // CDP and Tauri IPC becoming available are transport-level signals,
+      // not proof that App.initializeApp has registered the AddOns root.
+      // The sandbox suite mutates that root immediately after connecting,
+      // so wait for the command whose authority check depends on that
+      // registration. This closes the startup race without guessing how
+      // long a cold WebView2 takes to boot. Keep this outside the target
+      // detection catch so its timeout diagnostics reach the test runner.
+      const sandboxPath = process.env.KALPA_E2E_SANDBOX_DIR;
+      if (sandboxPath) {
+        await waitForSandboxReadiness(candidate, sandboxPath);
+      }
+      return { browser, page: candidate };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -98,6 +112,54 @@ async function connectToTauriAt(
   throw new Error(
     `No page exposing Tauri IPC appeared within 20s — is the app running via ${startCommand}? ` +
       `Last saw: ${seen.join(", ") || "no pages"}`
+  );
+}
+
+/**
+ * Wait until the app has registered the sandbox AddOns root with the backend.
+ *
+ * `scan_installed_addons` is deliberately used as the readiness probe rather
+ * than a DOM spinner: the command's `require_allowed_path` gate rejects every
+ * request until `set_addons_path` has completed, and it also verifies that the
+ * registered root is the exact path owned by this run. A successful probe is
+ * therefore the state the destructive specs actually require.
+ */
+async function waitForSandboxReadiness(page: Page, sandboxPath: string): Promise<void> {
+  const timeoutMs = 120_000;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "no probe attempt completed";
+
+  while (Date.now() < deadline) {
+    try {
+      await page.evaluate((addonsPath) => {
+        const internals = (
+          window as unknown as {
+            __TAURI_INTERNALS__?: { invoke: (command: string, args: unknown) => Promise<unknown> };
+          }
+        ).__TAURI_INTERNALS__;
+        if (!internals) throw new Error("Tauri IPC is not exposed on the app page.");
+        return internals.invoke("scan_installed_addons", { addonsPath });
+      }, sandboxPath);
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await page.waitForTimeout(250);
+  }
+
+  const diagnostics = await page
+    .evaluate(() => ({
+      url: window.location.href,
+      title: document.title,
+      body: (document.body.innerText || "").trim().slice(0, 500),
+    }))
+    .catch(() => ({ url: "<unavailable>", title: "<unavailable>", body: "<unavailable>" }));
+
+  throw new Error(
+    `Sandbox AddOns readiness was not established within ${timeoutMs / 1000}s. ` +
+      `The app never accepted scan_installed_addons for the owned root. ` +
+      `Last probe error: ${lastError}. ` +
+      `Page: ${diagnostics.url}; title: ${diagnostics.title}; visible text: ${diagnostics.body || "<none>"}`
   );
 }
 
