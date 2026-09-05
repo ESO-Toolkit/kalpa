@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const STAGING_DIR: &str = ".kalpa-staging";
 const HASHES_DIR: &str = ".kalpa-hashes";
+/// Marks a folder whose hash baseline this transaction promoted when there was
+/// no previous one, so a rollback can tell its own work from the user's.
+const ABSENT_BASELINE_SUFFIX: &str = ".absent";
 const RENAME_ATTEMPTS: usize = 5;
 const RENAME_BACKOFF: Duration = Duration::from_millis(40);
 const CREATE_ATTEMPTS: usize = 16;
@@ -644,11 +647,12 @@ fn promote_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> Re
         let source = source_dir.join(&file_name);
         let live = destination.join(&file_name);
         let tombstone = tombstone_dir.join(&file_name);
+        let absent = tombstone_dir.join(format!("{folder}{ABSENT_BASELINE_SUFFIX}"));
 
         // Renames preserve both the old and new baseline until the transaction
         // is finalized. This makes a partially promoted set fully reversible.
         if source.is_file() {
-            if tombstone.is_file() {
+            if tombstone.is_file() || absent.is_file() {
                 if live.exists() {
                     return Err(format!(
                         "Conflicting live and tombstoned hash baselines for {folder}."
@@ -660,6 +664,18 @@ fn promote_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> Re
                 })?;
             } else if live.exists() {
                 return Err(format!("Hash baseline path for {folder} is not a file."));
+            } else {
+                // Nothing to preserve, but the rollback still has to be able to
+                // tell "this transaction promoted the file now sitting at `live`"
+                // from "the staged file went missing and `live` is the user's
+                // existing baseline". Without a durable marker those look
+                // identical, and rollback would withdraw a baseline it never
+                // wrote — see `rollback_hashes`. Write the marker before the
+                // rename so a crash between the two still leaves the promotion
+                // attributable.
+                fs::write(&absent, b"").map_err(|e| {
+                    format!("Failed to record the absent hash baseline for {folder}: {e}")
+                })?;
             }
             rename_with_retries(&source, &live)
                 .map_err(|e| format!("Failed to promote hash baseline for {folder}: {e}"))?;
@@ -681,11 +697,19 @@ fn rollback_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> R
         let source = source_dir.join(&file_name);
         let live = destination.join(&file_name);
         let tombstone = tombstone_dir.join(&file_name);
+        let absent = tombstone_dir.join(format!("{folder}{ABSENT_BASELINE_SUFFIX}"));
 
-        // If the staged file was already promoted, move it back into the
-        // transaction first. Keeping that marker makes rollback idempotent if
-        // recovery itself is interrupted and retried.
-        if !source.is_file() && live.is_file() {
+        // Only withdraw a live baseline this transaction actually published.
+        // `promote_hashes` leaves one of the two markers behind whenever it
+        // promotes: the displaced previous baseline, or the empty marker saying
+        // there was none. Neither being present means the staged file went
+        // missing before promotion and `live` is the user's own baseline, still
+        // untouched — withdrawing it would move it into the transaction root,
+        // which recovery then deletes. Losing a baseline is not cosmetic: the
+        // next update sees none, reads the user's edits as absent, and
+        // overwrites them.
+        let this_transaction_promoted_it = tombstone.is_file() || absent.is_file();
+        if !source.is_file() && live.is_file() && this_transaction_promoted_it {
             if let Err(error) = rename_with_retries(&live, &source) {
                 first_error.get_or_insert_with(|| {
                     format!("Failed to withdraw new hash baseline for {folder}: {error}")
@@ -811,6 +835,118 @@ mod tests {
             fs::create_dir_all(root.join(child)).expect("create transaction directory");
         }
         root
+    }
+
+    #[test]
+    fn rollback_keeps_a_baseline_this_transaction_never_promoted() {
+        // The staged hash file vanishing mid-transaction (antivirus, a cleanup
+        // tool, the user) leaves `promote_hashes` looking at a missing source
+        // and a live baseline, which it treats as already-promoted and skips.
+        // Rollback then used to withdraw that live file into the transaction
+        // root, which recovery deletes — destroying the user's own baseline.
+        // That is not a cosmetic loss: the next update sees no baseline, reads
+        // the user's edits as absent, and overwrites them.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "txn");
+        let hashes_dir = addons_dir.join(HASHES_DIR);
+        fs::create_dir_all(&hashes_dir).expect("create hashes dir");
+        let live = hashes_dir.join("Example.json");
+        fs::write(&live, br#"{"the-users":"baseline"}"#).expect("write baseline");
+        // No staged source, and no tombstone or marker: this transaction never
+        // promoted anything for this folder.
+
+        promote_hashes(&addons_dir, &root, &["Example".to_string()]).expect("promote");
+        rollback_hashes(&addons_dir, &root, &["Example".to_string()]).expect("rollback");
+
+        assert_eq!(
+            fs::read(&live).expect("baseline must survive"),
+            br#"{"the-users":"baseline"}"#,
+            "rollback withdrew a baseline it never published"
+        );
+    }
+
+    #[test]
+    fn rollback_withdraws_a_first_baseline_this_transaction_did_promote() {
+        // The mirror case: no previous baseline, so promotion writes the absent
+        // marker and publishes. Rollback must undo that, leaving the folder with
+        // no baseline exactly as it found it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "txn");
+        fs::write(
+            root.join("hashes").join("Example.json"),
+            br#"{"new":"baseline"}"#,
+        )
+        .expect("stage baseline");
+        let live = addons_dir.join(HASHES_DIR).join("Example.json");
+
+        promote_hashes(&addons_dir, &root, &["Example".to_string()]).expect("promote");
+        assert!(
+            live.is_file(),
+            "promotion should publish the staged baseline"
+        );
+
+        rollback_hashes(&addons_dir, &root, &["Example".to_string()]).expect("rollback");
+
+        assert!(
+            !live.exists(),
+            "a first baseline this transaction published must be withdrawn again"
+        );
+        assert!(
+            root.join("hashes").join("Example.json").is_file(),
+            "the withdrawn baseline belongs back in the transaction"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_the_displaced_previous_baseline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "txn");
+        let hashes_dir = addons_dir.join(HASHES_DIR);
+        fs::create_dir_all(&hashes_dir).expect("create hashes dir");
+        let live = hashes_dir.join("Example.json");
+        fs::write(&live, br#"{"old":"baseline"}"#).expect("write baseline");
+        fs::write(
+            root.join("hashes").join("Example.json"),
+            br#"{"new":"baseline"}"#,
+        )
+        .expect("stage baseline");
+
+        promote_hashes(&addons_dir, &root, &["Example".to_string()]).expect("promote");
+        assert_eq!(fs::read(&live).unwrap(), br#"{"new":"baseline"}"#);
+
+        rollback_hashes(&addons_dir, &root, &["Example".to_string()]).expect("rollback");
+
+        assert_eq!(
+            fs::read(&live).expect("previous baseline must come back"),
+            br#"{"old":"baseline"}"#
+        );
+    }
+
+    #[test]
+    fn hash_rollback_is_idempotent() {
+        // Recovery can itself be interrupted and retried.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "txn");
+        let hashes_dir = addons_dir.join(HASHES_DIR);
+        fs::create_dir_all(&hashes_dir).expect("create hashes dir");
+        let live = hashes_dir.join("Example.json");
+        fs::write(&live, br#"{"old":"baseline"}"#).expect("write baseline");
+        fs::write(
+            root.join("hashes").join("Example.json"),
+            br#"{"new":"baseline"}"#,
+        )
+        .expect("stage baseline");
+
+        promote_hashes(&addons_dir, &root, &["Example".to_string()]).expect("promote");
+        for attempt in 0..3 {
+            rollback_hashes(&addons_dir, &root, &["Example".to_string()])
+                .unwrap_or_else(|e| panic!("rollback attempt {attempt} failed: {e}"));
+            assert_eq!(fs::read(&live).unwrap(), br#"{"old":"baseline"}"#);
+        }
     }
 
     #[test]
