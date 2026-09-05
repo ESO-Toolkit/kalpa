@@ -3,11 +3,16 @@ name: Slint Prototype CI
 # The Slint native UI ships as a Windows sidecar of the main app (see
 # src-tauri/tauri.windows.conf.json + scripts/build-native-slint-sidecar.mjs),
 # so its tree must stay green — but it is a full separate Rust workspace that
-# would roughly double CI time if built on every PR. Path-filter it instead:
-# any PR touching the prototype or its packaging wiring gets the full gate.
+# would roughly double CI time if built on every PR. Path-filter it instead.
+#
+# Be clear about what that filter actually spares, because it is less than it
+# sounds: it includes src-tauri/src/**, which most Rust PRs touch, so this runs
+# on nearly all of them and only frontend-, worker- or docs-only PRs skip it.
+# That is the intended trade — commit 11ca3f89 was a sidecar-only breakage no
+# other job could see — but it is not a narrow filter.
 on:
-  # Every base, not just main -- see the note in ci.yml. The path filter below
-  # is what keeps the cost down, not the branch filter.
+  # Every base, not just main; see the note in ci.yml. Stacked PRs are the
+  # reason, and they cost a full run each like any other PR.
   pull_request:
     paths:
       - "prototypes/slint-kalpa/**"
