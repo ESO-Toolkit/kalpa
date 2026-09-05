@@ -14,7 +14,7 @@
     "core:window:allow-start-dragging",
     "dialog:allow-open",
     "dialog:allow-save",
-    "store:allow-load",
+    "store:allow-get-store",
     "store:allow-get",
     "store:allow-set",
     "store:allow-delete",

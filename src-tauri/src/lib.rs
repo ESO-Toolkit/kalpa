@@ -905,8 +905,12 @@ pub fn run() {
                 *guard = Some(tray);
             }
 
+            // Open the settings store before anything reads it. The webview
+            // cannot open one itself — see `settings_store::ensure_open`.
+            settings_store::ensure_open(app.handle());
+
             // Migrate auth tokens from plaintext store to credential manager
-            // (one-time). This is also the first opener of the settings store.
+            // (one-time).
             token_store::migrate_from_store(app.handle());
 
             // If that open swallowed a load error (plugin-store ignores them) and
@@ -1144,6 +1148,7 @@ pub fn run() {
             uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
             uploader::commands::uploader_run_native_live_spike,
+            settings_store::ensure_settings_store,
             commands::flush_settings,
             commands::settings_tainted,
             commands::launch_native_performance_mode,
