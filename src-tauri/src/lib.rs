@@ -589,6 +589,7 @@ pub fn run() {
         .manage(AllowedAddonsPath(Mutex::new(None)))
         .manage(PendingAddonsPathApproval(Mutex::new(None)))
         .manage(client_write::AllowedGameInstallPath::new())
+        .manage(client_write::NativeClientPicks::new())
         .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
@@ -987,6 +988,7 @@ pub fn run() {
             client_health::validate_eso_client,
             client_health::inspect_eso_client,
             commands::is_eso_or_launcher_running,
+            client_write::choose_client_path,
             client_write::set_game_install_path,
             client_write::clear_game_install_path,
             client_stack::inspect_client_stack,

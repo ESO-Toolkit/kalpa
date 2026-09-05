@@ -19,6 +19,10 @@
 //!    user explicitly approved via [`set_game_install_path`]. Approval requires
 //!    a file named `eso64.exe` or `eso.exe` to be present. That is a mis-click
 //!    guard, not an authenticity check — a zero-byte file of that name passes.
+//!    So approval additionally requires the folder to be one native code
+//!    detected or one the user picked through [`choose_client_path`]'s native
+//!    dialog; the frontend cannot nominate an arbitrary directory as the write
+//!    root just because something named `eso64.exe` sits in it.
 //! 2. **Containment.** Every placed path is resolved through
 //!    [`safe_relative_join`], which rejects absolute paths, `..`, drive-relative
 //!    forms and reserved device names, then re-checks the result is still under
@@ -63,9 +67,10 @@
 
 use crate::client_install::{validate_client_dir, EsoClientLocation};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tauri_plugin_dialog::DialogExt;
 
 /// A client directory the user has explicitly approved for writes.
 #[derive(Debug, Clone)]
@@ -95,6 +100,44 @@ impl AllowedGameInstallPath {
 impl Default for AllowedGameInstallPath {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Canonical client directories the user picked in the native file dialog this
+/// session.
+///
+/// A set rather than the single-use slot `PendingAddonsPathApproval` uses,
+/// because the two roots are approved on different rhythms. The AddOns root is
+/// registered once and stays registered, so one consumable approval covers it.
+/// The client root is deliberately re-approved immediately before every single
+/// mutation and revoked when the panel closes, so a consumable approval would
+/// authorize the user's first shader install and refuse the second. What has to
+/// survive that cycle is the authorization fact -- the native dialog saw this
+/// user choose this folder -- while the revocable write approval on top of it
+/// keeps its short life. Entries are still matched on exact canonical equality
+/// and last only as long as the process.
+#[derive(Default)]
+pub struct NativeClientPicks(Mutex<HashSet<PathBuf>>);
+
+impl NativeClientPicks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn remember(&self, canonical: PathBuf) -> Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|_| "Internal approval lock error.".to_string())?
+            .insert(canonical);
+        Ok(())
+    }
+
+    fn contains(&self, canonical: &Path) -> Result<bool, String> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "Internal approval lock error.".to_string())?
+            .contains(canonical))
     }
 }
 
@@ -626,19 +669,105 @@ pub async fn begin_write(
 
 // ── Commands ─────────────────────────────────────────────────────────────
 
+/// Open the native file dialog on the ESO executable and remember the client
+/// directory the user chose, so [`set_game_install_path`] will accept it.
+///
+/// This deliberately lives behind a Rust command rather than using the webview
+/// dialog plugin, for the reason `choose_addons_path` gives for the AddOns
+/// root: the plugin hands a path to the webview, which establishes that *some*
+/// path reached the frontend but not that the native authorization boundary saw
+/// the user pick it. For the client root that distinction matters more, not
+/// less -- the blast radius of a bad write here is a game that will not launch.
+#[tauri::command]
+pub fn choose_client_path(
+    app: tauri::AppHandle,
+    picks: tauri::State<'_, NativeClientPicks>,
+) -> Result<Option<EsoClientLocation>, String> {
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_title("Locate eso64.exe")
+        .add_filter("ESO client", &["exe"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| "The file dialog did not return a local path.".to_string())?;
+    let location = validate_client_dir(&path)?;
+    picks.remember(canonical_client_dir(&location)?)?;
+    Ok(Some(location))
+}
+
+fn canonical_client_dir(location: &EsoClientLocation) -> Result<PathBuf, String> {
+    dunce::canonicalize(&location.client_dir)
+        .map_err(|e| format!("Could not resolve the client folder: {e}"))
+}
+
+fn is_detected_client_path(canonical: &Path) -> bool {
+    crate::client_health::detect_eso_clients()
+        .iter()
+        .any(|found| {
+            dunce::canonicalize(&found.client_dir).is_ok_and(|candidate| candidate == canonical)
+        })
+}
+
+/// Whether `canonical` may be registered as the write root.
+///
+/// `detected` is a parameter so the gate can be tested without a machine that
+/// happens to have ESO installed, and so a test can pin the "not detected"
+/// case that the check exists to refuse.
+fn approval_is_authorized(
+    current: Option<&ApprovedClientPath>,
+    picks: &NativeClientPicks,
+    canonical: &Path,
+    detected: impl Fn(&Path) -> bool,
+) -> Result<bool, String> {
+    if current.is_some_and(|approved| approved.canonical == canonical) {
+        return Ok(true);
+    }
+    if picks.contains(canonical)? {
+        return Ok(true);
+    }
+    Ok(detected(canonical))
+}
+
 /// Approve a client directory for writes for the rest of this session.
 ///
 /// Validation is stronger than the AddOns equivalent: rather than checking a
-/// folder name, this requires an actual ESO executable to be present.
+/// folder name, this requires an actual ESO executable to be present. That
+/// alone is only a mis-click guard, though -- it says the folder looks like a
+/// client, not that the user meant *this* folder. So, exactly as
+/// `set_addons_path` does, the path must additionally be one native code
+/// independently detected, one the user chose in the native dialog via
+/// [`choose_client_path`], or the one already approved. Otherwise anything able
+/// to `invoke` -- a compromised dependency in the webview, say -- could nominate
+/// any directory containing a file named `eso64.exe` as the write root without a
+/// dialog ever opening.
 #[tauri::command]
 pub fn set_game_install_path(
     state: tauri::State<'_, AllowedGameInstallPath>,
+    picks: tauri::State<'_, NativeClientPicks>,
     path: String,
 ) -> Result<EsoClientLocation, String> {
     let location = validate_client_dir(Path::new(&path))?;
-    let canonical = dunce::canonicalize(&location.client_dir)
-        .map_err(|e| format!("Could not resolve the client folder: {e}"))?;
+    let canonical = canonical_client_dir(&location)?;
+
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+    if !approval_is_authorized(
+        guard.current.as_ref(),
+        &picks,
+        &canonical,
+        is_detected_client_path,
+    )? {
+        return Err(
+            "That client folder was not detected by Kalpa and has not been chosen in the \
+             file picker. Use Browse to locate eso64.exe first."
+                .to_string(),
+        );
+    }
+
     guard.generation = guard.generation.wrapping_add(1);
     guard.current = Some(ApprovedClientPath {
         configured: location.client_dir.clone(),
@@ -668,6 +797,76 @@ mod tests {
         } else {
             "/games/eso/game/client"
         })
+    }
+
+    #[test]
+    fn approval_refuses_a_folder_that_was_never_detected_or_picked() {
+        let picks = NativeClientPicks::new();
+        let candidate = root();
+
+        let allowed = approval_is_authorized(None, &picks, &candidate, |_| false)
+            .expect("gate should not error");
+
+        assert!(
+            !allowed,
+            "a client folder nobody detected and nobody picked must not become the write root"
+        );
+    }
+
+    #[test]
+    fn approval_accepts_only_the_exact_folder_the_native_dialog_recorded() {
+        let picks = NativeClientPicks::new();
+        let picked = root();
+        picks.remember(picked.clone()).expect("remember");
+        let sibling = picked.parent().expect("parent").join("client-copy");
+
+        assert!(
+            approval_is_authorized(None, &picks, &picked, |_| false).expect("gate"),
+            "the picked folder is authorized"
+        );
+        assert!(
+            !approval_is_authorized(None, &picks, &sibling, |_| false).expect("gate"),
+            "a pick for one folder must not authorize a neighbouring one"
+        );
+    }
+
+    #[test]
+    fn a_native_pick_survives_the_revoke_and_reapprove_cycle() {
+        // Every client mutation calls set_game_install_path again and the panel
+        // revokes on close, so an approval that were consumed on first use would
+        // authorize the first shader install and refuse the second.
+        let picks = NativeClientPicks::new();
+        let picked = root();
+        picks.remember(picked.clone()).expect("remember");
+
+        for attempt in 0..3 {
+            assert!(
+                approval_is_authorized(None, &picks, &picked, |_| false).expect("gate"),
+                "attempt {attempt} should still be authorized after revocation"
+            );
+        }
+    }
+
+    #[test]
+    fn a_detected_folder_is_authorized_without_any_pick() {
+        let picks = NativeClientPicks::new();
+        let candidate = root();
+
+        assert!(approval_is_authorized(None, &picks, &candidate, |_| true).expect("gate"));
+    }
+
+    #[test]
+    fn the_already_approved_folder_stays_authorized() {
+        let picks = NativeClientPicks::new();
+        let candidate = root();
+        let current = ApprovedClientPath {
+            configured: candidate.clone(),
+            canonical: candidate.clone(),
+        };
+
+        assert!(
+            approval_is_authorized(Some(&current), &picks, &candidate, |_| false).expect("gate")
+        );
     }
 
     #[test]

@@ -289,8 +289,15 @@ impl KnownProcess {
     }
 }
 
+/// Whether `process` is running, or `Err` when that could not be determined.
+///
+/// The error case is deliberately not collapsed into `false`. `tasklist` and
+/// `pgrep` can be missing, denied or killed, and answering "not running" from a
+/// check that failed is how a precondition screen ends up showing a green
+/// "ESO is not running" tick while the game is open. Callers decide what an
+/// unknown answer means; [`check_preconditions`] treats it as running.
 #[cfg(target_os = "windows")]
-fn is_process_running(process: KnownProcess) -> bool {
+fn is_process_running(process: KnownProcess) -> Result<bool, String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     // Release builds are GUI-subsystem, so a console child spawned without
@@ -298,27 +305,63 @@ fn is_process_running(process: KnownProcess) -> bool {
     // row when the migration wizard checks its preconditions.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let name = process.name();
-    Command::new("tasklist")
+    let output = Command::new("tasklist")
         .args(["/FI", &format!("IMAGENAME eq {name}"), "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map(|o| {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.contains(name)
-        })
-        .unwrap_or(false)
+        .map_err(|e| format!("Could not run tasklist: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("tasklist failed while looking for {name}"));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.contains(name))
 }
 
 #[cfg(not(target_os = "windows"))]
-fn is_process_running(process: KnownProcess) -> bool {
+fn is_process_running(process: KnownProcess) -> Result<bool, String> {
     use std::process::Command;
     let name = process.name();
-    Command::new("pgrep")
+    let output = Command::new("pgrep")
         .arg("-i")
         .arg(name)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .map_err(|e| format!("Could not run pgrep: {e}"))?;
+    // pgrep exits 0 with matches, 1 with none, and >1 on a real error.
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!("pgrep failed while looking for {name}")),
+    }
+}
+
+/// `true` if either process is running **or** could not be checked.
+///
+/// Returns the first detection error alongside the verdict so the caller can
+/// say why it is assuming the worst rather than silently claiming a sighting.
+fn any_running_or_unknown(processes: [KnownProcess; 2]) -> (bool, Option<String>) {
+    any_running_or_unknown_with(processes, is_process_running)
+}
+
+/// Inner form taking the detector, so the indeterminate case can be driven
+/// without breaking `tasklist`/`pgrep` on the machine running the tests.
+fn any_running_or_unknown_with(
+    processes: [KnownProcess; 2],
+    check: impl Fn(KnownProcess) -> Result<bool, String>,
+) -> (bool, Option<String>) {
+    let mut unknown = None;
+    for process in processes {
+        match check(process) {
+            Ok(true) => return (true, None),
+            Ok(false) => {}
+            Err(error) => {
+                unknown.get_or_insert(error);
+            }
+        }
+    }
+    match unknown {
+        Some(error) => (true, Some(error)),
+        None => (false, None),
+    }
 }
 
 // ─── Core snapshot implementation ───────────────────────────────────────────
@@ -538,23 +581,31 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 /// Phase 0: Check preconditions before migration.
 pub fn check_preconditions(addons_dir: &Path) -> PreconditionResult {
     let parent = addons_dir.parent().unwrap_or(addons_dir);
-    let eso_running =
-        is_process_running(KnownProcess::Eso64) || is_process_running(KnownProcess::Eso);
-    let minion_running =
-        is_process_running(KnownProcess::Minion) || is_process_running(KnownProcess::MinionUnix);
+    let (eso_running, eso_unknown) =
+        any_running_or_unknown([KnownProcess::Eso64, KnownProcess::Eso]);
+    let (minion_running, minion_unknown) =
+        any_running_or_unknown([KnownProcess::Minion, KnownProcess::MinionUnix]);
     let minion_found = crate::commands::find_minion_xml().is_some();
     let addons_path_valid = addons_dir.is_dir();
     let saved_variables_exists = parent.join("SavedVariables").is_dir();
 
     let mut warnings = Vec::new();
-    if eso_running {
-        warnings
-            .push("ESO appears to be running. Please close the game before migrating.".to_string());
+    match (eso_running, &eso_unknown) {
+        (true, Some(error)) => warnings.push(format!(
+            "Could not check whether ESO is running ({error}); assuming it is. Please close the              game before migrating."
+        )),
+        (true, None) => warnings
+            .push("ESO appears to be running. Please close the game before migrating.".to_string()),
+        _ => {}
     }
-    if minion_running {
-        warnings.push(
+    match (minion_running, &minion_unknown) {
+        (true, Some(error)) => warnings.push(format!(
+            "Could not check whether Minion is running ({error}); assuming it is. Consider              closing it before proceeding."
+        )),
+        (true, None) => warnings.push(
             "Minion appears to be running. Consider closing it before proceeding.".to_string(),
-        );
+        ),
+        _ => {}
     }
     if !addons_path_valid {
         warnings.push("AddOns folder not found.".to_string());
@@ -1216,6 +1267,45 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{any_running_or_unknown_with, KnownProcess};
+
+    #[test]
+    fn a_detection_failure_is_reported_as_running_not_as_clear() {
+        let (running, unknown) =
+            any_running_or_unknown_with([KnownProcess::Eso64, KnownProcess::Eso], |_| {
+                Err("tasklist is missing".to_string())
+            });
+
+        assert!(
+            running,
+            "a check that could not run must not report the game as closed"
+        );
+        assert_eq!(unknown.as_deref(), Some("tasklist is missing"));
+    }
+
+    #[test]
+    fn a_sighting_wins_over_a_failure_on_the_other_name() {
+        let (running, unknown) =
+            any_running_or_unknown_with([KnownProcess::Eso64, KnownProcess::Eso], |process| {
+                match process {
+                    KnownProcess::Eso64 => Err("denied".to_string()),
+                    _ => Ok(true),
+                }
+            });
+
+        assert!(running);
+        assert_eq!(unknown, None, "an actual sighting needs no caveat");
+    }
+
+    #[test]
+    fn all_clear_only_when_every_check_actually_ran() {
+        let (running, unknown) =
+            any_running_or_unknown_with([KnownProcess::Eso64, KnownProcess::Eso], |_| Ok(false));
+
+        assert!(!running);
+        assert_eq!(unknown, None);
+    }
+
     use super::*;
 
     fn test_minion_addon(

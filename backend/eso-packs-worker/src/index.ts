@@ -1049,6 +1049,19 @@ export const SUBREQUEST_RESERVE = 100;
  */
 const EXCLUSION_SUBREQUEST_BUDGET = 60;
 
+/** One KV delete for `vote:{packId}:{userId}` and one for the reverse index. */
+export const SUBREQUESTS_PER_VOTE = 2;
+/** Worst-case cost of entering another vote page: the list call plus one
+ *  full record. */
+const VOTE_DELETE_SUBREQUESTS_PER_PAGE = 1 + SUBREQUESTS_PER_VOTE;
+/**
+ * Subrequests account deletion may spend clearing votes. The reserve covers
+ * everything outside the vote loop: the tombstone put, the DO call, the capped
+ * pack deletes, the capped share deletes and their list pages, the cache
+ * invalidation and the `backup:latest` scrub.
+ */
+export const ACCOUNT_DELETE_VOTE_BUDGET = SUBREQUEST_CEILING - SUBREQUEST_RESERVE;
+
 export const RESTORE_MAX_PAGE_SIZE = Math.floor(
   (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
 );
@@ -1648,18 +1661,42 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   // 2. Delete all user's votes via reverse index (user-votes:{userId}:{packId})
   // Does not decrement vote_count — denormalized aggregates, acceptable for rare deletion.
+  //
+  // Packs are capped at MAX_PACKS_PER_USER and shares at MAX_SHARES_PER_USER,
+  // so those loops are inherently bounded. Votes are not capped, so this is the
+  // one loop in account deletion that can spend an unbounded number of
+  // subrequests. Left unbudgeted it is the same failure the restore path was
+  // paged to avoid: past the ceiling the whole request throws, and the bounded
+  // cleanup below it — share codes and the never-expiring backup scrub — never
+  // runs at all. Budget the votes, always reach the bounded tail, and tell the
+  // caller when there is more to collect. Erasure stays convergent because
+  // every deleted key simply stops being listed on the next pass.
   let voteCount = 0;
   let voteCursor: string | undefined;
+  let votesComplete = true;
+  let voteSubrequests = 0;
   do {
+    if (voteSubrequests + VOTE_DELETE_SUBREQUESTS_PER_PAGE > ACCOUNT_DELETE_VOTE_BUDGET) {
+      votesComplete = false;
+      break;
+    }
     const list = await env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor: voteCursor });
+    voteSubrequests++;
     for (const key of list.keys) {
+      if (voteSubrequests + SUBREQUESTS_PER_VOTE > ACCOUNT_DELETE_VOTE_BUDGET) {
+        votesComplete = false;
+        break;
+      }
       const packId = key.name.slice(`user-votes:${userId}:`.length);
       if (packId) {
         await env.ESO_PACKS.delete(`vote:${packId}:${userId}`);
+        voteSubrequests++;
       }
       await env.ESO_PACKS.delete(key.name);
+      voteSubrequests++;
       voteCount++;
     }
+    if (!votesComplete) break;
     voteCursor = list.list_complete ? undefined : list.cursor;
   } while (voteCursor);
 
@@ -1690,6 +1727,9 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   await purgeUserFromLatestBackup(env, userId);
 
   return json(request, {
+    // `false` means the bounded work is done but votes remain; the caller
+    // repeats the request until this is `true`.
+    complete: votesComplete,
     deleted: {
       packs: packIds.length,
       votes: voteCount,

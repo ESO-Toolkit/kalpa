@@ -511,10 +511,14 @@ fn roll_back_with(
         if let Some(parent) = record.resolved.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        // Overwrite, never delete-then-copy. A copy that dies halfway leaves
-        // wrong bytes; a copy that dies after a successful delete leaves no
-        // file. For a proxy DLL, missing is a silent behaviour change and wrong
-        // at least still loads or visibly fails.
+        // Publish, never delete-then-copy and never write in place. A plain
+        // overwrite that dies halfway leaves a truncated proxy DLL, and a copy
+        // that dies after a successful delete leaves no file at all; both are
+        // bad ways for a rollback to fail. The production `restore` is
+        // `atomic_file::atomic_copy`, which needs neither trade-off: the
+        // destination holds Kalpa's complete file until the original's complete
+        // bytes replace it in one rename, so an interrupted rollback is
+        // re-runnable rather than destructive.
         if let Err(error) = restore(&backup, &record.resolved) {
             eprintln!(
                 "Warning: could not restore displaced file {}: {error}",
@@ -650,8 +654,20 @@ fn apply_placements_in(
         backup_root,
         root,
         placements,
-        |from: &Path, to: &Path| fs::copy(from, to),
+        restore_displaced,
     )
+}
+
+/// Put a displaced original back during a rollback.
+///
+/// Atomic publication rather than a plain overwrite, because a rollback is
+/// exactly when the destination must never be left half-written: an interrupted
+/// `fs::copy` leaves a truncated proxy DLL that the next run has no way to tell
+/// from a complete one. `atomic_copy` keeps Kalpa's complete file in place until
+/// the original's complete bytes replace it in a single rename, so an
+/// interrupted rollback can simply be run again.
+fn restore_displaced(from: &Path, to: &Path) -> std::io::Result<u64> {
+    crate::atomic_file::atomic_copy(from, to)
 }
 
 /// Inner form of [`apply_placements_in`] taking the restore-copy used during
@@ -1101,17 +1117,21 @@ fn revert_placements_in_locked(
         });
 
         let mutation = (|| -> Result<(), String> {
-            if resolved.is_file() {
-                fs::remove_file(&resolved)
-                    .map_err(|e| format!("Failed to remove {relative}: {e}"))?;
-            }
+            // Publishing the original over Kalpa's copy in one step, rather
+            // than removing first and copying after, means there is no instant
+            // at which the path holds neither file and no instant at which it
+            // holds a half-written one. Only a path with nothing to put back
+            // is removed outright.
             if let Some(backup) = &original {
                 if let Some(parent) = resolved.parent() {
                     fs::create_dir_all(parent)
                         .map_err(|e| format!("Failed to create directory: {e}"))?;
                 }
-                fs::copy(backup, &resolved)
+                crate::atomic_file::atomic_copy(backup, &resolved)
                     .map_err(|e| format!("Failed to restore {relative}: {e}"))?;
+            } else if resolved.is_file() {
+                fs::remove_file(&resolved)
+                    .map_err(|e| format!("Failed to remove {relative}: {e}"))?;
             }
             Ok(())
         })();
@@ -1150,9 +1170,7 @@ fn revert_placements_in_locked(
 /// it truthful again; a failed rollback is reported as mixed state and the
 /// snapshots are retained for manual recovery.
 fn rollback_revert_batch(backup_root: &Path, changed: &[PlacedRecord], cause: String) -> String {
-    let failed = roll_back_with(backup_root, changed, Vec::new(), |from, to| {
-        fs::copy(from, to)
-    });
+    let failed = roll_back_with(backup_root, changed, Vec::new(), restore_displaced);
     if failed.is_empty() {
         return format!("{cause}\n\nNothing was changed - every earlier revert step was undone.");
     }
@@ -1459,7 +1477,8 @@ fn run_one_op(
                     "Cannot put the game's own {destination} back: that name is still occupied."
                 ));
             }
-            fs::copy(&from, &to).map_err(|e| format!("Could not restore {destination}: {e}"))?;
+            crate::atomic_file::atomic_copy(&from, &to)
+                .map_err(|e| format!("Could not restore {destination}: {e}"))?;
             outcome
                 .applied
                 .push(format!("Copied your own {source} back to {destination}"));
@@ -1549,7 +1568,7 @@ fn undo_ops(client_root: &Path, done: &[&FileOp]) -> Vec<String> {
             } => {
                 crate::client_write::safe_relative_join(client_root, must_match).and_then(|from| {
                     let to = crate::client_write::safe_relative_join(client_root, relative_path)?;
-                    fs::copy(&from, &to)
+                    crate::atomic_file::atomic_copy(&from, &to)
                         .map(|_| ())
                         .map_err(|e| format!("{relative_path}: {e}"))
                 })
@@ -2478,6 +2497,39 @@ mod tests {
         assert!(
             entries[0].displaced_backup.is_some(),
             "the v1 file it overwrote must have been backed up"
+        );
+    }
+
+    #[test]
+    fn rollback_publishes_the_original_rather_than_writing_over_the_live_file() {
+        // A hard link is the observable difference between the two ways of
+        // putting a file back. `fs::copy` truncates the destination and writes
+        // through it, so every other name for that inode -- here `witness` --
+        // sees the new bytes, and sees them incomplete for as long as the copy
+        // is running. `atomic_copy` publishes a replacement over the name, so
+        // the old inode keeps its bytes and no reader ever observes a partial
+        // destination. Asserting on `witness` therefore pins atomicity itself,
+        // not merely that the right bytes arrived.
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("dxgi.dll");
+        let witness = temp.path().join("witness.dll");
+        let backup = temp.path().join("original.dll");
+        fs::write(&live, b"kalpa-proxy-bytes").unwrap();
+        fs::hard_link(&live, &witness).unwrap();
+        fs::write(&backup, b"the-users-own-original").unwrap();
+
+        restore_displaced(&backup, &live).expect("rollback restore should succeed");
+
+        assert_eq!(
+            fs::read(&live).unwrap(),
+            b"the-users-own-original",
+            "the displaced original must be what is live again"
+        );
+        assert_eq!(
+            fs::read(&witness).unwrap(),
+            b"kalpa-proxy-bytes",
+            "the live file was overwritten in place, so an interrupted rollback would leave a \
+             truncated DLL behind"
         );
     }
 

@@ -6,11 +6,13 @@ import {
 } from "cloudflare:test";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import worker, {
+  ACCOUNT_DELETE_VOTE_BUDGET,
   invalidatePackListCache,
   RESTORE_MAX_PAGE_SIZE,
   SUBREQUESTS_PER_RECORD,
   SUBREQUEST_CEILING,
   SUBREQUEST_RESERVE,
+  SUBREQUESTS_PER_VOTE,
 } from "../src/index";
 import { putPack, putVote } from "../src/kv";
 import { resetTokenCache } from "../src/shares";
@@ -2173,5 +2175,66 @@ describe("DELETE /account", () => {
     expect(res.status).toBe(200);
 
     expect(await e.ESO_PACKS.get("backup:latest")).toBe(original);
+  });
+
+  it("finishes the bounded cleanup and reports incompleteness when votes overrun the budget", async () => {
+    // Packs are capped and shares are capped, so votes are the one collection
+    // that can be large enough to spend the whole per-request subrequest
+    // allowance. Unbudgeted, the request throws partway through the vote loop
+    // and everything after it -- the share codes and the never-expiring backup
+    // scrub -- silently never runs, which is a GDPR erasure that reports
+    // failure while having half-applied.
+    const userId = String(TEST_USER.id);
+    const overBudget = Math.floor(ACCOUNT_DELETE_VOTE_BUDGET / SUBREQUESTS_PER_VOTE) + 20;
+    // Seed only the reverse-index keys the delete loop enumerates. Deleting
+    // the absent `vote:` twin costs the same subrequest, so the budget is
+    // exercised identically at half the setup cost.
+    await Promise.all(
+      Array.from({ length: overBudget }, (_, i) =>
+        e.ESO_PACKS.put(`user-votes:${userId}:budget-pack-${i}`, "1")
+      )
+    );
+    await e.ESO_PACKS.put(`share-user:${userId}:SHARE1`, "1");
+    await e.ESO_PACKS.put("share:SHARE1", JSON.stringify({ userId }));
+
+    const first = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<{
+      complete: boolean;
+      deleted: { votes: number; shares: number };
+    }>();
+
+    // It must say so rather than claiming a finished erasure...
+    expect(firstBody.complete).toBe(false);
+    expect(firstBody.deleted.votes).toBeGreaterThan(0);
+    expect(firstBody.deleted.votes).toBeLessThan(overBudget);
+    // ...and the bounded tail must still have run despite the overrun.
+    expect(firstBody.deleted.shares).toBe(1);
+    expect(await e.ESO_PACKS.get("share:SHARE1")).toBeNull();
+    expect(await e.ESO_PACKS.get(`share-user:${userId}:SHARE1`)).toBeNull();
+
+    // Repeating converges, because a deleted key stops being listed.
+    let complete = false;
+    for (let round = 0; round < 25 && !complete; round++) {
+      const next = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+      expect(next.status).toBe(200);
+      complete = (await next.json<{ complete: boolean }>()).complete;
+    }
+    expect(complete).toBe(true);
+
+    const remaining = await e.ESO_PACKS.list({ prefix: `user-votes:${userId}:` });
+    expect(remaining.keys).toEqual([]);
+  }, 60_000);
+
+  it("reports a single-request deletion as complete", async () => {
+    const userId = String(TEST_USER.id);
+    await putVote(e, "small-pack", userId);
+
+    const res = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+
+    expect(res.status).toBe(200);
+    const body = await res.json<{ complete: boolean; deleted: { votes: number } }>();
+    expect(body.complete).toBe(true);
+    expect(body.deleted.votes).toBe(1);
   });
 });

@@ -9718,19 +9718,27 @@ fn is_eso_running_windows(matches: impl Fn(&str) -> bool) -> Result<bool, String
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
+        // A process snapshot always contains at least this process, so a
+        // failure here is never an empty machine — it is a walk that did not
+        // happen. Reporting `false` would tell the write gates "ESO is not
+        // running" on the strength of a scan that never ran, which is exactly
+        // the indeterminate case they must refuse.
+        if Process32FirstW(snap, &mut entry) == 0 {
+            CloseHandle(snap);
+            return Err("Failed to read the process list".to_string());
+        }
+
         let mut found = false;
-        if Process32FirstW(snap, &mut entry) != 0 {
-            loop {
-                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
-                let name_os = OsString::from_wide(&entry.szExeFile[..len]);
-                let name = name_os.to_string_lossy();
-                if matches(&name) {
-                    found = true;
-                    break;
-                }
-                if Process32NextW(snap, &mut entry) == 0 {
-                    break;
-                }
+        loop {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+            let name_os = OsString::from_wide(&entry.szExeFile[..len]);
+            let name = name_os.to_string_lossy();
+            if matches(&name) {
+                found = true;
+                break;
+            }
+            if Process32NextW(snap, &mut entry) == 0 {
+                break;
             }
         }
 
