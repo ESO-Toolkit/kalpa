@@ -4,6 +4,10 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0-beta.23] — 2026-09-05
+
 The graphics stack panel (formerly "Client Health") used to say "Everything
 agrees" over a setup that could not possibly work. It now knows there are two
 mutually exclusive Neural Rendering paths, checks each slot against the one
@@ -955,7 +959,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...HEAD
+[0.1.0-beta.23]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...v0.1.0-beta.23
 [0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
 [0.1.0-beta.21]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...v0.1.0-beta.21
 [0.1.0-beta.20]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...v0.1.0-beta.20
