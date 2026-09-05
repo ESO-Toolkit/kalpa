@@ -14,7 +14,6 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   invokeOrThrow: vi.fn(),
-  open: vi.fn(),
 }));
 
 vi.mock("@/lib/tauri", () => ({
@@ -23,7 +22,11 @@ vi.mock("@/lib/tauri", () => ({
   invokeOrThrow: mocks.invokeOrThrow,
 }));
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open }));
+// Deliberately no `@tauri-apps/plugin-dialog` mock. Browsing for a client must
+// go through the native `choose_client_path` command, not the webview dialog
+// plugin -- a path the plugin hands to the frontend proves nothing about what
+// the user actually picked. If the panel ever reaches for the plugin again this
+// file will fail on the unmocked import rather than quietly passing.
 vi.mock("@/components/client-stack/preset-panel", () => ({ PresetPanel: () => null }));
 vi.mock("@/components/client-stack/tuning-panel", () => ({ TuningPanel: () => null }));
 vi.mock("@/components/client-stack/runtime-drift-card", () => ({ RuntimeDriftCard: () => null }));
@@ -123,6 +126,8 @@ function installDefaultIpc() {
           return clients.find((client) => client.client_dir === args?.path);
         case "clear_game_install_path":
           return undefined;
+        case "choose_client_path":
+          return null;
         default:
           throw new Error(`Unexpected IPC command: ${command}`);
       }
@@ -160,8 +165,46 @@ describe("Client Health mutation coordination", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.open.mockResolvedValue(null);
     installDefaultIpc();
+  });
+
+  it("browses through the native command rather than the webview dialog plugin", async () => {
+    const picked: EsoClientLocation = {
+      client_dir: "C:\\ESO-C",
+      exe_path: "C:\\ESO-C\\eso64.exe",
+      source: "manual",
+    };
+    const defaultImplementation = mocks.invokeOrThrow.getMockImplementation()!;
+    mocks.invokeOrThrow.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "choose_client_path") return Promise.resolve(picked);
+      if (command === "inspect_client_stack" && args?.clientDir === picked.client_dir) {
+        return Promise.resolve(stackFor(picked.client_dir));
+      }
+      if (command === "plan_adoption" && args?.clientDir === picked.client_dir) {
+        return Promise.resolve(adoptionPlan(picked.client_dir));
+      }
+      if (command === "list_managed_client_files" && args?.clientDir === picked.client_dir) {
+        return Promise.resolve(inventory(picked.client_dir));
+      }
+      if (command === "plan_client_toggle" && args?.clientDir === picked.client_dir) {
+        return Promise.resolve(togglePlan(picked.client_dir));
+      }
+      return defaultImplementation(command, args);
+    });
+    await renderReady();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+
+    await waitFor(() =>
+      expect(
+        mocks.invokeOrThrow.mock.calls.filter(([command]) => command === "choose_client_path")
+      ).toHaveLength(1)
+    );
+    // `validate_eso_client` took a frontend-supplied path; the native command
+    // validates the one the dialog itself returned, so the old call must be gone.
+    expect(
+      mocks.invokeOrThrow.mock.calls.filter(([command]) => command === "validate_eso_client")
+    ).toHaveLength(0);
   });
 
   it("locks install, refresh, close, and conflicting actions until the write reloads", async () => {

@@ -592,7 +592,8 @@ pub fn check_preconditions(addons_dir: &Path) -> PreconditionResult {
     let mut warnings = Vec::new();
     match (eso_running, &eso_unknown) {
         (true, Some(error)) => warnings.push(format!(
-            "Could not check whether ESO is running ({error}); assuming it is. Please close the              game before migrating."
+            "Could not check whether ESO is running ({error}); assuming it is. \
+             Please close the game before migrating."
         )),
         (true, None) => warnings
             .push("ESO appears to be running. Please close the game before migrating.".to_string()),
@@ -600,7 +601,8 @@ pub fn check_preconditions(addons_dir: &Path) -> PreconditionResult {
     }
     match (minion_running, &minion_unknown) {
         (true, Some(error)) => warnings.push(format!(
-            "Could not check whether Minion is running ({error}); assuming it is. Consider              closing it before proceeding."
+            "Could not check whether Minion is running ({error}); assuming it is. \
+             Consider closing it before proceeding."
         )),
         (true, None) => warnings.push(
             "Minion appears to be running. Consider closing it before proceeding.".to_string(),

@@ -614,11 +614,22 @@ pub async fn delete_pack(app: tauri::AppHandle, id: String) -> Result<(), String
 
 // ── Delete Account Data ──────────────────────────────────────────────────────
 
-/// Rounds of `DELETE /account` before Kalpa stops and reports the deletion as
-/// unfinished. Each round clears hundreds of votes, so this covers accounts far
-/// larger than any real one while still terminating if the worker stops making
-/// progress.
-const MAX_ACCOUNT_DELETE_ROUNDS: u32 = 25;
+/// Rounds of `DELETE /account` Kalpa will run back to back.
+///
+/// Bounded by the worker's own write rate limit rather than by how much data an
+/// account can hold: `/account` is a DELETE, so it is metered by `WRITE_LIMITER`
+/// at ten requests a minute, and asking for an eleventh in the same window earns
+/// a 429 instead of progress. Nine rounds clear several thousand votes, which is
+/// far beyond any real account; anything larger finishes on a second attempt,
+/// and the message below says so rather than reporting a hard failure.
+const MAX_ACCOUNT_DELETE_ROUNDS: u32 = 9;
+
+/// Shown when erasure ran out of rounds or hit the write limiter. Deliberately
+/// not phrased as a failure: the packs, share codes and backup scrub are done
+/// by then, and repeating the deletion finishes the remaining votes.
+const DELETE_INCOMPLETE_MESSAGE: &str =
+    "Most of your data is deleted, but there was too much to finish in one go. \
+     Run Delete Account once more to clear the rest.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -686,13 +697,14 @@ pub async fn delete_pack_hub_account(
                         return Ok(totals);
                     }
                     if round + 1 == MAX_ACCOUNT_DELETE_ROUNDS {
-                        return Err(
-                            "Pack Hub could not finish deleting your data. Some of your votes may                              remain; sign in and try again, or contact support."
-                                .to_string(),
-                        );
+                        return Err(DELETE_INCOMPLETE_MESSAGE.to_string());
                     }
                 }
                 401 => return Err("Session expired. Please sign in again.".to_string()),
+                // Only reachable after several rounds in one minute, which
+                // means the deletion was making progress and simply has more
+                // to do than one window allows.
+                429 => return Err(DELETE_INCOMPLETE_MESSAGE.to_string()),
                 status => {
                     let body = response.text().unwrap_or_default();
                     return Err(format!("Pack Hub returned HTTP {status} - {body}"));

@@ -678,8 +678,11 @@ pub async fn begin_write(
 /// path reached the frontend but not that the native authorization boundary saw
 /// the user pick it. For the client root that distinction matters more, not
 /// less -- the blast radius of a bad write here is a game that will not launch.
+// Async for the same reason `choose_addons_path` is: a sync command runs on the
+// main thread, and blocking it waiting for a native dialog deadlocks any
+// platform whose file picker is driven by the main run loop.
 #[tauri::command]
-pub fn choose_client_path(
+pub async fn choose_client_path(
     app: tauri::AppHandle,
     picks: tauri::State<'_, NativeClientPicks>,
 ) -> Result<Option<EsoClientLocation>, String> {
