@@ -69,6 +69,7 @@ interface SettingsProps {
   onRefresh: () => void;
   onOpenLogUpload: () => void;
   onOpenFeature: (id: FeatureId) => void;
+  graphicsStackDetected: boolean;
   minionDetected: boolean;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
@@ -96,6 +97,7 @@ export function Settings({
   onRefresh,
   onOpenLogUpload,
   onOpenFeature,
+  graphicsStackDetected,
   minionDetected,
   onShowShortcuts,
   onCheckForAppUpdate,
@@ -434,18 +436,25 @@ export function Settings({
 
   const pathDirty = path.trim() !== addonsPath;
 
-  const toolsCtx = { minionDetected };
+  const toolsCtx = { minionDetected, graphicsStackDetected };
+  // Selected by `toolsGroup`, NOT by `placement`. A toolbar feature may also own
+  // a permanent catalog row, and the graphics stack does: its header button is
+  // conditional on `pinnedWhen`, so without a fixed row here, plugging in a
+  // ReShade setup would MOVE the panel out of the one place the user had learned
+  // to find it. Nothing else changes — a feature with no `toolsGroup` is still
+  // absent from these blocks.
   const toolFeatures = (group: ToolsGroup) =>
-    FEATURES.filter(
-      (f) =>
-        f.placement === "tools" && f.toolsGroup === group && (f.visibleWhen?.(toolsCtx) ?? true)
-    );
+    FEATURES.filter((f) => f.toolsGroup === group && (f.visibleWhen?.(toolsCtx) ?? true));
   // Pinnable features the user has unpinned from the header toolbar. Without
-  // this block they would appear in NEITHER surface — `toolFeatures` only ever
-  // matches `placement: "tools"` — leaving an unpinned Pack Hub reachable only
-  // by deep link. This tab is the catalog, so it lists them first.
+  // this block they would appear in NEITHER surface, leaving an unpinned Pack
+  // Hub reachable only by deep link. This tab is the catalog, so it lists them
+  // first.
+  //
+  // Features carrying a `toolsGroup` are excluded: they already have a permanent
+  // row below, and listing them here as well would print the same feature twice
+  // in one tab whenever it happened to be unpinned.
   const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, toolsCtx).filter(
-    (f) => f.pinnableToToolbar
+    (f) => f.pinnableToToolbar && !f.toolsGroup
   );
 
   return (

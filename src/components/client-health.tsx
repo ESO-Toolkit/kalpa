@@ -929,8 +929,20 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && handleClose()}>
+      {/* No `max-h`. The cap was 760px on a window whose default is 1000x700,
+          so it did nothing at the default size and threw away ~600px of a
+          1440p display — while this panel's own layout comments agonise over a
+          267px content region. The rail is a fixed 240px, so every pixel
+          returned here goes to the pane and the sub-panels (shader-pack
+          library, tuning) that were actually cramped.
+
+          `DialogContent` remains the SINGLE fixed-height ancestor, which is the
+          contract the no-scroll pane depends on: `h-[calc(100dvh-2rem)]` is
+          still a definite height, so the unbroken `flex` + `min-h-0` chain
+          below is untouched. Removing the cap widens that height; it does not
+          make it indefinite. */}
       <DialogContent
-        className="flex h-[calc(100dvh-2rem)] max-h-[760px] flex-col gap-0 sm:max-w-5xl"
+        className="flex h-[calc(100dvh-2rem)] flex-col gap-0 sm:max-w-6xl"
         showCloseButton={!mutationPending}
       >
         {/* One header row instead of three stacked ones.

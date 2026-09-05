@@ -52,6 +52,7 @@ interface AppDialogsProps {
   isOffline: boolean;
   lastError: string | null;
   logUploaderMounted: boolean;
+  graphicsStackDetected: boolean;
   minionDetected: boolean;
   toolbarHidden: FeatureId[];
   /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
@@ -103,6 +104,7 @@ function AppDialogsBase({
   isOffline,
   lastError,
   logUploaderMounted,
+  graphicsStackDetected,
   minionDetected,
   toolbarHidden,
   onToolbarHiddenChange,
@@ -198,6 +200,7 @@ function AppDialogsBase({
               onPathChange={onPathChange}
               onClose={onCloseDialog}
               onRefresh={onRefresh}
+              graphicsStackDetected={graphicsStackDetected}
               minionDetected={minionDetected}
               toolbarHidden={toolbarHidden}
               onToolbarHiddenChange={onToolbarHiddenChange}

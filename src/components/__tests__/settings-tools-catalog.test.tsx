@@ -82,6 +82,7 @@ function settingsProps(overrides: Partial<SettingsProps> = {}): SettingsProps {
     onRefresh: vi.fn(),
     onOpenLogUpload: vi.fn(),
     onOpenFeature: vi.fn(),
+    graphicsStackDetected: false,
     minionDetected: false,
     onShowShortcuts: vi.fn(),
     onCheckForAppUpdate: vi.fn(),
@@ -149,5 +150,22 @@ describe("Settings > Tools is the catalog for unpinned features", () => {
     expect(secondary).toBeGreaterThanOrEqual(0);
     expect(unpinned).toBeLessThan(appUpdates);
     expect(unpinned).toBeLessThan(secondary);
+  });
+
+  // "Graphics stack" carries both `pinnedWhen` and a permanent `toolsGroup`. Its
+  // header button comes and goes with `graphicsStackDetected`, but the Tools tab
+  // must always show exactly one row for it — never zero, never two.
+  it("lists Graphics stack exactly once when it is unpinned from the toolbar", async () => {
+    render(<Settings {...settingsProps({ graphicsStackDetected: false })} />);
+    await openToolsTab();
+
+    expect(screen.getAllByText("Graphics stack")).toHaveLength(1);
+  });
+
+  it("still lists Graphics stack exactly once when it is pinned to the toolbar", async () => {
+    render(<Settings {...settingsProps({ graphicsStackDetected: true })} />);
+    await openToolsTab();
+
+    expect(screen.getAllByText("Graphics stack")).toHaveLength(1);
   });
 });
