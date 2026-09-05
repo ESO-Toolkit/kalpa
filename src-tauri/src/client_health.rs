@@ -752,10 +752,23 @@ fn scan_logs(dir: &Path) -> LogScan {
 /// Reduce the parsed evaluation counters to a three-state verdict.
 ///
 /// "Climbing" is defined as *any strictly increasing adjacent pair*, not
-/// `last > first`. ReShade appends across sessions, so a tail window can span
-/// a restart where the counter resets to zero; a first/last comparison would
-/// call that stall. One rising step is enough — the counter only advances when
-/// a frame was actually evaluated.
+/// `last > first`. Checked against a real install, ReShade actually truncates
+/// `ReShade.log` on every launch — the file holds exactly one session, with a
+/// single "Initializing crosire's ReShade" banner and no dates, only
+/// times-of-day. That does not make the permissive rule wrong to keep: a
+/// first/last comparison happens to be equivalent within a single truncated
+/// session, but a future ReShade version, or `dlss5-feed.log`, could still
+/// span sessions the way this was originally written to guard against, and
+/// the strictly-increasing-pair rule stays correct either way, so it is the
+/// safer one to keep rather than "simplifying" to `last > first`.
+///
+/// The truncation does change what a "Running" verdict is evidence *of*: with
+/// one session per file, everything this function sees describes the *last
+/// launch*, not the current moment. A positive signal here can predate any
+/// configuration change the user made after closing the game, so it is not
+/// proof about the on-disk configuration as it stands right now — only about
+/// what was running the last time ESO was open. (The frontend addresses that
+/// gap separately; this function only reduces the counters it is given.)
 fn neural_rendering_signal(evaluations: &[u64]) -> NeuralRenderingSignal {
     let climbing = evaluations.windows(2).any(|pair| pair[1] > pair[0]);
     let state = if evaluations.is_empty() {
@@ -1509,8 +1522,12 @@ mod tests {
 
     #[test]
     fn a_counter_reset_across_sessions_still_counts_as_climbing() {
-        // ReShade appends across launches, so the tail can span a restart.
-        // One rising adjacent pair is enough.
+        // ReShade truncates ReShade.log on every launch, but the counter
+        // reset this fixture models — a drop back toward zero mid-tail — is
+        // exactly what a hypothetical multi-session log (or dlss5-feed.log)
+        // could still produce, which is why the rule stays "any rising
+        // adjacent pair" rather than `last > first`. One rising step is
+        // enough.
         let signal = neural_rendering_signal(&[900, 901, 0, 1, 2]);
         assert_eq!(signal.state, NeuralRenderingState::Running);
         assert_eq!(signal.first_evaluation, Some(900));

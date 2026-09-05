@@ -1669,7 +1669,8 @@ fn keep_link_only(what: &str, where_from: &str) -> String {
 /// One sentence for every row on [`ActivePath::Unknown`], shared by
 /// [`build_slots`] and [`tuning_slot`] so the two rows cannot say it
 /// differently.
-const UNREADABLE_ROW: &str = "Kalpa could not read this client folder, so it cannot tell which \n                              Neural Rendering path is live or whether anything is missing here.";
+const UNREADABLE_ROW: &str = "Kalpa could not read this client folder, so it cannot tell which \
+                              Neural Rendering path is live or whether anything is missing here.";
 
 /// The need axis, one entry per frontend slot, always all eight.
 ///
@@ -1982,8 +1983,12 @@ fn tuning_slot(
                 ),
                 None,
             ),
-            // Only reachable when *nothing* is live: the headline falls back to
-            // a fossil only if there is no live block to prefer.
+            // Reached whenever the only tuning block present belongs to a path
+            // that is not the live one — not only when nothing is live. A
+            // direct-live install that has not yet written `[RENODX-DLSS]`
+            // still has only the feed's `[RenoDX.DLSS5]` block on disk, so it
+            // lands here too: see
+            // `a_tuning_block_left_by_a_parked_addon_is_marked_as_a_fossil`.
             TuningProvenance::Fossil => make(
                 StackSlot::Tuning,
                 SlotNeed::InstalledUnused,

@@ -122,7 +122,8 @@ pub const DIRECT_NR_ADDON: &str = "renodx-dlss.addon64";
 /// the copy that makes the refusal read as protection rather than as an
 /// arbitrary lock.
 pub const APPLY_TIMING_NOTE: &str =
-    "Applies at next launch, and only with ESO closed: ReShade rewrites ReShade.ini from      memory when the game exits, so anything changed while it is running is discarded.";
+    "Applies at next launch, and only with ESO closed: ReShade rewrites ReShade.ini from \
+     memory when the game exits, so anything changed while it is running is discarded.";
 
 /// Which of the two mutually exclusive RenoDX integrations a section belongs
 /// to. See the module doc.
@@ -934,7 +935,8 @@ pub fn slider_range(current: Option<f64>) -> (f64, f64) {
 pub fn validate_edit(edit: &TuningEdit) -> Result<(), String> {
     let spec = field_for(&edit.key).ok_or_else(|| {
         format!(
-            "{} is not a setting Kalpa can vouch for, so it will not write it. Settings              Kalpa shows read-only stay read-only.",
+            "{} is not a setting Kalpa can vouch for, so it will not write it. Settings Kalpa \
+             shows as read-only stay read-only.",
             edit.key
         )
     })?;
