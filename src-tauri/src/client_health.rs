@@ -59,16 +59,67 @@ pub struct HealthFinding {
     pub guide_url: Option<String>,
 }
 
-/// A log line that matched a known failure signature.
+/// A log line that matched a known **fatal** failure signature.
+///
+/// Only fatal matches reach this type. Benign signatures — the six ERROR/WARN
+/// lines a *working* RenoDX DLSS-NR setup emits on every launch, see
+/// [`BENIGN_LOG_RULES`] — are recognised and counted, never turned into an
+/// excerpt, because surfacing them is how a healthy stack got triaged as a
+/// broken one. Positive evidence lines are likewise not excerpts; they feed
+/// [`NeuralRenderingSignal`] instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogExcerpt {
     /// Source file name, e.g. `ReShade.log`.
     pub file: String,
-    /// Slug of the rule that matched, shared with the corresponding
-    /// [`HealthFinding::id`] where one is emitted.
+    /// Slug of the [`FATAL_LOG_RULES`] entry that matched.
+    ///
+    /// These slugs are *log-rule* slugs. They are deliberately **not** required
+    /// to correspond to a [`HealthFinding::id`]: no probe in this module emits
+    /// a finding from a log line, and the config-side finding for the same
+    /// condition (`LoadFromDllMain`) is raised by `client_stack` under its own
+    /// id. Where a slug happens to read like a finding id, treat that as
+    /// convenience, not a contract.
     pub rule: String,
     /// The matching line, trimmed and truncated to a sane display length.
     pub line: String,
+}
+
+/// Whether the log proves Neural Rendering is actually running.
+///
+/// The three states are genuinely different and collapsing them is the bug
+/// this type exists to fix — the panel used to treat "no evidence" as "fine".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeuralRenderingState {
+    /// `EvaluateFeature succeeded: evaluation=N` seen with **N climbing**.
+    /// This is the only real proof NR is running: the counter advances once
+    /// per rendered frame, so a rising sequence cannot be produced by an
+    /// add-on that merely loaded.
+    Running,
+    /// The evaluation line was found, but the counter never advanced across
+    /// the scanned window. NR initialised and then stopped — suspicious, and
+    /// explicitly *not* proof. A single occurrence lands here too.
+    Stalled,
+    /// No evaluation line in the scanned window. This is **unknown, not
+    /// broken**: the log may be absent, the session may predate the add-on,
+    /// or the evidence may simply sit above the tail window. Callers must not
+    /// render this as working, and must not render it as failing either.
+    Unknown,
+}
+
+/// Positive evidence, or the documented absence of it, that RenoDX DLSS
+/// Neural Rendering ran during the logged session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NeuralRenderingSignal {
+    pub state: NeuralRenderingState,
+    /// How many `EvaluateFeature succeeded` lines were seen in the scanned
+    /// window. Not a frame count — the window is capped (see
+    /// [`MAX_LOG_TAIL_LINES`]), so this saturates on any real session.
+    pub samples: usize,
+    /// First and last evaluation counter parsed, in file order. Reported so
+    /// the UI can say *how far* it climbed rather than just that it did.
+    pub first_evaluation: Option<u64>,
+    pub last_evaluation: Option<u64>,
 }
 
 /// The full diagnostic report for one client install.
@@ -90,7 +141,17 @@ pub struct ClientHealthReport {
     /// `PresetPath` read out of `ReShade.ini`, when ReShade is installed.
     pub reshade_preset: Option<String>,
     pub findings: Vec<HealthFinding>,
+    /// Fatal log matches only — see [`LogExcerpt`].
     pub log_excerpts: Vec<LogExcerpt>,
+    /// Positive evidence that Neural Rendering ran, or the honest absence of
+    /// it. The "everything agrees" claim must be earned by
+    /// [`NeuralRenderingState::Running`] here, not by an empty findings list.
+    pub neural_rendering: NeuralRenderingSignal,
+    /// How many lines matched a *benign* signature and were deliberately
+    /// suppressed. Surfaced so the panel can say "6 known-harmless lines
+    /// ignored" rather than silently discarding them — a suppressed line is
+    /// still a line somebody may go looking for in the raw log.
+    pub log_benign_suppressed: usize,
 }
 
 // ── Probe constants ──────────────────────────────────────────────────────
@@ -111,23 +172,143 @@ const LEGACY_D3DCOMPILER_PREFIX: &str = "6.3.9600";
 
 const GUIDE_URL: &str = "https://esotk.com/docs/dlss5-neural-rendering/";
 
-/// Log files scanned for known failure signatures.
+/// Log files scanned for known failure signatures *and* for the positive
+/// evidence that Neural Rendering ran.
+///
+/// Only the tail is read (see [`MAX_LOG_TAIL_BYTES`]/[`MAX_LOG_TAIL_LINES`]),
+/// and on a working session that tail is dominated by per-frame evaluation
+/// lines. Startup-time signatures can therefore scroll out of the window
+/// entirely, which is the other reason an empty scan means *unknown* rather
+/// than *healthy*.
+///
+/// `dlss5-feed.log` is the FEED path's own log, written by `dlss5-feed-host64.exe`: it is
+/// absent on a direct-path install (which is why it once looked like dead weight) and is the
+/// only log that exists when the feed pipeline is what is running. Path-specific, not
+/// obsolete — keep it.
 const LOG_FILES: [&str; 2] = ["ReShade.log", "dlss5-feed.log"];
 
-/// `(rule_slug, needle)` — matched case-insensitively against each tailed line.
-/// Deliberately a flat table so new signatures are a one-line addition.
-const LOG_RULES: &[(&str, &str)] = &[
+// The log rules are split three ways — benign, fatal, positive — because a
+// flat table cannot express the thing that actually matters here.
+//
+// A RenoDX DLSS Neural Rendering setup that is working *perfectly* writes six
+// distinct ERROR- and WARN-level lines to `ReShade.log` on every launch
+// (verified 2026-09-03 against a real, working Steam install). Severity is
+// therefore useless as a signal: a rule that flagged ERROR lines would flag a
+// healthy stack. Classification has to be by **signature**.
+//
+// Precedence, and it is load-bearing: [`BENIGN_LOG_RULES`] is consulted
+// **first**, and a benign match ends processing of that line. Several benign
+// lines contain words a fatal needle could plausibly grow into ("failed",
+// "not found"), so evaluating fatal rules first would reintroduce exactly the
+// noise this split exists to remove. See [`classify_line`].
+
+/// `(rule_slug, needle)` for lines that appear on a **working** setup.
+///
+/// Never surfaced as problems; only counted, into
+/// `ClientHealthReport::log_benign_suppressed`. Each entry carries the reason
+/// it is harmless, because the reasons are the expensive part — number 2 below
+/// was once misdiagnosed as the root cause of a failure it had nothing to do
+/// with, and a benign classification is what stops that recurring.
+///
+/// Needles here must be written **lowercase**: the line is lowercased once and
+/// compared directly, so a capital in a needle would silently never match.
+/// (`FATAL_LOG_RULES` keeps its source casing and lowercases per comparison;
+/// benign matching runs against every line and is the hotter path.) A unit
+/// test enforces the lowercase invariant.
+const BENIGN_LOG_RULES: &[(&str, &str)] = &[
+    // 1 + 2 fire once, together, and are a *pair*: the D3D11 proxy evaluation
+    // path declines because ESO's motion-vector format (34) cannot be
+    // preserved, after which NR initialises on the D3D12 backend path and
+    // works. This pair is what was originally, wrongly, blamed for NR doing
+    // nothing; the real cause was the missing `ADDON.LoadFromDllMain` entry
+    // below.
+    (
+        "benign-d3d11-motion-format",
+        "cannot preserve unsupported d3d11 motion format",
+    ),
+    (
+        "benign-d3d11-proxy-declined",
+        "d3d11 proxy evaluation failed",
+    ),
+    // 3 + 4: ESO ships no NVIDIA Streamline modules at all, so the interposer
+    // is genuinely absent and the Streamline hook groups are genuinely
+    // incomplete. Nothing in the DLSS-NR direct path uses either.
+    (
+        "benign-streamline-interposer-absent",
+        "streamline interposer not found",
+    ),
+    (
+        "benign-streamline-hooks-incomplete",
+        "hook groups are incomplete",
+    ),
+    // 5: emitted at DllMain time, before NVNGX has been initialised. Expected
+    // ordering, not a failure — the modules load later.
+    (
+        "benign-nvngx-parameter-not-loaded",
+        "nvngx parameter module is not loaded yet",
+    ),
+    (
+        "benign-nvngx-dlss-not-loaded",
+        "nvngx dlss is not loaded yet",
+    ),
+    // 6: four `vtable::Hook(Failed to find NVSDK_NGX_D3D11_*)` /
+    // `...D3D12_*` errors, for the same reason — the NVNGX exports are not
+    // resolvable at hook-install time. One needle covers both D3D11 and D3D12.
+    (
+        "benign-nvngx-vtable-hook-absent",
+        "failed to find nvsdk_ngx_d3d1",
+    ),
+];
+
+/// `(rule_slug, needle)` — matched case-insensitively, after the benign table
+/// has had its say.
+///
+/// Signatures that mean the stack is not doing what the user thinks it is.
+const FATAL_LOG_RULES: &[(&str, &str)] = &[
     ("dlss-error-0xbad00010", "0xBAD00010"),
     ("dlss-unsupported-parameter", "UnsupportedParameter"),
     ("shader-compile-failed", "failed to compile"),
     ("effect-compile-failed", "Effect compilation failed"),
+    // RenoDX naming its own fix. ESO creates a D3D12 device first, so ReShade
+    // loads the add-on during `D3D12CreateDevice` and hooks `d3d11.dll`
+    // afterwards; without an `ADDON.LoadFromDllMain` entry the early DLSS
+    // hooks never land and NR silently does nothing while the add-on still
+    // appears, healthy, in the ReShade Home menu. The fix is one line in
+    // `ReShade.ini` under `[ADDON]`, applied with the game closed.
+    //
+    // `client_stack` raises the *config*-side finding for this condition by
+    // reading `ReShade.ini`; this is the log-side confirmation of the same
+    // thing, and the two are expected to co-occur.
+    (
+        "renodx-loadfromdllmain-missing",
+        "is not listed in ADDON.LoadFromDllMain",
+    ),
 ];
+
+/// The one line that positively proves Neural Rendering ran.
+///
+/// RenoDX writes `DLSS-NR direct: EvaluateFeature succeeded: evaluation=N`
+/// once per evaluated frame. A single occurrence proves only that it
+/// initialised; the *counter climbing* is the proof. Matched
+/// case-insensitively, with the counter parsed out of
+/// [`EVALUATION_COUNTER_KEY`].
+const NR_EVALUATION_NEEDLE: &str = "evaluatefeature succeeded";
+/// Key immediately preceding the frame counter on an [`NR_EVALUATION_NEEDLE`]
+/// line.
+const EVALUATION_COUNTER_KEY: &str = "evaluation=";
 
 /// Never read more than this much of a log file — these grow unbounded.
 const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
 /// Of the tailed bytes, only the last this many lines are considered.
 const MAX_LOG_TAIL_LINES: usize = 400;
 /// Total excerpts across all log files, so one spammy log cannot flood the UI.
+///
+/// This budget is why benign and positive matches are *not* excerpts. On a
+/// working session the evaluation counter advances every rendered frame, so
+/// the tail window is overwhelmingly `EvaluateFeature succeeded` lines — they
+/// would consume all 20 slots within a fraction of a second of gameplay and
+/// push every genuine failure out of the report. They are folded into
+/// [`NeuralRenderingSignal`] instead, which is a fixed-size summary.
 const MAX_LOG_EXCERPTS: usize = 20;
 /// Per-excerpt display cap, in characters.
 const MAX_EXCERPT_CHARS: usize = 300;
@@ -462,43 +643,147 @@ fn truncate_line(line: &str) -> String {
     trimmed.chars().take(MAX_EXCERPT_CHARS).collect()
 }
 
-/// Match `lines` against [`LOG_RULES`], appending to `out` until the global
-/// excerpt cap is reached.
-fn scan_lines(file: &str, lines: &[String], out: &mut Vec<LogExcerpt>) {
-    for line in lines {
-        if out.len() >= MAX_LOG_EXCERPTS {
-            return;
+/// What a single log line turned out to be.
+enum LineKind {
+    /// Matched [`BENIGN_LOG_RULES`]. Counted, never reported.
+    Benign,
+    /// Matched [`NR_EVALUATION_NEEDLE`], carrying the parsed frame counter
+    /// when one was present. Never reported as an excerpt.
+    Evaluation(Option<u64>),
+    /// Matched nothing, or matched one or more [`FATAL_LOG_RULES`] — the
+    /// slugs of every fatal rule that hit, in table order.
+    Fatal(Vec<&'static str>),
+}
+
+/// Classify one already-lowercased log line.
+///
+/// Order is the contract: **benign wins**. A benign signature short-circuits
+/// before any fatal needle is tried, so a known-harmless line can never be
+/// promoted into a problem by a fatal rule whose wording overlaps it. The
+/// positive evidence check comes next, so a `EvaluateFeature succeeded` line
+/// never lands in the excerpt budget either.
+fn classify_line(lowered: &str) -> LineKind {
+    for (_, needle) in BENIGN_LOG_RULES {
+        if lowered.contains(needle) {
+            return LineKind::Benign;
         }
+    }
+    if lowered.contains(NR_EVALUATION_NEEDLE) {
+        return LineKind::Evaluation(parse_evaluation_counter(lowered));
+    }
+    let mut hits = Vec::new();
+    for (rule, needle) in FATAL_LOG_RULES {
+        if lowered.contains(&needle.to_lowercase()) {
+            hits.push(*rule);
+        }
+    }
+    LineKind::Fatal(hits)
+}
+
+/// Pull `N` out of `...evaluation=N...` on an already-lowercased line.
+///
+/// Returns `None` when the key is absent or is not followed by digits — a
+/// malformed line is not evidence, and must not be counted as a sample.
+fn parse_evaluation_counter(lowered: &str) -> Option<u64> {
+    let rest = lowered.split_once(EVALUATION_COUNTER_KEY)?.1;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u64>().ok()
+}
+
+/// Accumulator for one pass over the log files.
+#[derive(Debug, Default)]
+struct LogScan {
+    excerpts: Vec<LogExcerpt>,
+    benign_suppressed: usize,
+    /// Every evaluation counter parsed, in file order. Bounded by
+    /// [`MAX_LOG_TAIL_LINES`] per file, so this cannot grow unbounded.
+    evaluations: Vec<u64>,
+}
+
+/// Match `lines` against the rule tables, appending fatal hits to
+/// `scan.excerpts` until the global excerpt cap is reached.
+///
+/// Reaching the excerpt cap stops excerpt collection but **not** the scan:
+/// benign counting and evaluation-counter parsing continue over the remaining
+/// lines, because the positive signal must not be lost just because some other
+/// log was noisy.
+fn scan_lines(file: &str, lines: &[String], scan: &mut LogScan) {
+    for line in lines {
         let lowered = line.to_lowercase();
-        for (rule, needle) in LOG_RULES {
-            if out.len() >= MAX_LOG_EXCERPTS {
-                return;
+        match classify_line(&lowered) {
+            LineKind::Benign => scan.benign_suppressed += 1,
+            LineKind::Evaluation(counter) => {
+                if let Some(value) = counter {
+                    scan.evaluations.push(value);
+                }
             }
-            if lowered.contains(&needle.to_lowercase()) {
-                out.push(LogExcerpt {
-                    file: file.to_string(),
-                    rule: (*rule).to_string(),
-                    line: truncate_line(line),
-                });
+            LineKind::Fatal(rules) => {
+                for rule in rules {
+                    if scan.excerpts.len() >= MAX_LOG_EXCERPTS {
+                        break;
+                    }
+                    scan.excerpts.push(LogExcerpt {
+                        file: file.to_string(),
+                        rule: rule.to_string(),
+                        line: truncate_line(line),
+                    });
+                }
             }
         }
     }
 }
 
 /// Scan every known log file in `dir`.
-fn scan_logs(dir: &Path) -> Vec<LogExcerpt> {
-    let mut out = Vec::new();
+fn scan_logs(dir: &Path) -> LogScan {
+    let mut scan = LogScan::default();
     for name in LOG_FILES {
-        if out.len() >= MAX_LOG_EXCERPTS {
-            break;
-        }
         let lines = read_log_tail(&dir.join(name));
         if lines.is_empty() {
             continue;
         }
-        scan_lines(name, &lines, &mut out);
+        scan_lines(name, &lines, &mut scan);
     }
-    out
+    scan
+}
+
+/// Reduce the parsed evaluation counters to a three-state verdict.
+///
+/// "Climbing" is defined as *any strictly increasing adjacent pair*, not
+/// `last > first`. Checked against a real install, ReShade actually truncates
+/// `ReShade.log` on every launch — the file holds exactly one session, with a
+/// single "Initializing crosire's ReShade" banner and no dates, only
+/// times-of-day. That does not make the permissive rule wrong to keep: a
+/// first/last comparison happens to be equivalent within a single truncated
+/// session, but a future ReShade version, or `dlss5-feed.log`, could still
+/// span sessions the way this was originally written to guard against, and
+/// the strictly-increasing-pair rule stays correct either way, so it is the
+/// safer one to keep rather than "simplifying" to `last > first`.
+///
+/// The truncation does change what a "Running" verdict is evidence *of*: with
+/// one session per file, everything this function sees describes the *last
+/// launch*, not the current moment. A positive signal here can predate any
+/// configuration change the user made after closing the game, so it is not
+/// proof about the on-disk configuration as it stands right now — only about
+/// what was running the last time ESO was open. (The frontend addresses that
+/// gap separately; this function only reduces the counters it is given.)
+fn neural_rendering_signal(evaluations: &[u64]) -> NeuralRenderingSignal {
+    let climbing = evaluations.windows(2).any(|pair| pair[1] > pair[0]);
+    let state = if evaluations.is_empty() {
+        NeuralRenderingState::Unknown
+    } else if climbing {
+        NeuralRenderingState::Running
+    } else {
+        NeuralRenderingState::Stalled
+    };
+    NeuralRenderingSignal {
+        state,
+        samples: evaluations.len(),
+        first_evaluation: evaluations.first().copied(),
+        last_evaluation: evaluations.last().copied(),
+    }
 }
 
 // ── Findings ─────────────────────────────────────────────────────────────
@@ -693,7 +978,8 @@ pub fn inspect_client(location: &EsoClientLocation) -> ClientHealthReport {
         dlss.as_ref(),
         d3dcompiler.as_ref(),
     );
-    let log_excerpts = scan_logs(dir);
+    let scan = scan_logs(dir);
+    let neural_rendering = neural_rendering_signal(&scan.evaluations);
 
     ClientHealthReport {
         location: location.clone(),
@@ -702,7 +988,9 @@ pub fn inspect_client(location: &EsoClientLocation) -> ClientHealthReport {
         d3dcompiler,
         reshade_preset,
         findings,
-        log_excerpts,
+        log_excerpts: scan.excerpts,
+        neural_rendering,
+        log_benign_suppressed: scan.benign_suppressed,
     }
 }
 
@@ -1121,6 +1409,194 @@ mod tests {
             version_string(&tmp.path().join("missing.dll"), "ProductName"),
             None
         );
+    }
+
+    // ── Log classification ───────────────────────────────────────────────
+
+    /// The six ERROR/WARN signatures a *working* RenoDX DLSS-NR setup emits,
+    /// verbatim in shape from a real ReShade.log. Every one of these must be
+    /// silently absorbed: reporting them is how a healthy stack was once
+    /// triaged as broken.
+    const WORKING_SETUP_NOISE: &[&str] = &[
+        "WARN  | cannot preserve unsupported D3D11 motion format 34; native DLSS output remains authoritative",
+        "ERROR | D3D11 proxy evaluation failed",
+        "WARN  | Streamline interposer not found: sl.interposer.dll",
+        "WARN  | mods::streamline hook groups are incomplete",
+        "WARN  | NVNGX parameter module is not loaded yet",
+        "WARN  | NVNGX DLSS is not loaded yet",
+        "ERROR | vtable::Hook(Failed to find NVSDK_NGX_D3D11_Init)",
+        "ERROR | vtable::Hook(Failed to find NVSDK_NGX_D3D11_Shutdown)",
+        "ERROR | vtable::Hook(Failed to find NVSDK_NGX_D3D12_Init)",
+        "ERROR | vtable::Hook(Failed to find NVSDK_NGX_D3D12_Shutdown)",
+    ];
+
+    fn scan_body(body: &str) -> ClientHealthReport {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("ReShade.log"), body).unwrap();
+        inspect_client(&location(tmp.path()))
+    }
+
+    #[test]
+    fn benign_needles_are_lowercase() {
+        // Benign matching compares against an already-lowercased line, so a
+        // capital in a needle would silently never fire.
+        for (rule, needle) in BENIGN_LOG_RULES {
+            assert_eq!(
+                *needle,
+                needle.to_lowercase(),
+                "benign needle for {rule} must be lowercase"
+            );
+        }
+    }
+
+    #[test]
+    fn working_setup_noise_produces_no_problems() {
+        let body = format!("{}\n", WORKING_SETUP_NOISE.join("\n"));
+        let report = scan_body(&body);
+        assert!(
+            report.log_excerpts.is_empty(),
+            "expected no excerpts, got {:?}",
+            report.log_excerpts
+        );
+        assert_eq!(report.log_benign_suppressed, WORKING_SETUP_NOISE.len());
+        // Noise alone is not evidence either way.
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Unknown);
+    }
+
+    #[test]
+    fn benign_lines_win_over_fatal_rules() {
+        // "D3D11 proxy evaluation failed" sits next to a fatal needle in
+        // wording space; benign precedence is what keeps it quiet.
+        assert!(matches!(
+            classify_line(&"ERROR | D3D11 proxy evaluation failed to compile".to_lowercase()),
+            LineKind::Benign
+        ));
+    }
+
+    #[test]
+    fn loadfromdllmain_warning_is_fatal() {
+        let report = scan_body(
+            "WARN  | renodx-dlss.addon64 is not listed in ADDON.LoadFromDllMain. \
+             Early DLSS hooks are not guaranteed for this session.\n",
+        );
+        let hit = report
+            .log_excerpts
+            .iter()
+            .find(|e| e.rule == "renodx-loadfromdllmain-missing")
+            .expect("LoadFromDllMain warning is reported");
+        assert_eq!(hit.file, "ReShade.log");
+        assert!(hit.line.contains("LoadFromDllMain"));
+        assert_eq!(report.log_benign_suppressed, 0);
+    }
+
+    #[test]
+    fn a_climbing_evaluation_counter_proves_neural_rendering_runs() {
+        let body: String = (0..25)
+            .map(|i| format!("INFO  | DLSS-NR direct: EvaluateFeature succeeded: evaluation={i}\n"))
+            .collect();
+        let report = scan_body(&body);
+
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Running);
+        assert_eq!(report.neural_rendering.samples, 25);
+        assert_eq!(report.neural_rendering.first_evaluation, Some(0));
+        assert_eq!(report.neural_rendering.last_evaluation, Some(24));
+        // The per-frame flood must never reach the excerpt budget.
+        assert!(report.log_excerpts.is_empty());
+    }
+
+    #[test]
+    fn a_flat_evaluation_counter_is_not_proof() {
+        // Initialised and then stalled: the line is there, the frames are not.
+        let body: String = (0..5)
+            .map(|_| "INFO  | DLSS-NR direct: EvaluateFeature succeeded: evaluation=7\n")
+            .collect();
+        let report = scan_body(&body);
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Stalled);
+        assert_eq!(report.neural_rendering.samples, 5);
+
+        // A single occurrence is likewise not proof.
+        let once = scan_body("INFO  | EvaluateFeature succeeded: evaluation=1\n");
+        assert_eq!(once.neural_rendering.state, NeuralRenderingState::Stalled);
+        assert_eq!(once.neural_rendering.samples, 1);
+    }
+
+    #[test]
+    fn a_counter_reset_across_sessions_still_counts_as_climbing() {
+        // ReShade truncates ReShade.log on every launch, but the counter
+        // reset this fixture models — a drop back toward zero mid-tail — is
+        // exactly what a hypothetical multi-session log (or dlss5-feed.log)
+        // could still produce, which is why the rule stays "any rising
+        // adjacent pair" rather than `last > first`. One rising step is
+        // enough.
+        let signal = neural_rendering_signal(&[900, 901, 0, 1, 2]);
+        assert_eq!(signal.state, NeuralRenderingState::Running);
+        assert_eq!(signal.first_evaluation, Some(900));
+        assert_eq!(signal.last_evaluation, Some(2));
+    }
+
+    #[test]
+    fn an_absent_log_is_unknown_not_broken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = inspect_client(&location(tmp.path()));
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Unknown);
+        assert_eq!(report.neural_rendering.samples, 0);
+        assert_eq!(report.neural_rendering.first_evaluation, None);
+        assert_eq!(report.neural_rendering.last_evaluation, None);
+        // Nothing here may be read as a failure — the absence of findings and
+        // the absence of evidence are different claims.
+        assert!(report.log_excerpts.is_empty());
+        assert_eq!(report.log_benign_suppressed, 0);
+    }
+
+    #[test]
+    fn a_malformed_evaluation_line_is_not_a_sample() {
+        let report = scan_body(
+            "INFO  | EvaluateFeature succeeded: evaluation=\n\
+             INFO  | EvaluateFeature succeeded (no counter)\n",
+        );
+        assert_eq!(report.neural_rendering.samples, 0);
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Unknown);
+        // And they are still not excerpts.
+        assert!(report.log_excerpts.is_empty());
+    }
+
+    #[test]
+    fn evaluation_counter_parsing() {
+        assert_eq!(
+            parse_evaluation_counter("dlss-nr direct: evaluatefeature succeeded: evaluation=42"),
+            Some(42)
+        );
+        // Trailing prose after the number is fine.
+        assert_eq!(parse_evaluation_counter("evaluation=7 (frame 7)"), Some(7));
+        assert_eq!(parse_evaluation_counter("evaluation=abc"), None);
+        assert_eq!(parse_evaluation_counter("no counter here"), None);
+    }
+
+    #[test]
+    fn fatal_lines_survive_a_working_sessions_flood() {
+        // Real shape of a session: the startup warning, the known-harmless
+        // noise, then a flood of per-frame evaluation lines. The warning must
+        // still be the only excerpt and the evidence must still be parsed.
+        let mut body =
+            String::from("WARN  | renodx-dlss.addon64 is not listed in ADDON.LoadFromDllMain.\n");
+        for line in WORKING_SETUP_NOISE {
+            body.push_str(line);
+            body.push('\n');
+        }
+        for i in 0..300 {
+            body.push_str(&format!(
+                "INFO  | EvaluateFeature succeeded: evaluation={i}\n"
+            ));
+        }
+        let report = scan_body(&body);
+
+        assert_eq!(report.log_excerpts.len(), 1);
+        assert_eq!(
+            report.log_excerpts[0].rule,
+            "renodx-loadfromdllmain-missing"
+        );
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Running);
+        assert_eq!(report.log_benign_suppressed, WORKING_SETUP_NOISE.len());
     }
 
     #[test]
