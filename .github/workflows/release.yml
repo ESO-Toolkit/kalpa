@@ -13,7 +13,39 @@ permissions:
   contents: write
 
 jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Configure this environment with required reviewers, in Settings ->
+    # Environments. Naming an environment that does not exist does NOT gate
+    # anything: GitHub creates it on first use with no protection rules, so an
+    # unconfigured `release` is an empty gate rather than a closed one. Until a
+    # reviewer is attached, the commit check below is the whole control -- it
+    # fails closed if someone can push a tag but cannot merge to main, which is
+    # why it is written as exact equality with the tip of main rather than an
+    # ancestor test.
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag targets the current main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          tagged_commit=$(git rev-parse HEAD^{commit})
+          main_commit=$(git rev-parse origin/main^{commit})
+          if [ "$tagged_commit" != "$main_commit" ]; then
+            echo "::error::Release tag targets ${tagged_commit}, but origin/main is ${main_commit}."
+            exit 1
+          fi
+
   build:
+    needs: authorize
     strategy:
       fail-fast: false
       # Serialize the matrix: tauri-action merges each platform's entry into the
@@ -38,6 +70,14 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 60
+    permissions:
+      # `contents: write` uploads the bundles to the draft release; the other
+      # two are what `attest-build-provenance` needs to mint a signed statement
+      # against this workflow run. Stated per job rather than inherited so the
+      # extra scopes stop at the job that actually builds artifacts.
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -136,6 +176,7 @@ jobs:
           echo "Apple certificate secret found — macOS signing enabled."
 
       - name: Build Tauri app
+        id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -155,7 +196,54 @@ jobs:
           # draft to published — a tagged release is NOT done until that job is
           # green. If it fails, the draft is left in place for inspection.
           releaseDraft: true
+          # MUST stay false, including for -beta.N tags. The updater fetches
+          # releases/latest/download/latest.json, and GitHub's releases/latest
+          # endpoint skips every release with the "pre-release" flag set — so
+          # flipping this to true does not just mislabel a beta, it silently
+          # breaks auto-update for every existing install the moment this tag
+          # is no longer the newest non-prerelease release. A `-beta.N` version
+          # string is just this project's versioning convention; it has no
+          # bearing on GitHub's separate "pre-release" release flag, and the
+          # two must not be conflated when editing this block. The publish job's
+          # "Guard against a mis-flagged prerelease" step fails the run if this
+          # ever ends up true, but do not rely on that catch — it exists only
+          # to backstop this line.
           prerelease: false
+
+      # SHA256SUMS.txt and the updater .sig prove integrity and that whoever
+      # holds the Tauri signing key blessed these bytes. Neither ties an
+      # installer back to this repository, this commit and this workflow run,
+      # so neither answers "was this built from the tagged source?" -- the
+      # checksums are computed from the same artifacts they vouch for, and a
+      # leaked signing key signs anything. Provenance is the independent link:
+      # `gh attestation verify <asset> --owner ESO-Toolkit` resolves it from
+      # GitHub's transparency log rather than from anything in the release.
+      #
+      # `artifactPaths` is a JSON array from tauri-action, so this lists the
+      # bundles this matrix leg actually produced instead of guessing at
+      # per-platform globs that would have to match nothing on two legs out of
+      # three.
+      - name: Collect bundle paths
+        id: bundles
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ARTIFACT_PATHS:-}" ] || [ "$ARTIFACT_PATHS" = "null" ]; then
+            echo "::error::tauri-action reported no artifact paths; refusing to publish an unattested build."
+            exit 1
+          fi
+          {
+            echo "paths<<__KALPA_PATHS_EOF__"
+            printf '%s' "$ARTIFACT_PATHS" | jq -r '.[]'
+            echo "__KALPA_PATHS_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: ${{ steps.bundles.outputs.paths }}
 
   # Gate + publish: a release only goes live after every platform built and the
   # merged latest.json provably contains all updater entries. Auto-update is
@@ -260,6 +348,26 @@ jobs:
             --data-binary @SHA256SUMS.txt > /dev/null
 
           echo "SHA256SUMS.txt attached to ${TAG}."
+
+      # The build job hardcodes prerelease: false and explains why at length,
+      # but nothing there stops a future edit (or a manually-created release
+      # for this tag) from setting it anyway. GitHub's releases/latest
+      # endpoint — which is what the updater's
+      # releases/latest/download/latest.json fetch resolves against — skips
+      # every prerelease-flagged release, so publishing one here would go
+      # live while silently breaking auto-update for every existing install.
+      # Check the real release object (by id, not `gh release view "$TAG"`:
+      # per the comment above, drafts are not addressable by tag) before the
+      # next step ever flips it to published.
+      - name: Guard against a mis-flagged prerelease
+        run: |
+          set -euo pipefail
+          is_prerelease=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '.prerelease')
+          if [ "$is_prerelease" = "true" ]; then
+            echo "::error::Release ${TAG} is flagged as a GitHub pre-release. GitHub's releases/latest endpoint skips prereleases, and the Kalpa updater reads releases/latest/download/latest.json — publishing this would silently break auto-update for every existing install. A -beta.N version string does not require the GitHub pre-release flag; unset it on the release (or on the tauri-action prerelease input) and re-run." >&2
+            exit 1
+          fi
+          echo "Release ${TAG} is not flagged as a pre-release — safe to publish."
 
       - name: Publish the release
         run: |

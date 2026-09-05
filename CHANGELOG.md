@@ -4,7 +4,55 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-_Nothing yet._
+The graphics stack panel (formerly "Client Health") used to say "Everything
+agrees" over a setup that could not possibly work. It now knows there are two
+mutually exclusive Neural Rendering paths, checks each slot against the one
+you actually have, and only claims success when it has real proof. The panel
+also moved: it's pinned to the header toolbar when you have a stack to manage,
+and renamed to "Graphics stack" everywhere. Alongside that, a release audit
+closed several concurrency, stale-state, and accessibility defects.
+
+### Features
+
+- **The graphics stack panel now detects which Neural Rendering setup is
+  actually live — "direct" or "feed" — and reads every row against it.** A
+  slot the live setup doesn't want (like an empty motion-vector provider on a
+  direct install) now shows as deliberate instead of missing, and an
+  installed-but-unused add-on explains why it's still worth keeping.
+  ([#434](https://github.com/ESO-Toolkit/kalpa/pull/434))
+- **"Everything agrees" now requires proof, not just an absence of
+  complaints.** It only appears when Neural Rendering shows positive evidence
+  of running and the log has no fatal lines — and it no longer appears at all
+  when the stack is switched off or no path is live, since ReShade truncates
+  its log on every launch and old evidence can outlive the setup it described.
+  ([#434](https://github.com/ESO-Toolkit/kalpa/pull/434))
+- **A new check catches an add-on that's installed but loads too late to
+  work.** If it's missing from ReShade's `LoadFromDllMain` line, the panel now
+  names that as the fix instead of leaving you with a silently broken setup.
+  ([#434](https://github.com/ESO-Toolkit/kalpa/pull/434))
+- **The tuning panel and the graphics stack panel can no longer disagree about
+  which settings are live.** Settings left over from a setup you've since
+  switched away from are now labelled as history instead of shown as current.
+  ([#434](https://github.com/ESO-Toolkit/kalpa/pull/434))
+- **The graphics stack panel gained a shader-pack library**, so a motion-vector
+  slot has something real to choose between, and a provider-matching bug that
+  could report a correctly configured stack as broken was fixed.
+  ([#432](https://github.com/ESO-Toolkit/kalpa/pull/432),
+  [#433](https://github.com/ESO-Toolkit/kalpa/pull/433))
+- **The graphics stack is pinned to the header toolbar when you actually have
+  one to manage, and always has a row under Settings > Tools.** It was also
+  renamed from "Client Health" to "Graphics stack" so the toolbar and the
+  Settings list stop disagreeing about what to call it.
+  ([#435](https://github.com/ESO-Toolkit/kalpa/pull/435))
+
+### Bug Fixes
+
+- **Fixed several release-audit defects:** managed file writes are now
+  serialized with real file locks so concurrent operations can't corrupt each
+  other, a slow installation check can no longer overwrite a newer result with
+  a stale one, the log uploader's safety checks now fail closed instead of
+  open, and the graphics stack details rail is now fully keyboard accessible.
+  ([#436](https://github.com/ESO-Toolkit/kalpa/pull/436))
 
 ## [0.1.0-beta.22] — 2026-08-31
 
@@ -819,7 +867,7 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...HEAD
 [0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
 [0.1.0-beta.21]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...v0.1.0-beta.21
 [0.1.0-beta.20]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...v0.1.0-beta.20

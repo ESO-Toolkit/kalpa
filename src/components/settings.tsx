@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
@@ -267,11 +266,7 @@ export function Settings({
 
   const handleBrowse = async () => {
     try {
-      const selected = await open({
-        directory: true,
-        title: "Select ESO AddOns Folder",
-        defaultPath: path || undefined,
-      });
+      const selected = await invokeOrThrow<string | null>("choose_addons_path");
       if (selected) {
         setPath(selected);
       }

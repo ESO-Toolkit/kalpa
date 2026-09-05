@@ -8,7 +8,7 @@ const mockDelete = vi.fn();
 const mockInvoke = vi.fn();
 
 vi.mock("@tauri-apps/plugin-store", () => ({
-  load: vi.fn().mockResolvedValue({
+  getStore: vi.fn().mockResolvedValue({
     get: mockGet,
     set: mockSet,
     delete: mockDelete,
@@ -27,8 +27,8 @@ beforeEach(async () => {
   mockInvoke.mockReset();
   mockInvoke.mockResolvedValue(undefined);
 
-  const { load } = await import("@tauri-apps/plugin-store");
-  vi.mocked(load).mockResolvedValue({
+  const { getStore } = await import("@tauri-apps/plugin-store");
+  vi.mocked(getStore).mockResolvedValue({
     get: mockGet,
     set: mockSet,
     delete: mockDelete,
@@ -51,8 +51,8 @@ describe("getSetting", () => {
   });
 
   it("returns fallback when store throws", async () => {
-    const { load } = await import("@tauri-apps/plugin-store");
-    vi.mocked(load).mockRejectedValue(new Error("store unavailable"));
+    const { getStore } = await import("@tauri-apps/plugin-store");
+    vi.mocked(getStore).mockRejectedValue(new Error("store unavailable"));
     const { getSetting } = await import("../store");
     const result = await getSetting("key", "safe");
     expect(result).toBe("safe");
@@ -90,20 +90,37 @@ describe("setSetting", () => {
     expect(mockSet).toHaveBeenCalledWith("theme", "dark");
   });
 
-  it("loads the store with autoSave disabled and flushes atomically", async () => {
+  it("looks the store up rather than opening a path, and flushes atomically", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockResolvedValue(undefined);
     await setSetting("theme", "dark");
 
-    const { load } = await import("@tauri-apps/plugin-store");
-    expect(load).toHaveBeenCalledWith(
-      "settings.json",
-      expect.objectContaining({ autoSave: false })
-    );
+    const plugin = await import("@tauri-apps/plugin-store");
+    // `load` would let the webview name any path; the capability no longer
+    // grants it. Only the lookup is used, and only for the one known file.
+    // That `load` is unreachable is enforced by the ACL, not by this mock, and
+    // is asserted against a real app in e2e/packaged-settings-store.spec.ts —
+    // an assertion here could only inspect the mock's own shape.
+    expect(plugin.getStore).toHaveBeenCalledWith("settings.json");
     // Persistence is the atomic command, never the plugin's save().
     expect(mockInvoke).toHaveBeenCalledWith("flush_settings", {
       entries: { theme: "dark" },
     });
+  });
+
+  it("reports failure when native code never opened the store", async () => {
+    const { getStore } = await import("@tauri-apps/plugin-store");
+    vi.mocked(getStore).mockResolvedValue(null as never);
+    const { getSetting, setSetting } = await import("../store");
+
+    // A missing store must not silently look like an empty one: reads fall back
+    // and writes report failure rather than reporting a save that never landed.
+    await expect(getSetting("theme", "fallback")).resolves.toBe("fallback");
+    await expect(setSetting("theme", "dark")).resolves.toBe(false);
+    expect(mockInvoke).not.toHaveBeenCalledWith("flush_settings", expect.anything());
+    // Setup is the only opener, so a failed open must at least be retried
+    // through the no-argument reopen command before settings are given up on.
+    expect(mockInvoke).toHaveBeenCalledWith("ensure_settings_store");
   });
 
   it("handles set errors without throwing and reports failure", async () => {

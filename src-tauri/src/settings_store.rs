@@ -255,6 +255,61 @@ fn primary_may_hold_settings(path: &Path) -> bool {
     }
 }
 
+/// Reopen the settings store on demand.
+///
+/// Takes no path. That is the whole point: the frontend can ask for *the*
+/// settings store to be opened again, but it cannot say which file that is, so
+/// asking for a retry cannot become the arbitrary-path open this module exists
+/// to prevent. Needed because setup is now the only opener — if its open failed,
+/// nothing else would ever try again.
+///
+/// Deliberately modest about what it can recover. `build()` fails either because
+/// the app-data path will not resolve, which is deterministic for the process
+/// and so fails again here, or because the store was detached at exit, which
+/// leaves a stale resource id the plugin will not replace. So this mostly
+/// reports the state rather than repairing it — which is the same reach the
+/// frontend's own `load` had, not less. [`ensure_loaded`] runs too, so a retry
+/// that does open the store still gets the taint guard rather than an
+/// unprotected empty cache.
+#[tauri::command]
+pub fn ensure_settings_store(app: AppHandle) -> Result<bool, String> {
+    ensure_open(&app);
+    ensure_loaded(&app);
+    Ok(app.get_store(STORE_FILE).is_some())
+}
+
+/// Open the settings store, so the webview can obtain a handle to it.
+///
+/// Load-bearing rather than an optimisation. The frontend is no longer allowed
+/// to open stores itself: the capability grants `store:allow-get-store` and not
+/// `store:allow-load`, and `get_store` is a pure lookup that returns only what
+/// native code has already opened. That is what stops the webview naming a path
+/// of its own — the plugin resolves a caller-supplied path by pushing it onto
+/// the app-data directory with no containment check, so `..` and absolute paths
+/// escape it, and its autosave would then write attacker-shaped JSON anywhere
+/// the process can reach. Closing that off means native code owns the one path
+/// that is ever opened, and it means the frontend has no settings at all if this
+/// does not run.
+///
+/// Autosave stays off for the reason `flush` documents: persistence is explicit
+/// and atomic, and a debounced autosave could flush a partial multi-key batch.
+/// Whoever opens the store first fixes that option for the app's lifetime, so
+/// opening it here rather than as a side effect of the token migration also
+/// stops the setting depending on whether that migration ran.
+pub fn ensure_open<R: Runtime>(app: &AppHandle<R>) {
+    if app.get_store(STORE_FILE).is_some() {
+        return;
+    }
+    if app
+        .store_builder(STORE_FILE)
+        .disable_auto_save()
+        .build()
+        .is_err()
+    {
+        eprintln!("[settings_store] could not open the settings store; settings are unavailable");
+    }
+}
+
 /// Guard against tauri-plugin-store silently swallowing a load error: its
 /// `StoreBuilder::build_inner` ignores `load()` failures, so a settings file that
 /// was transiently unreadable when the store opened yields an *empty* in-memory

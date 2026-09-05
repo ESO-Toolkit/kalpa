@@ -614,6 +614,23 @@ pub async fn delete_pack(app: tauri::AppHandle, id: String) -> Result<(), String
 
 // ── Delete Account Data ──────────────────────────────────────────────────────
 
+/// Rounds of `DELETE /account` Kalpa will run back to back.
+///
+/// Bounded by the worker's own write rate limit rather than by how much data an
+/// account can hold: `/account` is a DELETE, so it is metered by `WRITE_LIMITER`
+/// at ten requests a minute, and asking for an eleventh in the same window earns
+/// a 429 instead of progress. Nine rounds clear several thousand votes, which is
+/// far beyond any real account; anything larger finishes on a second attempt,
+/// and the message below says so rather than reporting a hard failure.
+const MAX_ACCOUNT_DELETE_ROUNDS: u32 = 9;
+
+/// Shown when erasure ran out of rounds or hit the write limiter. Deliberately
+/// not phrased as a failure: the packs, share codes and backup scrub are done
+/// by then, and repeating the deletion finishes the remaining votes.
+const DELETE_INCOMPLETE_MESSAGE: &str =
+    "Most of your data is deleted, but there was too much to finish in one go. \
+     Run Delete Account once more to clear the rest.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteAccountSummary {
@@ -635,36 +652,75 @@ pub async fn delete_pack_hub_account(
         let base = pack_hub_url();
         let url = format!("{base}/account");
 
-        let response = client
-            .delete(&url)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .send()
-            .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    "Could not connect to Pack Hub. Check your internet connection.".to_string()
-                } else {
-                    format!("Network error: {e}")
-                }
-            })?;
+        // The worker budgets how many votes one request may clear so that the
+        // bounded cleanup after them always runs, and reports `complete: false`
+        // when votes remain. Erasure is only finished when it says so, so keep
+        // asking. Each round strictly reduces the remaining keys, and the bound
+        // is a safety net against a worker that never converges rather than an
+        // expected number of rounds.
+        let mut totals = DeleteAccountSummary {
+            packs: 0,
+            votes: 0,
+            shares: 0,
+        };
+        for round in 0..MAX_ACCOUNT_DELETE_ROUNDS {
+            let response = client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .send()
+                .map_err(|e| {
+                    if e.is_connect() || e.is_timeout() {
+                        "Could not connect to Pack Hub. Check your internet connection.".to_string()
+                    } else {
+                        format!("Network error: {e}")
+                    }
+                })?;
 
-        match response.status().as_u16() {
-            200 => {
-                #[derive(Deserialize)]
-                struct Resp {
-                    deleted: DeleteAccountSummary,
-                }
-                let body: Resp = response
-                    .json()
-                    .map_err(|e| format!("Invalid response: {e}"))?;
+            match response.status().as_u16() {
+                200 => {
+                    #[derive(Deserialize)]
+                    struct Resp {
+                        /// Absent on a worker predating the vote budget, which
+                        /// always finished in one request.
+                        complete: Option<bool>,
+                        deleted: DeleteAccountSummary,
+                    }
+                    let body: Resp = response
+                        .json()
+                        .map_err(|e| format!("Invalid response: {e}"))?;
 
-                Ok(body.deleted)
-            }
-            401 => Err("Session expired. Please sign in again.".to_string()),
-            status => {
-                let body = response.text().unwrap_or_default();
-                Err(format!("Pack Hub returned HTTP {status} - {body}"))
+                    totals.packs += body.deleted.packs;
+                    totals.votes += body.deleted.votes;
+                    totals.shares += body.deleted.shares;
+
+                    if body.complete.unwrap_or(true) {
+                        return Ok(totals);
+                    }
+                    if round + 1 == MAX_ACCOUNT_DELETE_ROUNDS {
+                        return Err(DELETE_INCOMPLETE_MESSAGE.to_string());
+                    }
+                }
+                401 => return Err("Session expired. Please sign in again.".to_string()),
+                // The limiter is keyed by IP and shared with every other
+                // write, so a 429 on the first round means this deletion has
+                // not run at all — someone else behind the same address, or
+                // this user's own recent pack edits, spent the window. Only
+                // once a round has landed is "run it once more" true.
+                429 if round == 0 => {
+                    return Err(
+                        "Pack Hub is busy right now and nothing was deleted. Try again in a \
+                         minute."
+                            .to_string(),
+                    )
+                }
+                429 => return Err(DELETE_INCOMPLETE_MESSAGE.to_string()),
+                status => {
+                    let body = response.text().unwrap_or_default();
+                    return Err(format!("Pack Hub returned HTTP {status} - {body}"));
+                }
             }
         }
+        unreachable!("the loop returns on its final round")
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))??;
@@ -1221,6 +1277,7 @@ pub async fn import_sv_settings(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || {
+        crate::commands::ensure_eso_not_running_for_settings_write()?;
         let sv_dir = sv_io::saved_variables_dir(&addons_dir);
         fs::create_dir_all(&sv_dir)
             .map_err(|e| format!("Failed to create SavedVariables directory: {e}"))?;
@@ -1291,6 +1348,13 @@ pub async fn import_sv_settings(
             }
 
             let dest = sv_dir.join(format!("{folder}.lua"));
+
+            // Re-check at the point of each write. An import can spend long
+            // enough validating earlier files for ESO to start mid-operation.
+            if let Err(error) = crate::commands::ensure_eso_not_running_for_settings_write() {
+                errors.push(format!("{folder}: {error}"));
+                break;
+            }
 
             // Create .bak before overwriting
             if dest.is_file() {

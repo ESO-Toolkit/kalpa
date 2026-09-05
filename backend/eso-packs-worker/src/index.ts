@@ -6,7 +6,6 @@ import {
   getVotedPackIds,
   getVote,
   deleteVote,
-  restoreVote,
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
@@ -29,9 +28,8 @@ export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
   try {
     if (isPublished) {
       const row = toD1PackRow(pack);
-      await env.ROSTER_HUB_DB
-        .prepare(
-          `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
+      await env.ROSTER_HUB_DB.prepare(
+        `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
            ON CONFLICT(id) DO UPDATE SET
              author_id = excluded.author_id,
@@ -43,7 +41,7 @@ export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
              author_name = excluded.author_name,
              vote_count = excluded.vote_count,
              updated_at = datetime('now')`,
-        )
+      )
         .bind(
           row.id,
           row.author_id,
@@ -67,7 +65,9 @@ export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
       const tagStmts = [
         env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
         ...pack.tags.map((tag) =>
-          env.ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)").bind(pack.id, tag),
+          env
+            .ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)")
+            .bind(pack.id, tag),
         ),
       ];
       await env.ROSTER_HUB_DB.batch(tagStmts);
@@ -235,9 +235,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const query = url.searchParams.get("q")?.slice(0, 200).toLowerCase();
   if (query) {
     packs = packs.filter(
-      (p) =>
-        p.title.toLowerCase().includes(query) ||
-        p.description.toLowerCase().includes(query),
+      (p) => p.title.toLowerCase().includes(query) || p.description.toLowerCase().includes(query),
     );
   }
 
@@ -268,7 +266,11 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const votedIds =
     viewerId === undefined
       ? null
-      : await getVotedPackIds(env, viewerId, paginated.map((p) => p.id));
+      : await getVotedPackIds(
+          env,
+          viewerId,
+          paginated.map((p) => p.id),
+        );
   const visible: PackView[] = votedIds
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
@@ -340,9 +342,8 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   const userId = String(user.id);
 
   // Generate ID from title if not provided
-  let id = typeof input.id === "string" && input.id.length > 0
-    ? input.id
-    : slugify(input.title as string);
+  let id =
+    typeof input.id === "string" && input.id.length > 0 ? input.id : slugify(input.title as string);
 
   // A title with no ASCII alphanumerics (CJK, Cyrillic, emoji) slugifies to
   // "", which every /packs/:id route rejects — the pack would be listed but
@@ -388,7 +389,9 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     }
     return json(
       request,
-      { error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.` },
+      {
+        error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.`,
+      },
       429,
     );
   }
@@ -521,12 +524,7 @@ async function handleSeed(request: Request, env: Env): Promise<Response> {
 }
 
 // ── POST /packs/:id/vote ──────────────────────────────────────────
-async function handleVotePack(
-  request: Request,
-  env: Env,
-  id: string,
-  url: URL,
-): Promise<Response> {
+async function handleVotePack(request: Request, env: Env, id: string, url: URL): Promise<Response> {
   const pack = await getPackIndexDO(env).getPack(id);
   if (!pack) {
     return notFound(request);
@@ -593,7 +591,7 @@ async function handleInstallPack(
   const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
   if (
     detail?.created_at === pack.created_at &&
-    await env.ESO_PACKS.get(`install-rate:${id}:${ip}`)
+    (await env.ESO_PACKS.get(`install-rate:${id}:${ip}`))
   ) {
     return json(request, { installCount: pack.install_count });
   }
@@ -612,11 +610,7 @@ async function handleInstallPack(
   const identity = [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-  const updated = await index.recordInstall(
-    id,
-    identity,
-    pack.created_at,
-  );
+  const updated = await index.recordInstall(id, identity, pack.created_at);
   if (!updated) {
     return notFound(request);
   }
@@ -711,20 +705,22 @@ async function handleMigrationAuthority(request: Request, env: Env): Promise<Res
       unowned_d1_ids?: unknown;
     };
     if (body.authority !== "kv" && body.authority !== "do") {
-      return badRequest(request, [{ field: "authority", message: 'authority must be "kv" or "do"' }]);
+      return badRequest(request, [
+        { field: "authority", message: 'authority must be "kv" or "do"' },
+      ]);
     }
     if (
       body.unowned_d1_ids !== undefined &&
       (!Array.isArray(body.unowned_d1_ids) ||
         body.unowned_d1_ids.length > 100 ||
-        body.unowned_d1_ids.some(
-          (id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id),
-        ))
+        body.unowned_d1_ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id)))
     ) {
-      return badRequest(request, [{
-        field: "unowned_d1_ids",
-        message: "unowned_d1_ids must contain at most 100 valid, manually adjudicated ids",
-      }]);
+      return badRequest(request, [
+        {
+          field: "unowned_d1_ids",
+          message: "unowned_d1_ids must contain at most 100 valid, manually adjudicated ids",
+        },
+      ]);
     }
     authority = body.authority;
     unownedD1Ids = new Set((body.unowned_d1_ids ?? []) as string[]);
@@ -762,10 +758,12 @@ async function handleMigrationAdopt(request: Request, env: Env): Promise<Respons
     body.ids.length > 100 ||
     body.ids.some((id) => typeof id !== "string" || !/^[a-z0-9-]{1,100}$/.test(id))
   ) {
-    return badRequest(request, [{
-      field: "ids",
-      message: "ids must contain 1 to 100 valid pack ids",
-    }]);
+    return badRequest(request, [
+      {
+        field: "ids",
+        message: "ids must contain 1 to 100 valid pack ids",
+      },
+    ]);
   }
   return json(request, await getPackIndexDO(env).adoptWitnesses(body.ids as string[]));
 }
@@ -882,10 +880,7 @@ function packPredatesDeletion(deleted: Map<string, number>, pack: Pack | undefin
   return recordTimeMs(pack.updated_at ?? pack.created_at) <= deletedAt;
 }
 
-function votePredatesDeletion(
-  deleted: Map<string, number>,
-  vote: VoteRecord | undefined,
-): boolean {
+function votePredatesDeletion(deleted: Map<string, number>, vote: VoteRecord | undefined): boolean {
   if (!vote) return false;
   const deletedAt = deleted.get(String(vote.userId));
   if (deletedAt === undefined) return false;
@@ -959,9 +954,7 @@ async function handleScheduled(env: Env): Promise<void> {
   );
   const livePackIds = new Set(index.packs.map(({ id }) => id));
   const votes = Object.fromEntries(
-    Object.entries(await listAllVotes(env)).filter(([, vote]) =>
-      livePackIds.has(vote.packId),
-    ),
+    Object.entries(await listAllVotes(env)).filter(([, vote]) => livePackIds.has(vote.packId)),
   );
 
   // Drop anyone who asked to be deleted, at WRITE time.
@@ -975,14 +968,15 @@ async function handleScheduled(env: Env): Promise<void> {
   // Filtering here rather than relying on having read after the delete is what
   // makes the ordering irrelevant: the tombstone outlives the read, so a stale
   // snapshot still cannot publish a deleted user.
-  const { packs, packBodies: keptBodies, votes: keptVotes } = dropDeletedUsers(
-    await loadDeletedUserTombstones(env),
-    {
-      packs: index.packs,
-      packBodies,
-      votes,
-    },
-  );
+  const {
+    packs,
+    packBodies: keptBodies,
+    votes: keptVotes,
+  } = dropDeletedUsers(await loadDeletedUserTombstones(env), {
+    packs: index.packs,
+    packBodies,
+    votes,
+  });
 
   const snapshot: PackBackupSnapshot = {
     created_at: new Date().toISOString(),
@@ -1054,6 +1048,19 @@ export const SUBREQUEST_RESERVE = 100;
  * vote toggle off; self-corrects on their second vote.
  */
 const EXCLUSION_SUBREQUEST_BUDGET = 60;
+
+/** One KV delete for `vote:{packId}:{userId}` and one for the reverse index. */
+export const SUBREQUESTS_PER_VOTE = 2;
+/** Worst-case cost of entering another vote page: the list call plus one
+ *  full record. */
+const VOTE_DELETE_SUBREQUESTS_PER_PAGE = 1 + SUBREQUESTS_PER_VOTE;
+/**
+ * Subrequests account deletion may spend clearing votes. The reserve covers
+ * everything outside the vote loop: the tombstone put, the DO call, the capped
+ * pack deletes, the capped share deletes and their list pages, the cache
+ * invalidation and the `backup:latest` scrub.
+ */
+export const ACCOUNT_DELETE_VOTE_BUDGET = SUBREQUEST_CEILING - SUBREQUEST_RESERVE;
 
 export const RESTORE_MAX_PAGE_SIZE = Math.floor(
   (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
@@ -1155,7 +1162,9 @@ function buildRestorePlan(snapshot: PackBackupSnapshot): RestorePlan {
   const votes = Object.values(snapshot.votes ?? {})
     .filter((record) => Boolean(record?.packId && record?.userId && livePackIds.has(record.packId)))
     .sort((a, b) => `${a.packId}:${a.userId}`.localeCompare(`${b.packId}:${b.userId}`));
-  const voteMap = Object.fromEntries(votes.map((vote): [string, VoteRecord] => [`${vote.packId}:${vote.userId}`, vote]));
+  const voteMap = Object.fromEntries(
+    votes.map((vote): [string, VoteRecord] => [`${vote.packId}:${vote.userId}`, vote]),
+  );
   return { packs, packBodies, votes, voteMap, packIds, total: packs.length + votes.length };
 }
 
@@ -1282,7 +1291,10 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     if (cursorInput !== undefined && requestedCursor > 0) {
       return json(
         request,
-        { error: "Restore cursor requires an opaque server-owned token. Start again with no cursor." },
+        {
+          error:
+            "Restore cursor requires an opaque server-owned token. Start again with no cursor.",
+        },
         409,
       );
     }
@@ -1348,7 +1360,10 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     await index.cancelActiveRestoreJob(tokenHash);
     return json(
       request,
-      { error: "Restore job snapshot changed while restore was in progress. Start again with no cursor." },
+      {
+        error:
+          "Restore job snapshot changed while restore was in progress. Start again with no cursor.",
+      },
       409,
     );
   }
@@ -1400,32 +1415,28 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     ...plan.votes.map((vote): RestoreWorkItem => ({ kind: "vote", vote })),
   ];
   const page = work.slice(claim.start, claim.end);
-
-  let restoredPacks = 0;
-  let restoredVotes = 0;
-  await runBounded(
-    page.map((item) => async () => {
-      if (item.kind === "pack") {
-        if (packPredatesDeletion(deletionTombstones, item.pack)) return;
-        await putPack(env, item.pack);
-        await d1UpsertPack(env, item.pack);
-        restoredPacks++;
-        return;
-      }
-
-      const pack = packById.get(item.vote.packId);
-      if (
-        !pack ||
-        packPredatesDeletion(deletionTombstones, pack) ||
-        votePredatesDeletion(deletionTombstones, item.vote)
-      ) {
-        return;
-      }
-      await restoreVote(env, item.vote.packId, item.vote.userId, item.vote);
-      restoredVotes++;
-    }),
-    RESTORE_CONCURRENCY,
-  );
+  const pagePacks = page.flatMap((item) => (item.kind === "pack" ? [item.pack] : []));
+  const pageVotes = page.flatMap((item) => {
+    if (item.kind !== "vote") return [];
+    const pack = packById.get(item.vote.packId);
+    return pack ? [{ vote: item.vote, pack }] : [];
+  });
+  const pageResult = await index.writeRestorePage({
+    tokenHash,
+    claimId: claim.claimId,
+    jobId: job.jobId,
+    packs: pagePacks,
+    votes: pageVotes,
+  });
+  if (!pageResult.ok) {
+    return json(
+      request,
+      { error: "Restore page claim expired or was cancelled before it could be written." },
+      pageResult.reason === "expired" || pageResult.reason === "not-found" ? 410 : 409,
+    );
+  }
+  const restoredPacks = pageResult.restoredPacks;
+  const restoredVotes = pageResult.restoredVotes;
 
   let finalReplacement: { packs: Pack[]; restoredIds: string[] } | undefined;
   if (claim.final) {
@@ -1578,9 +1589,7 @@ async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void
     const snapshot = JSON.parse(raw) as PackBackupSnapshot;
 
     const removedPackIds = new Set(
-      (snapshot.packs ?? [])
-        .filter((pack) => pack.author_id === userId)
-        .map((pack) => pack.id),
+      (snapshot.packs ?? []).filter((pack) => pack.author_id === userId).map((pack) => pack.id),
     );
     for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
       if (pack?.author_id === userId) removedPackIds.add(id);
@@ -1596,7 +1605,8 @@ async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void
     }
 
     const removed =
-      (snapshot.packs?.length ?? 0) - keptPacks.length +
+      (snapshot.packs?.length ?? 0) -
+      keptPacks.length +
       (Object.keys(snapshot.packBodies ?? {}).length - Object.keys(keptBodies).length) +
       (Object.keys(snapshot.votes ?? {}).length - Object.keys(keptVotes).length);
     if (removed === 0) return; // nothing of theirs in the snapshot — skip the write
@@ -1651,18 +1661,42 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   // 2. Delete all user's votes via reverse index (user-votes:{userId}:{packId})
   // Does not decrement vote_count — denormalized aggregates, acceptable for rare deletion.
+  //
+  // Packs are capped at MAX_PACKS_PER_USER and shares at MAX_SHARES_PER_USER,
+  // so those loops are inherently bounded. Votes are not capped, so this is the
+  // one loop in account deletion that can spend an unbounded number of
+  // subrequests. Left unbudgeted it is the same failure the restore path was
+  // paged to avoid: past the ceiling the whole request throws, and the bounded
+  // cleanup below it — share codes and the never-expiring backup scrub — never
+  // runs at all. Budget the votes, always reach the bounded tail, and tell the
+  // caller when there is more to collect. Erasure stays convergent because
+  // every deleted key simply stops being listed on the next pass.
   let voteCount = 0;
   let voteCursor: string | undefined;
+  let votesComplete = true;
+  let voteSubrequests = 0;
   do {
+    if (voteSubrequests + VOTE_DELETE_SUBREQUESTS_PER_PAGE > ACCOUNT_DELETE_VOTE_BUDGET) {
+      votesComplete = false;
+      break;
+    }
     const list = await env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor: voteCursor });
+    voteSubrequests++;
     for (const key of list.keys) {
+      if (voteSubrequests + SUBREQUESTS_PER_VOTE > ACCOUNT_DELETE_VOTE_BUDGET) {
+        votesComplete = false;
+        break;
+      }
       const packId = key.name.slice(`user-votes:${userId}:`.length);
       if (packId) {
         await env.ESO_PACKS.delete(`vote:${packId}:${userId}`);
+        voteSubrequests++;
       }
       await env.ESO_PACKS.delete(key.name);
+      voteSubrequests++;
       voteCount++;
     }
+    if (!votesComplete) break;
     voteCursor = list.list_complete ? undefined : list.cursor;
   } while (voteCursor);
 
@@ -1693,6 +1727,9 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   await purgeUserFromLatestBackup(env, userId);
 
   return json(request, {
+    // `false` means the bounded work is done but votes remain; the caller
+    // repeats the request until this is `true`.
+    complete: votesComplete,
     deleted: {
       packs: packIds.length,
       votes: voteCount,

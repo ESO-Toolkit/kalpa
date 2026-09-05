@@ -223,12 +223,17 @@ pub fn open_url(url: &str) -> Result<(), String> {
 /// to `pgrep` as a single argv entry (no shell), but keeping inputs static
 /// also keeps the results predictable.
 #[cfg(not(windows))]
-pub fn unix_process_running(pattern: &str) -> bool {
-    std::process::Command::new("pgrep")
+pub fn unix_process_running(pattern: &str) -> Result<bool, String> {
+    let output = std::process::Command::new("pgrep")
         .args(["-if", pattern])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .map_err(|error| format!("Failed to inspect running processes with pgrep: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(code) => Err(format!("pgrep failed with exit code {code}.")),
+        None => Err("pgrep was terminated before it could inspect running processes.".to_string()),
+    }
 }
 
 #[cfg(test)]

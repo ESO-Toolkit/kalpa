@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   ActivityIcon,
   AlertCircleIcon,
@@ -695,18 +694,16 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
     setBrowsing(true);
     setBrowseError(null);
     try {
-      const picked = await openFileDialog({
-        directory: false,
-        multiple: false,
-        title: "Locate eso64.exe",
-        filters: [{ name: "ESO client", extensions: ["exe"] }],
-      });
-      if (typeof picked !== "string") return;
+      // Native command, not the webview dialog plugin: the plugin would hand
+      // the path back here for `set_game_install_path` to take on trust, and
+      // the write gate has no way to tell that apart from a path the frontend
+      // made up. `choose_client_path` opens the picker on the native side and
+      // records the choice there, so approving this folder later is backed by
+      // the dialog rather than by our say-so.
+      const validated = await invokeOrThrow<EsoClientLocation | null>("choose_client_path");
+      if (!validated) return;
       if (pendingMutationRef.current) return;
       token = ++runToken.current;
-      const validated = await invokeOrThrow<EsoClientLocation>("validate_eso_client", {
-        path: picked,
-      });
       if (runToken.current !== token || pendingMutationRef.current) return;
       setClients((prev) => {
         const rest = (prev ?? []).filter((c) => c.client_dir !== validated.client_dir);
