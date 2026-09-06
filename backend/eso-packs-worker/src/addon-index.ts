@@ -79,6 +79,19 @@ const SCHEMA_STATEMENTS = [
    )`,
 ] as const;
 
+/**
+ * True when a query failed because the index has never been built.
+ *
+ * A freshly provisioned D1 has no tables until the first sync runs, and the
+ * read paths must treat that as "nothing indexed yet" rather than as an error —
+ * otherwise the very first deploy serves 500s from `/addons/search` and
+ * `/addons/stats` until someone runs a crawl.
+ */
+export function isMissingTable(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /no such table/i.test(message);
+}
+
 /** Idempotent. Cheap enough to call before any indexing operation. */
 export async function ensureSchema(db: D1Database): Promise<void> {
   for (const statement of SCHEMA_STATEMENTS) {
@@ -251,12 +264,15 @@ export async function searchAddons(
        ORDER BY score ASC, a.downloads DESC
        LIMIT ? OFFSET ?`;
 
-    const result = await db
-      .prepare(sql)
-      .bind(expression, limit, offset)
-      .all<SearchRow>();
+    let rows: SearchRow[];
+    try {
+      const result = await db.prepare(sql).bind(expression, limit, offset).all<SearchRow>();
+      rows = result.results ?? [];
+    } catch (err) {
+      if (isMissingTable(err)) return { hits: [], matched: 0, mode: "none" };
+      throw err;
+    }
 
-    const rows = result.results ?? [];
     if (rows.length > 0) {
       return { hits: rows.map(rowToHit), matched: rows.length, mode };
     }
@@ -400,7 +416,9 @@ export async function pendingDetailUids(db: D1Database, limit: number): Promise<
 }
 
 export async function indexStats(db: D1Database): Promise<AddonIndexStats> {
-  const row = await db
+  let row: { total: number; live: number; described: number; indexed_at: number } | null = null;
+  try {
+    row = await db
     .prepare(
       `SELECT
          COUNT(*) AS total,
@@ -410,6 +428,10 @@ export async function indexStats(db: D1Database): Promise<AddonIndexStats> {
        FROM addons`,
     )
     .first<{ total: number; live: number; described: number; indexed_at: number }>();
+  } catch (err) {
+    // An unbuilt index reports zeros, which is exactly what it contains.
+    if (!isMissingTable(err)) throw err;
+  }
 
   return {
     version: INDEX_VERSION,
@@ -417,7 +439,7 @@ export async function indexStats(db: D1Database): Promise<AddonIndexStats> {
     live: row?.live ?? 0,
     described: row?.described ?? 0,
     indexed_at: row?.indexed_at ?? 0,
-    last_sync: (await getMeta(db, "last_sync")) ?? null,
+    last_sync: row ? ((await getMeta(db, "last_sync")) ?? null) : null,
   };
 }
 

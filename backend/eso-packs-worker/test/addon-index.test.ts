@@ -5,6 +5,7 @@ import {
   contentTokens,
   ensureSchema,
   expandIdentifier,
+  isMissingTable,
   indexStats,
   markRemoved,
   pendingDetailUids,
@@ -274,5 +275,32 @@ describe("indexStats", () => {
     expect(stats.total).toBe(3);
     expect(stats.live).toBe(2);
     expect(stats.described).toBe(1);
+  });
+});
+
+describe("unbuilt index", () => {
+  it("recognises the missing-table error", () => {
+    expect(isMissingTable(new Error("D1_ERROR: no such table: addons_fts"))).toBe(true);
+    expect(isMissingTable(new Error("something else"))).toBe(false);
+  });
+
+  it("searches and reports stats as empty rather than throwing", async () => {
+    // A freshly provisioned D1 has no tables until the first sync. The read
+    // paths must treat that as "nothing indexed yet", or the first deploy
+    // serves 500s until someone runs a crawl.
+    await db().prepare("DROP TABLE IF EXISTS addons_fts").run();
+    await db().prepare("DROP TABLE IF EXISTS addons").run();
+    await db().prepare("DROP TABLE IF EXISTS index_meta").run();
+
+    expect(await searchAddons(db(), "combat indicator")).toEqual({
+      hits: [],
+      matched: 0,
+      mode: "none",
+    });
+    const stats = await indexStats(db());
+    expect(stats.total).toBe(0);
+    expect(stats.last_sync).toBeNull();
+
+    await ensureSchema(db());
   });
 });

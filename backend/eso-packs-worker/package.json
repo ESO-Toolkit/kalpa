@@ -7,7 +7,8 @@
     "deploy": "npm run check && wrangler deploy",
     "check": "npm run check:version-policy && tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
     "check:version-policy": "node scripts/check-version-policy.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "index:build": "node scripts/build-addon-index.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

@@ -21,8 +21,13 @@ import { INDEX_VERSION, searchAddons } from "./addon-index";
 
 /** Overridable via the `ASK_MODEL` var so swapping models is a config change,
  *  not a deploy of new code. Must be a Workers AI model that supports JSON
- *  mode — the grounding schema depends on it. */
-const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+ *  mode — the grounding schema depends on it.
+ *
+ *  Verify any replacement against `wrangler ai models` first. Model ids are not
+ *  guessable: the plausible-looking "@cf/meta/llama-3.1-8b-instruct-fast" does
+ *  not exist, and an unknown id fails at call time, which this module catches
+ *  and turns into a permanently degraded answer rather than a loud error. */
+const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
 
 /** How many candidates the model chooses among. Enough to contain the right
  *  answer for a vague question, small enough to keep the prompt ~2.5k tokens. */
