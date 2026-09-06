@@ -438,6 +438,16 @@ export type FilterMode =
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;
 export type ViewMode = "installed" | "discover";
+
+/** Which backend answered a Discover search. `esoui` means the worker's
+ *  full-text index could not answer and the title-only scraper was used. */
+export type AddonSearchSource = "index" | "esoui";
+
+export interface AddonSearchPage {
+  results: EsouiSearchResult[];
+  hasMore: boolean;
+  source: AddonSearchSource;
+}
 export type DiscoverTab = "search" | "popular" | "categories" | "url";
 
 // ── Pack types (from roster-hub-api Pack Hub) ─────────────────────────────

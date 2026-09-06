@@ -15,6 +15,11 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 [vars]
 # Remains log-only until a maintainer approves deletion-capable apply mode.
 D1_RECONCILIATION_MODE = "dry-run"
+# Nightly ESOUI addon-index crawl. Fail-closed: only the exact value "enabled"
+# turns it on. Flip this to "enabled" AFTER provisioning ADDON_INDEX and running
+# the initial backfill to completion — not before, or the cron starts calling a
+# third-party API on a half-built index.
+ADDON_INDEX_SYNC = "disabled"
 
 # Daily backup of pack index (midnight UTC)
 [triggers]
@@ -49,6 +54,28 @@ namespace_id = "1003"
   [ratelimits.simple]
   limit = 20
   period = 60
+
+[[ratelimits]]
+name = "ADDON_SEARCH_LIMITER"
+namespace_id = "1004"
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+# ── ESOUI addon full-text index (D1 + FTS5) ───────────────────────
+# Dedicated database. Deliberately NOT roster-hub-db: that one is shared with
+# the ESO Toolkit website and every schema change there needs coordinating.
+#
+# Uncomment after provisioning, pasting the id wrangler prints:
+#   wrangler d1 create kalpa-addon-index
+#
+# The ADDON_INDEX binding is optional in code — while this stays commented out
+# the worker serves Pack Hub exactly as before and /addons/* returns 503.
+#
+# [[d1_databases]]
+# binding = "ADDON_INDEX"
+# database_name = "kalpa-addon-index"
+# database_id = "PASTE_ID_FROM_WRANGLER_D1_CREATE"
 
 # ── Durable Object for atomic pack index mutations ────────────────
 [[durable_objects.bindings]]

@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { toast } from "sonner";
 import type {
+  AddonSearchPage,
+  AddonSearchSource,
   BrowsePopularPage,
   DiscoverTab,
   EsouiSearchResult,
@@ -522,6 +524,7 @@ function SearchContent({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
+  const [searchSource, setSearchSource] = useState<AddonSearchSource | null>(null);
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchIdRef = useRef(0);
@@ -546,15 +549,23 @@ function SearchContent({
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) {
       setResults([]);
+      setSearchSource(null);
       return;
     }
     setSearching(true);
     const id = ++searchIdRef.current;
     try {
-      const r = await invokeOrThrow<EsouiSearchResult[]>("search_esoui_addons", {
+      // Full-text search over titles AND descriptions, served by the Pack Hub
+      // worker's addon index. The command falls back to the ESOUI scraper on
+      // its own when the index cannot answer, so this never regresses to a
+      // dead search — `source` just reports which backend replied.
+      const page = await invokeOrThrow<AddonSearchPage>("search_addon_index", {
         query: searchQuery.trim(),
       });
-      if (searchIdRef.current === id) setResults(r);
+      if (searchIdRef.current === id) {
+        setResults(page.results);
+        setSearchSource(page.source);
+      }
     } catch (e) {
       if (searchIdRef.current === id) toast.error(getTauriErrorMessage(e));
     } finally {
@@ -617,6 +628,16 @@ function SearchContent({
         </div>
       )}
 
+      {/* The index searches descriptions; the scraper only matches titles. Say
+          so when we fall back, otherwise a thinner result set looks like a bug. */}
+      {results.length > 0 && searchSource === "esoui" && (
+        <div className="px-3 pb-1.5">
+          <span className="text-xs text-muted-foreground">
+            Matching addon names only &mdash; description search is unavailable right now.
+          </span>
+        </div>
+      )}
+
       <div ref={listRef} className="flex-1 overflow-y-auto">
         {searching ? (
           <DiscoverResultListSkeleton />
@@ -630,7 +651,7 @@ function SearchContent({
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/20" />}
             title="Search ESOUI"
-            subtitle="Type to find addons by name, author, or keyword"
+            subtitle="Describe what you want — searches names and descriptions"
           />
         ) : (
           <VirtualResultRows

@@ -158,6 +158,42 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed s
 - **Backup**: Daily cron at midnight UTC snapshots pack index to `backup:YYYY-MM-DD` keys (90-day TTL)
 - **CI**: `.github/workflows/deploy-worker.yml` — auto-deploys on push to main, with typecheck + name guard + health check
 
+### Addon index (`/addons/*`)
+
+The worker also owns a full-text index of the ESOUI catalogue, in a **separate**
+D1 database (binding `ADDON_INDEX`, database `kalpa-addon-index`). It backs
+Discover's search box, which previously matched addon _titles_ only because the
+bulk filelist API carries no descriptions.
+
+- `src/addon-index.ts` — D1 schema, FTS5 table, BM25 search. `expandIdentifier`
+  splits CamelCase titles ("CombatIndicator" -> "Combat Indicator") because
+  FTS5 tokenises the glued form as one token and would otherwise never match a
+  spaced query against a title.
+- `src/crawl.ts` — the ESOUI sync. `syncFilelist` is one bulk request;
+  `crawlDetails` fetches `filedetails/{id}` only for entries whose `lastUpdate`
+  moved.
+- `src/addon-routes.ts` — `GET /addons/search`, `GET /addons/stats`, and the
+  admin-only `POST /admin/index/sync` and `POST /admin/index/backfill`.
+
+**The nightly crawl is fail-closed.** It runs only when `ADDON_INDEX_SYNC` is
+exactly `"enabled"` AND the `ADDON_INDEX` binding exists. Provision the database
+and finish the backfill _before_ flipping the var — and note that this is the
+one sanctioned exception to "no background spam": one bulk request plus a
+bounded page of changed descriptions per day. Do not widen it to hourly, and do
+not add other scheduled outbound fetches without the same kind of bound.
+
+This does not violate "keep all scraping in `esoui.rs`". That rule governs the
+desktop client, and the crawl is not scraping — it uses the same public
+`api.mmoui.com` JSON API `esoui.rs` already calls, once on the server for all
+users rather than once per user. Net ESOUI load falls, because search stops
+hitting `esoui.com/downloads/search.php`.
+
+The Rust client is `src-tauri/src/pack_hub/addon_search.rs`. It treats the index
+as an enhancement, never a dependency: on a 503, a network error, or zero hits
+it falls back to `crate::esoui::search_esoui`, so search is never worse than it
+was and still works offline-ish. `AddonSearchPage.source` reports which backend
+answered so the UI can say when it is showing title-only results.
+
 ### Rust integration:
 
 - `pack_hub/commands.rs` calls `kalpa-pack-hub.eso-toolkit.workers.dev` (see `pack_hub_url()` and `share_worker_url()`)
