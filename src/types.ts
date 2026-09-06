@@ -443,12 +443,34 @@ export type ViewMode = "installed" | "discover";
  *  full-text index could not answer and the title-only scraper was used. */
 export type AddonSearchSource = "index" | "esoui";
 
+/** One addon recommended by the assistant. `fileInfoUri` is rebuilt server-side
+ *  from the index, never taken from model output, so it is safe to link. */
+export interface AskRecommendation {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  file_info_uri: string;
+  reason: string;
+}
+
+export interface AskResponse {
+  /** Prose answer. Empty when `degraded` is set. */
+  answer: string;
+  recommendations: AskRecommendation[];
+  no_good_match: boolean;
+  /** Ranked candidates shown without model prose — the assistant was
+   *  unavailable, over budget, or returned something ungroundable. */
+  degraded: boolean;
+  cached: boolean;
+}
+
 export interface AddonSearchPage {
   results: EsouiSearchResult[];
   hasMore: boolean;
   source: AddonSearchSource;
 }
-export type DiscoverTab = "search" | "popular" | "categories" | "url";
+export type DiscoverTab = "search" | "ask" | "popular" | "categories" | "url";
 
 // ── Pack types (from roster-hub-api Pack Hub) ─────────────────────────────
 export interface PackAddonEntry {

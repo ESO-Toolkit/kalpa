@@ -7,7 +7,9 @@
 //! though several addons say exactly that in their description text.
 //!
 //! The worker indexes title + author + category + description in D1/FTS5 and
-//! serves BM25 results from `GET /addons/search`. This module is the client.
+//! serves BM25 results from `GET /addons/search`. This module is the client for
+//! that route and for `POST /ask`, the natural-language assistant built on the
+//! same index.
 //!
 //! **The index is treated as an enhancement, never a dependency.** If the
 //! binding is unconfigured, the worker is unreachable, or the query returns
@@ -181,6 +183,111 @@ pub async fn search_addon_index(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+// ── Ask: natural-language addon assistant ─────────────────────────────────
+
+/// One recommended addon. Mirrors `AskRecommendation` in the worker.
+///
+/// `file_info_uri` is always rebuilt server-side from the index row — the model
+/// never emits a URL — so this can be linked without further validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskRecommendation {
+    #[serde(rename = "esoui_id")]
+    pub esoui_id: u32,
+    pub title: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(rename = "file_info_uri", default)]
+    pub file_info_uri: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskResponse {
+    /// Prose answer. Empty when `degraded` is set.
+    #[serde(default)]
+    pub answer: String,
+    #[serde(default)]
+    pub recommendations: Vec<AskRecommendation>,
+    #[serde(rename = "no_good_match", default)]
+    pub no_good_match: bool,
+    /// Ranked candidates shown without model prose, because the model was
+    /// unavailable, over its daily budget, or returned ungroundable output.
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default)]
+    pub cached: bool,
+}
+
+#[derive(Serialize)]
+struct AskRequest<'a> {
+    question: &'a str,
+}
+
+/// Longer than the search timeout: a model call is expected to take seconds,
+/// and there is no cheaper local fallback to race it against.
+const ASK_TIMEOUT_SECS: u64 = 20;
+
+fn ask_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(format!("Kalpa/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(ASK_TIMEOUT_SECS))
+            .build()
+            .expect("failed to build ask HTTP client")
+    })
+}
+
+/// Ask the assistant a natural-language question about addons.
+///
+/// Unlike [`search_addon_index`] there is no local fallback — the whole feature
+/// lives server-side — so failures surface as errors the UI can explain rather
+/// than being silently swallowed.
+#[tauri::command]
+pub async fn ask_addon_assistant(question: String) -> Result<AskResponse, String> {
+    let trimmed = question.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Enter a question first.".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let url = format!("{}/ask", addon_index_url());
+        let response = ask_client()
+            .post(&url)
+            .json(&AskRequest { question: &trimmed })
+            .send()
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Could not reach the addon assistant. Check your internet connection."
+                        .to_string()
+                } else {
+                    format!("Network error: {e}")
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(match status.as_u16() {
+                400 => "That question could not be understood. Try rephrasing it.".to_string(),
+                429 => "Too many questions right now. Wait a moment and try again.".to_string(),
+                503 => "The addon assistant is not available yet.".to_string(),
+                other => format!("The addon assistant returned HTTP {other}."),
+            });
+        }
+
+        response
+            .json::<AskResponse>()
+            .map_err(|e| format!("Failed to parse assistant response: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +322,42 @@ mod tests {
         let mapped: EsouiSearchResult = parsed.hits.into_iter().next().unwrap().into();
         assert_eq!(mapped.id, 7);
         assert_eq!(mapped.downloads, "0");
+    }
+
+    #[test]
+    fn parses_a_grounded_ask_response() {
+        let json = r#"{
+            "answer": "Yes, CombatIndicator does that.",
+            "recommendations": [{
+                "esoui_id": 1543,
+                "title": "CombatIndicator",
+                "author": "A",
+                "category": "Combat Mods",
+                "file_info_uri": "https://www.esoui.com/downloads/info1543.html",
+                "reason": "shows a flag while in combat"
+            }],
+            "no_good_match": false,
+            "degraded": false,
+            "cached": true
+        }"#;
+        let parsed: AskResponse = serde_json::from_str(json).expect("should parse");
+        assert!(parsed.cached);
+        assert!(!parsed.degraded);
+        assert_eq!(parsed.recommendations[0].esoui_id, 1543);
+        assert_eq!(
+            parsed.recommendations[0].file_info_uri,
+            "https://www.esoui.com/downloads/info1543.html"
+        );
+    }
+
+    #[test]
+    fn parses_a_degraded_ask_response_with_no_prose() {
+        // The model-unavailable path still returns usable candidates.
+        let json = r#"{"recommendations":[{"esoui_id":7,"title":"X"}],"degraded":true}"#;
+        let parsed: AskResponse = serde_json::from_str(json).expect("should parse");
+        assert!(parsed.answer.is_empty());
+        assert!(parsed.degraded);
+        assert_eq!(parsed.recommendations.len(), 1);
     }
 
     #[test]

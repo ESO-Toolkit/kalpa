@@ -122,6 +122,29 @@ export interface AddonIndexStats {
   last_sync: string | null;
 }
 
+// ── Ask (natural-language addon assistant) ───────────────────────────
+/** One recommended addon. Links are always rebuilt from the index, never
+ *  taken from model output. */
+export interface AskRecommendation {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  file_info_uri: string;
+  reason: string;
+}
+
+export interface AskResponse {
+  /** Prose answer. Empty when the model was skipped — see `degraded`. */
+  answer: string;
+  recommendations: AskRecommendation[];
+  no_good_match: boolean;
+  /** True when the ranked candidates are shown without model prose (model
+   *  unavailable, over budget, or output failed grounding). */
+  degraded: boolean;
+  cached: boolean;
+}
+
 export interface CrawlOutcome {
   fetched: number;
   removed: number;
@@ -166,4 +189,13 @@ export interface Env {
   ADDON_INDEX_SYNC?: string;
   /** Bounds the addon search route independently of pack reads. */
   ADDON_SEARCH_LIMITER?: RateLimit;
+  /** Workers AI binding for the Ask assistant. Optional: without it /ask still
+   *  answers, returning ranked candidates with no prose. */
+  AI?: Ai;
+  /** Tighter budget than search — an Ask costs a model call, not just a query. */
+  ASK_LIMITER?: RateLimit;
+  /** Workers AI model id. Overridable so swapping models is config, not code. */
+  ASK_MODEL?: string;
+  /** Max model calls per UTC day before /ask degrades to candidates-only. */
+  ASK_DAILY_BUDGET?: string;
 }

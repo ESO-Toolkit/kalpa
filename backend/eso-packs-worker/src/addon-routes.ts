@@ -2,6 +2,8 @@ import type { Env } from "./types";
 import { corsHeaders } from "./cors";
 import { indexStats, searchAddons } from "./addon-index";
 import { crawlDetails, syncFilelist, MAX_DETAIL_BATCH } from "./crawl";
+import { answerQuestion } from "./ask";
+import { readJsonBody } from "./validate";
 
 /**
  * HTTP surface for the addon index.
@@ -142,5 +144,50 @@ export async function handleIndexBackfill(
       { error: err instanceof Error ? err.message : "Backfill failed" },
       502,
     );
+  }
+}
+
+/**
+ * POST /ask  { "question": "..." }
+ *
+ * Anonymous by design, like `/addons/search`. Requiring sign-in for the first
+ * "is there an addon that…" question would gate the exact moment the feature is
+ * most useful to someone who has not invested in Kalpa yet.
+ */
+export async function handleAsk(request: Request, env: Env): Promise<Response> {
+  if (!env.ADDON_INDEX) return indexUnavailable(request);
+
+  const body = await readJsonBody(request);
+  if (!body.ok) {
+    return jsonResponse(
+      request,
+      { error: body.reason === "too-large" ? "Question too large" : "Invalid JSON body" },
+      400,
+    );
+  }
+  const question = (body.body as { question?: unknown })?.question;
+  if (typeof question !== "string") {
+    return jsonResponse(request, { error: "Missing 'question'" }, 400);
+  }
+
+  try {
+    const result = await answerQuestion(env, question);
+    if (!result.ok) {
+      if (result.reason === "no-index") return indexUnavailable(request);
+      return jsonResponse(
+        request,
+        {
+          error:
+            result.reason === "question-too-long"
+              ? "Question is too long"
+              : "Question is empty",
+        },
+        400,
+      );
+    }
+    return jsonResponse(request, result.response);
+  } catch (err) {
+    console.error("ask failed:", err);
+    return jsonResponse(request, { error: "Ask failed" }, 500);
   }
 }

@@ -20,6 +20,12 @@ D1_RECONCILIATION_MODE = "dry-run"
 # the initial backfill to completion — not before, or the cron starts calling a
 # third-party API on a half-built index.
 ADDON_INDEX_SYNC = "disabled"
+# Workers AI model for /ask. Swappable without a code change.
+ASK_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast"
+# Model calls per UTC day before /ask degrades to candidates-only. Workers AI
+# gives 10k neurons/day free and one ask costs ~25, so ~400/day is the free
+# ceiling; this sits under it deliberately.
+ASK_DAILY_BUDGET = "350"
 
 # Daily backup of pack index (midnight UTC)
 [triggers]
@@ -61,6 +67,19 @@ namespace_id = "1004"
   [ratelimits.simple]
   limit = 30
   period = 60
+
+[[ratelimits]]
+name = "ASK_LIMITER"
+namespace_id = "1005"
+  [ratelimits.simple]
+  limit = 8
+  period = 60
+
+# ── Workers AI (natural-language addon assistant) ─────────────────
+# No provisioning needed — this binding is all it takes. Free allocation is
+# 10,000 neurons/day; one ask is ~25 neurons.
+[ai]
+binding = "AI"
 
 # ── ESOUI addon full-text index (D1 + FTS5) ───────────────────────
 # Dedicated database. Deliberately NOT roster-hub-db: that one is shared with

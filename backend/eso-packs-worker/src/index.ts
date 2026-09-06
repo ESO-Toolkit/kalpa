@@ -18,6 +18,7 @@ import type { RestoreJobState } from "./pack-index-do";
 import {
   handleAddonSearch,
   handleAddonStats,
+  handleAsk,
   handleIndexBackfill,
   handleIndexSync,
 } from "./addon-routes";
@@ -1835,7 +1836,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     // budget when the binding exists. Falling back to READ_LIMITER keeps the
     // route usable on a deployment that has not added the binding yet.
     const isAddonRead = !isWrite && pathname.startsWith("/addons/");
-    const limiter = isAddonRead
+    // /ask is a POST but is a read in spirit; WRITE_LIMITER's 10/min is meant
+    // for pack mutations and would be an odd ceiling on asking questions.
+    const isAsk = pathname === "/ask";
+    const limiter = isAsk
+      ? (env.ASK_LIMITER ?? env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
+      : isAddonRead
       ? (env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
       : isVote
         ? env.VOTE_LIMITER
@@ -1902,6 +1908,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (method === "GET" && pathname === "/addons/stats") {
     return handleAddonStats(request, env);
+  }
+
+  if (method === "POST" && pathname === "/ask") {
+    return handleAsk(request, env);
   }
 
   // Index maintenance is admin-only: a crawl page makes dozens of outbound

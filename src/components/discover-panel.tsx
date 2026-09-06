@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import type {
   AddonSearchPage,
   AddonSearchSource,
+  AskResponse,
+  AskRecommendation,
   BrowsePopularPage,
   DiscoverTab,
   EsouiSearchResult,
@@ -14,6 +16,7 @@ import type {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import {
   Select,
@@ -38,6 +41,7 @@ import {
   Flame,
   Check,
   WifiOff,
+  Sparkles,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 import { useInstallProgress } from "@/hooks/use-install-progress";
@@ -345,6 +349,7 @@ function VirtualResultRows({
 
 const DISCOVER_TABS: [DiscoverTab, string, React.FC<{ className?: string }>][] = [
   ["search", "Search", Search],
+  ["ask", "Ask", Sparkles],
   ["popular", "Popular", Flame],
   ["categories", "Categories", FolderOpen],
   ["url", "URL / ID", Link],
@@ -444,6 +449,18 @@ export function DiscoverPanel({
               onSelectResult={onSelectResult}
               selectedResultId={selectedResultId}
             />
+          </motion.div>
+        )}
+        {activeTab === "ask" && (
+          <motion.div
+            key="ask"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.08 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <AskContent onSelectResult={onSelectResult} selectedResultId={selectedResultId} />
           </motion.div>
         )}
         {activeTab === "popular" && (
@@ -664,6 +681,137 @@ function SearchContent({
             onSelectResult={onSelectResult}
             onInstall={onInstall}
           />
+        )}
+      </div>
+    </>
+  );
+}
+
+/* ── Ask Tab ─────────────────────────────────────────── */
+
+/**
+ * Natural-language addon assistant.
+ *
+ * The worker does the retrieval and the grounding; every recommendation here
+ * corresponds to a real indexed addon, and clicking one opens the same
+ * DiscoverDetail pane (and Install button) the other tabs use.
+ */
+function AskContent({
+  onSelectResult,
+  selectedResultId,
+}: {
+  onSelectResult: (result: EsouiSearchResult | null) => void;
+  selectedResultId: number | null;
+}) {
+  const [question, setQuestion] = useState("");
+  const [response, setResponse] = useState<AskResponse | null>(null);
+  const [asking, setAsking] = useState(false);
+  const askIdRef = useRef(0);
+
+  const handleAsk = useCallback(async (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    setAsking(true);
+    const id = ++askIdRef.current;
+    try {
+      const result = await invokeOrThrow<AskResponse>("ask_addon_assistant", {
+        question: trimmed,
+      });
+      if (askIdRef.current === id) setResponse(result);
+    } catch (e) {
+      if (askIdRef.current === id) toast.error(getTauriErrorMessage(e));
+    } finally {
+      if (askIdRef.current === id) setAsking(false);
+    }
+  }, []);
+
+  // Only the ESOUI id is load-bearing: DiscoverDetail fetches everything else
+  // itself, so a recommendation can open the full detail pane directly.
+  const selectRecommendation = (rec: AskRecommendation) => {
+    onSelectResult({
+      id: rec.esoui_id,
+      title: rec.title,
+      author: rec.author,
+      category: rec.category,
+      downloads: "",
+      updated: "",
+    });
+  };
+
+  return (
+    <>
+      <div className="px-3 pb-2">
+        <Input
+          placeholder="Ask anything, e.g. an addon that shows when I'm in combat"
+          aria-label="Ask about addons"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleAsk(question);
+          }}
+          autoFocus
+        />
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-3 pb-3">
+        {asking ? (
+          <div className="flex items-center justify-center gap-2 py-12">
+            <div className="size-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
+            <span className="text-xs text-muted-foreground">Looking through addons&hellip;</span>
+          </div>
+        ) : !response ? (
+          <EmptyState
+            icon={<Sparkles className="size-8 text-muted-foreground/20" />}
+            title="Ask about addons"
+            subtitle="Describe what you want in your own words and press Enter."
+          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {response.answer && (
+              <GlassPanel variant="subtle" className="p-3">
+                <p className="text-sm leading-relaxed text-foreground">{response.answer}</p>
+              </GlassPanel>
+            )}
+
+            {/* Say plainly when the assistant itself did not run, rather than
+                passing off raw search hits as an answer. */}
+            {response.degraded && response.recommendations.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                The assistant is unavailable right now &mdash; showing the closest matches instead.
+              </p>
+            )}
+
+            {response.no_good_match && response.recommendations.length === 0 && (
+              <EmptyState
+                icon={<Sparkles className="size-8 text-muted-foreground/20" />}
+                title="Nothing matched"
+                subtitle="No indexed addon looks like a good fit. Try describing it differently."
+              />
+            )}
+
+            {response.recommendations.map((rec) => (
+              <button
+                key={rec.esoui_id}
+                onClick={() => selectRecommendation(rec)}
+                className={cn(
+                  "w-full rounded-lg border p-2.5 text-left transition-colors duration-150",
+                  selectedResultId === rec.esoui_id
+                    ? "border-primary/25 bg-primary/[0.06]"
+                    : "border-structure-06 hover:bg-structure-05"
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-heading text-sm font-medium text-foreground">
+                    {rec.title}
+                  </span>
+                  {rec.category && <InfoPill color="muted">{rec.category}</InfoPill>}
+                </div>
+                {rec.reason && (
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{rec.reason}</p>
+                )}
+              </button>
+            ))}
+          </div>
         )}
       </div>
     </>

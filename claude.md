@@ -188,6 +188,42 @@ desktop client, and the crawl is not scraping — it uses the same public
 users rather than once per user. Net ESOUI load falls, because search stops
 hitting `esoui.com/downloads/search.php`.
 
+### Ask (`POST /ask`)
+
+`src/ask.ts` is a natural-language addon assistant built on the same index, and
+its design is deliberately lopsided: **retrieval finds the addons, the model
+only picks among them and writes one sentence.** The model never sees a URL and
+never emits one.
+
+Three layers keep answers honest, and all three matter:
+
+1. Candidates are shown to the model as opaque keys (`C1`, `C2`, …), not IDs.
+2. The JSON schema constrains `candidate` to an enum of exactly those keys.
+3. `groundOutput()` re-checks every pick against the retrieved set and rebuilds
+   `file_info_uri` from the index row. Workers AI documents JSON mode as
+   best-effort and explicitly does **not** guarantee schema conformance, so
+   layer 3 is the real boundary — do not remove it on the strength of layer 2.
+
+Addon descriptions are third-party text and are treated as untrusted. The
+closed candidate set, not the markup stripping in `crawl.ts`, is what makes a
+prompt-injected description harmless.
+
+Runs on Workers AI (binding `AI`) — free allocation is 10k neurons/day and one
+ask costs ~25, so ~400/day is free. `ASK_DAILY_BUDGET` (default 350) caps model
+calls per UTC day. Past the cap, or when the model errors or returns
+ungroundable output, the route **degrades** rather than failing: it returns the
+ranked candidates with `degraded: true` and the UI says the assistant is
+unavailable. Degraded answers are never cached, so an outage cannot be pinned
+in KV for a week.
+
+**Tests must run without Cloudflare credentials.** The `[ai]` binding is remote,
+and by default `@cloudflare/vitest-pool-workers` opens a proxy session to the
+real API before any test runs — which fails with no credentials and takes the
+whole worker suite down in CI. `vitest.config.ts` sets `remoteBindings: false`
+to prevent that. Do not remove it; `ask.test.ts` injects its own `AI` stub.
+
+### Rust client
+
 The Rust client is `src-tauri/src/pack_hub/addon_search.rs`. It treats the index
 as an enhancement, never a dependency: on a 503, a network error, or zero hits
 it falls back to `crate::esoui::search_esoui`, so search is never worse than it
