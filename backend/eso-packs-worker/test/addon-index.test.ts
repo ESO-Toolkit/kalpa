@@ -179,6 +179,32 @@ describe("searchAddons", () => {
     expect(ids).toContain(4246);
   });
 
+  it("ranks the real addon above a patch that mentions it", async () => {
+    // Searching an addon by name returned derivatives: "Master Merchant"
+    // ranked a 12k-download plugin first and the 3.9M-download addon fourth.
+    // FTS5 normalises bm25 by the row's TOTAL length across all columns, so a
+    // major addon with a long description loses to a small patch with a short
+    // one. The title-phrase boost is scaled by how much of the title the query
+    // accounts for, which separates "Master Merchant 3.0" from
+    // "Importers for Master Merchant 3.0".
+    await seed(1, "Master Merchant 3.0", "A".repeat(1500) + " guild sales history tool", {
+      downloads: 3954764,
+    });
+    await seed(2, "AGS-SortOrder - MasterMerchant Deal", "Sorts deals.", { downloads: 12636 });
+    await seed(3, "Importers for Master Merchant 3.0", "Imports data.", { downloads: 9068 });
+
+    expect((await searchAddons(db(), "Master Merchant")).hits[0].esoui_id).toBe(1);
+  });
+
+  it("leaves concept searches untouched by the title boost", async () => {
+    // No title contains a whole sentence, so the boost must not fire.
+    await seed(1, "Combat Indicator", "Turns your compass red when you are in combat.");
+    await seed(2, "An addon that shows when I am in combat", "irrelevant filler text");
+
+    const hits = await searchAddons(db(), "an addon that shows when I am in combat");
+    expect(hits.hits.length).toBeGreaterThan(0);
+  });
+
   it("promotes a far more popular addon within a near-tied score band", async () => {
     // Measured live: for "combat" the top 12 spanned a 2.8% score band while
     // downloads spanned 197 to 28,114. Inside that noise the ordering was

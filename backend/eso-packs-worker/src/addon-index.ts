@@ -74,7 +74,37 @@ const POPULARITY_LADDER = `CASE
          WHEN a.downloads >= 200   THEN 0.03
          ELSE 0
        END`;
-const RANK_EXPRESSION = `bm25(addons_fts, ${BM25_WEIGHTS}) - (${POPULARITY_LADDER}) ASC`;
+/**
+ * Boost for a title that literally contains the query, scaled by how much of
+ * the title the query accounts for.
+ *
+ * Searching an addon by name is the most basic expectation and it was broken:
+ * "Master Merchant" ranked "AGS-SortOrder - MasterMerchant Deal" (12,636
+ * downloads) first, with the real "Master Merchant 3.0" (3,954,764 downloads)
+ * at rank 4. 8 of 12 exact-name probes returned a patch or plugin instead of
+ * the addon, one of them tagged [DEPRECATED].
+ *
+ * The cause is not term frequency. FTS5's bm25() normalises by the row's TOTAL
+ * length across every column, so a major addon with a long description is
+ * systematically penalised against a small patch with a short one. Popularity
+ * cannot bridge it — the gap here is 1.1 while the whole popularity ladder
+ * spans 0.15.
+ *
+ * The length ratio is what makes this precise rather than blunt: a query that
+ * IS the title ("Master Merchant" in "Master Merchant 3.0", 0.79) scores far
+ * above the same query buried in a longer name ("Importers for Master Merchant
+ * 3.0", 0.45). It applies only when the title genuinely contains the phrase, so
+ * concept searches ("an addon that shows combat") are untouched — no title
+ * contains that sentence.
+ */
+const TITLE_PHRASE_WEIGHT = 3.0;
+const TITLE_PHRASE_BOOST = `CASE
+         WHEN ?2 != '' AND instr(lower(a.title), ?2) > 0
+         THEN ${TITLE_PHRASE_WEIGHT} * (CAST(length(?2) AS REAL) / length(a.title))
+         ELSE 0
+       END`;
+
+const RANK_EXPRESSION = `bm25(addons_fts, ${BM25_WEIGHTS}) - (${POPULARITY_LADDER}) - (${TITLE_PHRASE_BOOST}) ASC`;
 
 /**
  * ESOUI category 157, "Discontinued & Outdated" — 981 of ~4170 addons, roughly
@@ -313,6 +343,12 @@ export async function searchAddons(
   const offset = Math.max(options.offset ?? 0, 0);
   const trimmed = query.trim().slice(0, MAX_QUERY_LENGTH);
 
+  // Lowercased raw query for the title-phrase boost. Only meaningful when it
+  // looks like a NAME rather than a sentence, so long inputs are skipped —
+  // no title contains "an addon that shows when i am in combat".
+  const phrase = trimmed.toLowerCase().replace(/\s+/g, " ").trim();
+  const phraseForBoost = phrase.length >= 3 && phrase.length <= 60 ? phrase : "";
+
   const tokens = contentTokens(toMatchTokens(trimmed));
   if (tokens.length === 0) {
     return { hits: [], matched: 0, mode: "none" };
@@ -325,12 +361,12 @@ export async function searchAddons(
              bm25(addons_fts, ${BM25_WEIGHTS}) AS score
         FROM addons_fts
         JOIN addons a ON a.uid = addons_fts.rowid
-       WHERE addons_fts MATCH ?
+       WHERE addons_fts MATCH ?1
          AND a.removed = 0
          ${options.includeLibraries ? "" : "AND a.is_library = 0"}
          ${options.includeDiscontinued ? "" : `AND a.category_id != ${DISCONTINUED_CATEGORY_ID}`}
        ORDER BY ${RANK_EXPRESSION}
-       LIMIT ? OFFSET ?`;
+       LIMIT ?3 OFFSET ?4`;
 
   // One token makes AND and OR identical, so there is nothing to union.
   const singleToken = tokens.length === 1;
@@ -345,11 +381,13 @@ export async function searchAddons(
     // exactly how Combat Indicator stayed hidden.
     const andLimit = singleToken ? limit : Math.ceil(limit / 2);
     const statements = [
-      db.prepare(buildSql("and")).bind(buildMatchExpression(tokens, "and"), andLimit, offset),
+      db
+        .prepare(buildSql("and"))
+        .bind(buildMatchExpression(tokens, "and"), phraseForBoost, andLimit, offset),
     ];
     if (!singleToken) {
       statements.push(
-        db.prepare(buildSql("or")).bind(buildMatchExpression(tokens, "or"), limit, offset),
+        db.prepare(buildSql("or")).bind(buildMatchExpression(tokens, "or"), phraseForBoost, limit, offset),
       );
     }
     // One round trip for both passes.
