@@ -614,7 +614,7 @@ pub fn spec_index_for_section(name: &str) -> Option<usize> {
             SECTIONS.iter().position(|spec| {
                 spec.prefix_match
                     && name.len() >= spec.name.len()
-                    && name[..spec.name.len()].eq_ignore_ascii_case(spec.name)
+                    && name.as_bytes()[..spec.name.len()].eq_ignore_ascii_case(spec.name.as_bytes())
             })
         })
 }
@@ -1281,6 +1281,27 @@ mod tests {
     #[test]
     fn field_for_unknown_key_is_none() {
         assert!(field_for("NotARealKey").is_none());
+    }
+    // ── spec_index_for_section ─────────────────────────────
+
+    /// Section names come from the user's own `ReShade.ini`. The prefix test
+    /// used to slice by byte index, so a header whose byte at the boundary is
+    /// mid-character panicked -- and `panic = "abort"` in the release profile
+    /// turns that into the whole app dying, at every launch, because
+    /// `collect_sections` runs on every client inspection.
+    #[test]
+    fn spec_index_for_section_survives_a_multibyte_boundary() {
+        // 17 ASCII bytes then a two-byte char straddling byte 18, which is
+        // exactly the length of the only prefix spec ("RENODX-DLSS-preset").
+        let name = format!("{}\u{e9}", "A".repeat(17));
+        assert_eq!(name.len(), 19);
+        assert_eq!(spec_index_for_section(&name), None);
+    }
+
+    #[test]
+    fn spec_index_for_section_still_matches_a_preset_prefix() {
+        assert!(spec_index_for_section("RENODX-DLSS-preset3").is_some());
+        assert!(spec_index_for_section("renodx-dlss-preset12").is_some());
     }
 
     // ── slider_range ────────────────────────────────────────────────────
