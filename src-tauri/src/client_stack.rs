@@ -492,8 +492,14 @@ pub struct PresetInfo {
     /// As written in `ReShade.ini`, e.g. `.\ReShadePreset.ini`.
     pub path: String,
     pub exists: bool,
-    /// Enabled techniques, **in the order ReShade will run them**. Order is
-    /// load-bearing; see the module doc.
+    /// Enabled techniques, **in the order ReShade will run them**: the *set*
+    /// comes from `Techniques`, the *order* from `TechniqueSorting` whenever the
+    /// preset has that key, because that is the key ReShade sorts by and
+    /// `Techniques` is only its fallback. Reading the order out of `Techniques`
+    /// regardless described an order nothing would run whenever the two keys
+    /// disagreed — which is the state every install Kalpa's own order fix
+    /// "repaired" was left in, back when that fix wrote `Techniques` alone. See
+    /// [`order_as_reshade_will_run`]. Order is load-bearing; see the module doc.
     pub techniques: Vec<Technique>,
     /// Everything the preset knows about, enabled or not.
     pub available: Vec<String>,
@@ -513,9 +519,14 @@ pub struct PresetInfo {
 /// it was hardest to see. Every known block is now read, by
 /// `client_tuning`'s own reader; see [`ClientStack::tuning_blocks`].
 ///
-/// Values are verbatim. Keys are the file's own spelling, except for the keys
-/// `client_tuning` has a verified field table for, which come back in that
-/// table's canonical spelling.
+/// Values are verbatim. Keys are the file's own spelling, with two exceptions.
+/// The keys `client_tuning` has a verified field table for come back in that
+/// table's canonical spelling. And the prefix-matched `[RENODX-DLSS-preset*]`
+/// family is **one** block over every matching header in the file, so its keys
+/// come back qualified with the header each was actually read from —
+/// `RENODX-DLSS-preset3/DirectNeuralRenderingIntensity`. Without that
+/// qualification preset 3's value was displayed on preset 1's row; see
+/// `client_tuning::collect_sections`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TuningValue {
     pub key: String,
@@ -538,7 +549,11 @@ pub struct TuningValue {
 /// one belongs to a parked add-on".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TuningBlock {
-    /// The section name as `ReShade.ini` spells it, e.g. `RENODX-DLSS-preset1`.
+    /// The section name as `ReShade.ini` spells it, e.g. `RenoDX.DLSS5` — or,
+    /// for the prefix-matched preset family, that family's own glob
+    /// `RENODX-DLSS-preset*`, because the block is every `[RENODX-DLSS-preset*]`
+    /// header in the file merged into one. Naming it after the first header seen
+    /// told a user running preset 3 that what they were looking at was preset 1.
     pub section: String,
     /// The add-on file that writes this section, so the UI can name the thing
     /// that is or is not loaded rather than only the block it left behind.
@@ -1123,25 +1138,25 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     // around, so nothing may be computed before it. `live_names` is every file
     // name in the folder, parked ones included, because the rule is about what
     // is named exactly like an add-on rather than about what Kalpa classified.
-    stack.active_path = if listed {
-        // The evidence lines belong to the tuning panel, which asks
-        // `detect_active_path` for them directly; this stack carries the
-        // verdict alone.
-        detect_active_path(&live_names, &stack.disabled_addons).0
+    // One reading of the folder answers both of the questions below — which
+    // path frames the panel, and whether each individual section's owning
+    // add-on file is loaded — so the two can never come from readings that
+    // disagree. See [`LoadedAddons`]. The evidence lines belong to the tuning
+    // panel, which builds its own and shows them; this stack carries the
+    // verdict alone.
+    let loaded = if listed {
+        LoadedAddons::from_listing(&live_names, &stack.disabled_addons)
     } else {
-        ActivePath::Unknown
+        LoadedAddons::unlisted(Vec::new())
     };
-    // Tuning second, because which block is live is a function of the path —
-    // and read through `client_tuning::read_form`, not through this module's
-    // own `ini` map, so the stack panel and the tuning panel are looking at one
-    // answer rather than two. `read_form` is pure over `(text, path)`, so this
-    // costs a second parse of a file already in memory and buys agreement.
-    let form = read_form(
-        &reshade_ini,
-        &stack.client_dir,
-        stack.active_path,
-        Vec::new(),
-    );
+    stack.active_path = loaded.path();
+    // Tuning second, because which block is live is a function of what the
+    // folder loads — and read through `client_tuning::read_form`, not through
+    // this module's own `ini` map, so the stack panel and the tuning panel are
+    // looking at one answer rather than two. `read_form` is pure over
+    // `(text, liveness)`, so this costs a second parse of a file already in
+    // memory and buys agreement.
+    let form = read_form(&reshade_ini, &stack.client_dir, &loaded);
     stack.tuning_blocks = form
         .sections
         .iter()
@@ -1249,6 +1264,31 @@ fn count_files(dir: &Path) -> usize {
     count
 }
 
+/// Put the enabled techniques into the order ReShade will actually run them.
+///
+/// `Techniques` decides the *set*; `TechniqueSorting` decides the *order*.
+/// ReShade sorts by the latter and falls back to the former only when the
+/// preset has no sorting line, so a diagnosis that read the order out of
+/// `Techniques` regardless described an order nothing would run whenever the
+/// two keys disagreed — and they disagree on every install the old one-key
+/// order fix "repaired", which rewrote `Techniques` and left
+/// `TechniqueSorting` misordered. See `client_preset`'s module doc.
+///
+/// A stable sort, and anything the sorting line does not name keeps its
+/// `Techniques` order and lands after the names it does. A technique missing
+/// from `TechniqueSorting` is a hand-edited file, not a licence to shuffle it.
+fn order_as_reshade_will_run(techniques: &mut [Technique], sorting: &[String]) {
+    if sorting.is_empty() {
+        return;
+    }
+    techniques.sort_by_key(|technique| {
+        sorting
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&technique.name))
+            .unwrap_or(usize::MAX)
+    });
+}
+
 fn read_preset(
     client_dir: &Path,
     ini: &BTreeMap<String, BTreeMap<String, String>>,
@@ -1277,7 +1317,7 @@ fn read_preset(
 
     let shader_dir = client_dir.join("reshade-shaders").join("Shaders");
     let technique_entries = ini_get(&preset_ini, "", "Techniques").unwrap_or_default();
-    let techniques: Vec<Technique> = technique_entries
+    let mut techniques: Vec<Technique> = technique_entries
         .split(',')
         .filter_map(split_technique)
         .map(|(name, source)| Technique {
@@ -1287,12 +1327,16 @@ fn read_preset(
         })
         .collect();
 
-    let available = ini_get(&preset_ini, "", "TechniqueSorting")
+    // `TechniqueSorting` is two lists at once: everything the preset knows
+    // about, and the order ReShade runs the enabled ones in. It was read here
+    // for the names alone and its order thrown away.
+    let available: Vec<String> = ini_get(&preset_ini, "", "TechniqueSorting")
         .unwrap_or_default()
         .split(',')
         .filter_map(split_technique)
         .map(|(name, _)| name)
         .collect();
+    order_as_reshade_will_run(&mut techniques, &available);
 
     let mv_provider = resolve_mv_provider(&preset_ini, ini, &shader_dir, &techniques);
 
@@ -1666,6 +1710,86 @@ pub fn detect_active_path(file_names: &[String], disabled: &[String]) -> (Active
         (false, false) => ActivePath::Neither,
     };
     (path, evidence)
+}
+
+/// Everything one folder says about which RenoDX add-ons are loaded: the
+/// framing verdict, the observations behind it, and the per-**file** answer
+/// that section provenance actually needs.
+///
+/// One value rather than an [`ActivePath`] carried around beside a folder
+/// listing, because a path is not an owner and the two may never come from
+/// readings that could disagree. `[RenoDX.DLSS5]` is written by
+/// `renodx-dlss5.addon64` alone, but the feed *path* is live when **either**
+/// feed add-on is loaded — so a folder holding a live `dlss5-feed.addon64` and
+/// a `renodx-dlss5.addon64` sitting in `DisabledAddons` came back
+/// [`ActivePath::Feed`], which `client_tuning` read as "[RenoDX.DLSS5] is in
+/// force" and, because that is the one section with a verified field table,
+/// made **writable**. Kalpa offered to edit settings nothing in that folder
+/// would ever read, on a card whose own evidence lines said the owning add-on
+/// was switched off. [`ActivePath::Both`] hid the same thing behind a
+/// friendlier verdict.
+///
+/// The rule itself is not restated here: [`LoadedAddons::owner_is_live`] asks
+/// [`live_addon_file`] the same question [`detect_active_path`] asks it, about
+/// one file rather than about a path. See [`detect_active_path`] for why a
+/// second rule in a second module is the thing this exists to prevent.
+#[derive(Debug, Clone)]
+pub struct LoadedAddons {
+    path: ActivePath,
+    evidence: Vec<String>,
+    /// The folder listing the verdict came from, or `None` when the folder
+    /// could not be listed at all — which is emphatically not an empty one.
+    file_names: Option<Vec<String>>,
+    disabled: Vec<String>,
+}
+
+impl LoadedAddons {
+    /// From a client folder's file names and `ReShade.ini`'s `DisabledAddons`.
+    pub fn from_listing(file_names: &[String], disabled: &[String]) -> Self {
+        let (path, evidence) = detect_active_path(file_names, disabled);
+        Self {
+            path,
+            evidence,
+            file_names: Some(file_names.to_vec()),
+            disabled: disabled.to_vec(),
+        }
+    }
+
+    /// The folder could not be listed. The path is [`ActivePath::Unknown`] and
+    /// every owner answers `None`, which is what stops the write side guessing
+    /// in the direction of writing.
+    pub fn unlisted(evidence: Vec<String>) -> Self {
+        Self {
+            path: ActivePath::Unknown,
+            evidence,
+            file_names: None,
+            disabled: Vec::new(),
+        }
+    }
+
+    /// Which of the two integrations is live, for framing.
+    pub fn path(&self) -> ActivePath {
+        self.path
+    }
+
+    /// The observations behind [`LoadedAddons::path`], shown verbatim.
+    pub fn evidence(&self) -> &[String] {
+        &self.evidence
+    }
+
+    /// Is the add-on file that owns a section loaded?
+    ///
+    /// `None` **only** when the folder could not be listed. A name that is not
+    /// an add-on file at all is simply not loaded — that is a fact, not the
+    /// absence of one, and answering `None` to it would make an unreadable
+    /// folder and a typo indistinguishable on the write side.
+    pub fn owner_is_live(&self, addon_file: &str) -> Option<bool> {
+        let names = self.file_names.as_deref()?;
+        Some(
+            addon_stem(addon_file)
+                .is_some_and(|stem| live_addon_file(names, &self.disabled, &stem).is_some()),
+        )
+    }
 }
 
 /// Is the feed pipeline live? True on [`ActivePath::Both`] as well, and that is
@@ -3226,6 +3350,98 @@ PresetPath=.\\ReShadePreset.ini
         assert!(preset.available.len() >= 3);
     }
 
+    /// ReShade sorts the techniques it runs by `TechniqueSorting` and falls
+    /// back to `Techniques` only when that key is absent, so a preset whose two
+    /// keys disagree runs in the sorting line's order. Reading the order out of
+    /// `Techniques` described an order nothing would run — and this is not a
+    /// hypothetical file: it is exactly the shape Kalpa's own order fix left
+    /// behind while it wrote `Techniques` alone.
+    #[test]
+    fn the_technique_order_follows_technique_sorting_when_the_preset_has_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,\
+             DLSS5_Feed@DLSS5_Feed.fx\n\
+             TechniqueSorting=DLSS5_Feed@DLSS5_Feed.fx,\
+             MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let preset = stack.preset.as_ref().expect("preset");
+
+        let names: Vec<&str> = preset.techniques.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["DLSS5_Feed", "MartysMods_Launchpad"],
+            "the order shown has to be the order ReShade will run"
+        );
+        assert!(
+            ids(&stack).contains(&"stack-technique-order"),
+            "and the misorder is reported rather than hidden by the other key: {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// No sorting line is ReShade's own fallback to `Techniques`, and Kalpa
+    /// must not invent an order for a file that carries only one.
+    #[test]
+    fn without_a_sorting_line_the_order_is_the_techniques_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,\
+             DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let names: Vec<String> = stack
+            .preset
+            .as_ref()
+            .expect("preset")
+            .techniques
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        assert_eq!(names, vec!["MartysMods_Launchpad", "DLSS5_Feed"]);
+        assert!(!ids(&stack).contains(&"stack-technique-order"));
+    }
+
+    /// A technique the sorting line does not name is a hand-edited file, not a
+    /// licence to shuffle it. It keeps its `Techniques` order relative to the
+    /// others and lands after the names the sorting line does carry.
+    #[test]
+    fn a_technique_missing_from_the_sorting_line_keeps_its_place_at_the_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=Daltonize@Daltonize.fx,\
+             MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,\
+             DLSS5_Feed@DLSS5_Feed.fx\n\
+             TechniqueSorting=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,\
+             DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let names: Vec<String> = stack
+            .preset
+            .as_ref()
+            .expect("preset")
+            .techniques
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["MartysMods_Launchpad", "DLSS5_Feed", "Daltonize"]
+        );
+    }
+
     /// Keys come back in `client_tuning`'s canonical spelling now that its
     /// reader is the one doing the reading. They used to be lower-cased by this
     /// module's own `parse_ini`, so the panel showed `nrlocalstructure` where
@@ -4374,9 +4590,20 @@ PresetPath=.\\ReShadePreset.ini
             block(&stack, "RENODX-DLSS").provenance,
             TuningProvenance::Live
         );
-        let preset = block(&stack, "RENODX-DLSS-preset1");
+        // The card is headed with the *family*, not with the first header in
+        // the file: it is one block over every `[RENODX-DLSS-preset*]` there
+        // is, and its rows are qualified with the block each came from.
+        let preset = block(&stack, "RENODX-DLSS-preset*");
         assert_eq!(preset.provenance, TuningProvenance::Live);
         assert_eq!(preset.values.len(), PRESET_KEYS.len());
+        assert!(
+            preset
+                .values
+                .iter()
+                .all(|value| value.key.starts_with("RENODX-DLSS-preset1/")),
+            "every row says which block it came from: {:?}",
+            preset.values
+        );
 
         // And the fossil keeps every one of its values. They are the user's
         // only copy of the feed path's settings — see [`TuningBlock`].
@@ -4409,6 +4636,34 @@ PresetPath=.\\ReShadePreset.ini
             .as_deref()
             .expect("the fossil needs saying");
         assert!(keep.contains("[RenoDX.DLSS5]"), "{keep}");
+    }
+
+    /// Liveness is a fact about one add-on file, and it reaches this panel too.
+    /// The feed *path* is live because `dlss5-feed.addon64` is loaded, while the
+    /// add-on that writes `[RenoDX.DLSS5]` is renamed aside — so the block is a
+    /// fossil and the rail may not offer it as this install's live tuning.
+    #[test]
+    fn a_feeder_without_its_addon_leaves_the_feed_block_a_fossil() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        std::fs::rename(
+            tmp.path().join("renodx-dlss5.addon64"),
+            tmp.path().join("renodx-dlss5.addon64.off"),
+        )
+        .expect("park the add-on that owns the section");
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(
+            stack.active_path,
+            ActivePath::Feed,
+            "the feeder is loaded, so the feed path is live"
+        );
+        assert_eq!(
+            block(&stack, "RenoDX.DLSS5").provenance,
+            TuningProvenance::Fossil,
+            "but the section's own add-on is parked, whatever the path says"
+        );
+        assert_eq!(stack.tuning_owner, TuningProvenance::Fossil);
     }
 
     /// The feed path, given the same three-section file: now the direct add-on
@@ -4479,7 +4734,7 @@ PresetPath=.\\ReShadePreset.ini
     #[test]
     fn an_unknown_path_never_calls_tuning_live() {
         let ini = all_three_sections(DIRECT_RESHADE_INI);
-        let form = read_form(&ini, "C:/client", ActivePath::Unknown, Vec::new());
+        let form = read_form(&ini, "C:/client", &LoadedAddons::unlisted(Vec::new()));
         assert!(
             form.sections
                 .iter()
