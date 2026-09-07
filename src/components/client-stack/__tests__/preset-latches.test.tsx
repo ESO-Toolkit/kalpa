@@ -56,6 +56,7 @@ function options(active: string, fixSummary: string): PresetOptions {
       feed_technique: "Feed.fx",
       before: "Feed.fx,Provider.fx",
       after: "Provider.fx,Feed.fx",
+      sorting_after: "Provider.fx,Feed.fx",
       summary: fixSummary,
     },
   };

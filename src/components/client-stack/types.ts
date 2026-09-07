@@ -464,11 +464,27 @@ export type ManagedKind =
   | "nvidia_runtime"
   | "shader_compiler";
 
+/** How a file came to be in Kalpa's records. Mirrors `client_write::FileOrigin`.
+ *
+ *  Not bookkeeping: it decides what removal is allowed to do. `revert_placements`
+ *  skips every `adopted` entry — Kalpa never placed those bytes, so it has no
+ *  displaced original of its own to put back — and the skip returns in
+ *  `UninstallOutcome.skipped`, which the panel explains as "modified since Kalpa
+ *  wrote them". Wrong sentence about the wrong file. */
+export type FileOrigin = "placed" | "adopted";
+
 export interface ManagedFileStatus {
   relative_path: string;
   kind: ManagedKind;
   placed_at: string;
   state: ManagedFileState;
+  /** State alone cannot tell the two apart: an untouched adopted file hashes
+   *  clean and reports `present`, exactly like a placed one. */
+  origin: FileOrigin;
+  /** Whether a backup sits behind this entry. Deliberately *not* narrowed to
+   *  placed files — for an adopted entry this is the kept copy of the user's
+   *  own file, and the "Stop managing" caveat counts exactly those. Branch on
+   *  `origin` for what removal will do, never on this. */
   restores_backup: boolean;
 }
 
@@ -699,6 +715,11 @@ export interface OrderFix {
   feed_technique: string;
   before: string;
   after: string;
+  /** The `TechniqueSorting=` value the fix would write, or null when the preset
+   *  has no such key (ReShade falls back to `Techniques` then) or already sorts
+   *  the provider first. This is the key ReShade actually orders by, so a fix
+   *  that wrote only `Techniques` changed nothing the runtime reads. */
+  sorting_after: string | null;
   summary: string;
 }
 

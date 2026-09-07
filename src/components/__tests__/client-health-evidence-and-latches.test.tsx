@@ -138,6 +138,7 @@ const managedFile: ManagedInventory["files"][number] = {
   kind: "re_shade_core",
   placed_at: "2026-08-28T00:00:00.000Z",
   state: "present",
+  origin: "placed",
   restores_backup: false,
 };
 

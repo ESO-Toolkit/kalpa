@@ -136,6 +136,37 @@ const FILE_STATE_META: Record<
   },
 };
 
+/**
+ * The same four states, said honestly about a file Kalpa did not write.
+ *
+ * Every hint above is phrased "since Kalpa wrote it", which for an adopted
+ * entry is simply false: the bytes are the user's own and `revert_placements`
+ * refuses to touch them. `present` is the one that costs something. An
+ * untouched adopted file hashes clean and reports `present` exactly like a
+ * placed one, so without this table the panel says "Safe to remove" about the
+ * single row removal is guaranteed to skip — and then reports the skip as
+ * "modified since Kalpa wrote them", naming the wrong reason about a file the
+ * user installed themselves.
+ */
+const ADOPTED_STATE_HINT: Record<ManagedFileState, string> = {
+  present:
+    "Your own file. Kalpa recorded it but never wrote it, so removal leaves it alone — stop managing this folder to drop the record instead.",
+  modified:
+    "Your own file, changed since Kalpa recorded it. Nothing to do: Kalpa does not touch adopted files either way.",
+  missing:
+    "Your own file, and it is no longer here. Kalpa has nothing of its own to put back, so only the record remains.",
+  parked:
+    "Moved aside so ESO does not load it. The file is your own, so switch the stack back on to put it back.",
+};
+
+/** The hint a row shows, which depends on who wrote the file and not on its
+ *  state alone. */
+function fileHint(file: ManagedFileStatus): string {
+  return file.origin === "adopted"
+    ? ADOPTED_STATE_HINT[file.state]
+    : FILE_STATE_META[file.state].hint;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Selection                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -1929,11 +1960,34 @@ function ManagedSection({
   const switchedOff = files.some((file) => file.state === "parked");
   const keptCopies = files.filter((file) => file.restores_backup).length;
 
+  /** The rows a removal may actually act on.
+   *
+   * `revert_placements` skips every adopted entry — Kalpa did not place those
+   * bytes, so it has no displaced original of its own to put back — and the
+   * skip comes back in `UninstallOutcome.skipped`, which this panel explains as
+   * "modified since Kalpa wrote them". So adopted rows are kept out of the
+   * counts rather than offered and then explained away: a button reading
+   * "Remove all (4)" that removes three is the promise the backend will not
+   * keep, and it is worded as an accusation against the user's own file. */
+  const removablePaths = useMemo(
+    () => files.filter((file) => file.origin !== "adopted").map((file) => file.relative_path),
+    [files]
+  );
+  const adoptedCount = files.length - removablePaths.length;
+
+  /** Filtered rather than read straight off `selectedPaths`: the checkbox on an
+   *  adopted row is disabled, but a selection made before a reload that adopted
+   *  the file would otherwise survive into the payload. */
+  const selectedRemovable = useMemo(
+    () => removablePaths.filter((path) => selectedPaths.has(path)),
+    [removablePaths, selectedPaths]
+  );
+
   const pendingPaths = useMemo(() => {
-    if (removeMode === "all") return files.map((f) => f.relative_path);
-    if (removeMode === "selected") return Array.from(selectedPaths);
+    if (removeMode === "all") return removablePaths;
+    if (removeMode === "selected") return selectedRemovable;
     return [];
-  }, [files, removeMode, selectedPaths]);
+  }, [removablePaths, removeMode, selectedRemovable]);
 
   return (
     <section aria-labelledby="client-health-managed">
@@ -2036,24 +2090,34 @@ function ManagedSection({
             ))}
           </ul>
 
+          {adoptedCount > 0 && (
+            <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">
+              {adoptedCount === 1 ? "One of these files is" : `${adoptedCount} of these files are`}{" "}
+              your own — adopted rather than placed by Kalpa — so removal leaves{" "}
+              {adoptedCount === 1 ? "it" : "them"} alone and the counts below exclude{" "}
+              {adoptedCount === 1 ? "it" : "them"}. Stop managing this folder to drop the record
+              instead.
+            </p>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              disabled={selectedPaths.size === 0 || removing}
+              disabled={selectedRemovable.length === 0 || removing}
               onClick={() => onRequestRemove("selected")}
             >
               <Trash2Icon />
-              Remove selected ({selectedPaths.size})
+              Remove selected ({selectedRemovable.length})
             </Button>
             <Button
               variant="outline"
               size="sm"
-              disabled={removing}
+              disabled={removing || removablePaths.length === 0}
               onClick={() => onRequestRemove("all")}
             >
               <Trash2Icon />
-              Remove all ({files.length})
+              Remove all ({removablePaths.length})
             </Button>
           </div>
 
@@ -2174,17 +2238,28 @@ function ManagedFileRow({
 }) {
   const meta = FILE_STATE_META[file.state];
   const { Icon } = meta;
+  /** Kalpa never placed this file, so `revert_placements` skips it and the row
+   *  must not offer removal. The state is still the state — an adopted file
+   *  can be present, modified, missing or parked like any other — so only the
+   *  action and the prose branch here, not the label or the icon. */
+  const adopted = file.origin === "adopted";
+  const isSelected = selected && !adopted;
   return (
     <li
       className={cn(
         "flex items-start gap-3 rounded-xl border p-3 transition-colors duration-150",
-        selected ? "border-primary/30 bg-primary/[0.04]" : "border-structure-06 bg-structure-02"
+        isSelected ? "border-primary/30 bg-primary/[0.04]" : "border-structure-06 bg-structure-02"
       )}
     >
       <Checkbox
-        checked={selected}
+        checked={isSelected}
+        disabled={adopted}
         onCheckedChange={() => onToggle()}
-        aria-label={`Select ${file.relative_path}`}
+        aria-label={
+          adopted
+            ? `${file.relative_path} is your own file and cannot be removed by Kalpa`
+            : `Select ${file.relative_path}`
+        }
         className="mt-0.5"
       />
       <div className="min-w-0 flex-1">
@@ -2193,6 +2268,9 @@ function ManagedFileRow({
             {file.relative_path}
           </span>
           <InfoPill color="muted">{KIND_LABEL[file.kind]}</InfoPill>
+          {/* The word, not just the disabled checkbox: "adopted" is the reason
+              the row behaves differently and it has to be readable. */}
+          {adopted && <InfoPill color="sky">Adopted</InfoPill>}
         </div>
         <div className="mt-1 flex items-center gap-1.5">
           <Icon aria-hidden className={cn("size-3.5 shrink-0", meta.text)} />
@@ -2200,10 +2278,21 @@ function ManagedFileRow({
             {meta.label}
           </span>
         </div>
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{meta.hint}</p>
-        {file.restores_backup && (
-          <p className="mt-1 text-xs text-status-info">Restores your original file when removed.</p>
-        )}
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{fileHint(file)}</p>
+        {file.restores_backup &&
+          (adopted ? (
+            /* `restores_backup` is true here because Kalpa kept a copy of the
+               user's own file when it adopted the entry, not because it
+               displaced an original of theirs. Same flag, opposite promise. */
+            <p className="mt-1 text-xs text-status-info">
+              Kalpa kept a copy of this file when it took over. Removal restores nothing — what is
+              in the folder is already yours.
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-status-info">
+              Restores your original file when removed.
+            </p>
+          ))}
       </div>
     </li>
   );
