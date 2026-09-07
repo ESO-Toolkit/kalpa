@@ -119,6 +119,20 @@ function AddonDetailBase({
   const [updateSuccess, setUpdateSuccess] = useState(false);
   const [installingDep, setInstallingDep] = useState<string | null>(null);
   const [justInstalledDeps, setJustInstalledDeps] = useState<Set<string>>(new Set());
+  // The mirror of `justInstalledDeps`, for the other direction.
+  //
+  // Removing a dependency deliberately does NOT call `onRefresh()`: removal is
+  // optimistic in App (the row is hidden and `remove_addon` fires three seconds
+  // later, so Undo still works), and the folder is still on disk for that whole
+  // window — a rescan would resurrect the row it just removed. But the row's
+  // tick comes from the selected addon's manifest, which nothing here rescans,
+  // so without a local record a removed dependency kept its green ✓ while its
+  // own trash button vanished: a satisfied-looking row with no controls.
+  //
+  // Shared caveat with every optimistic path in this pane: it does not follow an
+  // Undo, so undoing a removal leaves the row marked missing until the next
+  // rescan.
+  const [justRemovedDeps, setJustRemovedDeps] = useState<Set<string>>(new Set());
   const [customTagInput, setCustomTagInput] = useState("");
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
@@ -410,7 +424,15 @@ function AddonDetailBase({
   };
 
   const handleInstallDep = async (depName: string) => {
-    if (installingDep) return;
+    // `updating` as well as `installingDep`: one `operationIdRef` serves both
+    // flows, and `beginOperation` below overwrites it. Starting a dependency
+    // install during an in-flight update therefore orphans the update's
+    // progress events (they no longer match the ref), leaves `canStopUpdate`
+    // false, and kills its Stop button for the rest of that update — while
+    // `handleStopUpdate` would cancel the dependency instead. Guarded in both
+    // places, same as `handleUpdate`/`handleConflictResolve`: the buttons are
+    // disabled, and the handler refuses an event that was already queued.
+    if (installingDep || updating) return;
     setInstallingDep(depName);
     // Installing/updating a dependency also writes to the AddOns folder, so it needs
     // the same ESO-running gate — the game won't load it until /reloadui either way.
@@ -443,6 +465,21 @@ function AddonDetailBase({
       setInstallingDep(null);
       endOperation();
     }
+  };
+
+  /** Route a dependency-row removal through App's optimistic remove, and record
+   *  it locally so this pane's own verdict for that dependency stops reading
+   *  "satisfied". `folderName` is the real on-disk spelling; `depName` is the
+   *  token the manifest lists, and they can differ in case. */
+  const handleRemoveDep = (folderName: string, depName: string) => {
+    setJustInstalledDeps((prev) => {
+      if (!prev.has(depName)) return prev;
+      const next = new Set(prev);
+      next.delete(depName);
+      return next;
+    });
+    setJustRemovedDeps((prev) => new Set(prev).add(depName));
+    onRemoveAddon(folderName);
   };
 
   const submitCustomTag = () => {
@@ -821,11 +858,14 @@ function AddonDetailBase({
               <SectionHeader className="mb-2">Required Dependencies</SectionHeader>
               <div className="space-y-0.5">
                 {addon.dependsOn.map((dep) => {
-                  // satisfied = backend truth (accounts for bundled sub-modules in subfolders)
+                  // satisfied = backend truth (accounts for bundled sub-modules in subfolders),
+                  // corrected by what this pane has done since that truth was fetched —
+                  // nothing rescans between an install/remove here and the next render.
                   // removeTarget = real top-level folder spelling, if removable
                   const satisfied =
-                    !addon.missingDependencies.includes(dep.name) ||
-                    justInstalledDeps.has(dep.name);
+                    (!addon.missingDependencies.includes(dep.name) ||
+                      justInstalledDeps.has(dep.name)) &&
+                    !justRemovedDeps.has(dep.name);
                   const removeTarget = installedByLower.get(dep.name.toLowerCase());
                   const outdated = addon.outdatedDependencies.includes(dep.name);
                   const justInstalled = justInstalledDeps.has(dep.name);
@@ -872,7 +912,7 @@ function AddonDetailBase({
                               <button
                                 className="shrink-0 cursor-pointer rounded bg-status-warning-strong/10 px-2 py-1 text-xs font-medium text-status-warning hover:bg-status-warning-strong/20 transition-colors disabled:opacity-50"
                                 onClick={() => handleInstallDep(dep.name)}
-                                disabled={installingDep === dep.name || isOffline}
+                                disabled={installingDep === dep.name || isOffline || updating}
                               >
                                 {installingDep === dep.name ? (
                                   <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-status-warning" />
@@ -902,7 +942,7 @@ function AddonDetailBase({
                               >
                                 <button
                                   className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:pointer-events-none disabled:opacity-50"
-                                  onClick={() => onRemoveAddon(removeTarget)}
+                                  onClick={() => handleRemoveDep(removeTarget, dep.name)}
                                   disabled={Boolean(removalBlockedReason)}
                                   aria-label={`Remove ${removeTarget}`}
                                 >
@@ -923,7 +963,7 @@ function AddonDetailBase({
                           <button
                             className="shrink-0 cursor-pointer rounded bg-accent-sky/10 px-2 py-1 text-xs font-medium text-accent-sky hover:bg-accent-sky/20 transition-colors disabled:opacity-50"
                             onClick={() => handleInstallDep(dep.name)}
-                            disabled={installingDep === dep.name || isOffline}
+                            disabled={installingDep === dep.name || isOffline || updating}
                           >
                             {installingDep === dep.name ? (
                               <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-accent-sky" />
@@ -950,11 +990,13 @@ function AddonDetailBase({
               <SectionHeader className="mb-2">Optional Dependencies</SectionHeader>
               <div className="space-y-0.5">
                 {addon.optionalDependsOn.map((dep) => {
-                  // present = backend truth (subfolder-aware, case-insensitive).
+                  // present = backend truth (subfolder-aware, case-insensitive),
+                  // corrected by this pane's own installs and removals since.
                   // removeTarget = real top-level folder spelling, if removable.
                   const present =
-                    !addon.missingOptionalDependencies.includes(dep.name) ||
-                    justInstalledDeps.has(dep.name);
+                    (!addon.missingOptionalDependencies.includes(dep.name) ||
+                      justInstalledDeps.has(dep.name)) &&
+                    !justRemovedDeps.has(dep.name);
                   const removeTarget = installedByLower.get(dep.name.toLowerCase());
                   const justInstalled = justInstalledDeps.has(dep.name);
                   return (
@@ -992,7 +1034,7 @@ function AddonDetailBase({
                             >
                               <button
                                 className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-status-danger-strong/10 hover:text-status-danger transition-colors disabled:pointer-events-none disabled:opacity-50"
-                                onClick={() => onRemoveAddon(removeTarget)}
+                                onClick={() => handleRemoveDep(removeTarget, dep.name)}
                                 disabled={Boolean(removalBlockedReason)}
                                 aria-label={`Remove ${removeTarget}`}
                               >
@@ -1012,7 +1054,7 @@ function AddonDetailBase({
                           <button
                             className="shrink-0 cursor-pointer rounded bg-accent-sky/10 px-2 py-1 text-xs font-medium text-accent-sky hover:bg-accent-sky/20 transition-colors disabled:opacity-50"
                             onClick={() => handleInstallDep(dep.name)}
-                            disabled={installingDep === dep.name || isOffline}
+                            disabled={installingDep === dep.name || isOffline || updating}
                           >
                             {installingDep === dep.name ? (
                               <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-structure-10 border-t-accent-sky" />

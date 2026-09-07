@@ -757,7 +757,13 @@ function FieldRow({
           disabled={disabled}
           onValueChange={(next) => next && onChange(next)}
         >
-          <SelectTrigger className="mt-1.5 w-full">
+          {/* `FieldLabel` renders a <div>, not a <label>, so nothing associates
+              it with the control. Without this the trigger's accessible name
+              falls back to `SelectValue`'s content — the current value, or
+              "Not set" — which names everything except the field. Only the
+              `toggle` branch escapes it, by wrapping its control in a real
+              <label>. */}
+          <SelectTrigger aria-label={field.label} className="mt-1.5 w-full">
             <SelectValue placeholder="Not set" />
           </SelectTrigger>
           <SelectContent>
@@ -782,8 +788,15 @@ function FieldRow({
         <FieldLabel field={field} dirty={dirty} />
         <FieldHelp field={field} />
         <div className="mt-1.5 flex items-center gap-3">
+          {/* Two controls, one unassociated `FieldLabel`, so both need naming —
+              and they need distinct names, or a screen reader announces the
+              same field twice with no way to tell the slider from the box.
+              `aria-label` rather than an id/htmlFor pairing because both
+              sections of this panel render the same field table, so an id
+              derived from `field.key` would collide. */}
           <input
             type="range"
+            aria-label={field.label}
             className="h-1.5 flex-1 appearance-none rounded-full bg-structure-08 accent-primary enabled:cursor-pointer disabled:cursor-default"
             min={min}
             max={max}
@@ -794,6 +807,7 @@ function FieldRow({
           />
           <Input
             type="text"
+            aria-label={`${field.label} value`}
             inputMode="decimal"
             value={displayValue}
             disabled={disabled}
@@ -811,8 +825,11 @@ function FieldRow({
       <FieldLabel field={field} dirty={dirty} />
       <FieldHelp field={field} />
       <div className="mt-1.5 flex items-center gap-2">
+        {/* The "key code" span beside it is not a <label> either, so it names
+            nothing; without this the box is announced as an unlabelled edit. */}
         <Input
           type="text"
+          aria-label={`${field.label} key code`}
           inputMode="numeric"
           value={value ?? ""}
           disabled={disabled}

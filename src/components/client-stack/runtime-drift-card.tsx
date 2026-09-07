@@ -12,6 +12,8 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Button } from "@/components/ui/button";
 import { approveClientWrites } from "@/components/client-stack/approve";
+import { ROLE_TO_SLOT } from "@/components/client-stack/slots";
+import type { Slot } from "@/components/client-stack/slots";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { StackPanelProps } from "@/components/client-stack/panel-props";
@@ -197,10 +199,20 @@ function RuntimeRow({
 export function RuntimeDriftCard({
   clientDir,
   mutation,
-  filePaths,
+  slot,
 }: StackPanelProps & {
-  /** File names shown on the surrounding stage, so the card reports only those. */
-  filePaths: string[];
+  /**
+   * The slot pane this card is mounted in, so it reports only that slot's
+   * runtimes.
+   *
+   * This used to be a list of file names taken from `stack.items`, which is
+   * built by `client_stack::probe` and skips anything not on disk — so a
+   * runtime the manifest lists and the folder no longer has was filtered out
+   * of the card by the very fact that made it worth reporting, and
+   * `DriftState::Missing` could not render at all. `RuntimeStatus.role` comes
+   * from the same `ROLE_TO_SLOT` table without that survivorship filter.
+   */
+  slot: Slot;
 }) {
   const [report, setReport] = useState<RuntimeReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -290,7 +302,7 @@ export function RuntimeDriftCard({
 
   if (!report) return null;
 
-  const matching = report.runtimes.filter((r) => filePaths.includes(r.relative_path));
+  const matching = report.runtimes.filter((r) => ROLE_TO_SLOT[r.role] === slot);
   const reportable = matching.filter((r) => r.state !== "unchanged");
   if (reportable.length === 0) return null;
 

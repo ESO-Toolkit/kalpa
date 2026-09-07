@@ -395,6 +395,21 @@ export function ShaderPacksPanel({ clientDir, mutation }: StackPanelProps) {
           />
         ))}
       </ul>
+      {/* Say what "Installed" actually means, because it means less than the
+          word does. `PackStatus.installed` is marker-file presence and nothing
+          else — the commit `install_shader_pack` resolved is reported once in
+          the outcome line above and never persisted — so Kalpa has no version
+          to compare and offers no update or repair control. The same honesty
+          the `link_only` rows already carry in `source.reason`: better to state
+          the limit than to let a green "Installed" imply Kalpa is keeping the
+          pack current. */}
+      {installed.length > 0 && (
+        <p className="border-t border-structure-06 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          &quot;Installed&quot; means the pack&apos;s files are in your shader folder. Kalpa does
+          not record which revision that is, and it cannot update or repair a pack — for a newer
+          build, follow the author&apos;s own instructions.
+        </p>
+      )}
     </GlassPanel>
   );
 }

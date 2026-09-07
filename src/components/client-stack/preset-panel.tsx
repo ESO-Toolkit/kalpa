@@ -143,6 +143,13 @@ export function PresetPanel({ clientDir, mutation }: StackPanelProps) {
       if (mutationToken.current !== token || result.status !== "committed") return;
       setSwitchOutcome(result.value);
       setPendingChoice(null);
+      // The technique-order confirm belongs to the preset that was on screen
+      // when it was armed. `load()` below recomputes `options.fix` for the NEW
+      // preset, and the mount effect only re-runs when `clientDir` changes, so
+      // leaving this armed re-renders `FixOrderCard` pre-confirmed for a target
+      // the user never armed.
+      setFixConfirming(false);
+      setFixOutcome(null);
       await load();
     } catch (e) {
       if (mutationToken.current !== token) return;
@@ -177,6 +184,10 @@ export function PresetPanel({ clientDir, mutation }: StackPanelProps) {
       if (mutationToken.current !== token || result.status !== "committed") return;
       setFixOutcome(result.value);
       setFixConfirming(false);
+      // Symmetric with the switch handler above: a preset choice armed before
+      // the fix ran was armed against the list this reload replaces.
+      setPendingChoice(null);
+      setSwitchOutcome(null);
       await load();
     } catch (e) {
       if (mutationToken.current !== token) return;

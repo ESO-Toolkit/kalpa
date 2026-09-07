@@ -6,6 +6,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CircleHelpIcon,
+  ExternalLinkIcon,
   HardDriveIcon,
   PackageCheckIcon,
   PauseIcon,
@@ -41,6 +42,7 @@ import { SlotPane } from "@/components/client-stack/slot-pane";
 import { SlotRail } from "@/components/client-stack/slot-rail";
 import type { StackView } from "@/components/client-stack/slot-rail";
 import {
+  LEVEL_META,
   LEVEL_ORDER,
   SLOT_ORDER,
   findingsForSlot,
@@ -66,6 +68,7 @@ import type {
   EmergencyRemoval,
   EsoClientLocation,
   ForgetOutcome,
+  HealthFinding,
   LogExcerpt,
   ManagedFileState,
   ManagedFileStatus,
@@ -153,13 +156,31 @@ const FILE_STATE_META: Record<
  * all. An empty excerpt list is therefore the absence of known failures, never
  * proof of health, and the two are not allowed to be confused here again.
  *
+ * `findings` is the fourth field and it is the report's own diagnoses — the
+ * DLSS/injector/shader-compiler ones `client_health.rs::build_findings`
+ * produces, which are a different family from `ClientStack.findings` and have
+ * no `FINDING_SLOT` entry. `loadLogs` already had the whole report in hand and
+ * kept three fields, so every one of those diagnoses was computed and then
+ * dropped on the floor. They are rendered by `LogSignals`.
+ *
  * The shape is the read fields of `ClientHealthReport`; `inspect_eso_client`
  * returns the whole report and this is the part the panel uses.
  */
 type LogEvidence = Pick<
   ClientHealthReport,
-  "log_excerpts" | "neural_rendering" | "log_benign_suppressed"
+  "log_excerpts" | "neural_rendering" | "log_benign_suppressed" | "findings"
 >;
+
+/**
+ * The subset the two pure header gates below read.
+ *
+ * Narrower than `LogEvidence` on purpose. `findings` is presentation for the
+ * log pane, not an input to the verdict — the verdict's first gate counts
+ * `ClientStack.findings`, which is the other family — so typing the gates
+ * against the whole shape would make every caller, including the unit tests
+ * that exist to exercise them without a DOM, build a field neither reads.
+ */
+type VerdictEvidence = Pick<ClientHealthReport, "log_excerpts" | "neural_rendering">;
 
 /**
  * What a log Kalpa could not read looks like.
@@ -177,7 +198,41 @@ const NO_LOG_EVIDENCE: LogEvidence = {
     last_evaluation: null,
   },
   log_benign_suppressed: 0,
+  findings: [],
 };
+
+/**
+ * The Neural Rendering state the panel is allowed to *show*, as opposed to the
+ * raw one `ReShade.log` reported.
+ *
+ * One derivation, three consumers. This gate used to live inside
+ * `stackVerdict`, so only the header pill applied it: the rail row and the log
+ * pane read `evidence.neural_rendering.state` directly and went on rendering
+ * "Neural Rendering ran ... it is real proof" beside a header that already
+ * said "No proof it ran". Parking a DLL does not touch `ReShade.log`, so that
+ * disagreement is the ordinary result of switching the stack off, not an edge
+ * case.
+ *
+ * `running` is the only state that can be downgraded, and it is downgraded to
+ * `unknown` rather than to anything that reads as failure: the log is derived
+ * from the *last session*, and ReShade truncates it on every launch, so a
+ * stack that is switched off or off-path leaves stale positive evidence
+ * behind. Turning the stack off is a user choice, not a breakage.
+ */
+export function liveNeuralRenderingState(
+  evidence: VerdictEvidence,
+  stack: ClientStack | null
+): NeuralRenderingState {
+  const stackCouldRun =
+    stack !== null &&
+    !stack.is_disabled &&
+    (stack.active_path === "direct" ||
+      stack.active_path === "feed" ||
+      stack.active_path === "both");
+  return evidence.neural_rendering.state === "running" && !stackCouldRun
+    ? "unknown"
+    : evidence.neural_rendering.state;
+}
 
 /**
  * The header's one-glance verdict on the whole install.
@@ -206,7 +261,9 @@ const NO_LOG_EVIDENCE: LogEvidence = {
  *    case. This gate requires `is_disabled === false` and `active_path` to be
  *    one of `"direct" | "feed" | "both"` before a `running` state is allowed
  *    to mean anything; `"neither"`, `"unknown"`, and a not-yet-loaded stack
- *    (`null`) all fail it.
+ *    (`null`) all fail it. It lives in `liveNeuralRenderingState` rather than
+ *    here so the rail and the log pane apply the same gate — they did not, and
+ *    the two surfaces contradicted each other on screen.
  * 4. **Neural Rendering evidence.** Only `running` — the `EvaluateFeature`
  *    counter found *and climbing*, on a stack that gate 3 confirmed could be
  *    live — earns "Everything agrees". `stalled` and `unknown` get their own
@@ -220,7 +277,7 @@ const NO_LOG_EVIDENCE: LogEvidence = {
  */
 export function stackVerdict(
   attentionCount: number,
-  evidence: LogEvidence,
+  evidence: VerdictEvidence,
   stack: ClientStack | null
 ): { label: string; color: "amber" | "red" | "emerald" | "muted"; Icon: typeof ShieldCheckIcon } {
   if (attentionCount > 0) {
@@ -238,16 +295,7 @@ export function stackVerdict(
       Icon: AlertCircleIcon,
     };
   }
-  const stackCouldRun =
-    stack !== null &&
-    !stack.is_disabled &&
-    (stack.active_path === "direct" ||
-      stack.active_path === "feed" ||
-      stack.active_path === "both");
-  const state =
-    evidence.neural_rendering.state === "running" && !stackCouldRun
-      ? "unknown"
-      : evidence.neural_rendering.state;
+  const state = liveNeuralRenderingState(evidence, stack);
   switch (state) {
     case "running":
       return { label: "Everything agrees", color: "emerald", Icon: ShieldCheckIcon };
@@ -507,7 +555,8 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
    *  client never triggers those calls: nothing to plan, nothing recorded. */
   /** What ReShade.log and dlss5-feed.log say: fatal matches, how many benign
    *  lines were suppressed, and whether Neural Rendering can be shown to have
-   *  actually run.
+   *  actually run — plus the report's own findings, which used to be computed
+   *  by the backend and then dropped here.
    *
    *  A best-effort extra: a log Kalpa cannot read is not worth an error banner
    *  when the rest of the panel is fine, so this swallows its own failure — but
@@ -524,6 +573,7 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         log_excerpts: report.log_excerpts ?? [],
         neural_rendering: report.neural_rendering ?? NO_LOG_EVIDENCE.neural_rendering,
         log_benign_suppressed: report.log_benign_suppressed ?? 0,
+        findings: report.findings ?? [],
       });
     } catch {
       if (runToken.current !== token) return;
@@ -604,6 +654,20 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
         pending.generation = ++runToken.current;
         await loadInstall(clientDir, pending.generation);
         if (!isCurrentMutation(pending)) return { status: "stale" };
+        // Disarm every destructive latch, because the reload above swapped the
+        // subject they were armed against. `pendingPaths` for "Remove all" is
+        // derived live from the reloaded inventory and the prompt only ever
+        // states a count, so a confirm armed before an install or a power
+        // toggle would execute over files that appeared after consent was
+        // given; the parked-stack guard on "Stop managing" is in the *other*
+        // branch of `forgetConfirming`, so an armed confirm skips it entirely.
+        // Same rule as `handleToggleSelect`: consent is for the set that was
+        // on screen when it was given. Every caller already clears its own
+        // latch on success, so this only ever fires for the cross-flow case.
+        setRemoveMode(null);
+        setForgetConfirming(false);
+        setEmergencyTarget(null);
+        setEmergencyConfirmInput("");
         return { status: "committed", value };
       } finally {
         if (pendingMutationRef.current?.id === pending.id) {
@@ -625,6 +689,11 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
   const detect = useCallback(async () => {
     if (pendingMutationRef.current) return;
     const token = ++runToken.current;
+    // Read the current selection before `resetInstallUiState` runs: Refresh is
+    // this same function, so re-seeding unconditionally from `found[0]` moved a
+    // multi-install user off whichever install they were looking at and
+    // reloaded the pane against a different folder, silently.
+    const previous = selectedDirRef.current;
     setDetecting(true);
     setDetectError(null);
     setBrowseError(null);
@@ -635,11 +704,18 @@ function ClientHealthPanel({ open, onClose }: ClientHealthPanelProps) {
       const found = await invokeOrThrow<EsoClientLocation[]>("detect_eso_clients");
       if (runToken.current !== token) return;
       setClients(found);
-      const first = found[0];
-      selectedDirRef.current = first ? first.client_dir : null;
-      setSelectedDir(first ? first.client_dir : null);
+      // Keep the selection when detection still finds it; fall back to the head
+      // of the list when it is gone (uninstalled, or a folder picked by hand
+      // that detection does not know about). `resetInstallUiState` has already
+      // run either way, so no per-install latch carries over.
+      const next =
+        previous !== null && found.some((client) => client.client_dir === previous)
+          ? previous
+          : (found[0]?.client_dir ?? null);
+      selectedDirRef.current = next;
+      setSelectedDir(next);
       setDetecting(false);
-      if (first) await loadInstall(first.client_dir, token);
+      if (next) await loadInstall(next, token);
     } catch (e) {
       if (runToken.current !== token) return;
       setClients([]);
@@ -1311,6 +1387,12 @@ export function StackBody(props: StackBodyProps) {
   const { stack, effectiveSelection, onSelect } = props;
   const paneScrollRef = useRef<HTMLDivElement>(null);
 
+  // Derived once, here, and handed to both the rail and the pane. The gate used
+  // to live only in `stackVerdict`, so the header said "No proof it ran" while
+  // the row and the pane below it still said "Neural Rendering ran" from the
+  // same stale log.
+  const nrState = liveNeuralRenderingState(props.logEvidence, stack);
+
   // The pane would otherwise open at whatever offset the previous selection
   // left behind, which for a long slot reads as a blank pane.
   useEffect(() => {
@@ -1336,10 +1418,10 @@ export function StackBody(props: StackBodyProps) {
         isManaged={props.isManaged}
         trackedCount={props.managedInventory?.files.length ?? null}
         logCount={props.logEvidence.log_excerpts.length}
-        nrState={props.logEvidence.neural_rendering.state}
+        nrState={nrState}
       />
       <div ref={paneScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
-        <DetailPane {...props} />
+        <DetailPane {...props} nrState={nrState} />
       </div>
     </div>
   );
@@ -1403,7 +1485,7 @@ function RecordsSection(props: StackBodyProps) {
  * per-slot special-casing left here — that all moved into `SlotPane`, which
  * is why this reads as navigation rather than as a second layout.
  */
-function DetailPane(props: StackBodyProps) {
+function DetailPane(props: StackBodyProps & { nrState: NeuralRenderingState }) {
   const { stack, plan, planLoading, planError, effectiveSelection } = props;
 
   if (effectiveSelection === "power") {
@@ -1446,7 +1528,8 @@ function DetailPane(props: StackBodyProps) {
     );
   }
 
-  if (effectiveSelection === "logs") return <LogSignals evidence={props.logEvidence} />;
+  if (effectiveSelection === "logs")
+    return <LogSignals evidence={props.logEvidence} nrState={props.nrState} />;
   if (effectiveSelection === "records") return <RecordsSection {...props} />;
   if (!effectiveSelection) {
     return <p className="text-xs text-muted-foreground">Pick a slot to see what is in it.</p>;
@@ -1592,6 +1675,51 @@ const NR_STATE_COPY: Record<
 };
 
 /**
+ * One `ClientHealthReport` finding.
+ *
+ * Same colour+icon+word discipline as `SlotFinding` in `slot-pane.tsx` and the
+ * same `LEVEL_META` ladder, because they are the same kind of thing shown in a
+ * different place — these ones just have nowhere else to go. Kept deliberately
+ * small: no `FINDING_IMPACT` line, because that table is keyed on the
+ * `stack-*` ids and none of these are in it.
+ */
+function ReportFinding({ finding }: { finding: HealthFinding }) {
+  const meta = LEVEL_META[finding.level];
+  const { Icon } = meta;
+  return (
+    <li className={cn("rounded-xl border border-l-[3px] p-3", meta.border, meta.tint)}>
+      <div className="flex items-start gap-2">
+        <Icon aria-hidden className={cn("mt-0.5 size-4 shrink-0", meta.text)} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 className="font-heading text-[13px] font-semibold">{finding.title}</h4>
+            {/* The level as a word: colour alone says nothing on the light and
+                high-contrast themes. */}
+            <span className={cn("text-[11px] font-semibold uppercase tracking-wide", meta.text)}>
+              {meta.label}
+            </span>
+          </div>
+          <p className="mt-1 max-w-[72ch] text-xs leading-relaxed text-muted-foreground">
+            {finding.detail}
+          </p>
+          {finding.guide_url && (
+            <Button
+              variant="link"
+              size="xs"
+              className="mt-1 h-auto px-0"
+              onClick={() => void openGuide(finding.guide_url!)}
+            >
+              Read the guide
+              <ExternalLinkIcon />
+            </Button>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+/**
  * What the logs actually say — positive evidence first, then fatal matches.
  *
  * The order is the correction. This view used to be failure matches and nothing
@@ -1607,8 +1735,28 @@ const NR_STATE_COPY: Record<
  * the absent Streamline interposer, four NVNGX vtable hooks — and surfacing
  * them is how a healthy stack got triaged as a broken one. Saying how many were
  * ignored keeps them findable by anyone who opens the raw log and sees them.
+ *
+ * It is also the panel's only home for `ClientHealthReport.findings` — the
+ * stale-DLSS-runtime, two-injectors and 2013-shader-compiler diagnoses. Those
+ * are a different family from `ClientStack.findings`: they have no
+ * `FINDING_SLOT` entry, so no rail row can show them, and until they were
+ * rendered here `build_findings` computed them for nobody. They are listed
+ * after the evidence and before the fatal lines, and `ok` entries are dropped
+ * — this pane is about what is worth reading, and a per-file all-clear is the
+ * "no findings means healthy" reasoning the whole view exists to refuse.
+ *
+ * `nrState` is passed in rather than read off `evidence`: it is the gated
+ * state from `liveNeuralRenderingState`, the same one the header pill and the
+ * rail row use. Reading the raw field here is exactly how this pane came to
+ * call a switched-off stack "real proof".
  */
-function LogSignals({ evidence }: { evidence: LogEvidence }) {
+function LogSignals({
+  evidence,
+  nrState,
+}: {
+  evidence: LogEvidence;
+  nrState: NeuralRenderingState;
+}) {
   const byFile = useMemo(() => {
     const groups = new Map<string, LogExcerpt[]>();
     for (const excerpt of evidence.log_excerpts) {
@@ -1619,8 +1767,16 @@ function LogSignals({ evidence }: { evidence: LogEvidence }) {
     return Array.from(groups.entries());
   }, [evidence.log_excerpts]);
 
+  const reportFindings = useMemo(
+    () =>
+      evidence.findings
+        .filter((f) => f.level !== "ok")
+        .sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]),
+    [evidence.findings]
+  );
+
   const nr = evidence.neural_rendering;
-  const copy = NR_STATE_COPY[nr.state];
+  const copy = NR_STATE_COPY[nrState];
   const benign = evidence.log_benign_suppressed;
 
   return (
@@ -1644,6 +1800,14 @@ function LogSignals({ evidence }: { evidence: LogEvidence }) {
         </div>
         <p className="max-w-[72ch] text-xs leading-relaxed text-muted-foreground">{copy.body}</p>
       </GlassPanel>
+
+      {reportFindings.length > 0 && (
+        <ul className="space-y-2">
+          {reportFindings.map((finding) => (
+            <ReportFinding key={finding.id} finding={finding} />
+          ))}
+        </ul>
+      )}
 
       {byFile.length === 0 ? (
         // Never "Nothing matched" on its own. The honest statement is what was
