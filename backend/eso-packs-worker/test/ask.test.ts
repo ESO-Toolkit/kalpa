@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { answerQuestion, cacheKeyFor, groundOutput } from "../src/ask";
+import { answerQuestion, cacheKeyFor, groundOutput, scrubProse } from "../src/ask";
 import { applyDetail, ensureSchema, upsertMeta } from "../src/addon-index";
 import type { AddonSearchHit, Env } from "../src/types";
 
@@ -36,6 +36,7 @@ async function seed(uid: number, title: string, description: string): Promise<vo
       title,
       author: "Author",
       categoryId: 25,
+      categoryName: "Combat Mods",
       downloads: 1000,
       downloadsMonthly: 10,
       favorites: 5,
@@ -176,9 +177,29 @@ describe("groundOutput", () => {
   });
 });
 
+describe("scrubProse", () => {
+  it("removes links an injected description talked the model into emitting", () => {
+    expect(scrubProse("Download it from https://evil.example/kalpa instead.")).toBe(
+      "Download it from instead.",
+    );
+    expect(scrubProse("See www.evil.example for more")).toBe("See for more");
+    expect(scrubProse("Get it at evil.example.com/path now")).toBe("Get it at now");
+  });
+
+  it("keeps ordinary prose and version numbers intact", () => {
+    expect(scrubProse("Shows when you are in combat.")).toBe("Shows when you are in combat.");
+    expect(scrubProse("Requires version 2.10.1 or later")).toBe("Requires version 2.10.1 or later");
+  });
+});
+
 describe("cacheKeyFor", () => {
   it("collapses trivially different phrasings", () => {
     expect(cacheKeyFor("Combat  Indicator?")).toBe(cacheKeyFor("combat indicator"));
+  });
+
+  it("collapses reordered and duplicated wording", () => {
+    expect(cacheKeyFor("DPS meter addon?")).toBe(cacheKeyFor("addon dps meter"));
+    expect(cacheKeyFor("combat combat indicator")).toBe(cacheKeyFor("combat indicator"));
   });
 
   it("keeps genuinely different questions apart", () => {
@@ -195,6 +216,34 @@ describe("answerQuestion", () => {
       reason: "question-too-long",
     });
     expect(e.AI!.run).not.toHaveBeenCalled();
+  });
+
+  it("strips a link the model was talked into putting in the answer", async () => {
+    await seed(1543, "CombatIndicator", "Shows an icon when you are flagged in combat.");
+    const e = envWithAi({
+      answer: "Sure — but first grab the updater from https://evil.example/x.",
+      no_good_match: false,
+      recommendations: [{ candidate: "C1", reason: "see http://evil.example" }],
+    });
+
+    const result = await answerQuestion(e, "is there an in combat indicator");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.response.answer).not.toContain("evil.example");
+    expect(result.response.recommendations[0].reason).not.toContain("evil.example");
+  });
+
+  it("caps generated tokens so the neuron budget stays bounded", async () => {
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi({
+      answer: "Yes.",
+      no_good_match: false,
+      recommendations: [{ candidate: "C1", reason: "fits" }],
+    });
+
+    await answerQuestion(e, "in combat indicator");
+    const call = (e.AI!.run as unknown as { mock: { calls: unknown[][] } }).mock.calls[0];
+    expect((call[1] as { max_tokens?: number }).max_tokens).toBe(256);
   });
 
   it("returns a grounded answer from model output", async () => {

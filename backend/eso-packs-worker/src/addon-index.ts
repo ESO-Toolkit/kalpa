@@ -287,6 +287,10 @@ export interface AddonMetaRow {
   title: string;
   author: string;
   categoryId: number;
+  /** Resolved from categorylist.json at sync time and written with the row, so
+   *  no second UPDATE pass is needed (which used to cost one query per
+   *  category, against a hard 1000-queries-per-invocation budget). */
+  categoryName: string;
   downloads: number;
   downloadsMonthly: number;
   favorites: number;
@@ -296,29 +300,20 @@ export interface AddonMetaRow {
 }
 
 /**
- * Write bulk-list metadata for one addon.
- *
- * `detail_stale` is set when the addon is new or its `last_update` moved, which
- * is what schedules a `filedetails` fetch later. It is deliberately NOT cleared
- * here — only {@link applyDetail} clears it, so an interrupted backfill resumes
- * exactly where it stopped instead of silently leaving rows description-less.
+ * D1 caps a query at 100 bound parameters. Each row binds 12, so 8 rows
+ * (96 params) is the largest multi-row statement that fits with headroom.
  */
-export async function upsertMeta(
-  db: D1Database,
-  row: AddonMetaRow,
-  now: number,
-): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO addons (
-         uid, title, author, category_id, downloads, downloads_monthly,
-         favorites, is_library, file_info_uri, last_update, removed, indexed_at,
-         detail_stale
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1)
-       ON CONFLICT(uid) DO UPDATE SET
+const ROW_PARAMS = 12;
+const ROWS_PER_STATEMENT = Math.floor(96 / ROW_PARAMS);
+
+/** Statements per `batch()` call. Only affects round trips, not any hard limit. */
+const STATEMENTS_PER_BATCH = 50;
+
+const UPSERT_TAIL = `ON CONFLICT(uid) DO UPDATE SET
          title = excluded.title,
          author = excluded.author,
          category_id = excluded.category_id,
+         category_name = excluded.category_name,
          downloads = excluded.downloads,
          downloads_monthly = excluded.downloads_monthly,
          favorites = excluded.favorites,
@@ -326,19 +321,39 @@ export async function upsertMeta(
          file_info_uri = excluded.file_info_uri,
          removed = 0,
          indexed_at = excluded.indexed_at,
-         -- Only a moved last_update re-queues a description fetch. Download
-         -- counts change constantly and say nothing about the text.
          detail_stale = CASE
+           -- Un-tombstoning MUST re-queue a description fetch. Removal deletes
+           -- the addons_fts row, and applyDetail is the only thing that ever
+           -- writes one back. Without this clause a resurrected addon (upstream
+           -- blip, or removed-then-restored) stays live in the addons table with
+           -- no FTS row and is permanently unsearchable -- silently, because
+           -- search just returns fewer results.
+           WHEN addons.removed = 1 THEN 1
+           -- Otherwise only a moved last_update re-queues. Download counts
+           -- change constantly and say nothing about the text.
            WHEN addons.last_update != excluded.last_update THEN 1
            ELSE addons.detail_stale
          END,
-         last_update = excluded.last_update`,
-    )
-    .bind(
+         last_update = excluded.last_update`;
+
+function upsertStatement(db: D1Database, rows: AddonMetaRow[], now: number): D1PreparedStatement {
+  // 12 bound values per row; `removed` and `detail_stale` are literals.
+  const placeholders = rows.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)").join(", ");
+  const sql = `INSERT INTO addons (
+         uid, title, author, category_id, category_name, downloads,
+         downloads_monthly, favorites, is_library, file_info_uri, last_update,
+         indexed_at, removed, detail_stale
+       ) VALUES ${placeholders}
+       ${UPSERT_TAIL}`;
+
+  const values: (string | number)[] = [];
+  for (const row of rows) {
+    values.push(
       row.uid,
       row.title,
       row.author,
       row.categoryId,
+      row.categoryName,
       row.downloads,
       row.downloadsMonthly,
       row.favorites,
@@ -346,8 +361,49 @@ export async function upsertMeta(
       row.fileInfoUri,
       row.lastUpdate,
       now,
-    )
-    .run();
+    );
+  }
+  return db.prepare(sql).bind(...values);
+}
+
+/**
+ * Write bulk-list metadata for many addons.
+ *
+ * Batched into multi-row statements because D1 allows only **1000 queries per
+ * Worker invocation**. One statement per addon meant ~4000 queries for a full
+ * ESOUI sync, which fails outright — this brings the same work down to ~500.
+ *
+ * `detail_stale` is set when the addon is new or its `last_update` moved, which
+ * is what schedules a `filedetails` fetch later. It is deliberately NOT cleared
+ * here — only {@link applyDetail} clears it, so an interrupted backfill resumes
+ * exactly where it stopped instead of silently leaving rows description-less.
+ *
+ * Returns the number of D1 queries spent, so the caller can stay under budget.
+ */
+export async function upsertMetaBatch(
+  db: D1Database,
+  rows: AddonMetaRow[],
+  now: number,
+): Promise<number> {
+  if (rows.length === 0) return 0;
+
+  const statements: D1PreparedStatement[] = [];
+  for (let i = 0; i < rows.length; i += ROWS_PER_STATEMENT) {
+    statements.push(upsertStatement(db, rows.slice(i, i + ROWS_PER_STATEMENT), now));
+  }
+  for (let i = 0; i < statements.length; i += STATEMENTS_PER_BATCH) {
+    await db.batch(statements.slice(i, i + STATEMENTS_PER_BATCH));
+  }
+  return statements.length;
+}
+
+/** Single-row convenience wrapper. */
+export async function upsertMeta(
+  db: D1Database,
+  row: AddonMetaRow,
+  now: number,
+): Promise<void> {
+  await upsertMetaBatch(db, [row], now);
 }
 
 /**
@@ -388,16 +444,57 @@ export async function applyDetail(
   ]);
 }
 
-/** Tombstone an addon that vanished from the bulk list or 404'd on detail.
- *  Rows are kept rather than deleted so a transient upstream blip that drops an
- *  entry for one run can be undone by the next run's upsert. */
+/** Tombstone specific addons — used for a `filedetails` 404, which is per-addon.
+ *
+ *  Chunked because D1 rejects a query with more than 100 bound parameters, and
+ *  an `IN (...)` clause binds one per uid. Rows are kept rather than deleted so
+ *  a transient upstream blip that drops an entry for one run can be undone by
+ *  the next run's upsert. */
 export async function markRemoved(db: D1Database, uids: number[]): Promise<void> {
   if (uids.length === 0) return;
-  const placeholders = uids.map(() => "?").join(", ");
+  // 45 per statement; the batch below issues two statements over the same list.
+  const CHUNK = 45;
+  for (let i = 0; i < uids.length; i += CHUNK) {
+    const slice = uids.slice(i, i + CHUNK);
+    const placeholders = slice.map(() => "?").join(", ");
+    await db.batch([
+      db.prepare(`UPDATE addons SET removed = 1 WHERE uid IN (${placeholders})`).bind(...slice),
+      db.prepare(`DELETE FROM addons_fts WHERE rowid IN (${placeholders})`).bind(...slice),
+    ]);
+  }
+}
+
+/**
+ * Tombstone every live addon the current sync did not touch.
+ *
+ * Replaces "read all live uids, diff in JS, delete by id list", which bound one
+ * parameter per vanished addon and blew D1's 100-parameter cap the first time
+ * ESOUI removed more than a hundred entries. This is three parameter-free
+ * statements regardless of catalogue size.
+ *
+ * `since` is the timestamp stamped onto every row the sync upserted, so
+ * `indexed_at < since` is exactly "not seen in this run".
+ */
+export async function sweepUnseen(db: D1Database, since: number): Promise<number> {
+  const before = await db
+    .prepare("SELECT COUNT(*) AS n FROM addons WHERE removed = 0 AND indexed_at < ?")
+    .bind(since)
+    .first<{ n: number }>();
+
+  const count = before?.n ?? 0;
+  if (count === 0) return 0;
+
   await db.batch([
-    db.prepare(`UPDATE addons SET removed = 1 WHERE uid IN (${placeholders})`).bind(...uids),
-    db.prepare(`DELETE FROM addons_fts WHERE rowid IN (${placeholders})`).bind(...uids),
+    db
+      .prepare(
+        `DELETE FROM addons_fts
+          WHERE rowid IN (SELECT uid FROM addons WHERE removed = 0 AND indexed_at < ?)`,
+      )
+      .bind(since),
+    db.prepare("UPDATE addons SET removed = 1 WHERE removed = 0 AND indexed_at < ?").bind(since),
   ]);
+
+  return count;
 }
 
 /** Live addons still missing a current description, most-downloaded first so a

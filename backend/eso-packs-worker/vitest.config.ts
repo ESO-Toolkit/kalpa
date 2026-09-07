@@ -17,9 +17,9 @@ export default defineConfig({
           ADMIN_API_KEY: "test-api-key",
           ALLOW_SEED: "true",
         },
-        // The real ADDON_INDEX binding stays commented out in wrangler.toml
-        // until the database is provisioned; miniflare supplies a local one so
-        // the index is fully exercised by tests either way.
+        // wrangler.toml binds ADDON_INDEX to the real kalpa-addon-index D1
+        // database. Tests must never touch it, so miniflare supplies a local
+        // throwaway under the same binding name.
         d1Databases: { ADDON_INDEX: "addon-index-test" },
       },
     }),

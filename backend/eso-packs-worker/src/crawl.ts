@@ -5,7 +5,8 @@ import {
   markRemoved,
   pendingDetailUids,
   setMeta,
-  upsertMeta,
+  sweepUnseen,
+  upsertMetaBatch,
   type AddonMetaRow,
 } from "./addon-index";
 
@@ -36,6 +37,27 @@ const API_BASE = "https://api.mmoui.com/v4/game/ESO";
 /** Identifies the crawler to ESOUI so they can see who we are and contact us. */
 const USER_AGENT = "Kalpa-PackHub-Indexer/1.0 (+https://github.com/ESO-Toolkit/Kalpa)";
 
+/**
+ * Refuse to tombstone the catalogue when a "successful" bulk fetch returns
+ * implausibly few entries.
+ *
+ * `fetchFilelist` throwing is handled — but a 200 response carrying `[]` or a
+ * truncated list is not an error, and would tombstone everything. That is not
+ * self-correcting either: removal deletes the FTS rows, and while the next sync
+ * un-tombstones the addons, they only become searchable again after their
+ * descriptions are re-fetched. A bad five minutes upstream would cost a full
+ * re-crawl.
+ */
+const MIN_ENTRIES_RATIO = 0.5;
+
+/** Below this, ratio checks are meaningless — a small index is normal early on. */
+const SANITY_FLOOR_MIN_LIVE = 50;
+
+/** Titles and authors go into the FTS index AND the Ask prompt, where a newline
+ *  would forge extra candidate lines. Descriptions are already flattened and
+ *  capped by stripMarkup; these were not. */
+const MAX_TITLE_LENGTH = 200;
+
 /** Ceiling on one backfill page. Workers cap outbound subrequests per
  *  invocation, and each addon costs one fetch plus a few D1 statements, so a
  *  page has to stay well clear of that limit. */
@@ -46,6 +68,16 @@ export const MAX_DETAIL_BATCH = 40;
 const DETAIL_DELAY_MS = 250;
 
 const FETCH_TIMEOUT_MS = 15_000;
+
+/** Collapse to a single line and cap. Not stripMarkup: titles are plain text
+ *  upstream, and running them through markup stripping would eat legitimate
+ *  angle brackets in names. */
+export function flattenField(value: unknown, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
+  const flat = value.replace(/\s+/g, " ").trim();
+  if (flat.length === 0) return fallback;
+  return flat.length > MAX_TITLE_LENGTH ? flat.slice(0, MAX_TITLE_LENGTH).trimEnd() : flat;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -211,53 +243,57 @@ export async function syncFilelist(db: D1Database): Promise<{
   await ensureSchema(db);
 
   const [entries, categories] = await Promise.all([fetchFilelist(), fetchCategories()]);
+
+  // Every row written by this run carries the same stamp, so "not seen in this
+  // run" is later expressible as `indexed_at < now` — no per-addon bookkeeping,
+  // and no id list to bind.
   const now = Date.now();
 
-  const seenUids = new Set<number>();
-  for (const entry of entries) {
-    const row: AddonMetaRow = {
-      uid: entry.id,
-      title: typeof entry.title === "string" ? entry.title : `Addon ${entry.id}`,
-      author: typeof entry.author === "string" ? entry.author : "",
-      categoryId: typeof entry.categoryId === "number" ? entry.categoryId : 0,
-      downloads: typeof entry.downloads === "number" ? entry.downloads : 0,
-      downloadsMonthly: typeof entry.downloadsMonthly === "number" ? entry.downloadsMonthly : 0,
-      favorites: typeof entry.favorites === "number" ? entry.favorites : 0,
-      isLibrary: entry.library === true,
-      fileInfoUri:
-        typeof entry.fileInfoUri === "string" && entry.fileInfoUri.startsWith("https://")
-          ? entry.fileInfoUri
-          : `https://www.esoui.com/downloads/info${entry.id}.html`,
-      lastUpdate: typeof entry.lastUpdate === "number" ? entry.lastUpdate : 0,
-    };
-    await upsertMeta(db, row, now);
-    seenUids.add(entry.id);
-  }
+  const rows: AddonMetaRow[] = entries.map((entry) => ({
+    uid: entry.id,
+    title: flattenField(entry.title, `Addon ${entry.id}`),
+    author: flattenField(entry.author),
+    categoryId: typeof entry.categoryId === "number" ? entry.categoryId : 0,
+    categoryName:
+      typeof entry.categoryId === "number" ? (categories.get(entry.categoryId) ?? "") : "",
+    downloads: typeof entry.downloads === "number" ? entry.downloads : 0,
+    downloadsMonthly: typeof entry.downloadsMonthly === "number" ? entry.downloadsMonthly : 0,
+    favorites: typeof entry.favorites === "number" ? entry.favorites : 0,
+    isLibrary: entry.library === true,
+    fileInfoUri:
+      typeof entry.fileInfoUri === "string" && entry.fileInfoUri.startsWith("https://")
+        ? entry.fileInfoUri
+        : `https://www.esoui.com/downloads/info${entry.id}.html`,
+    lastUpdate: typeof entry.lastUpdate === "number" ? entry.lastUpdate : 0,
+  }));
 
-  // Anything live in our table but absent from a SUCCESSFUL bulk fetch is gone
-  // upstream. This runs only after the fetch resolved, so a network failure
-  // throws above and cannot tombstone the whole catalogue.
-  const live = await db
-    .prepare("SELECT uid FROM addons WHERE removed = 0")
-    .all<{ uid: number }>();
-  const vanished = (live.results ?? []).map((r) => r.uid).filter((uid) => !seenUids.has(uid));
-  await markRemoved(db, vanished);
+  // Deduplicate by uid. A multi-row upsert that names the same primary key twice
+  // in one statement fails ("ON CONFLICT DO UPDATE command cannot affect row a
+  // second time"), so one duplicated upstream entry would abort the whole sync.
+  const deduped = [...new Map(rows.map((row) => [row.uid, row])).values()];
 
-  // Category names live on the addon row so the FTS rebuild in applyDetail can
-  // pick them up without a second lookup.
-  if (categories.size > 0) {
-    const statements = [...categories.entries()].map(([id, title]) =>
-      db.prepare("UPDATE addons SET category_name = ? WHERE category_id = ?").bind(title, id),
+  // Sanity floor before any destructive step.
+  const liveRow = await db
+    .prepare("SELECT COUNT(*) AS n FROM addons WHERE removed = 0")
+    .first<{ n: number }>();
+  const liveBefore = liveRow?.n ?? 0;
+  if (liveBefore >= SANITY_FLOOR_MIN_LIVE && deduped.length < liveBefore * MIN_ENTRIES_RATIO) {
+    throw new Error(
+      `filelist.json returned ${deduped.length} entries against ${liveBefore} live addons; ` +
+        `refusing to sync (looks truncated). Re-run when upstream recovers.`,
     );
-    for (let i = 0; i < statements.length; i += 20) {
-      await db.batch(statements.slice(i, i + 20));
-    }
   }
+
+  await upsertMetaBatch(db, deduped, now);
+
+  // Only reached if the bulk fetch above resolved, so a network failure throws
+  // earlier and cannot be mistaken for "the entire catalogue was deleted".
+  const removed = await sweepUnseen(db, now);
 
   const pending = await pendingDetailUids(db, 1);
   await setMeta(db, "last_sync", new Date(now).toISOString());
 
-  return { seen: seenUids.size, removed: vanished.length, queued: pending.length };
+  return { seen: deduped.length, removed, queued: pending.length };
 }
 
 /**

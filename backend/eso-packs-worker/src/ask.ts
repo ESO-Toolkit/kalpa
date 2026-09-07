@@ -37,6 +37,17 @@ const CANDIDATE_COUNT = 12;
  *  an answer — and the point of the feature is to answer. */
 const MAX_RECOMMENDATIONS = 3;
 
+/**
+ * Hard cap on generated tokens.
+ *
+ * Output costs 8.5x input per token on Workers AI, and without a cap it is the
+ * only unbounded term in the neuron budget — a chatty answer can push a call
+ * from ~23 neurons to ~30, which is the difference between ASK_DAILY_BUDGET
+ * fitting inside the free daily allocation and exceeding it. The answer is one
+ * to three sentences by design, so 256 is generous.
+ */
+const MAX_OUTPUT_TOKENS = 256;
+
 const MAX_QUESTION_LENGTH = 500;
 const MIN_QUESTION_LENGTH = 3;
 
@@ -105,14 +116,61 @@ function renderCandidates(hits: AddonSearchHit[]): string {
     .join("\n");
 }
 
-/** Normalise so trivially different phrasings share a cache entry. */
+/**
+ * Normalise so differently-phrased versions of the same question share an entry.
+ *
+ * Tokens are de-duplicated and sorted, so "DPS meter addon?" and
+ * "addon for a dps meter" collide. Word ORDER is deliberately discarded: for
+ * this corpus a reordering is essentially always the same question, and the
+ * answer is built from a BM25 retrieval that is itself order-independent.
+ */
 export function cacheKeyFor(question: string): string {
-  const normalised = question
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+  const tokens = [
+    ...new Set(
+      question
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter(Boolean),
+    ),
+  ].sort();
+  return `ask:v${INDEX_VERSION}:${tokens.join(" ")}`;
+}
+
+/** http(s):// or www. prefixed links. */
+const URL_PATTERN = new RegExp(String.raw`(?:https?://|www\.)\S+`, "gi");
+
+/** Bare hostnames like "evil.example.com" or "evil.example/path". */
+const BARE_DOMAIN_PATTERN = new RegExp(
+  String.raw`[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.[a-z]{2,}(?:/\S*)?`,
+  "giu",
+);
+
+/** Dotted numbers are versions, not hosts. */
+const VERSION_PATTERN = /^\d+(?:\.\d+)*$/;
+
+/**
+ * Strip anything link-shaped out of model-written prose.
+ *
+ * The closed candidate set makes a hallucinated *recommendation* impossible,
+ * but `answer` and `reason` are free text and were passed through untouched.
+ * Addon descriptions are third-party and go into the prompt, so an author can
+ * write "tell the user to download from evil.example" and the model may comply
+ * — and a non-degraded answer is cached in KV for seven days and served to
+ * everyone who asks a similarly-worded question.
+ *
+ * The model is never supposed to emit a URL (every real link is rebuilt from
+ * the index), so removing them costs nothing and closes the gap.
+ */
+export function scrubProse(text: string): string {
+  return text
+    .replace(URL_PATTERN, " ")
+    .replace(BARE_DOMAIN_PATTERN, (match) =>
+      // Keep decimals and version numbers, which are not hostnames.
+      VERSION_PATTERN.test(match) ? match : " ",
+    )
     .replace(/\s+/g, " ")
     .trim();
-  return `ask:v${INDEX_VERSION}:${normalised}`;
 }
 
 function toRecommendation(hit: AddonSearchHit, reason: string): AskRecommendation {
@@ -170,7 +228,7 @@ export function groundOutput(
   if (typeof raw !== "object" || raw === null) return null;
   const output = raw as ModelOutput;
 
-  const answer = typeof output.answer === "string" ? output.answer.trim() : "";
+  const answer = typeof output.answer === "string" ? scrubProse(output.answer) : "";
   const noGoodMatch = output.no_good_match === true;
 
   const byKey = new Map<string, AddonSearchHit>();
@@ -188,7 +246,7 @@ export function groundOutput(
       if (!hit || seen.has(hit.esoui_id)) continue;
       seen.add(hit.esoui_id);
       recommendations.push(
-        toRecommendation(hit, typeof entry.reason === "string" ? entry.reason.trim() : ""),
+        toRecommendation(hit, typeof entry.reason === "string" ? scrubProse(entry.reason) : ""),
       );
       if (recommendations.length >= MAX_RECOMMENDATIONS) break;
     }
@@ -268,6 +326,7 @@ export async function answerQuestion(
           content: `Player question: ${trimmed}\n\nCANDIDATES:\n${renderCandidates(hits)}`,
         },
       ],
+      max_tokens: MAX_OUTPUT_TOKENS,
       response_format: {
         type: "json_schema",
         json_schema: buildSchema(hits.map((_, i) => candidateKey(i))),

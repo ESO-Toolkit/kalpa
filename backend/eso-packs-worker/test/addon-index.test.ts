@@ -10,7 +10,9 @@ import {
   markRemoved,
   pendingDetailUids,
   searchAddons,
+  sweepUnseen,
   toMatchTokens,
+  upsertMetaBatch,
   upsertMeta,
   type AddonMetaRow,
 } from "../src/addon-index";
@@ -30,6 +32,7 @@ function meta(uid: number, overrides: Partial<AddonMetaRow> = {}): AddonMetaRow 
     title: `Addon ${uid}`,
     author: "SomeAuthor",
     categoryId: 25,
+    categoryName: "Combat Mods",
     downloads: 1000,
     downloadsMonthly: 100,
     favorites: 10,
@@ -302,5 +305,66 @@ describe("unbuilt index", () => {
     expect(stats.last_sync).toBeNull();
 
     await ensureSchema(db());
+  });
+});
+
+describe("D1 limit safety", () => {
+  // D1 rejects a query with more than 100 bound parameters, and allows only
+  // 1000 queries per Worker invocation. Both were violated by the original
+  // one-statement-per-addon design, which would have failed on the very first
+  // real sync of ~4000 addons.
+  it("writes far more rows than fit in one statement", async () => {
+    const rows = Array.from({ length: 250 }, (_, i) =>
+      meta(i + 1, { title: `Addon ${i + 1}`, downloads: i }),
+    );
+    const statements = await upsertMetaBatch(db(), rows, Date.now());
+
+    // 12 bound values per row against a 100-parameter cap means 8 rows per
+    // statement, so 250 rows must not be 250 queries.
+    expect(statements).toBe(Math.ceil(250 / 8));
+
+    const count = await db()
+      .prepare("SELECT COUNT(*) AS n FROM addons")
+      .first<{ n: number }>();
+    expect(count?.n).toBe(250);
+  });
+
+  it("tombstones more addons than the parameter cap allows in one IN clause", async () => {
+    const rows = Array.from({ length: 150 }, (_, i) => meta(i + 1));
+    await upsertMetaBatch(db(), rows, Date.now());
+
+    await markRemoved(
+      db(),
+      rows.map((r) => r.uid),
+    );
+
+    const live = await db()
+      .prepare("SELECT COUNT(*) AS n FROM addons WHERE removed = 0")
+      .first<{ n: number }>();
+    expect(live?.n).toBe(0);
+  });
+});
+
+describe("sweepUnseen", () => {
+  it("tombstones only rows the current run did not touch", async () => {
+    await upsertMetaBatch(db(), [meta(1), meta(2)], 1000);
+    await applyDetail(db(), 1, "combat indicator", "Combat Mods", 1000);
+
+    // A later run sees only uid 2.
+    await upsertMetaBatch(db(), [meta(2)], 2000);
+    const removed = await sweepUnseen(db(), 2000);
+
+    expect(removed).toBe(1);
+    const row = await db()
+      .prepare("SELECT removed FROM addons WHERE uid = 1")
+      .first<{ removed: number }>();
+    expect(row?.removed).toBe(1);
+    // And it must leave the FTS index, or a removed addon keeps matching.
+    expect((await searchAddons(db(), "combat indicator")).hits).toHaveLength(0);
+  });
+
+  it("is a no-op when every row was seen", async () => {
+    await upsertMetaBatch(db(), [meta(1), meta(2)], 3000);
+    expect(await sweepUnseen(db(), 3000)).toBe(0);
   });
 });
