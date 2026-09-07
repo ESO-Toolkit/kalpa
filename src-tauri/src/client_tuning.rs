@@ -320,6 +320,12 @@ pub struct TuningSection {
     /// design. For `[RenoDX.DLSS5]` an entry here is a newer add-on build, and
     /// silently dropping it on the next write would delete a setting the user
     /// relies on.
+    ///
+    /// One exception to "verbatim": the prefix-matched `RENODX-DLSS-preset*`
+    /// family shares one section here, so its keys are prefixed with the block
+    /// they came from — `RENODX-DLSS-preset3/DirectNeuralRenderingIntensity`.
+    /// See [`collect_sections`]; without it preset 3's value was shown as
+    /// preset 1's.
     pub entries: Vec<TuningEntry>,
 }
 
@@ -648,14 +654,21 @@ impl RawSection {
 ///
 /// A section written twice — which ReShade does not do but a hand-edited file
 /// can — merges into one, last-value-wins, which is what ReShade's own reader
-/// would resolve to. The prefix-matched preset family also merges: all of
-/// `RENODX-DLSS-preset1..3` land in one bucket, because Kalpa shows them
-/// read-only and has no way to know which preset the add-on will select.
+/// would resolve to. The prefix-matched preset family shares one bucket for the
+/// same reason (Kalpa shows them read-only and has no way to know which preset
+/// the add-on will select), but its keys are **qualified with the header they
+/// came from** — `RENODX-DLSS-preset3/DirectNeuralRenderingIntensity`. Without
+/// that, preset 3's value collapsed onto preset 1's row and was shown as
+/// preset 1's: a value from somewhere else presented as this one's current
+/// value, which is the exact failure this module exists to prevent.
 fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
     let mut sections: Vec<RawSection> = SECTIONS.iter().map(|_| RawSection::default()).collect();
     let mut addon = RawSection::default();
     // Index into `sections`, or `usize::MAX` for `[ADDON]`, or `None`.
     let mut current: Option<usize> = None;
+    // The header of the block being read right now, which for a prefix-matched
+    // family is not the same as `sections[index].header` (the first one seen).
+    let mut current_header = String::new();
     let mut in_addon = false;
 
     for raw in reshade_ini.split_inclusive('\n') {
@@ -663,6 +676,7 @@ fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
         let trimmed = without_bom(content).trim();
         if let Some(name) = section_header(trimmed) {
             in_addon = name.eq_ignore_ascii_case("ADDON");
+            current_header = name.to_string();
             current = spec_index_for_section(name).inspect(|&index| {
                 if sections[index].header.is_none() {
                     sections[index].header = Some(name.to_string());
@@ -670,6 +684,7 @@ fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
             });
             continue;
         }
+        let qualify = current.is_some_and(|index| SECTIONS[index].prefix_match);
         let target = match (current, in_addon) {
             (Some(index), _) => &mut sections[index],
             (None, true) => &mut addon,
@@ -681,7 +696,14 @@ fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
         let Some((key, value)) = trimmed.split_once('=') else {
             continue;
         };
-        let key = key.trim().to_string();
+        // Only the prefix-matched family is qualified. The exact-match sections
+        // are looked up by key name (`RawSection::get`) and written back with
+        // that name, so a prefix on them would break both.
+        let key = if qualify {
+            format!("{current_header}/{}", key.trim())
+        } else {
+            key.trim().to_string()
+        };
         let value = value.trim().to_string();
         if let Some(existing) = target
             .entries
@@ -1016,7 +1038,13 @@ fn dominant_line_ending(lines: &[Line]) -> String {
 /// (ReShade writes CRLF on Windows; rewriting the file as LF would be a
 /// gratuitous whole-file diff and would confuse any tool diffing it). Within the
 /// section, a key that is already present is edited in place; a key that is not
-/// is appended at the end of the section, before the next `[header]`.
+/// is appended at the end of the section, before the next `[header]`. A file
+/// that names the section more than once has *every* one of its blocks
+/// rewritten, and an appended key goes at the end of the **last** of them,
+/// which is the block a reader resolves to.
+///
+/// Values are written trimmed — the same string [`validate_edit`] parsed, so
+/// what is on disk is what was checked.
 ///
 /// Returns `Err` when the section does not exist — writing one from nothing
 /// would be Kalpa inventing configuration for an add-on that has never run.
@@ -1052,23 +1080,41 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
         .filter(|(_, line)| section_header(without_bom(&line.content).trim()).is_some())
         .map(|(i, _)| i)
         .collect();
-    let section_start = *headers
+    // Every block the file gives the section, not just the first, each running
+    // to the next header of any kind. ReShade will not write the section twice
+    // but a hand-edited file can, and `collect_sections` — like ReShade's own
+    // reader — resolves a key to its *last* occurrence. Taking only the first
+    // block meant an apply rewrote a block nobody reads: the panel showed the
+    // last block's value, the user changed it, the first block was already at
+    // that value so nothing was appended either, and the toast reported success
+    // over a file that had not changed.
+    let section_blocks: Vec<(usize, usize)> = headers
         .iter()
-        .find(|&&i| {
+        .copied()
+        .filter(|&i| {
             section_header(without_bom(&lines[i].content).trim())
                 .is_some_and(|name| name.eq_ignore_ascii_case(TUNING_SECTION))
         })
-        .ok_or_else(|| format!("The [{TUNING_SECTION}] section was not found in {TUNING_FILE}."))?;
-    // The section runs to the next header of any kind. Derived from the header
-    // list rather than tracked in one pass so that a file with the section
-    // written twice — which ReShade will not produce but a hand-edited file
-    // can — still yields an end that is after the start, instead of a reversed
-    // range that would append the edit above the section it belongs to.
-    let section_end = headers
-        .iter()
-        .copied()
-        .find(|&i| i > section_start)
-        .unwrap_or(lines.len());
+        .map(|start| {
+            let end = headers
+                .iter()
+                .copied()
+                .find(|&i| i > start)
+                .unwrap_or(lines.len());
+            (start, end)
+        })
+        .collect();
+    if section_blocks.is_empty() {
+        return Err(format!(
+            "The [{TUNING_SECTION}] section was not found in {TUNING_FILE}."
+        ));
+    }
+    // Anything left over is appended to the *last* block, because that is the
+    // one both `read_form` and ReShade resolve a key to.
+    let append_at = section_blocks
+        .last()
+        .map(|&(_, end)| end)
+        .expect("section_blocks is not empty");
 
     // A key named twice in one edit list has no meaningful answer once every
     // occurrence is rewritten: the first edit would claim all the lines and the
@@ -1094,22 +1140,30 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
     // correct whichever occurrence the reader happens to take.
     let mut applied = vec![false; edits.len()];
 
-    for line in lines.iter_mut().take(section_end).skip(section_start + 1) {
-        let trimmed = line.content.trim();
-        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some(eq_pos) = line.content.find('=') else {
-            continue;
-        };
-        let key_trimmed = line.content[..eq_pos].trim();
-        if let Some(pos) = edits
-            .iter()
-            .position(|edit| edit.key.eq_ignore_ascii_case(key_trimmed))
-        {
-            let key_part = &line.content[..eq_pos];
-            line.content = format!("{key_part}={}", edits[pos].value);
-            applied[pos] = true;
+    for &(start, end) in &section_blocks {
+        for line in lines.iter_mut().take(end).skip(start + 1) {
+            let trimmed = line.content.trim();
+            if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(eq_pos) = line.content.find('=') else {
+                continue;
+            };
+            let key_trimmed = line.content[..eq_pos].trim();
+            if let Some(pos) = edits
+                .iter()
+                .position(|edit| edit.key.eq_ignore_ascii_case(key_trimmed))
+            {
+                let key_part = &line.content[..eq_pos];
+                // The trimmed value, which is the one `validate_edit` parsed.
+                // Writing the raw string put whatever padding the caller sent
+                // straight into the file: a value of `"\n1.5\n"` passes the
+                // float check and then lands as `NRIntensity=` followed by a
+                // stray `1.5` line, blanking the setting while the apply
+                // reports the key as changed.
+                line.content = format!("{key_part}={}", edits[pos].value.trim());
+                applied[pos] = true;
+            }
         }
     }
 
@@ -1129,18 +1183,20 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
             let key = field_for(&edit.key)
                 .map(|spec| spec.key)
                 .unwrap_or(&edit.key);
-            appended.push(format!("{key}={}", edit.value));
+            // Trimmed for the same reason as the in-place rewrite above: the
+            // bytes on disk are the bytes `validate_edit` accepted.
+            appended.push(format!("{key}={}", edit.value.trim()));
         }
 
         // A key appended right at end-of-file needs the preceding line to end
         // with a newline first, or it would land on the same physical line.
-        if section_end > 0 && lines[section_end - 1].terminator.is_empty() {
-            lines[section_end - 1].terminator = dominant_line_ending(&lines);
+        if append_at > 0 && lines[append_at - 1].terminator.is_empty() {
+            lines[append_at - 1].terminator = dominant_line_ending(&lines);
         }
         let terminator = dominant_line_ending(&lines);
         for (offset, content) in appended.into_iter().enumerate() {
             lines.insert(
-                section_end + offset,
+                append_at + offset,
                 Line {
                     content,
                     terminator: terminator.clone(),
@@ -1198,7 +1254,19 @@ pub fn read_form_for_dir(client_dir: &Path, reshade_ini: &str) -> TuningForm {
 pub fn read_client_tuning(client_dir: String) -> Result<TuningForm, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let ini_path = tuning_file_path(&location.client_dir);
-    let contents = std::fs::read_to_string(&ini_path).unwrap_or_default();
+    let contents = match std::fs::read_to_string(&ini_path) {
+        Ok(contents) => contents,
+        // A client folder with no `ReShade.ini` is ordinary, and empty text is
+        // the honest reading of it: every section reports absent. Every *other*
+        // failure is not — a permission error, a sharing violation, or a file
+        // hand-saved as UTF-16 — and swallowing it told the user "[RenoDX.DLSS5]
+        // is missing, so the add-on has never run here", which sends them to fix
+        // a problem they do not have. It also made `disabled_addons("")` empty,
+        // scoring an add-on they had disabled as live. Same sentence the write
+        // path in `apply_client_tuning` already uses.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("Could not read {TUNING_FILE}: {e}")),
+    };
     Ok(read_form_for_dir(&location.client_dir, &contents))
 }
 
@@ -1574,7 +1642,7 @@ mod tests {
         assert!(preset
             .entries
             .iter()
-            .any(|e| e.key == "DirectNeuralRenderingStyle"));
+            .any(|e| e.key == "RENODX-DLSS-preset1/DirectNeuralRenderingStyle"));
     }
 
     /// Presets 2 and 3 exist in the add-on's own UI, so a user who moves off
@@ -1586,6 +1654,38 @@ mod tests {
         let preset = section_named(&form, "RENODX-DLSS-preset3");
         assert!(preset.present);
         assert_eq!(preset.entries.len(), 1);
+    }
+
+    /// Two preset blocks in one file used to collapse onto each other: the
+    /// family shares one bucket and last-occurrence won, so preset 3's
+    /// `DirectNeuralRenderingIntensity` was displayed on preset 1's row, under
+    /// a card headed `[RENODX-DLSS-preset1]`. A value from somewhere else,
+    /// presented as this one's current value — the failure the whole module
+    /// exists to prevent, in read-only form.
+    #[test]
+    fn two_preset_blocks_keep_their_own_values_each_attributed() {
+        let ini = concat!(
+            "[RENODX-DLSS-preset1]\n",
+            "DirectNeuralRenderingIntensity=1\n",
+            "[RENODX-DLSS-preset3]\n",
+            "DirectNeuralRenderingIntensity=0.4\n",
+        );
+        let form = read_form(ini, "C:/client", ActivePath::Direct, Vec::new());
+        let preset = section_named(&form, "RENODX-DLSS-preset1");
+
+        let values: Vec<(&str, &str)> = preset
+            .entries
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.value.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                ("RENODX-DLSS-preset1/DirectNeuralRenderingIntensity", "1"),
+                ("RENODX-DLSS-preset3/DirectNeuralRenderingIntensity", "0.4"),
+            ],
+            "both blocks' values must survive, each naming the block it came from"
+        );
     }
 
     /// The direct path's keys are undocumented, so they appear as raw key and
@@ -2200,7 +2300,9 @@ mod tests {
     }
 
     /// A hand-edited file can name the section twice. The edit has to land
-    /// inside a section, not above one.
+    /// inside a section, not above one — and inside the *last* one, because
+    /// that is the block `read_form` and ReShade both resolve a key to.
+    /// Appending into the first block wrote where nobody reads.
     #[test]
     fn apply_edits_survives_the_section_appearing_twice() {
         let original =
@@ -2213,9 +2315,113 @@ mod tests {
         let updated = apply_edits(original, &edits).expect("section exists");
         assert_eq!(
             updated,
-            "[RenoDX.DLSS5]\nNRStyle=0\n\nNRIntensity=0.50\n[GENERAL]\nFoo=1\n\n\
-             [RenoDX.DLSS5]\nNRPreset=2\n",
-            "the appended key must sit inside a [RenoDX.DLSS5] block"
+            "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n\
+             [RenoDX.DLSS5]\nNRPreset=2\nNRIntensity=0.50\n",
+            "the appended key must sit inside the last [RenoDX.DLSS5] block"
+        );
+
+        let form = feed_form(&updated);
+        let intensity = dlss5(&form)
+            .fields
+            .iter()
+            .find(|f| f.key == "NRIntensity")
+            .expect("NRIntensity is a known field")
+            .clone();
+        assert_eq!(
+            intensity.current.as_deref(),
+            Some("0.50"),
+            "and the panel must read back what was written"
+        );
+    }
+
+    /// The silent no-op: the panel shows the last block's value, the user
+    /// changes it, and the first block already happens to hold the new value —
+    /// so the old apply marked the edit done, appended nothing, and left the
+    /// block ReShade reads untouched while reporting success and a backup id.
+    #[test]
+    fn apply_edits_rewrites_a_key_present_in_both_duplicated_blocks() {
+        let original =
+            "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n[RenoDX.DLSS5]\nNRStyle=1\n";
+        let edits = vec![TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "0".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n[RenoDX.DLSS5]\nNRStyle=0\n",
+            "both blocks must carry the new value"
+        );
+
+        let form = feed_form(&updated);
+        let style = dlss5(&form)
+            .fields
+            .iter()
+            .find(|f| f.key == "NRStyle")
+            .expect("NRStyle is a known field")
+            .clone();
+        assert_eq!(style.current.as_deref(), Some("0"));
+    }
+
+    /// `validate_edit` parses the trimmed value, so the trimmed value is what
+    /// gets written. A raw `"\n1.5\n"` passed the float check and then landed
+    /// as `NRIntensity=` plus a stray `1.5` line: the setting blanked, the
+    /// apply reporting the key as changed.
+    #[test]
+    fn apply_edits_writes_the_value_that_was_validated_not_its_padding() {
+        let original = "[RenoDX.DLSS5]\nNRIntensity=0.1\n";
+        let edits = vec![
+            TuningEdit {
+                key: "NRIntensity".to_string(),
+                value: "\n0.50\n".to_string(),
+            },
+            TuningEdit {
+                key: "NRLocalTone".to_string(),
+                value: "  0.25  ".to_string(),
+            },
+        ];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nNRIntensity=0.50\nNRLocalTone=0.25\n",
+            "no padding on either the rewritten line or the appended one"
+        );
+    }
+
+    // ── read_client_tuning ──────────────────────────────────────────────
+
+    fn client_dir_with_exe() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(tmp.path().join("eso64.exe"), b"").expect("write exe");
+        tmp
+    }
+
+    /// No `ReShade.ini` at all is an ordinary client folder, and the panel's
+    /// "the add-on has never run here" is the right thing to say about it.
+    #[test]
+    fn read_client_tuning_treats_a_missing_ini_as_an_empty_one() {
+        let tmp = client_dir_with_exe();
+        let form = read_client_tuning(tmp.path().to_string_lossy().to_string())
+            .expect("a client folder with no ReShade.ini is not an error");
+        assert!(form.sections.iter().all(|section| !section.present));
+    }
+
+    /// An unreadable `ReShade.ini` is not an absent one. Swallowing the error
+    /// reported a UTF-16 or locked file to the user as "renodx-dlss5.addon64
+    /// has never run here", and made `disabled_addons` empty on top of it, so
+    /// an add-on they had disabled scored as live.
+    #[test]
+    fn read_client_tuning_surfaces_an_unreadable_ini_instead_of_calling_it_absent() {
+        let tmp = client_dir_with_exe();
+        // A UTF-16LE `[` — present, and not valid UTF-8.
+        std::fs::write(tuning_file_path(tmp.path()), [0xff, 0xfe, 0x5b, 0x00]).expect("write ini");
+
+        let err = read_client_tuning(tmp.path().to_string_lossy().to_string())
+            .expect_err("an unreadable ReShade.ini must not read as an absent section");
+        assert!(err.contains(TUNING_FILE), "{err}");
+        assert!(
+            !err.contains("has never run here"),
+            "the message must not blame the add-on: {err}"
         );
     }
 }

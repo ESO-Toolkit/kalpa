@@ -952,7 +952,17 @@ fn addon_stem(file_name: &str) -> Option<String> {
 
 /// Read the whole stack for one client directory.
 pub fn inspect_stack(client_dir: &Path) -> ClientStack {
-    let reshade_ini = std::fs::read_to_string(client_dir.join("ReShade.ini")).unwrap_or_default();
+    // Lossy, not `read_to_string`: that fails whole on the first byte that is
+    // not UTF-8, and a hand-edited ReShade.ini acquires one easily — a section
+    // name saved in the local code page is enough, as this release's
+    // `client_tuning` fix already showed. The file then read as *absent*, so
+    // `LoadFromDllMain` came back empty and `stack-addon-not-in-dllmain` told
+    // the user to add a line their file already had — and the fix that finding
+    // recommends is another hand-edit of the same file. Decoding lossily
+    // mangles only the offending bytes. Same reader as `client_health`.
+    let reshade_ini = std::fs::read(client_dir.join("ReShade.ini"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     let ini = parse_ini(&reshade_ini);
     let overlay_collapsed = ini_get(&ini, "ADDON", "OverlayCollapsed");
 
@@ -1363,6 +1373,37 @@ fn shader_source_exists(shader_dir: &Path, source: &str) -> bool {
     find_shader_source(shader_dir, source).is_some()
 }
 
+/// Does `EffectSearchPaths` name a root [`find_shader_source`] never searches?
+///
+/// The lookup only ever walks `reshade-shaders\Shaders` and its immediate
+/// subdirectories, while ReShade walks every entry of this comma list. Where
+/// the two disagree, a `source_present: false` says only that Kalpa did not
+/// find the file — not that ReShade will not — while
+/// `stack-technique-source-missing` is a Danger claiming the preset will fail
+/// to compile. Suppressing an unprovable claim is the safe direction.
+///
+/// The default ReShade writes, `.\reshade-shaders\Shaders\**`, counts as
+/// covered, so the finding still fires for the layout almost everyone has. That
+/// is deliberately generous in one respect: `**` is recursive and the lookup
+/// stops one level down, so a shader buried three folders deep under the
+/// default root is still reported missing. Resolving the list properly —
+/// comma-splitting, `**` recursion and absolute roots, i.e. a new directory
+/// walk over user-controlled paths — is the real fix and is not a release-eve
+/// change.
+fn search_paths_beyond_lookup(paths: &str) -> bool {
+    paths.split(',').any(|entry| {
+        let entry = entry.trim().trim_matches('"').replace('/', "\\");
+        if entry.is_empty() {
+            return false;
+        }
+        let root = entry
+            .trim_start_matches(".\\")
+            .trim_end_matches("\\**")
+            .trim_end_matches('\\');
+        !root.eq_ignore_ascii_case("reshade-shaders\\Shaders")
+    })
+}
+
 /// Read one entry out of a ReShade `PreprocessorDefinitions=A=1,B=2` list.
 fn preprocessor_definition<'a>(
     ini: &'a BTreeMap<String, BTreeMap<String, String>>,
@@ -1407,10 +1448,20 @@ fn resolve_mv_provider(
         return None;
     }
 
-    // Per-effect definitions win over the global list; absent both, the effect's
-    // own `#ifndef` default applies.
+    // ReShade has three tiers, and this reads all three in its own precedence
+    // order: the preset's `[DLSS5_Feed.fx]` block, then the preset's top-level
+    // list, then `[GENERAL]` in ReShade.ini. Absent all three, the effect's own
+    // `#ifndef` default applies.
+    //
+    // The middle tier was missing until 2026-09-07, and it is the one ReShade
+    // writes a preset-wide `PreprocessorDefinitions=` line into — the primary
+    // user's own preset has exactly that line. Skipping it meant a correctly
+    // configured current-build install resolved to no definition at all, fell
+    // through to the 0.4.x scheme, defaulted to LaunchPad, and was told
+    // `stack-mv-provider-missing` about a technique it had no reason to enable.
     let definition = |name: &str| {
         preprocessor_definition(preset_ini, FEED_SOURCE, name)
+            .or_else(|| preprocessor_definition(preset_ini, "", name))
             .or_else(|| preprocessor_definition(reshade_ini, "GENERAL", name))
     };
 
@@ -2208,7 +2259,18 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
         ));
     }
 
-    for name in &stack.disabled_addons {
+    // Only for an add-on that is actually here. `DisabledAddons` is a raw split
+    // of an ini value and ReShade keeps entries for add-ons that have since
+    // been deleted or renamed aside — the note on `DIRECT_RESHADE_INI` below
+    // says exactly that of the neighbouring key. The copy asserts "even though
+    // the file is present", so the entry has to be checked against the folder
+    // before it is believed; a parked file is in `parked`, not `items`, and is
+    // correctly absent from `has_file` too.
+    for name in stack
+        .disabled_addons
+        .iter()
+        .filter(|name| has_file(stack, name))
+    {
         out.push(finding(
             "stack-addon-disabled",
             HealthLevel::Warning,
@@ -2272,8 +2334,20 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
             ));
         }
 
+        // Only where Kalpa looked where ReShade looks. `find_shader_source`
+        // searches one tree, `reshade-shaders\Shaders`, plus its immediate
+        // subdirectories; a user who points `EffectSearchPaths` at a root of
+        // their own gets one Danger per enabled technique telling them a preset
+        // that compiles fine will not compile. Not finding a file in a tree
+        // nobody said to search is not evidence the file is missing.
+        let searched_where_reshade_does = stack
+            .shaders
+            .effect_search_paths
+            .as_deref()
+            .map(|paths| !search_paths_beyond_lookup(paths))
+            .unwrap_or(true);
         for technique in &preset.techniques {
-            if !technique.source_present {
+            if !technique.source_present && searched_where_reshade_does {
                 out.push(finding(
                     "stack-technique-source-missing",
                     HealthLevel::Danger,
@@ -2297,7 +2371,23 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
                 .iter()
                 .position(|t| t.name.eq_ignore_ascii_case(needle))
         };
-        match (position(FEED_TECHNIQUE), preset.mv_provider.as_ref()) {
+        // `feed_is_live`, not merely "the preset lists DLSS5_Feed". The module
+        // header has said since 2026-09-03 that these two checks are gated on
+        // the path rather than on file presence, and until 2026-09-07 they were
+        // gated on neither. A feed -> direct migration parks the feed add-ons
+        // and leaves the old preset behind, so the list still enables
+        // DLSS5_Feed with no provider above it — and the Motion slot then
+        // rendered "Nothing in ReShade has to produce them, so an empty slot
+        // here is correct" beside a Danger saying DLSS sees a still image.
+        // Nothing runs that list, so there is no order to be wrong.
+        //
+        // Hiding the position rather than guarding the arm keeps the fall
+        // through identical: a live feed add-on implies `feed_is_live`, so
+        // `stack-feed-technique-off` below still sees exactly what it saw.
+        let feed_at = feed_is_live(stack.active_path)
+            .then(|| position(FEED_TECHNIQUE))
+            .flatten();
+        match (feed_at, preset.mv_provider.as_ref()) {
             (Some(feed), Some(provider)) => match &provider.technique {
                 Some(name) if position(name).is_some_and(|at| at > feed) => {
                     out.push(finding(
@@ -2378,12 +2468,17 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
             .and_then(|v| v.split('.').next())
             .and_then(|major| major.parse::<u32>().ok())
             .is_some_and(|major| major < 3);
-        let has_swapped_backup = stack.preserved_originals.iter().any(|original| {
-            original
-                .file_name
-                .to_ascii_lowercase()
-                .contains("nvngx_dlss")
-        });
+        // `backs_up` is the resolved target name, so this asks whether a backup
+        // of *nvngx_dlss.dll* exists. The old test was a substring match on
+        // `file_name`, which caught `nvngx_dlssnr.dll.disabled-bak` and
+        // `nvngx_dlssg.dll.bak` just as readily — and since every stock install
+        // ships a sub-3 DLSS, backing up the NR runtime before swapping *it*
+        // was enough to be told a game update had overwritten a swap of
+        // nvngx_dlss.dll that never happened.
+        let has_swapped_backup = stack
+            .preserved_originals
+            .iter()
+            .any(|original| original.backs_up.as_deref() == Some("nvngx_dlss.dll"));
         if reverted && has_swapped_backup {
             out.push(finding(
                 "stack-dlss-reverted",
@@ -2647,6 +2742,63 @@ PresetPath=.\\ReShadePreset.ini
             .expect("the ordering check must run for this provider too")
             .detail;
         assert!(detail.contains("Lumenite_Kernel"), "{detail}");
+    }
+
+    /// The middle tier. ReShade writes preset-wide definitions above the first
+    /// `[effect.fx]` header — [`direct_path_stack`] reproduces that line from
+    /// the primary user's real folder — and the resolver used to read the
+    /// per-effect block and `[GENERAL]` only. A correctly configured
+    /// current-build feed install therefore resolved to *no* definition, fell
+    /// back to the 0.4.x scheme, defaulted to LaunchPad and was reported as
+    /// `stack-mv-provider-missing`: Kalpa telling a working install it renders
+    /// a still image.
+    #[test]
+    fn a_preset_wide_mv_provider_definition_is_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(tmp.path(), "reshade-shaders/Shaders/lumenite_Kernel.fx", "");
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "PreprocessorDefinitions=DLSS5_MV_PROVIDER=3\n\
+             Techniques=Lumenite_Kernel@lumenite_Kernel.fx,DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+
+        let provider = stack
+            .preset
+            .as_ref()
+            .and_then(|preset| preset.mv_provider.as_ref())
+            .expect("provider");
+        assert_eq!(provider.kind, MvProviderKind::LumeniteKernel);
+        assert_eq!(provider.technique.as_deref(), Some("Lumenite_Kernel"));
+        assert!(
+            stack.findings.is_empty(),
+            "the provider is enabled above the feed, so nothing should be reported; got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// And the tiers stay in ReShade's order: a per-effect definition still
+    /// wins over the preset-wide one, so adding the middle tier cannot make
+    /// Kalpa read a stale global value over the block the user edited last.
+    #[test]
+    fn a_per_effect_definition_still_wins_over_the_preset_wide_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(tmp.path(), "reshade-shaders/Shaders/lumenite_Kernel.fx", "");
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "PreprocessorDefinitions=DLSS5_MV_PROVIDER=1\n\
+             Techniques=Lumenite_Kernel@lumenite_Kernel.fx,DLSS5_Feed@DLSS5_Feed.fx\n\n\
+             [DLSS5_Feed.fx]\nPreprocessorDefinitions=DLSS5_MV_PROVIDER=3\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        let provider = stack.preset.unwrap().mv_provider.unwrap();
+
+        assert_eq!(provider.kind, MvProviderKind::LumeniteKernel);
+        assert_eq!(provider.technique.as_deref(), Some("Lumenite_Kernel"));
     }
 
     /// The numbering is not the same as the old runtime combo: `1` is LaunchPad
@@ -2919,6 +3071,56 @@ PresetPath=.\\ReShadePreset.ini
         assert!(ids(&stack).contains(&"stack-technique-source-missing"));
     }
 
+    /// The same missing file, with a second search root added to ReShade.ini.
+    /// Kalpa's lookup only ever walks `reshade-shaders\Shaders` and one level
+    /// below it, so on any non-default layout it was raising a Danger — one per
+    /// enabled technique — telling the user a preset that compiles fine would
+    /// fail to compile. Not finding a file in a tree nobody said to search is
+    /// not evidence the file is missing.
+    #[test]
+    fn a_search_path_kalpa_does_not_walk_suppresses_the_missing_source_danger() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &REAL_RESHADE_INI.replace(
+                r"EffectSearchPaths=.\reshade-shaders\Shaders\**",
+                r"EffectSearchPaths=.\reshade-shaders\Shaders\**,.\my-shaders\**",
+            ),
+        );
+        std::fs::remove_file(
+            tmp.path()
+                .join("reshade-shaders")
+                .join("Shaders")
+                .join("DLSS5_Feed.fx"),
+        )
+        .unwrap();
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            !ids(&stack).contains(&"stack-technique-source-missing"),
+            "the file may be under the root Kalpa cannot walk, got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// The gate above must not swallow the finding on the layout almost
+    /// everyone has: `.\reshade-shaders\Shaders\**` is what ReShade writes by
+    /// default, and it is the one tree the lookup does walk. The end-to-end
+    /// half of this is `a_missing_shader_source_is_reported`, which uses that
+    /// default and still expects the Danger.
+    #[test]
+    fn the_default_search_path_counts_as_searched() {
+        assert!(!search_paths_beyond_lookup(r".\reshade-shaders\Shaders\**"));
+        assert!(!search_paths_beyond_lookup(r"reshade-shaders/Shaders"));
+        assert!(!search_paths_beyond_lookup(r".\RESHADE-SHADERS\shaders\**"));
+        assert!(search_paths_beyond_lookup(
+            r".\reshade-shaders\Shaders\**,.\my-shaders\**"
+        ));
+        assert!(search_paths_beyond_lookup(r"C:\shaders\**"));
+    }
+
     #[test]
     fn a_disabled_addon_is_reported() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2933,6 +3135,30 @@ PresetPath=.\\ReShadePreset.ini
         assert_eq!(stack.disabled_addons, vec!["dlss5-feed.addon64"]);
     }
 
+    /// ReShade keeps `DisabledAddons` entries for add-ons that are no longer
+    /// there — the same way [`DIRECT_RESHADE_INI`]'s `OverlayCollapsed` still
+    /// names two parked ones. The finding's own copy says "even though the file
+    /// is present", so an entry naming nothing on disk was Kalpa warning about
+    /// a file that does not exist.
+    #[test]
+    fn a_disabled_entry_for_a_file_that_is_gone_is_not_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &REAL_RESHADE_INI.replace("DisabledAddons=", "DisabledAddons=vanished.addon64"),
+        );
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.disabled_addons, vec!["vanished.addon64"]);
+        assert!(
+            !ids(&stack).contains(&"stack-addon-disabled"),
+            "no such file is in the folder, got {:?}",
+            ids(&stack)
+        );
+    }
+
     #[test]
     fn the_feed_host_being_absent_is_reported() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2940,6 +3166,50 @@ PresetPath=.\\ReShadePreset.ini
         std::fs::remove_file(tmp.path().join("dlss5-feed-host64.exe")).unwrap();
         let stack = inspect_stack(tmp.path());
         assert!(ids(&stack).contains(&"stack-feed-host-missing"));
+    }
+
+    /// Stamp a version onto the DLSS runtime and re-derive the findings.
+    ///
+    /// `file_version` reads a real PE version resource, which a zero-byte
+    /// fixture cannot carry, so `stack-dlss-reverted` is unreachable through
+    /// `inspect_stack` alone — which is exactly why the bug below survived.
+    fn findings_with_dlss_version(stack: &mut ClientStack, version: &str) -> Vec<String> {
+        for item in &mut stack.items {
+            if item.role == StackRole::SuperSampling {
+                item.version = Some(version.to_string());
+            }
+        }
+        build_findings(stack)
+            .into_iter()
+            .map(|finding| finding.id)
+            .collect()
+    }
+
+    /// The reverted-swap check matched *any* `nvngx_dlss*` backup, and every
+    /// stock install ships a sub-3 DLSS — so a user who backed up
+    /// `nvngx_dlssnr.dll` before swapping the NR runtime, and never touched
+    /// `nvngx_dlss.dll` at all, was told a game update had overwritten a swap
+    /// that never happened.
+    #[test]
+    fn a_backup_of_another_runtime_is_not_a_reverted_dlss_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(tmp.path(), "nvngx_dlssnr.dll.disabled-bak", "");
+        let mut stack = inspect_stack(tmp.path());
+        let found = findings_with_dlss_version(&mut stack, "2.2.16.0");
+        assert!(
+            !found.contains(&"stack-dlss-reverted".to_string()),
+            "nothing here backs up nvngx_dlss.dll, got {found:?}"
+        );
+
+        // The check still bites when the backup really is of nvngx_dlss.dll.
+        write(tmp.path(), "nvngx_dlss.dll.disabled-bak", "");
+        let mut swapped = inspect_stack(tmp.path());
+        let found = findings_with_dlss_version(&mut swapped, "2.2.16.0");
+        assert!(
+            found.contains(&"stack-dlss-reverted".to_string()),
+            "a preserved nvngx_dlss.dll beside ESO's own build is the drift case, got {found:?}"
+        );
     }
 
     #[test]
@@ -3227,6 +3497,74 @@ PresetPath=.\\ReShadePreset.ini
                 "{id} describes the feed path and must not fire on the direct path"
             );
         }
+    }
+
+    /// And the same install with the old preset still on disk, which is what a
+    /// feed -> direct migration actually leaves behind: the add-ons parked, the
+    /// technique list untouched.
+    ///
+    /// The preset checks above were gated on the path; the ordering and
+    /// provider checks were gated on nothing but "the list names DLSS5_Feed",
+    /// so this file — which ReShade runs no part of, because the add-on that
+    /// reads it is parked — produced a Danger inside the Motion slot, directly
+    /// beside that slot's own copy saying an empty slot here is correct.
+    #[test]
+    fn a_leftover_feed_preset_is_quiet_on_the_direct_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        direct_path_stack(tmp.path());
+        write(tmp.path(), "reshade-shaders/Shaders/DLSS5_Feed.fx", "");
+
+        // No provider above the feed at all.
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        let stack = inspect_stack(tmp.path());
+        assert_eq!(stack.active_path, ActivePath::Direct);
+        assert!(
+            stack.findings.is_empty(),
+            "nothing reads this preset, got {:?}",
+            ids(&stack)
+        );
+
+        // And with the order wrong in the same dead file.
+        write(
+            tmp.path(),
+            "ReShadePreset.ini",
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+        );
+        let reordered = inspect_stack(tmp.path());
+        assert!(
+            reordered.findings.is_empty(),
+            "there is no order to be wrong when nothing runs the list, got {:?}",
+            ids(&reordered)
+        );
+    }
+
+    /// A `ReShade.ini` carrying a byte that is not UTF-8 — a section name saved
+    /// in the local code page is enough, and this release already fixed a panic
+    /// on one — used to fail `read_to_string` whole, so the file read as
+    /// *absent*: every key gone, `LoadFromDllMain` empty, and
+    /// `stack-addon-not-in-dllmain` telling the primary user to add a line that
+    /// was already in their file. The remedy that finding gives is another
+    /// hand-edit of the same file, which is how it got the byte.
+    #[test]
+    fn a_non_utf8_reshade_ini_is_still_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        direct_path_stack(tmp.path());
+        let mut bytes = DIRECT_RESHADE_INI.as_bytes().to_vec();
+        // 0xE9 is `é` in Windows-1252 and is not valid UTF-8 on its own.
+        bytes.extend_from_slice(b"\n[Caf\xE9]\nNote=1\n");
+        std::fs::write(tmp.path().join("ReShade.ini"), bytes).unwrap();
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(stack.load_from_dll_main, vec!["renodx-dlss.addon64"]);
+        assert!(
+            !ids(&stack).contains(&"stack-addon-not-in-dllmain"),
+            "the line is in the file; only its encoding is odd, got {:?}",
+            ids(&stack)
+        );
     }
 
     /// The feed fixture is the older shape and still has to behave exactly as
