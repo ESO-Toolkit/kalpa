@@ -175,6 +175,28 @@ bulk filelist API carries no descriptions.
 - `src/addon-routes.ts` — `GET /addons/search`, `GET /addons/stats`, and the
   admin-only `POST /admin/index/sync` and `POST /admin/index/backfill`.
 
+Two upstream quirks the crawl exists to absorb: `categorylist.json` returns
+`id` as a **string** while `filelist.json` sends a number (a `typeof` check
+here silently blanked every category), and ESOUI descriptions carry BBCode
+whose attribute is often a full URL, so the tag pattern cannot be
+length-capped tightly.
+
+**Category 157, "Discontinued & Outdated", is excluded by default** — it is
+~980 of ~4170 addons. Offering a retired addon as the answer to "is there an
+addon that…" reads as a live recommendation, which is worse than no answer.
+Pass `?discontinued=true` to include them.
+
+D1's limits shape the write path and are easy to reintroduce: **100 bound
+parameters per query** and **1000 queries per Worker invocation**. Metadata is
+therefore written in multi-row statements via `upsertMetaBatch`, and the sync
+tombstones with `sweepUnseen` (an `indexed_at < runStart` comparison) rather
+than an id list. One statement per addon means ~4000 queries and fails.
+
+`detail_stale` is the FTS rebuild trigger, and only `applyDetail` ever writes
+an `addons_fts` row. Anything that invalidates the indexed text — a moved
+`last_update`, a changed `category_name`, or **un-tombstoning** — has to
+re-arm it, or the addons table and the search index quietly disagree.
+
 **The nightly crawl is fail-closed.** It runs only when `ADDON_INDEX_SYNC` is
 exactly `"enabled"` AND the `ADDON_INDEX` binding exists. Provision the database
 and finish the backfill _before_ flipping the var — and note that this is the

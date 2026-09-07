@@ -37,6 +37,18 @@ const SNIPPET_TOKENS = 24;
  */
 const BM25_WEIGHTS = "10.0, 1.5, 3.0, 1.0";
 
+/**
+ * ESOUI category 157, "Discontinued & Outdated" — 981 of ~4170 addons, roughly
+ * a quarter of the catalogue.
+ *
+ * Excluded from search and from Ask candidates by default. These are addons
+ * their authors have retired; surfacing one as the answer to "is there an addon
+ * that..." is worse than returning nothing, because it looks like a live
+ * recommendation. They stay indexed so a direct lookup by name still finds them
+ * via `includeDiscontinued`.
+ */
+export const DISCONTINUED_CATEGORY_ID = 157;
+
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS addons (
      uid INTEGER PRIMARY KEY,
@@ -223,6 +235,8 @@ export interface SearchOptions {
   /** Libraries are dependencies, not things a player chooses. Excluded by
    *  default, matching how `browse_popular` in esoui.rs filters them. */
   includeLibraries?: boolean;
+  /** Include retired addons. Off by default — see DISCONTINUED_CATEGORY_ID. */
+  includeDiscontinued?: boolean;
 }
 
 /**
@@ -261,6 +275,7 @@ export async function searchAddons(
        WHERE addons_fts MATCH ?
          AND a.removed = 0
          ${options.includeLibraries ? "" : "AND a.is_library = 0"}
+         ${options.includeDiscontinued ? "" : `AND a.category_id != ${DISCONTINUED_CATEGORY_ID}`}
        ORDER BY score ASC, a.downloads DESC
        LIMIT ? OFFSET ?`;
 
@@ -329,6 +344,10 @@ const UPSERT_TAIL = `ON CONFLICT(uid) DO UPDATE SET
            -- no FTS row and is permanently unsearchable -- silently, because
            -- search just returns fewer results.
            WHEN addons.removed = 1 THEN 1
+           -- The FTS row embeds category_name, and only applyDetail rewrites
+           -- it. Without this, a corrected category never reaches the search
+           -- index -- the addons table and addons_fts just quietly disagree.
+           WHEN addons.category_name != excluded.category_name THEN 1
            -- Otherwise only a moved last_update re-queues. Download counts
            -- change constantly and say nothing about the text.
            WHEN addons.last_update != excluded.last_update THEN 1

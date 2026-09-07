@@ -182,6 +182,18 @@ describe("searchAddons", () => {
     expect(result.hits.map((h) => h.esoui_id)).toEqual([1]);
   });
 
+  it("excludes discontinued addons by default and includes them on request", async () => {
+    // ~24% of the ESOUI catalogue is category 157 "Discontinued & Outdated".
+    // Offering one as the answer to "is there an addon that..." reads as a live
+    // recommendation, which is worse than returning nothing.
+    await seed(1, "OldCombatThing", "shows combat state", { categoryId: 157 });
+
+    expect((await searchAddons(db(), "combat state")).hits).toHaveLength(0);
+    expect(
+      (await searchAddons(db(), "combat state", { includeDiscontinued: true })).hits,
+    ).toHaveLength(1);
+  });
+
   it("excludes libraries by default and includes them on request", async () => {
     await seed(1, "LibStub", "A combat library for addon authors.", { isLibrary: true });
 

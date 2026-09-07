@@ -111,11 +111,31 @@ interface ApiFileDetail {
 }
 
 interface ApiCategory {
-  id: number;
+  /** v4 sends this as a STRING ("17") on categorylist.json, but as a number on
+   *  filelist.json. A `typeof === "number"` guard here silently dropped every
+   *  category and left every addon with a blank category name. */
+  id: number | string;
   title?: string;
 }
 
+/** Accept either representation and reject anything that is not a real id. */
+function toCategoryId(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 // ── Text normalisation ─────────────────────────────────────────────────────
+
+/**
+ * BBCode tags: `[b]`, `[/b]`, `[size=3]`, `[URL="https://..."]`.
+ *
+ * The attribute value is frequently a full URL, so it cannot be capped tightly
+ * — the previous 60-character limit meant `[URL="https://www.esoui.com/..."]`
+ * was left in verbatim, leaking markup into search snippets and into the Ask
+ * prompt. Bounded at 300 and forbidden from spanning lines so it cannot run
+ * away across a whole description.
+ */
+const BBCODE_PATTERN = new RegExp(String.raw`\[/?[a-z][a-z0-9]*(?:=[^\]\n]{0,300})?\]`, "gi");
 
 const ENTITIES: Record<string, string> = {
   amp: "&",
@@ -148,8 +168,11 @@ export function stripMarkup(input: string, maxLength = 2000): string {
     .replace(/<\s*br\s*\/?\s*>/gi, " ")
     .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
     .replace(/<[^>]*>/g, "")
-    // BBCode survives in older descriptions.
-    .replace(/\[\/?[a-z0-9*=#"'\s.:/?&-]{0,60}\]/gi, " ");
+    // BBCode survives in older descriptions. The attribute value is often a
+    // full URL, so it must not be length-capped tightly — a [URL="https://..."]
+    // tag routinely exceeds 60 characters and was being left in verbatim,
+    // leaking markup into snippets and into the Ask prompt.
+    .replace(BBCODE_PATTERN, " ");
 
   const decoded = withoutTags.replace(/&([a-z]+|#x?[0-9a-f]+);/gi, (match, name: string) => {
     const key = name.toLowerCase();
@@ -193,8 +216,9 @@ export async function fetchCategories(): Promise<Map<number, string>> {
     const parsed: unknown = await response.json();
     if (!Array.isArray(parsed)) return map;
     for (const raw of parsed as ApiCategory[]) {
-      if (typeof raw?.id === "number" && typeof raw.title === "string") {
-        map.set(raw.id, raw.title);
+      const id = toCategoryId(raw?.id);
+      if (id !== null && typeof raw.title === "string") {
+        map.set(id, flattenField(raw.title));
       }
     }
   } catch {
@@ -253,9 +277,8 @@ export async function syncFilelist(db: D1Database): Promise<{
     uid: entry.id,
     title: flattenField(entry.title, `Addon ${entry.id}`),
     author: flattenField(entry.author),
-    categoryId: typeof entry.categoryId === "number" ? entry.categoryId : 0,
-    categoryName:
-      typeof entry.categoryId === "number" ? (categories.get(entry.categoryId) ?? "") : "",
+    categoryId: toCategoryId(entry.categoryId) ?? 0,
+    categoryName: categories.get(toCategoryId(entry.categoryId) ?? -1) ?? "",
     downloads: typeof entry.downloads === "number" ? entry.downloads : 0,
     downloadsMonthly: typeof entry.downloadsMonthly === "number" ? entry.downloadsMonthly : 0,
     favorites: typeof entry.favorites === "number" ? entry.favorites : 0,

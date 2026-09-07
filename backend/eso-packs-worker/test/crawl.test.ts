@@ -121,6 +121,15 @@ describe("stripMarkup", () => {
     expect(stripMarkup("[b]Combat[/b] [url=http://x.com]link[/url]")).toBe("Combat link");
   });
 
+  it("strips a BBCode tag whose attribute is a long URL", () => {
+    // The old 60-character cap let this through verbatim, leaking markup into
+    // search snippets and into the Ask prompt.
+    const tag = '[URL="https://www.esoui.com/downloads/info245-AdvancedFiltersUpdated.html"]';
+    expect(stripMarkup(`Original addon: ${tag}Advanced Filters[/URL] here`)).toBe(
+      "Original addon: Advanced Filters here",
+    );
+  });
+
   it("decodes numeric entities", () => {
     expect(stripMarkup("caf&#233; &#x41;")).toBe("café A");
   });
@@ -213,6 +222,44 @@ describe("syncFilelist", () => {
     // upstream entry would abort the entire sync.
     mockApi({ filelist: [filelistEntry(1), filelistEntry(1), filelistEntry(2)] });
     await expect(syncFilelist(db())).resolves.toMatchObject({ seen: 2 });
+  });
+
+  it("accepts a string category id, which is what v4 actually sends", async () => {
+    // categorylist.json returns {"id":"25"} while filelist.json sends a number.
+    // A typeof === "number" guard silently dropped every category and left the
+    // whole index with blank category names.
+    mockApi({
+      filelist: [filelistEntry(1, { categoryId: 25 })],
+      categories: [{ id: "25", title: "Combat Mods" }],
+    });
+    await syncFilelist(db());
+
+    const row = await db()
+      .prepare("SELECT category_name FROM addons WHERE uid = 1")
+      .first<{ category_name: string }>();
+    expect(row?.category_name).toBe("Combat Mods");
+  });
+
+  it("re-queues a description fetch when a category name changes", async () => {
+    // addons_fts embeds the category, and only applyDetail rewrites it.
+    mockApi({
+      filelist: [filelistEntry(1)],
+      categories: [{ id: "25", title: "Combat Mods" }],
+      details: { 1: { id: 1, description: "shows combat" } },
+    });
+    await syncFilelist(db());
+    await crawlDetails(db(), 10);
+
+    mockApi({
+      filelist: [filelistEntry(1)],
+      categories: [{ id: "25", title: "Combat Mods Renamed" }],
+    });
+    await syncFilelist(db());
+
+    const row = await db()
+      .prepare("SELECT detail_stale FROM addons WHERE uid = 1")
+      .first<{ detail_stale: number }>();
+    expect(row?.detail_stale).toBe(1);
   });
 
   it("writes category names during the upsert, not in a second pass", async () => {

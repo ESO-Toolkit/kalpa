@@ -76,9 +76,15 @@ export async function handleAddonSearch(
   const limit = parsePositiveInt(url.searchParams.get("limit"), 25, 50) || 25;
   const offset = parsePositiveInt(url.searchParams.get("offset"), 0, 5000);
   const includeLibraries = url.searchParams.get("libraries") === "true";
+  const includeDiscontinued = url.searchParams.get("discontinued") === "true";
 
   try {
-    const result = await searchAddons(db, query, { limit, offset, includeLibraries });
+    const result = await searchAddons(db, query, {
+      limit,
+      offset,
+      includeLibraries,
+      includeDiscontinued,
+    });
     // Five minutes: long enough to absorb a user retyping the same query,
     // short enough that a freshly indexed addon shows up the same session.
     return jsonResponse(request, result, 200, 300);
