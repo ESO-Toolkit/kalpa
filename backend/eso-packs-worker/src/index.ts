@@ -20,6 +20,7 @@ import {
   handleAddonStats,
   handleAsk,
   handleIndexBackfill,
+  handleIndexReprocess,
   handleIndexSync,
 } from "./addon-routes";
 import { runDailySync } from "./crawl";
@@ -1925,6 +1926,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (method === "POST" && pathname === "/admin/index/backfill") {
     if (!requireAuth(request, env)) return unauthorized(request);
     return handleIndexBackfill(request, env, url);
+  }
+
+  if (method === "POST" && pathname === "/admin/index/reprocess") {
+    if (!requireAuth(request, env)) return unauthorized(request);
+    return handleIndexReprocess(request, env);
   }
 
   // Migration control routes are admin-only inside their handlers.

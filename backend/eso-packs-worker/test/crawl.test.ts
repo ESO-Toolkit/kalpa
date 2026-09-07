@@ -4,6 +4,7 @@ import {
   crawlDetails,
   fetchDetail,
   flattenField,
+  reprocessDescriptions,
   runDailySync,
   stripMarkup,
   syncFilelist,
@@ -128,6 +129,21 @@ describe("stripMarkup", () => {
     expect(stripMarkup(`Original addon: ${tag}Advanced Filters[/URL] here`)).toBe(
       "Original addon: Advanced Filters here",
     );
+  });
+
+  it("removes bare URLs, which are not markup and were indexed verbatim", () => {
+    // A language-flag icon URL injected the tokens icons/flags/usa/png, so
+    // "flagged in combat" matched addons that merely displayed a flag image.
+    expect(
+      stripMarkup(
+        "Translations http://icons.iconarchive.com/icons/iconscity/flags/32/usa-icon.png done",
+      ),
+    ).toBe("Translations done");
+    expect(stripMarkup("Visit www.example.com/x for docs")).toBe("Visit for docs");
+  });
+
+  it("strips the bare [*] list marker", () => {
+    expect(stripMarkup("Features: [*]one [*]two")).toBe("Features: one two");
   });
 
   it("decodes numeric entities", () => {
@@ -454,5 +470,52 @@ describe("runDailySync", () => {
 
     await runDailySync({ ...testEnv, ADDON_INDEX_SYNC: "enabled" });
     expect((await searchAddons(db(), "in combat")).hits[0].esoui_id).toBe(1543);
+  });
+});
+
+describe("reprocessDescriptions", () => {
+  /** Write a description straight into storage, bypassing stripMarkup, to
+   *  simulate a row indexed before the pipeline learned a rule. */
+  async function seedDirty(uid: number, description: string): Promise<void> {
+    mockApi({ filelist: [filelistEntry(uid)], details: { [uid]: { id: uid, description: "x" } } });
+    await syncFilelist(db());
+    await crawlDetails(db(), 5);
+    await db().prepare("UPDATE addons SET description = ? WHERE uid = ?").bind(description, uid).run();
+    await db().prepare("DELETE FROM addons_fts WHERE rowid = ?").bind(uid).run();
+    await db()
+      .prepare("INSERT INTO addons_fts (rowid, title, author, category, description) VALUES (?,?,?,?,?)")
+      .bind(uid, "Addon " + uid, "Author", "", description)
+      .run();
+  }
+
+  it("re-cleans stored text without any upstream request", async () => {
+    await seedDirty(1, "Combat helper http://icons.example.com/flags/32/usa-icon.png here");
+    // Proves the contamination is real before the fix.
+    expect((await searchAddons(db(), "usa icon")).hits).toHaveLength(1);
+
+    // Fresh spy: seeding above legitimately hit the API, and the claim under
+    // test is that REPROCESSING does not.
+    const spy = mockApi({});
+    spy.mockClear();
+    const result = await reprocessDescriptions(db());
+
+    expect(result.changed).toBe(1);
+    expect(spy).not.toHaveBeenCalled();
+    expect((await searchAddons(db(), "usa icon")).hits).toHaveLength(0);
+    // …and the genuine content still matches.
+    expect((await searchAddons(db(), "combat helper")).hits).toHaveLength(1);
+  });
+
+  it("skips rows that are already clean", async () => {
+    await seedDirty(1, "Already clean text");
+    mockApi({});
+    expect((await reprocessDescriptions(db())).changed).toBe(0);
+  });
+
+  it("reports complete and resets its cursor when the walk ends", async () => {
+    mockApi({});
+    const result = await reprocessDescriptions(db());
+    expect(result.complete).toBe(true);
+    expect(result.scanned).toBe(0);
   });
 });

@@ -2,6 +2,7 @@ import type { Env, CrawlOutcome } from "./types";
 import {
   applyDetail,
   ensureSchema,
+  getMeta,
   markRemoved,
   pendingDetailUids,
   setMeta,
@@ -135,7 +136,23 @@ function toCategoryId(value: unknown): number | null {
  * prompt. Bounded at 300 and forbidden from spanning lines so it cannot run
  * away across a whole description.
  */
-const BBCODE_PATTERN = new RegExp(String.raw`\[/?[a-z][a-z0-9]*(?:=[^\]\n]{0,300})?\]`, "gi");
+const BBCODE_PATTERN = new RegExp(
+  // [b] [/b] [size=3] [URL="https://..."] and the bare list marker [*].
+  String.raw`\[(?:\*|/?[a-z][a-z0-9]*(?:=[^\]\n]{0,300})?)\]`,
+  "gi",
+);
+
+/**
+ * Bare URLs left in description prose.
+ *
+ * These are not markup, so tag-stripping never touched them, and they were
+ * indexed verbatim. A language-flag icon URL like
+ * `http://icons.iconarchive.com/icons/iconscity/flags/32/usa-icon.png` injects
+ * the tokens `icons`, `flags`, `usa` and `png` into an addon's searchable text,
+ * so a search for "flagged in combat" matched addons that merely displayed a
+ * flag image. 468 of ~2900 descriptions carried at least one.
+ */
+const BARE_URL_PATTERN = new RegExp(String.raw`(?:https?://|www\.)\S+`, "gi");
 
 const ENTITIES: Record<string, string> = {
   amp: "&",
@@ -172,7 +189,8 @@ export function stripMarkup(input: string, maxLength = 2000): string {
     // full URL, so it must not be length-capped tightly — a [URL="https://..."]
     // tag routinely exceeds 60 characters and was being left in verbatim,
     // leaking markup into snippets and into the Ask prompt.
-    .replace(BBCODE_PATTERN, " ");
+    .replace(BBCODE_PATTERN, " ")
+    .replace(BARE_URL_PATTERN, " ");
 
   const decoded = withoutTags.replace(/&([a-z]+|#x?[0-9a-f]+);/gi, (match, name: string) => {
     const key = name.toLowerCase();
@@ -395,4 +413,72 @@ export async function runDailySync(env: Env): Promise<void> {
     `addon-index sync: seen=${summary.seen} removed=${summary.removed} ` +
       `details=${outcome.fetched} failed=${outcome.failed} remaining=${outcome.remaining}`,
   );
+}
+
+/**
+ * Rows re-cleaned per call. Each costs an UPDATE plus an FTS delete+insert
+ * (3 queries), so 150 rows is 450 — comfortably inside D1's 1000-per-invocation
+ * budget with room for the read.
+ */
+const REPROCESS_PAGE = 150;
+
+/**
+ * Re-run the text pipeline over descriptions ALREADY stored, with no upstream
+ * traffic at all.
+ *
+ * `stripMarkup` is a pure function of the raw text, but what is stored is its
+ * OUTPUT — so when the pipeline gains a rule (bare-URL removal, `[*]` markers),
+ * every previously-indexed row keeps the old contamination. Re-fetching ~4000
+ * descriptions from ESOUI to fix our own parser would be rude and slow; the
+ * stored text still contains the offending substrings, so re-applying the
+ * current pipeline to it is enough.
+ *
+ * Paged and resumable via an `index_meta` cursor. Safe to re-run: rows whose
+ * text does not change are skipped, so a second pass is nearly free.
+ */
+export async function reprocessDescriptions(
+  db: D1Database,
+  limit = REPROCESS_PAGE,
+): Promise<{ scanned: number; changed: number; complete: boolean }> {
+  await ensureSchema(db);
+
+  const cursor = Number.parseInt((await getMeta(db, "reprocess_cursor")) ?? "0", 10) || 0;
+  const page = Math.min(Math.max(limit, 1), REPROCESS_PAGE);
+
+  const rows = await db
+    .prepare(
+      `SELECT uid, title, author, category_name, description
+         FROM addons
+        WHERE uid > ? AND removed = 0 AND detail_stale = 0
+        ORDER BY uid
+        LIMIT ?`,
+    )
+    .bind(cursor, page)
+    .all<{
+      uid: number;
+      title: string;
+      author: string;
+      category_name: string;
+      description: string;
+    }>();
+
+  const results = rows.results ?? [];
+  if (results.length === 0) {
+    // A finished pass resets the cursor so the next one starts from the top.
+    await setMeta(db, "reprocess_cursor", "0");
+    return { scanned: 0, changed: 0, complete: true };
+  }
+
+  let changed = 0;
+  for (const row of results) {
+    const cleaned = stripMarkup(row.description);
+    if (cleaned === row.description) continue;
+    // applyDetail rewrites both the stored text and the FTS row, and is the
+    // single place that knows how to build one.
+    await applyDetail(db, row.uid, cleaned, row.category_name, Date.now());
+    changed++;
+  }
+
+  await setMeta(db, "reprocess_cursor", String(results[results.length - 1].uid));
+  return { scanned: results.length, changed, complete: false };
 }

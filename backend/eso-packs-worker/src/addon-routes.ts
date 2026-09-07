@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { corsHeaders } from "./cors";
 import { indexStats, searchAddons } from "./addon-index";
-import { crawlDetails, syncFilelist, MAX_DETAIL_BATCH } from "./crawl";
+import { crawlDetails, reprocessDescriptions, syncFilelist, MAX_DETAIL_BATCH } from "./crawl";
 import { answerQuestion } from "./ask";
 import { readJsonBody } from "./validate";
 
@@ -195,5 +195,26 @@ export async function handleAsk(request: Request, env: Env): Promise<Response> {
   } catch (err) {
     console.error("ask failed:", err);
     return jsonResponse(request, { error: "Ask failed" }, 500);
+  }
+}
+
+/**
+ * POST /admin/index/reprocess — re-clean stored descriptions in place.
+ *
+ * No upstream requests. Run this after changing the text pipeline instead of
+ * re-crawling ESOUI. The operator loops until `complete`.
+ */
+export async function handleIndexReprocess(request: Request, env: Env): Promise<Response> {
+  const db = env.ADDON_INDEX;
+  if (!db) return indexUnavailable(request);
+  try {
+    return jsonResponse(request, await reprocessDescriptions(db));
+  } catch (err) {
+    console.error("index reprocess failed:", err);
+    return jsonResponse(
+      request,
+      { error: err instanceof Error ? err.message : "Reprocess failed" },
+      500,
+    );
   }
 }
