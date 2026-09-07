@@ -977,12 +977,24 @@ pub struct EsoPackData {
     pub addons: Vec<PackAddonEntry>,
 }
 
+/// Suggested save-dialog file name for a pack, derived from its title.
+///
+/// The fallback stem is load-bearing. A title written entirely in Cyrillic, CJK
+/// or emoji — all legal, the worker only bounds a title's length — sanitises to
+/// `""`, and the suggestion became a bare `.esopack`. `Path::extension` reports
+/// `None` for a name that begins with a dot and has no other dot, so accepting
+/// the dialog's own default then failed [`export_pack_to_path`]'s extension
+/// check: the pack could not be exported at all until the user retyped a name
+/// by hand.
 fn pack_export_file_name(title: &str) -> String {
     let safe_name: String = title
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || "-_ ".contains(*character))
         .collect();
     let safe_name = safe_name.split_whitespace().collect::<Vec<_>>().join("-");
+    if safe_name.is_empty() {
+        return "pack.esopack".to_string();
+    }
     format!("{safe_name}.esopack")
 }
 
@@ -1219,6 +1231,24 @@ pub struct SvImportResult {
     pub errors: Vec<String>,
 }
 
+/// Trailing `errors` entry naming how many addons an aborted import never
+/// reached, or `None` when the abort landed on the last one.
+///
+/// Every other failure in the import loop is per-addon and continues, so the
+/// frontend's "Settings import errors: …" toast reads as "these addons failed".
+/// An abort is not that: it stops the batch. Without this line a user who
+/// launched ESO mid-import saw "Applied settings for 3 addons" plus one error
+/// and no sign that the remaining forty were never attempted.
+fn import_abort_notice(not_attempted: usize) -> Option<String> {
+    if not_attempted == 0 {
+        return None;
+    }
+    let plural = if not_attempted == 1 { "" } else { "s" };
+    Some(format!(
+        "Import stopped without applying {not_attempted} more addon{plural}."
+    ))
+}
+
 /// Does `lua` still carry an identity placeholder the importer could not resolve?
 ///
 /// World tokens count. They did not used to: every world collapsed to a single
@@ -1286,7 +1316,7 @@ pub async fn import_sv_settings(
         let mut skipped = Vec::new();
         let mut errors = Vec::new();
 
-        for folder in &addon_folders {
+        for (index, folder) in addon_folders.iter().enumerate() {
             if let Err(e) = validate_name(folder) {
                 errors.push(format!("{folder}: invalid folder name: {e}"));
                 continue;
@@ -1353,6 +1383,9 @@ pub async fn import_sv_settings(
             // enough validating earlier files for ESO to start mid-operation.
             if let Err(error) = crate::commands::ensure_eso_not_running_for_settings_write() {
                 errors.push(format!("{folder}: {error}"));
+                if let Some(notice) = import_abort_notice(addon_folders.len() - index - 1) {
+                    errors.push(notice);
+                }
                 break;
             }
 
@@ -1559,6 +1592,49 @@ mod tests {
         assert!(validate_pack_id(&long_id).is_err());
         let max_id = "a".repeat(100);
         assert!(validate_pack_id(&max_id).is_ok());
+    }
+
+    /// A title with no ASCII-safe characters must still suggest a name the
+    /// export accepts. A bare `.esopack` has no extension as far as `Path` is
+    /// concerned, so accepting the dialog's own default failed the check in
+    /// `export_pack_to_path` and the pack could not be saved at all.
+    #[test]
+    fn pack_export_file_name_always_carries_an_esopack_extension() {
+        for title in [
+            "Trial Essentials",
+            "\u{42d}\u{43d}\u{434}\u{433}\u{435}\u{439}\u{43c}",
+            "\u{526f}\u{672c}\u{5fc5}\u{5907}",
+            "\u{2728}\u{2728}",
+            "   ",
+        ] {
+            let name = pack_export_file_name(title);
+            assert_eq!(
+                Path::new(&name).extension().and_then(|e| e.to_str()),
+                Some("esopack"),
+                "title {title:?} produced {name:?}"
+            );
+        }
+        assert_eq!(
+            pack_export_file_name("Trial  Essentials"),
+            "Trial-Essentials.esopack"
+        );
+        assert_eq!(
+            pack_export_file_name("\u{526f}\u{672c}\u{5fc5}\u{5907}"),
+            "pack.esopack"
+        );
+    }
+
+    #[test]
+    fn import_abort_notice_counts_only_the_addons_never_reached() {
+        assert_eq!(import_abort_notice(0), None);
+        assert_eq!(
+            import_abort_notice(1).as_deref(),
+            Some("Import stopped without applying 1 more addon.")
+        );
+        assert_eq!(
+            import_abort_notice(37).as_deref(),
+            Some("Import stopped without applying 37 more addons.")
+        );
     }
 
     #[test]
