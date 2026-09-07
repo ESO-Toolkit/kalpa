@@ -25,6 +25,17 @@ const RESTORE_SNAPSHOT_PREFIX = "restore:snapshot:";
 const RESTORE_STAGED_PACK_PREFIX = "restore:staged-pack:";
 const RESTORE_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const RESTORE_CLAIM_TTL_MS = 5 * 60 * 1000;
+/**
+ * How many orphaned bodies one aborted restore may erase in a single call.
+ * Each costs a KV delete plus a D1 batch, and the Durable Object shares the
+ * Worker's 1000-subrequest ceiling — an abort that blew through it would throw
+ * and erase nothing at all. The alarm path shares that budget with the pending
+ * create/delete journal it drains in the same invocation, hence the headroom.
+ * Anything past the budget KEEPS its journal entry rather than losing it, so
+ * removePacksByAuthor can still find and erase it on request; the warning in
+ * discardRestoreStagedPacks is the signal that happened.
+ */
+const RESTORE_STAGED_ERASE_BUDGET = 200;
 
 interface BackupSnapshot {
   created_at: string;
@@ -417,7 +428,7 @@ export class PackIndexDO extends DurableObject<Env> {
           });
           await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${active.jobId}`);
         }
-        await this.deleteRestoreStagedPacks(active.jobId);
+        await this.discardRestoreStagedPacks(active.jobId);
         await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
       }
 
@@ -457,7 +468,7 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.ctx.storage.delete(found.key);
         await this.deleteActiveRestoreIf(found.job.jobId);
         await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${found.job.jobId}`);
-        await this.deleteRestoreStagedPacks(found.job.jobId);
+        await this.discardRestoreStagedPacks(found.job.jobId);
         return null;
       }
       return this.publicRestoreState(found.job);
@@ -631,6 +642,9 @@ export class PackIndexDO extends DurableObject<Env> {
       if (input.end >= job.total) {
         job.status = "done";
         await this.deleteActiveRestoreIf(job.jobId);
+        // Plain delete, not discardRestoreStagedPacks: the replacement above
+        // just made every staged body canonical, so the journal has nothing
+        // left to point at. Only the abort paths have orphans to erase.
         await this.deleteRestoreStagedPacks(job.jobId);
       }
       await this.ctx.storage.put(found.key, job);
@@ -664,7 +678,7 @@ export class PackIndexDO extends DurableObject<Env> {
       await this.ctx.storage.put(found.key, found.job);
       await this.deleteActiveRestoreIf(found.job.jobId);
       await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${found.job.jobId}`);
-      await this.deleteRestoreStagedPacks(found.job.jobId);
+      await this.discardRestoreStagedPacks(found.job.jobId);
       return true;
     });
   }
@@ -713,7 +727,7 @@ export class PackIndexDO extends DurableObject<Env> {
             await this.ctx.storage.delete(key);
             await this.deleteActiveRestoreIf(job.jobId);
             await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
-            await this.deleteRestoreStagedPacks(job.jobId);
+            await this.discardRestoreStagedPacks(job.jobId);
             removed += 1;
             continue;
           }
@@ -1314,6 +1328,65 @@ export class PackIndexDO extends DurableObject<Env> {
     return `${RESTORE_STAGED_PACK_PREFIX}${jobId}:${packId}`;
   }
 
+  /**
+   * Retire an ABORTED restore's journal, erasing every body it published that
+   * nothing references.
+   *
+   * completeRestorePage may drop a finished job's journal outright, because
+   * applyReplacement has already made those bodies canonical. Cancellation and
+   * expiry cannot: the pages they abandon leave `pack:` values in KV and rows
+   * in the shared D1 mirror that no index points at, and dropping the journal
+   * with them threw away the only record of who wrote them. A later account
+   * deletion then could not erase them, and the nightly D1 reconcile does not
+   * either — an id the DO never owned is reported as unowned for manual
+   * adjudication, never swept — so a deleted user's pack stayed on esotk.com.
+   *
+   * Only a body that is orphaned RIGHT NOW is erased. A restore commonly
+   * replays packs that are already live and those must survive the abort:
+   * `pack:` storage covers the DO-authoritative case, and the KV index covers
+   * shadow mode, where DO storage may not have hydrated the record yet.
+   */
+  private async discardRestoreStagedPacks(jobId: string): Promise<void> {
+    const prefix = `${RESTORE_STAGED_PACK_PREFIX}${jobId}:`;
+    // Read the KV index once, and only when there is something to retire —
+    // every job that completed normally reaches this with an empty journal.
+    if ((await this.ctx.storage.list({ prefix, limit: 1 })).size === 0) return;
+    const liveInKv = new Set((await this.readKvIndex()).packs.map(({ id }) => id));
+    let budget = RESTORE_STAGED_ERASE_BUDGET;
+    let retained = 0;
+    let startAfter: string | undefined;
+    while (true) {
+      const entries = await this.ctx.storage.list<RestoreStagedPack>({
+        prefix,
+        startAfter,
+        limit: 128,
+      });
+      if (entries.size === 0) break;
+      startAfter = [...entries.keys()].at(-1);
+      for (const [key, staged] of entries) {
+        const id = staged.pack.id;
+        const orphaned = !(await this.ctx.storage.get<Pack>(this.packKey(id))) && !liveInKv.has(id);
+        if (orphaned) {
+          if (budget <= 0) {
+            retained += 1;
+            continue;
+          }
+          budget -= 1;
+          await this.env.ESO_PACKS.delete(`pack:${id}`);
+          await this.deleteD1Pack(id);
+        }
+        await this.ctx.storage.delete(key);
+      }
+      if (entries.size < 128) break;
+    }
+    if (retained > 0) {
+      console.warn(
+        `Restore ${jobId}: kept ${retained} staged record(s) past the erase budget; ` +
+          "their bodies stay orphaned until an account deletion consumes the journal.",
+      );
+    }
+  }
+
   private async deleteRestoreStagedPacks(jobId: string): Promise<void> {
     let startAfter: string | undefined;
     const prefix = `${RESTORE_STAGED_PACK_PREFIX}${jobId}:`;
@@ -1378,12 +1451,25 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
     const current = await this.getStoredPacks();
+    const live = new Map(current.map((pack): [string, Pack] => [pack.id, pack]));
     const deletedAuthors = await this.getDeletedAuthorMarkers();
     const accepted: Pack[] = [];
     for (const pack of packs) {
       const pending = await this.getPending(pack.id);
-      if (pending?.kind !== "delete" && !this.packPredatesDeletion(deletedAuthors, pack)) {
+      if (pending?.kind === "delete") continue;
+      if (!this.packPredatesDeletion(deletedAuthors, pack)) {
         accepted.push(pack);
+        continue;
+      }
+      // Refusing a pre-deletion body must not also delete whatever holds the
+      // slug now. Slugs are reusable, so a returning author's freshly
+      // published pack can share an id with the body a restore is replaying;
+      // dropping the id out of the desired set removed the NEW pack too, which
+      // is exactly the post-deletion data the timestamped marker exists to let
+      // through. Keep the live record unless it is pre-deletion data itself.
+      const existing = live.get(pack.id);
+      if (existing && !this.packPredatesDeletion(deletedAuthors, existing)) {
+        accepted.push(existing);
       }
     }
     const desiredIds = new Set(accepted.map(({ id }) => id));
