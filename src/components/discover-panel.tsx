@@ -47,7 +47,7 @@ import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 import { useInstallProgress } from "@/hooks/use-install-progress";
 import { formatInstallProgress, type InstallProgress } from "@/lib/install-progress";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
-import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
+import { AskAnswerSkeleton, DiscoverResultListSkeleton } from "@/components/ui/skeletons";
 import { motion, AnimatePresence } from "motion/react";
 
 const PAGE_SIZE = 25;
@@ -704,6 +704,20 @@ function SearchContent({
 /* ── Ask Tab ─────────────────────────────────────────── */
 
 /**
+ * Shown in the empty state rather than the placeholder.
+ *
+ * The panel is ~380px, so any placeholder long enough to carry a real example
+ * gets truncated mid-word — and the example is exactly the half that gets cut.
+ * Here they wrap, stay fully readable, and are clickable, so discovering what
+ * the feature accepts costs no typing.
+ */
+const ASK_EXAMPLES = [
+  "an addon that shows when I'm in combat",
+  "something to manage my inventory and bank",
+  "how do I track my dps",
+];
+
+/**
  * Natural-language addon assistant.
  *
  * The worker does the retrieval and the grounding; every recommendation here
@@ -756,7 +770,7 @@ function AskContent({
     <>
       <div className="px-3 pb-2">
         <Input
-          placeholder="Ask anything, e.g. an addon that shows when I'm in combat"
+          placeholder="Ask about addons…"
           aria-label="Ask about addons"
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
@@ -769,15 +783,35 @@ function AskContent({
 
       <div className="flex-1 overflow-y-auto px-3 pb-3">
         {asking ? (
-          <div className="flex items-center justify-center gap-2 py-12">
-            <div className="size-4 animate-spin rounded-full border-2 border-structure-10 border-t-primary" />
-            <span className="text-xs text-muted-foreground">Looking through addons&hellip;</span>
-          </div>
+          /* A centred spinner sat in the middle of an empty column and then
+             the answer appeared at the top — the whole panel jumped. The
+             skeleton occupies the same shape the cards will. */
+          <AskAnswerSkeleton />
         ) : !response ? (
           <EmptyState
             icon={<Sparkles className="size-8 text-muted-foreground/20" />}
             title="Ask about addons"
-            subtitle="Describe what you want in your own words and press Enter."
+            subtitleClassName="mt-2 w-full max-w-[260px]"
+            subtitle={
+              <span className="flex flex-col items-center gap-2">
+                <span>Describe what you want in your own words. Try:</span>
+                <span className="flex w-full flex-col items-stretch gap-1.5">
+                  {ASK_EXAMPLES.map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      onClick={() => {
+                        setQuestion(example);
+                        handleAsk(example);
+                      }}
+                      className="rounded-lg border border-structure-06 px-2.5 py-1.5 text-left text-xs leading-snug text-foreground transition-colors duration-150 hover:border-primary/25 hover:bg-primary/[0.06]"
+                    >
+                      &ldquo;{example}&rdquo;
+                    </button>
+                  ))}
+                </span>
+              </span>
+            }
           />
         ) : (
           <div className="flex flex-col gap-2">
@@ -1399,10 +1433,14 @@ function EmptyState({
   icon,
   title,
   subtitle,
+  subtitleClassName,
 }: {
   icon: React.ReactNode;
   title: string;
   subtitle: React.ReactNode;
+  /** Overrides the default narrow measure. The 200px cap suits a sentence but
+   *  squashes richer content such as the Ask tab's example buttons. */
+  subtitleClassName?: string;
 }) {
   return (
     <Fade transition={{ type: "spring", stiffness: 200, damping: 25 }}>
@@ -1412,7 +1450,14 @@ function EmptyState({
         </div>
         <div className="text-center">
           <p className="font-heading text-sm font-medium text-foreground">{title}</p>
-          <p className="mt-1 text-xs text-muted-foreground max-w-[200px]">{subtitle}</p>
+          <div
+            className={cn(
+              "mt-1 text-xs text-muted-foreground",
+              subtitleClassName ?? "max-w-[200px]"
+            )}
+          >
+            {subtitle}
+          </div>
         </div>
       </div>
     </Fade>
