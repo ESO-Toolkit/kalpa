@@ -295,7 +295,25 @@ pub async fn choose_addons_path(
 /// so it carries its own sandbox refusal. Anything added later with a second
 /// write root needs one too; every other command routes its single path through
 /// `require_allowed_path`.
-#[tauri::command]
+///
+/// `(async)` because a non-async `#[tauri::command]` runs on the main thread,
+/// and this body stopped being cheap in beta.23. Through beta.22 it was a
+/// canonicalize and a mutex write. The durable approval record and the
+/// detection fallback added above now read `approved-roots.json`, atomically
+/// rewrite it, and run `detect_all_game_instances`, which stats every
+/// `documents_candidates` root — including a OneDrive-redirected Documents,
+/// so possibly network I/O — across three region folders each and counts the
+/// addon manifests in every AddOns directory it finds. That is the work the
+/// user pays for the instant they finish picking a folder in Browse, with
+/// nothing else on screen to explain a frozen window.
+///
+/// The `State<'_, _>` parameters survive `(async)`; Tauri only requires that
+/// such a command return `Result`, which this one always did. Nothing in the
+/// body is main-thread-affine — `game_instances` is filesystem and env work
+/// with no COM — and no lock is held across it: each `lock()` here is a
+/// statement-local temporary, so a slow detection never parks the mutex that
+/// every other command's `require_allowed_path` needs.
+#[tauri::command(async)]
 pub fn set_addons_path(
     app: AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -11542,6 +11560,54 @@ mod tests {
                 .trim_end()
                 .ends_with("#[tauri::command(async)]"),
             "reveal_allowed_path must be #[tauri::command(async)]"
+        );
+    }
+
+    /// Same rule, and `set_addons_path` is where it regressed: beta.22's body
+    /// was a canonicalize and a mutex write, and beta.23 hung the
+    /// `approved-roots.json` read/write and a full `detect_all_game_instances`
+    /// walk off it. Sync, that freezes the window on the Browse path — the
+    /// worst place for it, because a user who got that far has nothing on
+    /// screen that would explain the stall. Source-level because an attribute
+    /// has no runtime seam to assert on.
+    #[test]
+    fn set_addons_path_stays_off_the_main_thread() {
+        const SOURCE: &str = include_str!("commands.rs");
+        let at = SOURCE
+            .find("pub fn set_addons_path(")
+            .expect("set_addons_path is still defined here");
+        // `trim_end` because this file is CRLF and `include_str!` preserves it.
+        assert!(
+            SOURCE[..at]
+                .trim_end()
+                .ends_with("#[tauri::command(async)]"),
+            "set_addons_path must be #[tauri::command(async)]"
+        );
+    }
+
+    /// `dialog:allow-save` is the webview's grant for `plugin:dialog|save`,
+    /// and nothing in `src/` invokes it any more: the two `save as
+    /// saveFileDialog` call sites went away when `export_pack_file` took the
+    /// dialog into Rust, where `tauri-plugin-dialog`'s `desktop::save_file`
+    /// drives rfd directly and never consults the ACL. So the grant now buys
+    /// the app nothing and buys anything executing in the webview a native
+    /// save dialog.
+    ///
+    /// Asserted as a pair rather than as a bare absence, because
+    /// `dialog:allow-open` must stay: `uploader-workspace.tsx` still picks its
+    /// log directory with the plugin's `open`, and deleting that one would
+    /// break the uploader with a runtime error no unit test can see — the
+    /// frontend suite mocks the plugin module wholesale.
+    #[test]
+    fn the_webview_keeps_only_the_dialog_permission_it_still_calls() {
+        const CAPABILITY: &str = include_str!("../capabilities/default.json");
+        assert!(
+            CAPABILITY.contains("\"dialog:allow-open\""),
+            "uploader-workspace.tsx picks its log directory with the plugin's open()"
+        );
+        assert!(
+            !CAPABILITY.contains("\"dialog:allow-save\""),
+            "no frontend code calls the dialog plugin's save(); re-grant only with one"
         );
     }
 
