@@ -59,14 +59,20 @@ const SANITY_FLOOR_MIN_LIVE = 50;
  *  capped by stripMarkup; these were not. */
 const MAX_TITLE_LENGTH = 200;
 
-/** Ceiling on one backfill page. Workers cap outbound subrequests per
- *  invocation, and each addon costs one fetch plus a few D1 statements, so a
- *  page has to stay well clear of that limit. */
-export const MAX_DETAIL_BATCH = 40;
+/**
+ * Ceiling on one backfill page.
+ *
+ * Sized by INVOCATION DURATION, not by the subrequest cap. At 40 addons with a
+ * 250ms delay a page spent ~10s inside one request and Cloudflare started
+ * killing it with `error code: 1102` (worker exceeded resource limits) — first
+ * intermittently, then consistently. 12 addons at 150ms is ~2s, which leaves
+ * generous headroom and only costs more pages, which are cheap.
+ */
+export const MAX_DETAIL_BATCH = 12;
 
-/** Delay between `filedetails` calls inside a page. ~4 req/s sustained is
+/** Delay between `filedetails` calls inside a page. ~6 req/s sustained is still
  *  polite for a one-off walk of a public API that exists to be read by Minion. */
-const DETAIL_DELAY_MS = 250;
+const DETAIL_DELAY_MS = 150;
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -416,11 +422,13 @@ export async function runDailySync(env: Env): Promise<void> {
 }
 
 /**
- * Rows re-cleaned per call. Each costs an UPDATE plus an FTS delete+insert
- * (3 queries), so 150 rows is 450 — comfortably inside D1's 1000-per-invocation
- * budget with room for the read.
+ * Rows re-cleaned per call.
+ *
+ * Each changed row costs a SELECT plus a 3-statement batch — two round trips —
+ * so the binding constraint is invocation duration rather than D1's
+ * 1000-query budget. 150 tripped Cloudflare's 1102 resource limit; 40 does not.
  */
-const REPROCESS_PAGE = 150;
+const REPROCESS_PAGE = 40;
 
 /**
  * Re-run the text pipeline over descriptions ALREADY stored, with no upstream
@@ -438,7 +446,7 @@ const REPROCESS_PAGE = 150;
  */
 export async function reprocessDescriptions(
   db: D1Database,
-  limit = REPROCESS_PAGE,
+  limit: number = REPROCESS_PAGE,
 ): Promise<{ scanned: number; changed: number; complete: boolean }> {
   await ensureSchema(db);
 

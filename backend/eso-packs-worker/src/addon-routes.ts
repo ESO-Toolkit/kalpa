@@ -204,11 +204,16 @@ export async function handleAsk(request: Request, env: Env): Promise<Response> {
  * No upstream requests. Run this after changing the text pipeline instead of
  * re-crawling ESOUI. The operator loops until `complete`.
  */
-export async function handleIndexReprocess(request: Request, env: Env): Promise<Response> {
+export async function handleIndexReprocess(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
   const db = env.ADDON_INDEX;
   if (!db) return indexUnavailable(request);
+  const limit = parsePositiveInt(url.searchParams.get("limit"), 0, 200);
   try {
-    return jsonResponse(request, await reprocessDescriptions(db));
+    return jsonResponse(request, await reprocessDescriptions(db, limit || undefined));
   } catch (err) {
     console.error("index reprocess failed:", err);
     return jsonResponse(

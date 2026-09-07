@@ -1930,7 +1930,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (method === "POST" && pathname === "/admin/index/reprocess") {
     if (!requireAuth(request, env)) return unauthorized(request);
-    return handleIndexReprocess(request, env);
+    return handleIndexReprocess(request, env, url);
   }
 
   // Migration control routes are admin-only inside their handlers.
