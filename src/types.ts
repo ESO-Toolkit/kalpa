@@ -458,6 +458,9 @@ export interface AskResponse {
   /** Prose answer. Empty when `degraded` is set. */
   answer: string;
   recommendations: AskRecommendation[];
+  /** Ranked candidates the assistant did not pick. Rendered collapsed so a
+   *  short answer does not look like it missed relevant addons. */
+  also_considered: AskRecommendation[];
   no_good_match: boolean;
   /** Ranked candidates shown without model prose — the assistant was
    *  unavailable, over budget, or returned something ungroundable. */

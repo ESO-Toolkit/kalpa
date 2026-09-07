@@ -109,8 +109,9 @@ export interface AddonSearchHit {
 export interface AddonSearchResult {
   hits: AddonSearchHit[];
   matched: number;
-  /** Which pass produced the hits: all tokens, any token, or nothing. */
-  mode: "and" | "or" | "none";
+  /** Which pass produced the hits: the strict pass only, the permissive pass
+   *  only, both merged, or nothing matched. */
+  mode: "and" | "or" | "union" | "none";
 }
 
 export interface AddonIndexStats {
@@ -138,6 +139,9 @@ export interface AskResponse {
   /** Prose answer. Empty when the model was skipped — see `degraded`. */
   answer: string;
   recommendations: AskRecommendation[];
+  /** Ranked candidates the model did not pick. Free (no extra model call) and
+   *  shown collapsed, so a short answer does not look like it missed things. */
+  also_considered: AskRecommendation[];
   no_good_match: boolean;
   /** True when the ranked candidates are shown without model prose (model
    *  unavailable, over budget, or output failed grounding). */

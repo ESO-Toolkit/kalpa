@@ -213,6 +213,10 @@ pub struct AskResponse {
     pub answer: String,
     #[serde(default)]
     pub recommendations: Vec<AskRecommendation>,
+    /// Ranked candidates the model did not pick. Free (no extra model call);
+    /// shown collapsed so a short answer does not look like it missed things.
+    #[serde(rename = "also_considered", default)]
+    pub also_considered: Vec<AskRecommendation>,
     #[serde(rename = "no_good_match", default)]
     pub no_good_match: bool,
     /// Ranked candidates shown without model prose, because the model was

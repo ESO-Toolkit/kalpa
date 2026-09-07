@@ -34,8 +34,47 @@ const SNIPPET_TOKENS = 24;
  * low: matching it is almost always incidental, except when someone searches
  * for an author by name deliberately, which still works because nothing else
  * will match.
+ *
+ * Category is deliberately NOT high. ESOUI has a literal "Combat Mods"
+ * category, so at weight 3 every one of its ~150 addons outscored a
+ * description that actually explained combat behaviour — the category word
+ * flooded the results for any query term that doubles as a category name
+ * (combat, chat, map, guild, crafting, pvp).
  */
-const BM25_WEIGHTS = "10.0, 1.5, 3.0, 1.0";
+const BM25_WEIGHTS = "10.0, 1.5, 1.5, 1.0";
+
+/**
+ * Ranking expression: BM25 relevance with a small popularity prior.
+ *
+ * bm25() returns negative values, more negative being better, so subtracting a
+ * positive bonus promotes a row.
+ *
+ * The prior exists because BM25 alone does not discriminate inside a cluster.
+ * Measured on the live index for the query "combat": ranks 1-12 spanned scores
+ * 4.123 to 4.008 — a 2.8% band — while their download counts spanned 197 to
+ * 28,114, a 140x range. The top hit had 399 downloads; "Combat Indicator"
+ * (28,114 downloads, the canonical answer) sat at rank 9, and an addon titled
+ * "DEPRECATED: ..." outranked it. Within that band the ordering is noise.
+ *
+ * A roughly logarithmic bucket ladder rather than log10(): **D1 does not
+ * authorize log10** ("not authorized to use function: log10"), and a stored
+ * precomputed column would need an ALTER TABLE on a live index. Buckets need
+ * neither, and they are easier to reason about and tune than a curve.
+ *
+ * The maximum nudge is 0.15 — the same order as the 0.115 noise band measured
+ * above, and far smaller than the ~2.0 gap between a title match and a
+ * description-only match. So it reorders ties without letting a popular addon
+ * outrank a genuinely better textual match.
+ */
+const POPULARITY_LADDER = `CASE
+         WHEN a.downloads >= 20000 THEN 0.15
+         WHEN a.downloads >= 10000 THEN 0.12
+         WHEN a.downloads >= 5000  THEN 0.09
+         WHEN a.downloads >= 1000  THEN 0.06
+         WHEN a.downloads >= 200   THEN 0.03
+         ELSE 0
+       END`;
+const RANK_EXPRESSION = `bm25(addons_fts, ${BM25_WEIGHTS}) - (${POPULARITY_LADDER}) ASC`;
 
 /**
  * ESOUI category 157, "Discontinued & Outdated" — 981 of ~4170 addons, roughly
@@ -141,9 +180,14 @@ export async function setMeta(db: D1Database, key: string, value: string): Promi
 export function toMatchTokens(query: string): string[] {
   return (query.match(/[\p{L}\p{N}]+/gu) ?? [])
     .map((token) => token.toLowerCase())
-    .filter((token) => token.length >= 2)
-    .slice(0, 12);
+    .filter((token) => token.length >= 2);
 }
+
+/** Ceiling on tokens sent to MATCH, applied AFTER stopwords are dropped.
+ *  Capping first meant a wordy question ("hi, is there any good addon that can
+ *  tell me when i am in combat") spent its whole budget on filler and truncated
+ *  the only word that mattered. */
+const MAX_MATCH_TOKENS = 12;
 
 /** Stopwords worth dropping only when the query has other content to stand on.
  *  "is there a good addon that shows combat" should search for "shows combat". */
@@ -155,6 +199,20 @@ const STOPWORDS = new Set([
   "do", "does", "did", "can", "could", "would", "should", "will", "just",
   "have", "has", "had", "what", "which", "who", "how", "when", "where",
   "addon", "addons", "eso", "please", "thanks", "question", "stupid",
+  // "am" was the acute bug: not a stopword, 2 chars so it survived the length
+  // filter, and present in only 184 of 4170 descriptions. As an AND term it
+  // excluded 96% of the catalogue, which is why "an addon that shows when I am
+  // in combat" could not return Combat Indicator.
+  "am", "im", "ive", "id", "ill", "were", "youre", "its", "hi", "hey", "ok",
+  // Generic UI/action verbs. "show" alone appears in 1162 of 4170 descriptions
+  // (28%), so it contributes almost nothing to RANKING while acting as a hard
+  // filter under AND. Listed unstemmed because the check runs on the raw JS
+  // token, before FTS5's porter stemmer sees it.
+  "show", "shows", "showing", "shown", "display", "displays", "displaying",
+  "tell", "tells", "let", "lets", "make", "makes", "give", "gives", "get",
+  "gets", "use", "uses", "using", "want", "wants", "need", "needs", "know",
+  "see", "find", "looking", "help", "helps", "recommend", "something",
+  "anything", "way", "one", "possible", "good", "better",
 ]);
 
 /**
@@ -164,7 +222,7 @@ const STOPWORDS = new Set([
  */
 export function contentTokens(tokens: string[]): string[] {
   const kept = tokens.filter((token) => !STOPWORDS.has(token));
-  return kept.length > 0 ? kept : tokens;
+  return (kept.length > 0 ? kept : tokens).slice(0, MAX_MATCH_TOKENS);
 }
 
 /**
@@ -260,12 +318,7 @@ export async function searchAddons(
     return { hits: [], matched: 0, mode: "none" };
   }
 
-  for (const mode of ["and", "or"] as const) {
-    // A single token makes AND and OR identical; skip the redundant round trip.
-    if (mode === "or" && tokens.length === 1) break;
-
-    const expression = buildMatchExpression(tokens, mode);
-    const sql = `
+  const buildSql = (mode: "and" | "or") => `
       SELECT a.uid, a.title, a.author, a.category_name, a.downloads, a.favorites,
              a.last_update, a.file_info_uri, a.is_library,
              snippet(addons_fts, 3, '', '', '…', ${SNIPPET_TOKENS}) AS snippet,
@@ -276,24 +329,52 @@ export async function searchAddons(
          AND a.removed = 0
          ${options.includeLibraries ? "" : "AND a.is_library = 0"}
          ${options.includeDiscontinued ? "" : `AND a.category_id != ${DISCONTINUED_CATEGORY_ID}`}
-       ORDER BY score ASC, a.downloads DESC
+       ORDER BY ${RANK_EXPRESSION}
        LIMIT ? OFFSET ?`;
 
-    let rows: SearchRow[];
-    try {
-      const result = await db.prepare(sql).bind(expression, limit, offset).all<SearchRow>();
-      rows = result.results ?? [];
-    } catch (err) {
-      if (isMissingTable(err)) return { hits: [], matched: 0, mode: "none" };
-      throw err;
-    }
+  // One token makes AND and OR identical, so there is nothing to union.
+  const singleToken = tokens.length === 1;
 
-    if (rows.length > 0) {
-      return { hits: rows.map(rowToHit), matched: rows.length, mode };
+  let andRows: SearchRow[] = [];
+  let orRows: SearchRow[] = [];
+  try {
+    // Reserve half the page for the strict pass so today's best results are
+    // preserved verbatim, then fill the remainder from the permissive pass.
+    // Appending OR *after* a full AND page would have changed nothing: when AND
+    // already returns `limit` rows the extra recall is invisible, which is
+    // exactly how Combat Indicator stayed hidden.
+    const andLimit = singleToken ? limit : Math.ceil(limit / 2);
+    const statements = [
+      db.prepare(buildSql("and")).bind(buildMatchExpression(tokens, "and"), andLimit, offset),
+    ];
+    if (!singleToken) {
+      statements.push(
+        db.prepare(buildSql("or")).bind(buildMatchExpression(tokens, "or"), limit, offset),
+      );
     }
+    // One round trip for both passes.
+    const [andResult, orResult] = await db.batch<SearchRow>(statements);
+    andRows = andResult?.results ?? [];
+    orRows = orResult?.results ?? [];
+  } catch (err) {
+    if (isMissingTable(err)) return { hits: [], matched: 0, mode: "none" };
+    throw err;
   }
 
-  return { hits: [], matched: 0, mode: "none" };
+  const seen = new Set<number>();
+  const merged: SearchRow[] = [];
+  for (const row of [...andRows, ...orRows]) {
+    if (seen.has(row.uid)) continue;
+    seen.add(row.uid);
+    merged.push(row);
+    if (merged.length >= limit) break;
+  }
+
+  if (merged.length === 0) return { hits: [], matched: 0, mode: "none" };
+
+  const mode: AddonSearchResult["mode"] =
+    singleToken || orRows.length === 0 ? "and" : andRows.length === 0 ? "or" : "union";
+  return { hits: merged.map(rowToHit), matched: merged.length, mode };
 }
 
 /** Metadata row as it arrives from the bulk filelist, before descriptions. */

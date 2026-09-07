@@ -42,6 +42,7 @@ import {
   Check,
   WifiOff,
   Sparkles,
+  ChevronRight,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 import { useInstallProgress } from "@/hooks/use-install-progress";
@@ -871,6 +872,37 @@ function AskContent({
                 )}
               </button>
             ))}
+
+            {/* The assistant answers with a few picks, but retrieval found more.
+                Showing the rest collapsed means a short answer never looks like
+                it missed something — and it costs no extra model call. */}
+            {response.also_considered.length > 0 && (
+              <details className="group mt-1">
+                <summary className="cursor-pointer list-none rounded-lg px-1 py-1 text-xs text-muted-foreground transition-colors duration-150 hover:text-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <ChevronRight className="size-3 shrink-0 transition-transform duration-150 group-open:rotate-90" />
+                    {response.also_considered.length} more{" "}
+                    {response.also_considered.length === 1 ? "match" : "matches"}
+                  </span>
+                </summary>
+                <div className="mt-1.5 flex flex-col gap-1">
+                  {response.also_considered.map((rec) => (
+                    <button
+                      key={rec.esoui_id}
+                      onClick={() => selectRecommendation(rec)}
+                      className={cn(
+                        "w-full rounded-lg border px-2.5 py-1.5 text-left transition-colors duration-150",
+                        selectedResultId === rec.esoui_id
+                          ? "border-primary/25 bg-primary/[0.06]"
+                          : "border-structure-06 hover:bg-structure-05"
+                      )}
+                    >
+                      <span className="block truncate text-xs text-foreground">{rec.title}</span>
+                    </button>
+                  ))}
+                </div>
+              </details>
+            )}
           </div>
         )}
       </div>

@@ -134,7 +134,7 @@ describe("groundOutput", () => {
     expect(result?.recommendations).toHaveLength(1);
   });
 
-  it("caps recommendations at three", () => {
+  it("caps recommendations at five", () => {
     const many = Array.from({ length: 8 }, (_, i) => hit(i + 1, `Addon${i + 1}`));
     const result = groundOutput(
       {
@@ -144,7 +144,9 @@ describe("groundOutput", () => {
       },
       many,
     );
-    expect(result?.recommendations).toHaveLength(3);
+    // Raised from 3: a hard 3 truncated genuinely relevant results when more
+    // than three addons legitimately solve the problem.
+    expect(result?.recommendations).toHaveLength(5);
   });
 
   it("accepts a genuine no-match answer", () => {

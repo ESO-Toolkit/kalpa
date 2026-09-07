@@ -50,8 +50,12 @@ async function seed(
   description: string,
   overrides: Partial<AddonMetaRow> = {},
 ): Promise<void> {
-  await upsertMeta(db(), meta(uid, { title, ...overrides }), Date.now());
-  await applyDetail(db(), uid, description, "Combat Mods", Date.now());
+  const row = meta(uid, { title, ...overrides });
+  await upsertMeta(db(), row, Date.now());
+  // Use the row's own category. Hard-coding "Combat Mods" for every fixture
+  // meant unrelated addons matched a combat query on their category alone —
+  // an artifact that hid nothing under AND but showed up under the union pass.
+  await applyDetail(db(), uid, description, row.categoryName, Date.now());
 }
 
 beforeEach(async () => {
@@ -72,11 +76,19 @@ describe("toMatchTokens", () => {
     expect(toMatchTokens('foo "bar" (baz)').join(" ")).toBe("foo bar baz");
   });
 
-  it("drops single characters and caps token count", () => {
+  it("drops single characters", () => {
     expect(toMatchTokens("a b combat")).toEqual(["combat"]);
-    expect(toMatchTokens(Array.from({ length: 30 }, (_, i) => `word${i}`).join(" "))).toHaveLength(
-      12,
-    );
+  });
+
+  it("caps tokens AFTER stopwords, so filler cannot crowd out real words", () => {
+    // The cap used to run first, so a wordy question spent its budget on
+    // filler: "...that can tell me when i am in combat" truncated before
+    // "combat", the only word that mattered.
+    const wordy = "hi is there any good addon that can tell me when i am in combat";
+    expect(contentTokens(toMatchTokens(wordy))).toContain("combat");
+
+    const many = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    expect(contentTokens(toMatchTokens(many))).toHaveLength(12);
   });
 
   it("returns nothing for punctuation-only input", () => {
@@ -141,11 +153,40 @@ describe("searchAddons", () => {
       "Shows a small icon when you are flagged in combat so you do not have to check manually.",
     );
     await seed(4246, "FightingDisplay", "Displays fighting status when in combat.");
-    await seed(9999, "Bag Space", "Increases inventory display and bank sorting options.");
+    await seed(9999, "Bag Space", "Increases inventory display and bank sorting options.", {
+      categoryName: "Bags, Bank, Inventory",
+    });
 
     const result = await searchAddons(db(), "flagged in combat");
     expect(result.hits.map((h) => h.esoui_id)).toContain(1543);
     expect(result.hits.map((h) => h.esoui_id)).not.toContain(9999);
+  });
+
+  it("returns BOTH answers when one lacks a generic verb the user typed", async () => {
+    // The reported bug. "an addon that shows when I am in combat" returned
+    // Fighting Display (its description says "shows") but not Combat
+    // Indicator, which says "turns your compass outline red". Two causes: "am"
+    // was not a stopword and appears in only 4% of descriptions, so the AND
+    // pass required it; and "shows" acted as a hard filter despite appearing
+    // in 28% of the corpus and carrying almost no ranking signal.
+    await seed(1543, "Combat Indicator", "Turns your compass outline red when you are in combat.");
+    await seed(4246, "Fighting Display", "Shows the word Fighting! when in combat.");
+
+    const ids = (await searchAddons(db(), "an addon that shows when I am in combat")).hits.map(
+      (h) => h.esoui_id,
+    );
+    expect(ids).toContain(1543);
+    expect(ids).toContain(4246);
+  });
+
+  it("promotes a far more popular addon within a near-tied score band", async () => {
+    // Measured live: for "combat" the top 12 spanned a 2.8% score band while
+    // downloads spanned 197 to 28,114. Inside that noise the ordering was
+    // arbitrary, so a 399-download addon outranked the canonical answer.
+    await seed(1, "Combat Alpha", "combat helper", { downloads: 200 });
+    await seed(2, "Combat Beta", "combat helper", { downloads: 30000 });
+
+    expect((await searchAddons(db(), "combat")).hits[0].esoui_id).toBe(2);
   });
 
   it("ranks a title match above a description-only match", async () => {
