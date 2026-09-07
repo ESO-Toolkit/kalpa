@@ -447,11 +447,35 @@ fn copy_residual_files(
                 fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
             }
             fs::copy(&source, &target).map_err(|e| describe_write_error(&target, &e))?;
+            // `fs::copy` is `CopyFileExW` on Windows and carries the read-only
+            // attribute across, but the `sync_all` reopen below needs a write
+            // handle. Without this, one read-only residual file aborted the
+            // transaction and made every future update of that addon fail the
+            // same way, behind a Controlled Folder Access message naming an
+            // opaque staging path the user cannot act on.
+            #[cfg(windows)]
+            let restore_readonly = metadata.permissions().readonly();
+            #[cfg(windows)]
+            if restore_readonly {
+                let mut writable = metadata.permissions();
+                // The lint warns that this is 0o777 on Unix; the branch is
+                // Windows-only, and the attribute goes back on below.
+                #[allow(clippy::permissions_set_readonly_false)]
+                writable.set_readonly(false);
+                fs::set_permissions(&target, writable)
+                    .map_err(|e| describe_write_error(&target, &e))?;
+            }
             fs::OpenOptions::new()
                 .write(true)
                 .open(&target)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| describe_write_error(&target, &e))?;
+            #[cfg(windows)]
+            if restore_readonly {
+                // Best effort: losing the attribute on the published copy is
+                // cosmetic, failing the update over it is not.
+                let _ = fs::set_permissions(&target, metadata.permissions());
+            }
         }
     }
     Ok(())
@@ -1062,6 +1086,35 @@ mod tests {
 
         assert!(addons_dir.join("LibGPS/LibGPS.txt").is_file());
         assert!(addons_dir.join("LibGPS/extra.lua").is_file());
+    }
+
+    /// `fs::copy` is `CopyFileExW` on Windows, so a read-only residual file
+    /// landed read-only in staging and the `sync_all` reopen — which needs a
+    /// write handle — failed with `ERROR_ACCESS_DENIED`. That aborted the
+    /// transaction before commit, leaving the read-only file live, so every
+    /// later update of the addon failed identically forever.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_residual_file_still_rides_across_an_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("AddOns/Example");
+        let stage = tmp.path().join("stage/Example");
+        fs::create_dir_all(&live).unwrap();
+        fs::create_dir_all(&stage).unwrap();
+        let source = live.join("settings.cfg");
+        fs::write(&source, b"USER DATA").unwrap();
+        let mut readonly = fs::metadata(&source).unwrap().permissions();
+        readonly.set_readonly(true);
+        fs::set_permissions(&source, readonly).unwrap();
+
+        copy_residual_files(&live, &stage, &live).expect("read-only residual file must be kept");
+
+        let staged = stage.join("settings.cfg");
+        assert_eq!(fs::read(&staged).unwrap(), b"USER DATA");
+        assert!(
+            fs::metadata(&staged).unwrap().permissions().readonly(),
+            "the attribute the user set must survive into the published copy"
+        );
     }
 
     #[test]
