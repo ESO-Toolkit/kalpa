@@ -173,7 +173,17 @@ bulk filelist API carries no descriptions.
   `crawlDetails` fetches `filedetails/{id}` only for entries whose `lastUpdate`
   moved.
 - `src/addon-routes.ts` — `GET /addons/search`, `GET /addons/stats`, and the
-  admin-only `POST /admin/index/sync` and `POST /admin/index/backfill`.
+  admin-only `POST /admin/index/sync`, `POST /admin/index/backfill` and
+  `POST /admin/index/reprocess`.
+
+`stripMarkup` is pure over its input, but what gets **stored** is its output —
+so adding a rule leaves every existing row contaminated. `reprocess` re-applies
+the current pipeline to stored text in place, with no upstream traffic. Reach
+for it after any text-pipeline change rather than re-crawling ESOUI to work
+around our own parser. Run the crawl with `npm run index:build` (needs
+`ADMIN_API_KEY`), and **drive it against the deployed worker, not
+`wrangler dev --remote`** — the remote preview session dies after ~20 minutes
+and returns Cloudflare HTML error pages mid-run.
 
 Two upstream quirks the crawl exists to absorb: `categorylist.json` returns
 `id` as a **string** while `filelist.json` sends a number (a `typeof` check
@@ -217,18 +227,24 @@ its design is deliberately lopsided: **retrieval finds the addons, the model
 only picks among them and writes one sentence.** The model never sees a URL and
 never emits one.
 
-Three layers keep answers honest, and all three matter:
+Three layers keep answers honest, and the third is the one that holds:
 
 1. Candidates are shown to the model as opaque keys (`C1`, `C2`, …), not IDs.
-2. The JSON schema constrains `candidate` to an enum of exactly those keys.
+2. The prompt states the closed set of valid keys. This is only a prompt-level
+   constraint: `@cf/meta/llama-3.1-8b-instruct-fp8` **rejects `json_schema`
+   outright** (`AiError 5025: This model doesn't support JSON Schema`), which
+   failed every call and silently degraded every answer until it was caught.
+   The route uses `json_object`, which guarantees parseable JSON and nothing
+   more. Verify any model change against `wrangler ai models` first.
 3. `groundOutput()` re-checks every pick against the retrieved set and rebuilds
-   `file_info_uri` from the index row. Workers AI documents JSON mode as
-   best-effort and explicitly does **not** guarantee schema conformance, so
-   layer 3 is the real boundary — do not remove it on the strength of layer 2.
+   `file_info_uri` from the index row. **This is the real boundary** — layer 2
+   cannot be relied on at all, so never weaken layer 3.
 
-Addon descriptions are third-party text and are treated as untrusted. The
-closed candidate set, not the markup stripping in `crawl.ts`, is what makes a
-prompt-injected description harmless.
+Addon descriptions are third-party text and are treated as untrusted, and
+`scrubProse()` additionally strips link-shaped text out of the model's `answer`
+and `reason`, which the closed candidate set does not cover: a hostile
+description can talk the model into writing a URL, and a non-degraded answer is
+cached for seven days.
 
 Runs on Workers AI (binding `AI`) — free allocation is 10k neurons/day and one
 ask costs ~25, so ~400/day is free. `ASK_DAILY_BUDGET` (default 350) caps model
