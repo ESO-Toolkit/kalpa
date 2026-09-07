@@ -24,6 +24,11 @@ The `.dmg` is the only installer published without a `.sig`: macOS updates are
 delivered as the `.app.tar.gz` bundle, so that is the artifact the updater
 signs and checks.
 
+One thing every release carries is *not* in that table: a **build provenance
+attestation** for each installer bundle. It is not a release asset — GitHub
+stores it and `gh attestation verify` fetches it, which is exactly why it can
+say something the release page cannot. See step 3 below.
+
 ## About the `.sig` file
 
 The `.sig` is **not** a GPG/PGP signature — it is a
@@ -41,7 +46,7 @@ automatically. `gpg --verify` does not apply to this file.
 
 If you download an installer directly from the
 [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page, you have
-two layers of assurance:
+three layers of assurance:
 
 1. **Transport integrity (always).** Downloads come over **HTTPS from GitHub's
    release storage**, so the transfer is protected against tampering in transit.
@@ -80,6 +85,27 @@ two layers of assurance:
    replace the checksum file alongside it. The cryptographic guarantee is the
    minisign signature described above, which is verified against a key compiled
    into the app and cannot be forged by editing the release.
+
+3. **Build provenance.** Every installer bundle is attested at build time,
+   linking the file to this repository, the tagged commit and the workflow
+   run that produced it. Unlike the checksum, the attestation is resolved
+   from GitHub's transparency log rather than from anything on the release
+   page — which covers precisely the compromised-release case above, where
+   an attacker who could swap an installer could swap `SHA256SUMS.txt`
+   beside it. Requires the [GitHub CLI](https://cli.github.com/):
+
+   ```bash
+   gh attestation verify Kalpa_<version>_x64-setup.exe --owner ESO-Toolkit
+   ```
+
+   `--repo ESO-Toolkit/kalpa` instead of `--owner` is stricter: it pins the
+   build to this repository rather than to any repository in the
+   organization.
+
+   **What this covers.** Only the installer bundles the build jobs produced.
+   `latest.json` and `SHA256SUMS.txt` are assembled by a later job, after
+   attestation, so they carry no provenance of their own — verify them the
+   way the rest of this page describes, not with `gh attestation verify`.
 
 ## Reporting a problem
 
