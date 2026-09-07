@@ -376,17 +376,19 @@ export function DiscoverPanel({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {/* Sub-tab selector (disabled) */}
-        <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+        <div className="@container flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
           {DISCOVER_TABS.map(([tab, label, Icon]) => (
             <button
               key={tab}
               role="tab"
               aria-selected={false}
               disabled
-              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
+              title={label}
+              aria-label={label}
+              className="flex-1 min-w-0 rounded-lg px-2 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
             >
               <Icon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className="truncate hidden @md:inline">{label}</span>
             </button>
           ))}
         </div>
@@ -402,14 +404,24 @@ export function DiscoverPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Sub-tab selector */}
-      <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+      {/* Five tabs never fit their labels in a 300-380px panel — the labels
+          alone need ~450px, so every one truncated to an ellipsis. Only the
+          ACTIVE tab shows its label; the rest are icons with tooltips, which
+          fits comfortably and still names where you are. A wide enough
+          container (a future resizable panel) shows every label again. */}
+      <div className="@container flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
         {DISCOVER_TABS.map(([tab, label, Icon]) => (
           <button
             key={tab}
             role="tab"
             aria-selected={activeTab === tab}
+            title={label}
+            aria-label={label}
             className={cn(
-              "relative flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
+              "relative min-w-0 rounded-lg px-2 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
+              // The active tab earns the room for its label; the others stay
+              // icon-sized so nothing has to truncate.
+              activeTab === tab ? "flex-1" : "flex-none @md:flex-1",
               activeTab === tab
                 ? "text-primary"
                 : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-transparent"
@@ -423,9 +435,11 @@ export function DiscoverPanel({
                 transition={{ type: "spring", stiffness: 400, damping: 30 }}
               />
             )}
-            <span className="relative z-10 flex items-center justify-center gap-1">
+            <span className="relative z-10 flex min-w-0 items-center justify-center gap-1">
               <Icon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className={cn("truncate", activeTab === tab ? "inline" : "hidden @md:inline")}>
+                {label}
+              </span>
             </span>
           </button>
         ))}
@@ -767,7 +781,11 @@ function AskContent({
           />
         ) : (
           <div className="flex flex-col gap-2">
-            {response.answer && (
+            {/* The per-addon reasons carry the useful information. A summary
+                paragraph on top of them just restated the question back at the
+                user, so it is shown only when there is nothing to recommend
+                and the sentence has to do the whole job. */}
+            {response.answer && response.no_good_match && (
               <GlassPanel variant="subtle" className="p-3">
                 <p className="text-sm leading-relaxed text-foreground">{response.answer}</p>
               </GlassPanel>
@@ -800,14 +818,22 @@ function AskContent({
                     : "border-structure-06 hover:bg-structure-05"
                 )}
               >
-                <div className="flex items-center gap-2">
-                  <span className="truncate font-heading text-sm font-medium text-foreground">
+                {/* The pill used to share a row with the title and would wrap
+                    to two lines ("Graphic UI / Mods") whenever the title was
+                    long. The title now owns the row and truncates; the category
+                    sits with the reason, where it never competes for width. */}
+                <div className="min-w-0">
+                  <span className="block truncate font-heading text-sm font-medium text-foreground">
                     {rec.title}
                   </span>
-                  {rec.category && <InfoPill color="muted">{rec.category}</InfoPill>}
                 </div>
                 {rec.reason && (
                   <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{rec.reason}</p>
+                )}
+                {rec.category && (
+                  <InfoPill color="muted" className="mt-1.5 max-w-full whitespace-nowrap">
+                    <span className="truncate">{rec.category}</span>
+                  </InfoPill>
                 )}
               </button>
             ))}
