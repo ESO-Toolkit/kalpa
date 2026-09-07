@@ -47,9 +47,10 @@
 //!
 //! Listing is read-only and needs no token.
 
-use crate::client_backup;
+use crate::client_backup::{self, install_key};
 use crate::client_write::{
-    self, AllowedGameInstallPath, ApprovedRoot, ManagedFile, ManagedKind, ManagedManifest,
+    self, AllowedGameInstallPath, ApprovedRoot, FileOrigin, ManagedFile, ManagedKind,
+    ManagedManifest,
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -95,9 +96,24 @@ pub struct ManagedFileStatus {
     /// RFC3339, copied from the manifest entry.
     pub placed_at: String,
     pub state: ManagedFileState,
+    /// How the file got into the manifest, so the panel can tell a file Kalpa
+    /// wrote from one it merely adopted.
+    ///
+    /// Without it the two are indistinguishable in the UI: an unchanged
+    /// adopted file hashes clean and reports [`ManagedFileState::Present`],
+    /// exactly like a placed one, so it gets offered for removal — and the
+    /// removal cannot do anything, because `revert_placements` skips every
+    /// [`FileOrigin::Adopted`] entry and the skip is reported as "modified
+    /// since Kalpa wrote them". Adopted rows need their own hint and their own
+    /// action ("Stop managing"), which is a decision only this field supports.
+    pub origin: FileOrigin,
     /// True when removing this file would put a displaced original back rather
     /// than simply leaving a gap. Worth showing: it is the difference between
     /// "uninstall" and "revert to what you had".
+    ///
+    /// For an adopted entry this is the *kept copy* of the user's own file, not
+    /// something Kalpa displaced, so branch on `origin` rather than redefining
+    /// this flag.
     pub restores_backup: bool,
 }
 
@@ -188,18 +204,6 @@ pub fn inventory_in(
     }
 }
 
-/// Manifest key for one client directory.
-///
-/// Mirrors `client_backup::install_key`, which is private to that module, and
-/// must stay in step with it: canonicalize where possible, fall back to the
-/// path as supplied when the directory has gone away.
-fn install_key(client_root: &Path) -> String {
-    dunce::canonicalize(client_root)
-        .unwrap_or_else(|_| client_root.to_path_buf())
-        .to_string_lossy()
-        .to_string()
-}
-
 /// Classify one manifest entry against what is on disk.
 fn status_for(client_root: &Path, entry: &ManagedFile) -> ManagedFileStatus {
     // A parked entry describes a file under its `.kalpa-off` name, so resolve
@@ -238,6 +242,7 @@ fn status_for(client_root: &Path, entry: &ManagedFile) -> ManagedFileStatus {
         kind: entry.kind,
         placed_at: entry.placed_at.clone(),
         state,
+        origin: entry.origin,
         restores_backup: entry.displaced_backup.is_some(),
     }
 }
@@ -381,8 +386,9 @@ pub fn vet_emergency_removal(
 ///
 /// Copy-then-remove rather than a rename, because the quarantine directory is
 /// in the app-data folder and the client folder is very often on another
-/// volume. The copy is verified before the original is removed: a quarantine
-/// that lost the file it was supposed to preserve is worse than no quarantine.
+/// volume. The copy is made durable and verified before the original is
+/// removed: a quarantine that lost the file it was supposed to preserve is
+/// worse than no quarantine.
 pub fn quarantine_file(
     client_root: &Path,
     quarantine_root: &Path,
@@ -401,7 +407,12 @@ pub fn quarantine_file(
     // one must not be the weaker of the two.
     let destination = client_write::safe_relative_join(&folder, file_name)?;
 
-    std::fs::copy(&source, &destination)
+    // `atomic_copy`, not `fs::copy`, because the hash compare below reads the
+    // destination back through the page cache: it proves the right bytes were
+    // written, not that they survive the machine dying. The original is deleted
+    // seconds later, so the copy has to be on disk by then, and `atomic_copy`
+    // is the primitive in this layer that flushes and fsyncs before publishing.
+    crate::atomic_file::atomic_copy(&source, &destination)
         .map_err(|e| format!("Failed to copy {file_name} to quarantine: {e}"))?;
 
     let source_hash = client_backup::hash_file(&source)?;
@@ -646,6 +657,53 @@ mod tests {
 
         let inventory = inventory_in(&h.manifest, &h.client, "client");
         assert!(inventory.files[0].restores_backup);
+    }
+
+    /// An unchanged adopted file hashes clean and reports `Present`, exactly
+    /// like a file Kalpa wrote — so without `origin` the panel offers it for
+    /// removal, and the removal is a guaranteed no-op reported as "modified
+    /// since Kalpa wrote them".
+    #[test]
+    fn inventory_reports_the_origin_of_each_file() {
+        let h = Harness::new();
+        h.write_client_file("dxgi.dll", "kalpa-wrote-this");
+        h.write_client_file("nvngx_dlss.dll", "the-users-own");
+
+        let mut adopted = h.managed_file(
+            "nvngx_dlss.dll",
+            "the-users-own",
+            Some("kept-copy-id".to_string()),
+        );
+        adopted.origin = FileOrigin::Adopted;
+        h.save_manifest(vec![
+            h.managed_file("dxgi.dll", "kalpa-wrote-this", None),
+            adopted,
+        ]);
+
+        let inventory = inventory_in(&h.manifest, &h.client, "client");
+        let by_path = |name: &str| {
+            inventory
+                .files
+                .iter()
+                .find(|f| f.relative_path == name)
+                .unwrap_or_else(|| panic!("missing entry for {name}"))
+        };
+
+        assert_eq!(by_path("dxgi.dll").state, ManagedFileState::Present);
+        assert_eq!(by_path("dxgi.dll").origin, FileOrigin::Placed);
+
+        let adopted = by_path("nvngx_dlss.dll");
+        assert_eq!(
+            adopted.state,
+            ManagedFileState::Present,
+            "an untouched adopted file is indistinguishable from a placed one by state alone"
+        );
+        assert_eq!(adopted.origin, FileOrigin::Adopted);
+        assert!(
+            adopted.restores_backup,
+            "the kept copy still counts here — the panel branches on origin for the action, \
+             not on this flag"
+        );
     }
 
     #[test]
@@ -898,6 +956,21 @@ mod tests {
         assert!(
             !h.client.join("dxgi.dll").exists(),
             "the original must be gone from the client folder"
+        );
+
+        // The copy is published, not written through, so a finished quarantine
+        // holds exactly the file. Kalpa shows this folder's path to the user as
+        // the way to get the DLL back by hand; a leftover staging file there is
+        // a second, half-named copy of it to guess between.
+        let debris: Vec<String> = std::fs::read_dir(destination.parent().expect("folder"))
+            .expect("read quarantine folder")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(crate::atomic_file::STAGING_INFIX))
+            .collect();
+        assert!(
+            debris.is_empty(),
+            "staging debris in quarantine: {debris:?}"
         );
     }
 }
