@@ -86,6 +86,52 @@ could have damaged files it was in the middle of protecting.
   the interface thread at every launch, so a slow or unreachable Steam library
   locked the app up while it waited.
 - **The shader-pack "Open page" links now open** instead of failing silently.
+- **A file you installed yourself is no longer described as one Kalpa wrote.**
+  A stack Kalpa adopted showed your own files as "Unchanged since Kalpa wrote
+  it. Safe to remove." and offered them under Remove all, where removing them
+  did nothing and reported back that they had been modified — the wrong reason
+  about the wrong file. Adopted files are now labelled as yours and excluded
+  from removal, which "Stop managing" handles instead.
+- **Your original file survives a re-install.** Placing a file over one Kalpa
+  had already placed dropped the record pointing at whatever was there before
+  you started, and housekeeping then deleted that copy. The record is now
+  carried forward, so the file you began with stays restorable.
+- **A damaged graphics-stack record now stops the operation instead of being
+  overwritten.** An unreadable record was treated as an empty one, saved over
+  the real one, and used to decide which backups were unreferenced and could
+  be deleted.
+- **The "fix technique order" button now actually fixes the order.** It
+  rewrote one key while ReShade orders by another, so it reported success and
+  changed nothing the game reads.
+- **Settings are no longer shown as live when the add-on that owns them is
+  switched off**, and a preset family no longer displays every preset's values
+  under the first preset's name.
+- **"Everything agrees" now depends on evidence newer than the last change.**
+  ReShade truncates its log every launch, so proof from before a change Kalpa
+  itself had just applied could still earn the all-clear.
+- **Confirmations no longer outlive what you agreed to.** Removing managed
+  files, stopping management, and the technique-order fix each stayed armed
+  across a reload, a switch-off or a preset change, so a confirmation given
+  for one thing could be spent on another.
+- **Installing a shader pack is bounded and keeps each pack's licence.** There
+  was no limit on how much a downloaded archive could expand to, and every
+  pack's licence file landed on the same path, so a second pack overwrote the
+  first one's.
+- **The four new Elder Scrolls themes now work in performance mode**, which
+  was silently rendering a different theme because they had never been
+  exported to the native sidecar.
+- **Installing a dependency during an update no longer disables that update's
+  Stop button**, and removing a dependency refreshes the addon instead of
+  leaving it shown as satisfied.
+- **Picking your AddOns folder no longer freezes the window** while Kalpa
+  checks the folder and scans for game installs.
+- **Deleting your account no longer reports failure when it mostly
+  succeeded.** When there is too much to erase in one pass, Kalpa now says so
+  and asks you to run it once more, instead of showing an error.
+- **Several graphics-stack diagnoses that could never be right have been
+  corrected**, including a warning that fired on a correctly configured
+  install, one that fired inside a slot it had just called correctly empty,
+  and drift on a file whose result could never reach the screen.
 - **Text damaged by an earlier bad encoding pass has been repaired**, and a
   check now catches that class of damage before it can return.
   ([#411](https://github.com/ESO-Toolkit/kalpa/pull/411))
