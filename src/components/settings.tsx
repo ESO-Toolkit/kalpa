@@ -84,6 +84,22 @@ const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
   { id: "data", label: "Data", icon: Database },
 ];
 
+/**
+ * Mirrors `DELETE_INCOMPLETE_MESSAGE` in `src-tauri/src/pack_hub/commands.rs`,
+ * asserted byte-for-byte by `settings-delete-account.test.tsx`.
+ *
+ * `delete_pack_hub_account` returns this as an `Err` because erasure is not
+ * finished, but it is the ONE error on that command that is not a failure: by
+ * the time it is sent, the packs, share codes and backup scrub are already
+ * done and only a bounded remainder of votes is left. Reporting it through the
+ * generic "Failed to delete account data" branch told a user finishing a GDPR
+ * erasure that nothing had happened, and implied re-running it was pointless —
+ * when re-running is the one thing that finishes the job.
+ */
+export const DELETE_INCOMPLETE_MESSAGE =
+  "Most of your data is deleted, but there was too much to finish in one go. " +
+  "Run Delete Account once more to clear the rest.";
+
 export function Settings({
   addonsPath,
   authUser,
@@ -354,7 +370,20 @@ export function Settings({
         `Deleted ${result.packs} pack${result.packs !== 1 ? "s" : ""}, ${result.votes} vote${result.votes !== 1 ? "s" : ""}, and ${result.shares} share code${result.shares !== 1 ? "s" : ""}.`
       );
     } catch (e) {
-      toast.error(`Failed to delete account data: ${getTauriErrorMessage(e)}`);
+      const message = getTauriErrorMessage(e);
+      if (message === DELETE_INCOMPLETE_MESSAGE) {
+        // Not `toast.error`: this is partial success, and the backend says so.
+        // The sign-out is skipped on purpose too — the leftover votes can only
+        // be cleared by a signed-in session, so calling `onAuthChange(null)`
+        // here would lock the user out of finishing their own erasure. The
+        // confirm panel is left open for the same reason: the second run the
+        // message asks for is then one click away, not five.
+        toast.warning(message, {
+          description: "Your packs and share codes are already gone.",
+        });
+        return;
+      }
+      toast.error(`Failed to delete account data: ${message}`);
     } finally {
       setDeletingAccount(false);
     }
