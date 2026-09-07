@@ -33,8 +33,9 @@ pub struct DllInfo {
     pub version: Option<String>,
 }
 
-/// Severity of a finding. `Ok` is reported explicitly so the panel can show
-/// green rows rather than only listing problems.
+/// Severity of a finding. `Ok` is emitted explicitly rather than omitted, so
+/// that a renderer can show green rows rather than only listing problems. No
+/// panel reads these yet — see [`ClientHealthReport::findings`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthLevel {
@@ -140,6 +141,14 @@ pub struct ClientHealthReport {
     pub d3dcompiler: Option<DllInfo>,
     /// `PresetPath` read out of `ReShade.ini`, when ReShade is installed.
     pub reshade_preset: Option<String>,
+    /// Diagnoses of the DLLs above. **Nothing renders these today.** The
+    /// client-health panel copies only `log_excerpts`, `neural_rendering` and
+    /// `log_benign_suppressed` out of this report, and the findings it does
+    /// draw are `client_stack`'s separate `stack-*` set. They are still
+    /// computed because this is the only place the diagnosis exists — most
+    /// pointedly `d3dcompiler-legacy`, which is the written explanation for
+    /// the `shader-compile-failed` excerpt the panel *does* show, so a user
+    /// currently sees "1 log failure" without the sentence explaining it.
     pub findings: Vec<HealthFinding>,
     /// Fatal log matches only — see [`LogExcerpt`].
     pub log_excerpts: Vec<LogExcerpt>,
@@ -496,9 +505,18 @@ pub fn version_string(path: &Path, field: &str) -> Option<String> {
 
             // `text_len` counts characters including a trailing NUL when the
             // resource is well-formed. Copy the whole run and trim at the
-            // first NUL rather than trusting the count to be exact.
-            let mut chars: Vec<u16> = Vec::with_capacity(text_len as usize);
-            for index in 0..text_len as usize {
+            // first NUL rather than trusting the count to be exact — and clamp
+            // it to the buffer first, because a malformed resource's declared
+            // length is no more the OS's promise than its alignment is. A
+            // well-formed resource is unaffected: the NUL trim below already
+            // ends the string, so the clamp can only shorten a run that was
+            // reading past the end of the block.
+            let Some(offset) = (text as usize).checked_sub(buffer.as_ptr() as usize) else {
+                continue; // the value does not point into the buffer we own
+            };
+            let count = clamped_utf16_units(text_len, offset, size as usize);
+            let mut chars: Vec<u16> = Vec::with_capacity(count);
+            for index in 0..count {
                 chars.push(std::ptr::read_unaligned(
                     text.cast::<u8>().add(index * 2).cast::<u16>(),
                 ));
@@ -512,6 +530,25 @@ pub fn version_string(path: &Path, field: &str) -> Option<String> {
     }
 
     None
+}
+
+/// How many UTF-16 units of a `StringFileInfo` value may be read, given where
+/// that value starts inside the version buffer.
+///
+/// The declared length is the resource's claim, not the OS's promise, so it is
+/// clamped to what the buffer actually holds. This matters more here than it
+/// looks: [`version_string`] gates a destructive action — `client_uninstall`
+/// offers the orphan-injector emergency remove on a positive `ProductName`
+/// match — and a string read out of a neighbouring allocation is not an answer
+/// to that question. Split out so the clamp has a test at all: exercising it in
+/// place would need a deliberately malformed version resource, which nothing
+/// read-only can produce.
+#[cfg(target_os = "windows")]
+fn clamped_utf16_units(text_len: u32, offset: usize, buffer_len: usize) -> usize {
+    let Some(remaining) = buffer_len.checked_sub(offset) else {
+        return 0; // starts past the end of the buffer
+    };
+    (text_len as usize).min(remaining / 2)
 }
 
 /// NUL-terminated UTF-16 for a `VerQueryValueW` sub-block name.
@@ -698,9 +735,16 @@ fn parse_evaluation_counter(lowered: &str) -> Option<u64> {
 struct LogScan {
     excerpts: Vec<LogExcerpt>,
     benign_suppressed: usize,
-    /// Every evaluation counter parsed, in file order. Bounded by
+    /// Every evaluation counter parsed, **one segment per log file**, in file
+    /// order. Kept split rather than spliced because a rising pair that
+    /// straddles two files is not evidence of anything: `dlss5-feed.log` is the
+    /// feed host's own log and is not truncated per launch the way
+    /// `ReShade.log` is, so a stalled ReShade session next to the feed log's
+    /// accumulated high counter would otherwise produce exactly one rising
+    /// boundary pair — and with it a `Running` verdict, which is the gate the
+    /// panel's "everything agrees" claim is earned by. Bounded by
     /// [`MAX_LOG_TAIL_LINES`] per file, so this cannot grow unbounded.
-    evaluations: Vec<u64>,
+    evaluations: Vec<Vec<u64>>,
 }
 
 /// Match `lines` against the rule tables, appending fatal hits to
@@ -710,14 +754,18 @@ struct LogScan {
 /// benign counting and evaluation-counter parsing continue over the remaining
 /// lines, because the positive signal must not be lost just because some other
 /// log was noisy.
+///
+/// This file's evaluation counters are appended to [`LogScan::evaluations`] as
+/// their own segment; see that field for why they are not spliced together.
 fn scan_lines(file: &str, lines: &[String], scan: &mut LogScan) {
+    let mut counters: Vec<u64> = Vec::new();
     for line in lines {
         let lowered = line.to_lowercase();
         match classify_line(&lowered) {
             LineKind::Benign => scan.benign_suppressed += 1,
             LineKind::Evaluation(counter) => {
                 if let Some(value) = counter {
-                    scan.evaluations.push(value);
+                    counters.push(value);
                 }
             }
             LineKind::Fatal(rules) => {
@@ -734,6 +782,7 @@ fn scan_lines(file: &str, lines: &[String], scan: &mut LogScan) {
             }
         }
     }
+    scan.evaluations.push(counters);
 }
 
 /// Scan every known log file in `dir`.
@@ -783,6 +832,46 @@ fn neural_rendering_signal(evaluations: &[u64]) -> NeuralRenderingSignal {
         samples: evaluations.len(),
         first_evaluation: evaluations.first().copied(),
         last_evaluation: evaluations.last().copied(),
+    }
+}
+
+/// Merge the per-file verdicts of [`LogScan::evaluations`] into one.
+///
+/// Each file is judged on its own sequence by [`neural_rendering_signal`] and
+/// only then combined: `Running` if *any* file climbs, else `Stalled` if any
+/// file saw a sample, else `Unknown`. Concatenating the segments first is the
+/// thing this avoids — that hands a `Running` verdict to two files that each
+/// proved nothing, on the strength of the one adjacent pair that spans the
+/// boundary between them.
+fn neural_rendering_signal_across_files(files: &[Vec<u64>]) -> NeuralRenderingSignal {
+    let per_file: Vec<NeuralRenderingSignal> = files
+        .iter()
+        .map(|counters| neural_rendering_signal(counters))
+        .collect();
+    let state = if per_file
+        .iter()
+        .any(|signal| signal.state == NeuralRenderingState::Running)
+    {
+        NeuralRenderingState::Running
+    } else if per_file
+        .iter()
+        .any(|signal| signal.state == NeuralRenderingState::Stalled)
+    {
+        NeuralRenderingState::Stalled
+    } else {
+        NeuralRenderingState::Unknown
+    };
+    NeuralRenderingSignal {
+        state,
+        // Totals and the reported range still span the whole scan, from the
+        // first file that saw anything to the last — reporting how far it got
+        // never implied the files form one sequence, only the verdict did.
+        samples: per_file.iter().map(|signal| signal.samples).sum(),
+        first_evaluation: per_file.iter().find_map(|signal| signal.first_evaluation),
+        last_evaluation: per_file
+            .iter()
+            .rev()
+            .find_map(|signal| signal.last_evaluation),
     }
 }
 
@@ -979,7 +1068,7 @@ pub fn inspect_client(location: &EsoClientLocation) -> ClientHealthReport {
         d3dcompiler.as_ref(),
     );
     let scan = scan_logs(dir);
-    let neural_rendering = neural_rendering_signal(&scan.evaluations);
+    let neural_rendering = neural_rendering_signal_across_files(&scan.evaluations);
 
     ClientHealthReport {
         location: location.clone(),
@@ -1391,6 +1480,27 @@ mod tests {
         assert_eq!(version_string(system_dll, "KalpaNotAField"), None);
     }
 
+    /// The clamp on a `StringFileInfo` run. `version_string` gates
+    /// `client_uninstall`'s emergency-remove offer, so a length the resource
+    /// merely *claims* must never be allowed to read past the version buffer
+    /// the OS filled. Windows-only because that is where the function is more
+    /// than a `None` stub.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_string_run_is_clamped_to_the_version_buffer() {
+        // Well-formed: the run fits, nothing is trimmed.
+        assert_eq!(clamped_utf16_units(8, 16, 64), 8);
+        // Ending exactly at the last byte is still a fit.
+        assert_eq!(clamped_utf16_units(8, 48, 64), 8);
+        // Over-declared length: only what the buffer holds is read.
+        assert_eq!(clamped_utf16_units(4096, 48, 64), 8);
+        // An odd trailing byte cannot yield half a UTF-16 unit.
+        assert_eq!(clamped_utf16_units(4096, 63, 64), 0);
+        // A value starting at or past the end reads nothing at all.
+        assert_eq!(clamped_utf16_units(8, 64, 64), 0);
+        assert_eq!(clamped_utf16_units(8, 128, 64), 0);
+    }
+
     /// The guards that keep a malformed request from addressing a resource the
     /// caller did not name. These hold on every platform: off Windows the
     /// function is a `None` stub, which satisfies the same assertions.
@@ -1532,6 +1642,54 @@ mod tests {
         assert_eq!(signal.state, NeuralRenderingState::Running);
         assert_eq!(signal.first_evaluation, Some(900));
         assert_eq!(signal.last_evaluation, Some(2));
+    }
+
+    #[test]
+    fn counters_do_not_climb_across_two_log_files() {
+        // Each file is stalled on its own. Spliced into one sequence they read
+        // as [1, 2] and manufacture a Running verdict — the gate behind
+        // "everything agrees" — out of two logs that each proved nothing.
+        // dlss5-feed.log is not truncated per launch, so its accumulated high
+        // counter sitting after a stalled ReShade session is the realistic
+        // shape of this, not a contrived one.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("ReShade.log"),
+            "INFO  | EvaluateFeature succeeded: evaluation=1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("dlss5-feed.log"),
+            "INFO  | EvaluateFeature succeeded: evaluation=2\n",
+        )
+        .unwrap();
+
+        let report = inspect_client(&location(tmp.path()));
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Stalled);
+        // The totals and the reported range still span both files.
+        assert_eq!(report.neural_rendering.samples, 2);
+        assert_eq!(report.neural_rendering.first_evaluation, Some(1));
+        assert_eq!(report.neural_rendering.last_evaluation, Some(2));
+    }
+
+    #[test]
+    fn one_climbing_file_is_enough_when_the_other_stalls() {
+        // The merge is "any file climbs", not "every file climbs": a stalled
+        // dlss5-feed.log must not mask a genuinely running ReShade session.
+        let tmp = tempfile::tempdir().unwrap();
+        let climbing: String = (0..5)
+            .map(|i| format!("INFO  | EvaluateFeature succeeded: evaluation={i}\n"))
+            .collect();
+        std::fs::write(tmp.path().join("ReShade.log"), climbing).unwrap();
+        std::fs::write(
+            tmp.path().join("dlss5-feed.log"),
+            "INFO  | EvaluateFeature succeeded: evaluation=9\n",
+        )
+        .unwrap();
+
+        let report = inspect_client(&location(tmp.path()));
+        assert_eq!(report.neural_rendering.state, NeuralRenderingState::Running);
+        assert_eq!(report.neural_rendering.samples, 6);
     }
 
     #[test]

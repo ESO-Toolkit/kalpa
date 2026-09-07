@@ -103,12 +103,19 @@ fn resolve_allowed_reveal_path(
 /// AddOns directory or its sibling Logs and kalpa-backups directories. The webview intentionally
 /// has no direct reveal permission because valid ESO locations are runtime
 /// state and cannot be represented safely by static capability globs.
-#[tauri::command]
-pub fn reveal_allowed_path(
-    app: AppHandle,
-    state: tauri::State<'_, AllowedAddonsPath>,
-    path: String,
-) -> Result<(), String> {
+///
+/// `(async)` is load-bearing, not decoration. `reveal_item_in_dir` is the
+/// plugin's own `async` command upstream because it `CoInitialize`s the
+/// calling thread and then blocks in `SHOpenFolderAndSelectItems` until
+/// Explorer has the folder open — a cold-Explorer reveal on the main thread
+/// freezes the window for that whole launch. Routing every webview reveal
+/// through this confinement wrapper is what put it back on the main thread;
+/// this is the piece that keeps it off. The state is looked up from `app`
+/// rather than taken as a `State<'_, _>` parameter because that borrow cannot
+/// outlive an async command's future.
+#[tauri::command(async)]
+pub fn reveal_allowed_path(app: AppHandle, path: String) -> Result<(), String> {
+    let state = app.state::<AllowedAddonsPath>();
     let addons_root = {
         let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
         guard
@@ -9777,6 +9784,28 @@ fn is_eso_or_launcher_process_name(name: &str) -> bool {
         || lower == "esolauncher.exe"
 }
 
+/// Whether a zero return from `Process32NextW` means "the list ended" rather
+/// than "the walk was aborted".
+///
+/// `Process32NextW` returns 0 for both, and only the thread's last-error code
+/// tells them apart. `ERROR_SUCCESS` is accepted alongside `ERROR_NO_MORE_FILES`
+/// deliberately: an unset last-error must not turn every install and every
+/// SavedVariables write on such a machine into a hard refusal, which is the one
+/// way this check could regress. Anything else is an indeterminate scan, and the
+/// write gates have to refuse it for the same reason the `Process32FirstW` guard
+/// does — reporting `false` would tell them "ESO is not running" on the strength
+/// of a walk that stopped before it reached `eso64.exe`.
+///
+/// Carries `test` in the cfg for the same reason as
+/// [`is_eso_client_process_name`]: the FFI walk around it cannot be driven from
+/// a unit test, but this decision can.
+#[cfg(any(target_os = "windows", test))]
+fn process_walk_ended_cleanly(last_error: u32) -> bool {
+    const ERROR_SUCCESS: u32 = 0;
+    const ERROR_NO_MORE_FILES: u32 = 18;
+    last_error == ERROR_SUCCESS || last_error == ERROR_NO_MORE_FILES
+}
+
 /// Check the running-process snapshot on Windows for a process name matching
 /// `matches`. Shared by [`is_eso_running`] and [`is_eso_or_launcher_running`]
 /// so the Toolhelp32 FFI walk is written once. This avoids spawning a
@@ -9809,6 +9838,7 @@ fn is_eso_running_windows(matches: impl Fn(&str) -> bool) -> Result<bool, String
         fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
         fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
         fn CloseHandle(hObject: isize) -> i32;
+        fn GetLastError() -> u32;
     }
 
     unsafe {
@@ -9831,6 +9861,7 @@ fn is_eso_running_windows(matches: impl Fn(&str) -> bool) -> Result<bool, String
         }
 
         let mut found = false;
+        let mut walk_aborted = false;
         loop {
             let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
             let name_os = OsString::from_wide(&entry.szExeFile[..len]);
@@ -9840,11 +9871,20 @@ fn is_eso_running_windows(matches: impl Fn(&str) -> bool) -> Result<bool, String
                 break;
             }
             if Process32NextW(snap, &mut entry) == 0 {
+                // Read the last error here, before anything else can overwrite
+                // it: this is the only place the clean end of the list can be
+                // told apart from a walk that gave up part way through, and
+                // the difference decides whether the write gates get an answer
+                // or a refusal. See [`process_walk_ended_cleanly`].
+                walk_aborted = !process_walk_ended_cleanly(GetLastError());
                 break;
             }
         }
 
         CloseHandle(snap);
+        if walk_aborted {
+            return Err("Process list walk ended early".to_string());
+        }
         Ok(found)
     }
 }
@@ -11460,6 +11500,49 @@ mod tests {
         assert!(is_eso_or_launcher_process_name("esolauncher.exe"));
         assert!(!is_eso_or_launcher_process_name("notepad.exe"));
         assert!(!is_eso_or_launcher_process_name("resolve.exe"));
+    }
+
+    #[test]
+    fn a_process_walk_that_stops_early_is_not_an_empty_machine() {
+        // The clean end of the list, and the unset last-error that must not be
+        // read as a failure.
+        assert!(process_walk_ended_cleanly(0)); // ERROR_SUCCESS
+        assert!(process_walk_ended_cleanly(18)); // ERROR_NO_MORE_FILES
+
+        // Everything else is a scan that stopped before it could have seen
+        // eso64.exe. Answering `Ok(false)` for these is what let the
+        // SavedVariables and client-write gates proceed while the game may
+        // have been running.
+        assert!(!process_walk_ended_cleanly(5)); // ERROR_ACCESS_DENIED
+        assert!(!process_walk_ended_cleanly(6)); // ERROR_INVALID_HANDLE
+        assert!(!process_walk_ended_cleanly(8)); // ERROR_NOT_ENOUGH_MEMORY
+
+        // And the refusal the gates then produce, rather than an all-clear.
+        let refused =
+            ensure_eso_not_running_with(|| Err("Process list walk ended early".to_string()))
+                .unwrap_err();
+        assert!(refused.contains("refusing to change SavedVariables"));
+    }
+
+    /// A non-async `#[tauri::command]` runs on the main thread. `reveal` is the
+    /// one that bites: `reveal_item_in_dir` blocks until Explorer has opened
+    /// the folder, so a sync wrapper freezes the window on every cold reveal —
+    /// which is how beta.22's direct webview call regressed when the five call
+    /// sites were routed through native confinement. Source-level because an
+    /// attribute has no runtime seam to assert on.
+    #[test]
+    fn reveal_allowed_path_stays_off_the_main_thread() {
+        const SOURCE: &str = include_str!("commands.rs");
+        let at = SOURCE
+            .find("pub fn reveal_allowed_path(")
+            .expect("reveal_allowed_path is still defined here");
+        // `trim_end` because this file is CRLF and `include_str!` preserves it.
+        assert!(
+            SOURCE[..at]
+                .trim_end()
+                .ends_with("#[tauri::command(async)]"),
+            "reveal_allowed_path must be #[tauri::command(async)]"
+        );
     }
 
     #[test]
