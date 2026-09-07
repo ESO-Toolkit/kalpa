@@ -44,22 +44,62 @@ if (!KEY) {
   process.exit(1);
 }
 
+/** Transient failures that say "try again", not "this is broken". */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 5;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * POST with backoff.
+ *
+ * A full crawl is ~100 sequential requests over half an hour, so a single
+ * blip — a worker reload, a 503, a dropped socket — should not discard the
+ * run. Progress is committed per page server-side, so retrying a page is
+ * always safe: already-described addons are simply no longer queued.
+ */
 async function post(path) {
-  const response = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { "X-API-Key": KEY },
-  });
-  const text = await response.text();
-  let body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error(`${path} returned non-JSON (HTTP ${response.status}): ${text.slice(0, 200)}`);
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      const backoff = Math.min(2000 * 2 ** (attempt - 2), 15000);
+      console.log(`    retry ${attempt - 1}/${MAX_ATTEMPTS - 1} in ${backoff / 1000}s — ${lastError}`);
+      await sleep(backoff);
+    }
+
+    let response;
+    try {
+      response = await fetch(`${BASE}${path}`, {
+        method: "POST",
+        headers: { "X-API-Key": KEY },
+      });
+    } catch (err) {
+      // Network-level failure (worker restarting, socket dropped).
+      lastError = err instanceof Error ? err.message : String(err);
+      continue;
+    }
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      if (RETRYABLE_STATUS.has(response.status)) {
+        lastError = `HTTP ${response.status}`;
+        continue;
+      }
+      throw new Error(`${path} failed (HTTP ${response.status}): ${text.slice(0, 200)}`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      // A 200 carrying an HTML error page is the shape a reloading dev worker
+      // returns; treat it as transient rather than as corrupt data.
+      lastError = "non-JSON response";
+    }
   }
-  if (!response.ok) {
-    throw new Error(`${path} failed (HTTP ${response.status}): ${body.error ?? text}`);
-  }
-  return body;
+
+  throw new Error(`${path} failed after ${MAX_ATTEMPTS} attempts: ${lastError}`);
 }
 
 const started = Date.now();
