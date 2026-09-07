@@ -25,6 +25,18 @@
 //!
 //! Non-Windows targets always report unverified: Authenticode is a Windows
 //! construct, and the client-directory manager is Windows-only anyway.
+//!
+//! # No caller in this release
+//!
+//! Nothing invokes [`verify_authenticode`] yet. The path it is the gate for —
+//! installing a DLSS or Neural Rendering runtime the user picked off their own
+//! disk — does not exist in this release: `ManagedKind::NvidiaRuntime` is only
+//! ever *recorded* for a file already sitting in the client folder
+//! (`client_adopt`) or *parked* (`client_toggle`), never placed from a
+//! user-chosen source. This module is kept, and kept tested, so the gate is
+//! already in place when that path is built rather than being retrofitted onto
+//! a shipping write. Whoever builds it should read the revocation note on
+//! `win_verify_trust` before wiring this in.
 
 use serde::Serialize;
 use std::path::Path;
@@ -33,8 +45,13 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SignatureInfo {
     /// True only when the signature is present, intact, and chains to a root
-    /// the OS trusts. Any failure — absent, malformed, expired, self-signed,
-    /// revoked — is `false`.
+    /// the OS trusts. Any failure — absent, malformed, expired, self-signed —
+    /// is `false`.
+    ///
+    /// Revocation is deliberately **not** in that list: `win_verify_trust`
+    /// passes `WTD_REVOKE_NONE`, so a certificate the CA has since revoked
+    /// still reports `true` here. See the comment on that flag for why, and
+    /// for what the first real caller has to decide.
     pub trusted: bool,
     /// Common Name of the signing certificate's subject, e.g.
     /// `NVIDIA Corporation`. `None` when absent or unreadable.
@@ -189,6 +206,17 @@ mod imp {
             pPolicyCallbackData: std::ptr::null_mut(),
             pSIPClientData: std::ptr::null_mut(),
             dwUIChoice: WTD_UI_NONE,
+            // No revocation check, so a revoked signing certificate still
+            // verifies as trusted — `CERT_E_REVOKED` in `describe_trust_result`
+            // is therefore unreachable from this call. The alternative,
+            // `WTD_REVOKE_WHOLECHAIN`, makes a live CRL/OCSP fetch whose
+            // offline failure mode is `CRYPT_E_REVOCATION_OFFLINE`, i.e. a
+            // false negative that refuses a perfectly good NVIDIA DLL on a
+            // machine with no network. Neither answer is right in the
+            // abstract, and nothing calls this module yet, so the choice is
+            // left to the caller that eventually gates a runtime write: it
+            // must revisit this flag and decide what an unreachable CA means
+            // for a file the user already has on their own disk.
             fdwRevocationChecks: WTD_REVOKE_NONE,
             dwUnionChoice: WTD_CHOICE_FILE,
             Anonymous: WINTRUST_DATA_0 {
