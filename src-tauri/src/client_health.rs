@@ -1002,13 +1002,13 @@ pub fn inspect_client(location: &EsoClientLocation) -> ClientHealthReport {
 // registered in the single `generate_handler!` list in `lib.rs`.
 
 /// Enumerate ESO client installs found on this machine.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_eso_clients() -> Vec<EsoClientLocation> {
     crate::client_install::detect_client_locations()
 }
 
 /// Validate a user-picked path as a client install, for the browse fallback.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn validate_eso_client(path: String) -> Result<EsoClientLocation, String> {
     crate::client_install::validate_client_dir(Path::new(&path))
 }
