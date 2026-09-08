@@ -975,7 +975,20 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     // the user to add a line their file already had — and the fix that finding
     // recommends is another hand-edit of the same file. Decoding lossily
     // mangles only the offending bytes. Same reader as `client_health`.
-    let reshade_ini = std::fs::read(client_dir.join("ReShade.ini"))
+    let read = std::fs::read(client_dir.join("ReShade.ini"));
+    // Present but unreadable is not absent, and only one of those licenses a
+    // verdict. A folder with no `ReShade.ini` is ordinary and empty text is the
+    // honest reading of it; a permission error or the sharing violation a
+    // running ESO produces is not, and swallowing it made `DisabledAddons`,
+    // `LoadFromDllMain`, `PresetPath` and every tuning section read as
+    // absent — a configured install reported as unconfigured. Same split
+    // `client_tuning::read_client_tuning` already makes, and it becomes
+    // [`ActivePath::Unknown`] below for the same reason the folder walk does.
+    let unreadable = read
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+    let reshade_ini = read
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     let ini = parse_ini(&reshade_ini);
@@ -1144,7 +1157,12 @@ pub fn inspect_stack(client_dir: &Path) -> ClientStack {
     // disagree. See [`LoadedAddons`]. The evidence lines belong to the tuning
     // panel, which builds its own and shows them; this stack carries the
     // verdict alone.
-    let loaded = if listed {
+    // Both inputs, or neither. `detect_active_path` needs the folder listing
+    // *and* `DisabledAddons`, so an ini Kalpa could not read leaves liveness
+    // exactly as unprovable as a folder it could not list: a present add-on may
+    // be one ReShade has been told not to load, and a verdict either way would
+    // be a guess wearing a verdict's clothes.
+    let loaded = if listed && !unreadable {
         LoadedAddons::from_listing(&live_names, &stack.disabled_addons)
     } else {
         LoadedAddons::unlisted(Vec::new())
@@ -1315,13 +1333,18 @@ fn read_preset(
     };
     let preset_ini = parse_ini(&contents);
 
-    let shader_dir = client_dir.join("reshade-shaders").join("Shaders");
+    // Where ReShade will look, not where Kalpa assumes. See
+    // [`EffectSearchPaths`]: this is the whole difference between "Kalpa did
+    // not find it" and "the preset will not compile", and only the second is
+    // worth a Danger.
+    let search =
+        EffectSearchPaths::resolve(client_dir, ini_get(ini, "GENERAL", "EffectSearchPaths"));
     let technique_entries = ini_get(&preset_ini, "", "Techniques").unwrap_or_default();
     let mut techniques: Vec<Technique> = technique_entries
         .split(',')
         .filter_map(split_technique)
         .map(|(name, source)| Technique {
-            source_present: shader_source_exists(&shader_dir, &source),
+            source_present: search.has(&source),
             name,
             source,
         })
@@ -1338,7 +1361,7 @@ fn read_preset(
         .collect();
     order_as_reshade_will_run(&mut techniques, &available);
 
-    let mv_provider = resolve_mv_provider(&preset_ini, ini, &shader_dir, &techniques);
+    let mv_provider = resolve_mv_provider(&preset_ini, ini, &search, &techniques);
 
     Some(PresetInfo {
         path: raw.to_string(),
@@ -1349,36 +1372,180 @@ fn read_preset(
     })
 }
 
-/// Shader packs nest one level (`Shaders/MartysMods/...`), so look in the root
-/// and in immediate subdirectories.
+/// What ReShade falls back to when `EffectSearchPaths` is absent or empty. It
+/// writes this exact line back into `ReShade.ini` on exit.
+const DEFAULT_EFFECT_SEARCH_PATHS: &str = r".\reshade-shaders\Shaders\**";
+
+/// How far a `**` entry is walked.
+///
+/// Not a budget for real shader trees: packs nest two or three levels
+/// (`Shaders/MartysMods/...`) and none ship deeper, so no honest layout can
+/// reach this and be reported missing. It is here because `Path::is_dir`
+/// follows symlinks, and a link pointing back up its own tree would otherwise
+/// walk forever on a lookup that runs on every panel refresh.
+const MAX_SEARCH_DEPTH: usize = 16;
+
+/// Where ReShade will look for an effect file, resolved from
+/// `[GENERAL] EffectSearchPaths`.
+///
+/// Kalpa used to search one hard-coded tree — `reshade-shaders\Shaders` plus
+/// its immediate subdirectories — whatever the ini said. ReShade searches
+/// every entry of that comma list, recursively wherever the entry ends in `**`,
+/// and its own default entry *is* `**`. So a shader two folders down under the
+/// default root, or any shader under a root the user added, read as missing,
+/// and every enabled technique using one raised a
+/// `stack-technique-source-missing` Danger telling the user a preset that
+/// compiles fine will not compile. beta.23 suppressed that claim whenever the
+/// list named anything but the default root, which left the deep-nesting case
+/// still wrong; this resolves the list instead, so the finding is answered
+/// rather than silenced.
+///
+/// Entries are honoured the way ReShade honours them, absolute roots included:
+/// the list is the user's own statement of where their shaders are, and
+/// declining to look where they said is what put the false Danger there. The
+/// guard that matters is on the other side and is unchanged — `source` is the
+/// right-hand side of a preset's `Technique@Source.fx` entry, so it still goes
+/// through `safe_relative_join` and cannot reach outside the root being
+/// searched. Nothing here writes.
+struct EffectSearchPaths {
+    roots: Vec<SearchRoot>,
+}
+
+/// One resolved entry of the comma list.
+struct SearchRoot {
+    dir: std::path::PathBuf,
+    /// The entry ended in `**` — ReShade's "and everything under it".
+    recursive: bool,
+}
+
+impl EffectSearchPaths {
+    /// Resolve the list against the client directory.
+    ///
+    /// A missing key, an empty value, and a value whose every entry is unusable
+    /// all fall back to [`DEFAULT_EFFECT_SEARCH_PATHS`], because that is what
+    /// ReShade does with them. An empty root list would report every shader on
+    /// the machine as missing, which is the failure this type exists to end.
+    fn resolve(client_dir: &Path, configured: Option<&str>) -> Self {
+        let mut roots = configured
+            .map(|raw| parse_search_paths(client_dir, raw))
+            .unwrap_or_default();
+        if roots.is_empty() {
+            roots = parse_search_paths(client_dir, DEFAULT_EFFECT_SEARCH_PATHS);
+        }
+        Self { roots }
+    }
+
+    /// The file ReShade would compile for `source`, or `None`.
+    ///
+    /// First match wins, in the list's own order, which is ReShade's rule too.
+    fn find(&self, source: &str) -> Option<std::path::PathBuf> {
+        self.roots.iter().find_map(|root| {
+            let depth = if root.recursive { MAX_SEARCH_DEPTH } else { 0 };
+            find_under(&root.dir, source, depth)
+        })
+    }
+
+    /// Is `source` anywhere ReShade will look?
+    fn has(&self, source: &str) -> bool {
+        self.find(source).is_some()
+    }
+}
+
+/// Split an `EffectSearchPaths` value into resolved roots.
+fn parse_search_paths(client_dir: &Path, raw: &str) -> Vec<SearchRoot> {
+    raw.split(',')
+        .filter_map(|entry| parse_search_entry(client_dir, entry))
+        .collect()
+}
+
+/// Resolve one comma-list entry, e.g. `.\reshade-shaders\Shaders\**`.
+///
+/// Separators are split by hand on both `/` and `\` rather than handed to
+/// `Path`: `ReShade.ini` is written by a Windows program and keeps Windows
+/// separators even on the Proton installs Kalpa supports, where `\` is an
+/// ordinary character in a file name and `Path` would read the whole entry as
+/// one component. That is the same class of bug as the case folding
+/// [`case_insensitive_file`] exists for, and Linux is where both bite.
+fn parse_search_entry(client_dir: &Path, entry: &str) -> Option<SearchRoot> {
+    let entry = entry.trim().trim_matches('"').trim();
+    if entry.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<&str> = entry.split(['/', '\\']).collect();
+    // A trailing separator leaves an empty last part, and it can sit after the
+    // `**` that decides recursion, so strip those before looking for it.
+    while parts.last() == Some(&"") {
+        parts.pop();
+    }
+    let recursive = parts.last() == Some(&"**");
+    if recursive {
+        parts.pop();
+    }
+
+    // `\shaders` and `C:\shaders` are each a root of their own; everything else
+    // hangs off the client directory, which is what ReShade resolves a relative
+    // entry against.
+    let absolute = match parts.first() {
+        Some(&"") => true,
+        Some(first) => first.ends_with(':'),
+        None => false,
+    };
+    if absolute {
+        return Some(SearchRoot {
+            dir: std::path::PathBuf::from(parts.join(std::path::MAIN_SEPARATOR_STR)),
+            recursive,
+        });
+    }
+
+    let mut dir = client_dir.to_path_buf();
+    for part in parts {
+        match part {
+            "" | "." => {}
+            // ReShade resolves these too, so Kalpa does. A root Kalpa refused
+            // to walk would be a root the finding cannot be answered from,
+            // which is exactly how the false Danger arose in the first place.
+            ".." => {
+                if !dir.pop() {
+                    return None;
+                }
+            }
+            _ => dir.push(part),
+        }
+    }
+    Some(SearchRoot { dir, recursive })
+}
+
+/// Look for `source` in `dir`, and in up to `depth` levels below it.
+///
+/// `depth == 0` is ReShade's non-recursive entry: that directory and nothing
+/// under it.
 ///
 /// `source` is the right-hand side of a `Technique@Source.fx` entry in a preset
 /// file, which the user or ReShade owns and Kalpa does not validate on the way
-/// in. A bare `Path::join` with a segment like `C:pwned.fx` is drive-relative on
-/// Windows: it discards `shader_dir` entirely and resolves against the process
-/// cwd. Nothing here writes, so the worst case today is reporting a shader as
-/// present because an unrelated file exists elsewhere — but it is the same
-/// class as the two joins already fixed in this module, and the answer feeds
-/// findings the user acts on. `safe_relative_join` refusing reads as "not
-/// found", which is the safe direction for a presence test.
-fn find_shader_source(shader_dir: &Path, source: &str) -> Option<std::path::PathBuf> {
-    let direct = crate::client_write::safe_relative_join(shader_dir, source).ok()?;
-    if direct.is_file() {
-        return Some(direct);
+/// in. A bare `Path::join` with a segment like `C:pwned.fx` is drive-relative
+/// on Windows: it discards `dir` entirely and resolves against the process cwd.
+/// Nothing here writes, so the worst case is reporting a shader as present
+/// because an unrelated file exists elsewhere — but the answer feeds findings
+/// the user acts on. `safe_relative_join` refusing reads as "not found", which
+/// is the safe direction for a presence test.
+fn find_under(dir: &Path, source: &str, depth: usize) -> Option<std::path::PathBuf> {
+    if let Ok(direct) = crate::client_write::safe_relative_join(dir, source) {
+        if direct.is_file() {
+            return Some(direct);
+        }
     }
-    if let Some(hit) = case_insensitive_file(shader_dir, source) {
+    if let Some(hit) = case_insensitive_file(dir, source) {
         return Some(hit);
     }
-    std::fs::read_dir(shader_dir).ok()?.flatten().find_map(|e| {
-        let dir = e.path();
-        if !dir.is_dir() {
+    if depth == 0 {
+        return None;
+    }
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let nested = entry.path();
+        if !nested.is_dir() {
             return None;
         }
-        let nested = crate::client_write::safe_relative_join(&dir, source).ok()?;
-        if nested.is_file() {
-            return Some(nested);
-        }
-        case_insensitive_file(&dir, source)
+        find_under(&nested, source, depth - 1)
     })
 }
 
@@ -1410,41 +1577,6 @@ fn case_insensitive_file(dir: &Path, file_name: &str) -> Option<std::path::PathB
                 .to_string_lossy()
                 .eq_ignore_ascii_case(file_name))
         .then_some(path)
-    })
-}
-
-fn shader_source_exists(shader_dir: &Path, source: &str) -> bool {
-    find_shader_source(shader_dir, source).is_some()
-}
-
-/// Does `EffectSearchPaths` name a root [`find_shader_source`] never searches?
-///
-/// The lookup only ever walks `reshade-shaders\Shaders` and its immediate
-/// subdirectories, while ReShade walks every entry of this comma list. Where
-/// the two disagree, a `source_present: false` says only that Kalpa did not
-/// find the file — not that ReShade will not — while
-/// `stack-technique-source-missing` is a Danger claiming the preset will fail
-/// to compile. Suppressing an unprovable claim is the safe direction.
-///
-/// The default ReShade writes, `.\reshade-shaders\Shaders\**`, counts as
-/// covered, so the finding still fires for the layout almost everyone has. That
-/// is deliberately generous in one respect: `**` is recursive and the lookup
-/// stops one level down, so a shader buried three folders deep under the
-/// default root is still reported missing. Resolving the list properly —
-/// comma-splitting, `**` recursion and absolute roots, i.e. a new directory
-/// walk over user-controlled paths — is the real fix and is not a release-eve
-/// change.
-fn search_paths_beyond_lookup(paths: &str) -> bool {
-    paths.split(',').any(|entry| {
-        let entry = entry.trim().trim_matches('"').replace('/', "\\");
-        if entry.is_empty() {
-            return false;
-        }
-        let root = entry
-            .trim_start_matches(".\\")
-            .trim_end_matches("\\**")
-            .trim_end_matches('\\');
-        !root.eq_ignore_ascii_case("reshade-shaders\\Shaders")
     })
 }
 
@@ -1485,7 +1617,7 @@ fn preprocessor_definition<'a>(
 fn resolve_mv_provider(
     preset_ini: &BTreeMap<String, BTreeMap<String, String>>,
     reshade_ini: &BTreeMap<String, BTreeMap<String, String>>,
-    shader_dir: &Path,
+    search: &EffectSearchPaths,
     techniques: &[Technique],
 ) -> Option<MvProvider> {
     if !techniques.iter().any(is_feed_technique) {
@@ -1543,7 +1675,7 @@ fn resolve_mv_provider(
                 // feed declares it too — as the consumer — so its own source is
                 // excluded.
                 !t.source.eq_ignore_ascii_case(FEED_SOURCE)
-                    && source_mentions_shared_mv(shader_dir, &t.source)
+                    && source_mentions_shared_mv(search, &t.source)
             } else {
                 names.iter().any(|name| t.name.eq_ignore_ascii_case(name))
                     || (kind == MvProviderKind::Launchpad
@@ -1561,8 +1693,8 @@ fn resolve_mv_provider(
 /// consumer would match too. It is the strongest signal available without
 /// parsing HLSL, and naming the wrong enabled effect is a far smaller error
 /// than the check not running.
-fn source_mentions_shared_mv(shader_dir: &Path, source: &str) -> bool {
-    let Some(path) = find_shader_source(shader_dir, source) else {
+fn source_mentions_shared_mv(search: &EffectSearchPaths, source: &str) -> bool {
+    let Some(path) = search.find(source) else {
         return false;
     };
     std::fs::read_to_string(&path)
@@ -1755,9 +1887,10 @@ impl LoadedAddons {
         }
     }
 
-    /// The folder could not be listed. The path is [`ActivePath::Unknown`] and
-    /// every owner answers `None`, which is what stops the write side guessing
-    /// in the direction of writing.
+    /// One of the two inputs could not be read — the folder listing, or the
+    /// `ReShade.ini` that `DisabledAddons` comes out of. The path is
+    /// [`ActivePath::Unknown`] and every owner answers `None`, which is what
+    /// stops the write side guessing in the direction of writing.
     pub fn unlisted(evidence: Vec<String>) -> Self {
         Self {
             path: ActivePath::Unknown,
@@ -1820,12 +1953,20 @@ fn parked_feed_addons(stack: &ClientStack) -> Vec<String> {
     names
 }
 
-/// Is iMMERSE LaunchPad in the shader tree?
+/// Is iMMERSE LaunchPad anywhere ReShade will look?
+///
+/// Through [`EffectSearchPaths`] rather than the hard-coded
+/// `reshade-shaders\Shaders`, because a user who keeps their shaders elsewhere
+/// had LaunchPad read as absent here — which silently downgrades the Shaders
+/// slot from `InstalledUnused` (keep this, Kalpa cannot refetch it) to
+/// `NotOnThisPath` (nothing to see), the same downgrade the case-folding bug
+/// caused on Linux.
 fn launchpad_installed(stack: &ClientStack) -> bool {
-    let shader_dir = Path::new(&stack.client_dir)
-        .join("reshade-shaders")
-        .join("Shaders");
-    find_shader_source(&shader_dir, LAUNCHPAD_SOURCE).is_some()
+    EffectSearchPaths::resolve(
+        Path::new(&stack.client_dir),
+        stack.shaders.effect_search_paths.as_deref(),
+    )
+    .has(LAUNCHPAD_SOURCE)
 }
 
 /// The sentence explaining why a link-only piece is worth keeping.
@@ -1844,8 +1985,9 @@ fn keep_link_only(what: &str, where_from: &str) -> String {
 /// One sentence for every row on [`ActivePath::Unknown`], shared by
 /// [`build_slots`] and [`tuning_slot`] so the two rows cannot say it
 /// differently.
-const UNREADABLE_ROW: &str = "Kalpa could not read this client folder, so it cannot tell which \
-                              Neural Rendering path is live or whether anything is missing here.";
+const UNREADABLE_ROW: &str = "Kalpa could not read this client folder — either its file list or \
+                              its ReShade.ini — so it cannot tell which Neural Rendering path is \
+                              live or whether anything is missing here.";
 
 /// The need axis, one entry per frontend slot, always all eight.
 ///
@@ -2294,10 +2436,17 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
     // The fix is one ini line, and it has to be made with ESO **closed**:
     // ReShade rewrites `ReShade.ini` when the game exits and discards anything
     // edited underneath it.
+    //
+    // Silent under [`ActivePath::Unknown`], which is what an unreadable
+    // `ReShade.ini` produces: `load_from_dll_main` is then empty because Kalpa
+    // could not read the file, not because the line is missing, and this
+    // finding would tell the user to add a line their file already has — the
+    // same wrong advice the non-UTF-8 read used to give, reached the other way.
     for item in stack
         .items
         .iter()
         .filter(|item| item.role == StackRole::Addon)
+        .filter(|_| stack.active_path != ActivePath::Unknown)
     {
         let Some(stem) = addon_stem(&item.file_name) else {
             continue;
@@ -2458,20 +2607,17 @@ pub fn build_findings(stack: &ClientStack) -> Vec<HealthFinding> {
             ));
         }
 
-        // Only where Kalpa looked where ReShade looks. `find_shader_source`
-        // searches one tree, `reshade-shaders\Shaders`, plus its immediate
-        // subdirectories; a user who points `EffectSearchPaths` at a root of
-        // their own gets one Danger per enabled technique telling them a preset
-        // that compiles fine will not compile. Not finding a file in a tree
-        // nobody said to search is not evidence the file is missing.
-        let searched_where_reshade_does = stack
-            .shaders
-            .effect_search_paths
-            .as_deref()
-            .map(|paths| !search_paths_beyond_lookup(paths))
-            .unwrap_or(true);
+        // `source_present` is now answered from `EffectSearchPaths` — every
+        // entry of the comma list, recursively under `**`, absolute roots
+        // included — so "Kalpa did not find it" and "ReShade will not find it"
+        // are the same statement and this Danger is answerable again. It used
+        // to be gated on the list naming nothing but the default root, because
+        // the lookup walked that one tree and one level below it regardless of
+        // what the user had configured: a shader three folders deep, or under a
+        // root of their own, produced one Danger per enabled technique about a
+        // preset that compiles fine.
         for technique in &preset.techniques {
-            if !technique.source_present && searched_where_reshade_does {
+            if !technique.source_present {
                 out.push(finding(
                     "stack-technique-source-missing",
                     HealthLevel::Danger,
@@ -3145,8 +3291,9 @@ PresetPath=.\\ReShadePreset.ini
         // than about the target happening not to exist.
         std::fs::write(dir.path().join("Outside.fx"), "technique").expect("write outside");
 
+        let search = EffectSearchPaths::resolve(dir.path(), None);
         assert!(
-            shader_source_exists(&shaders, "Real.fx"),
+            search.has("Real.fx"),
             "an ordinary source must still resolve"
         );
         assert!(
@@ -3154,10 +3301,7 @@ PresetPath=.\\ReShadePreset.ini
             "the escape target must exist for this test to mean anything"
         );
         for source in ["../../Outside.fx", "C:Outside.fx", "/Outside.fx"] {
-            assert!(
-                !shader_source_exists(&shaders, source),
-                "{source} must not resolve"
-            );
+            assert!(!search.has(source), "{source} must not resolve");
         }
     }
 
@@ -3195,14 +3339,14 @@ PresetPath=.\\ReShadePreset.ini
         assert!(ids(&stack).contains(&"stack-technique-source-missing"));
     }
 
-    /// The same missing file, with a second search root added to ReShade.ini.
-    /// Kalpa's lookup only ever walks `reshade-shaders\Shaders` and one level
-    /// below it, so on any non-default layout it was raising a Danger — one per
-    /// enabled technique — telling the user a preset that compiles fine would
-    /// fail to compile. Not finding a file in a tree nobody said to search is
-    /// not evidence the file is missing.
+    /// The same file, moved under a second search root the user added.
+    ///
+    /// beta.23 could only *suppress* the Danger here: the lookup still walked
+    /// one hard-coded tree, so `source_present` stayed false and the panel
+    /// showed a perfectly good effect as having no shader file. Reading
+    /// `EffectSearchPaths` answers the question instead of ducking it.
     #[test]
-    fn a_search_path_kalpa_does_not_walk_suppresses_the_missing_source_danger() {
+    fn a_shader_under_a_root_the_user_configured_is_found() {
         let tmp = tempfile::tempdir().unwrap();
         healthy_stack(tmp.path());
         write(
@@ -3213,6 +3357,50 @@ PresetPath=.\\ReShadePreset.ini
                 r"EffectSearchPaths=.\reshade-shaders\Shaders\**,.\my-shaders\**",
             ),
         );
+        let mine = tmp.path().join("my-shaders").join("feed");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::rename(
+            tmp.path()
+                .join("reshade-shaders")
+                .join("Shaders")
+                .join("DLSS5_Feed.fx"),
+            mine.join("DLSS5_Feed.fx"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(tmp.path());
+        let preset = stack.preset.as_ref().expect("the ini names a preset");
+        assert!(
+            preset.techniques.iter().all(|t| t.source_present),
+            "the file is under a root the ini names, got {:?}",
+            preset.techniques
+        );
+        assert!(
+            !ids(&stack).contains(&"stack-technique-source-missing"),
+            "got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// And the Danger has to come back when the file really is nowhere.
+    ///
+    /// This is what beta.23's gate cost: with any root but the default in the
+    /// list, no enabled technique could raise the finding at all, whether or
+    /// not its shader existed. A preset that will genuinely fail to compile has
+    /// to be reported on a non-default layout too.
+    #[test]
+    fn a_missing_shader_is_still_reported_under_extra_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &REAL_RESHADE_INI.replace(
+                r"EffectSearchPaths=.\reshade-shaders\Shaders\**",
+                r"EffectSearchPaths=.\reshade-shaders\Shaders\**,.\my-shaders\**",
+            ),
+        );
+        std::fs::create_dir_all(tmp.path().join("my-shaders")).unwrap();
         std::fs::remove_file(
             tmp.path()
                 .join("reshade-shaders")
@@ -3223,26 +3411,64 @@ PresetPath=.\\ReShadePreset.ini
         let stack = inspect_stack(tmp.path());
 
         assert!(
-            !ids(&stack).contains(&"stack-technique-source-missing"),
-            "the file may be under the root Kalpa cannot walk, got {:?}",
+            ids(&stack).contains(&"stack-technique-source-missing"),
+            "the file is under neither root, got {:?}",
             ids(&stack)
         );
     }
 
-    /// The gate above must not swallow the finding on the layout almost
-    /// everyone has: `.\reshade-shaders\Shaders\**` is what ReShade writes by
-    /// default, and it is the one tree the lookup does walk. The end-to-end
-    /// half of this is `a_missing_shader_source_is_reported`, which uses that
-    /// default and still expects the Danger.
+    /// The resolution rules themselves, against a real tree: comma splitting,
+    /// `**` recursion and its absence, `/` as well as `\`, an absolute root,
+    /// and the fallback that stops an empty value meaning "look nowhere".
     #[test]
-    fn the_default_search_path_counts_as_searched() {
-        assert!(!search_paths_beyond_lookup(r".\reshade-shaders\Shaders\**"));
-        assert!(!search_paths_beyond_lookup(r"reshade-shaders/Shaders"));
-        assert!(!search_paths_beyond_lookup(r".\RESHADE-SHADERS\shaders\**"));
-        assert!(search_paths_beyond_lookup(
-            r".\reshade-shaders\Shaders\**,.\my-shaders\**"
-        ));
-        assert!(search_paths_beyond_lookup(r"C:\shaders\**"));
+    fn effect_search_paths_are_resolved_the_way_reshade_reads_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = tmp.path().join("client");
+        let shaders = client.join("reshade-shaders").join("Shaders");
+        let deep = shaders.join("MartysMods").join("iMMERSE");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(shaders.join("Flat.fx"), "").unwrap();
+        std::fs::write(deep.join("Deep.fx"), "").unwrap();
+        let outside = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("Outside.fx"), "").unwrap();
+
+        // Absent means ReShade's own default, and that default is recursive.
+        // Two levels down is the layout iMMERSE actually ships.
+        let default = EffectSearchPaths::resolve(&client, None);
+        assert!(default.has("Flat.fx"));
+        assert!(default.has("Deep.fx"), "`**` is recursive");
+        assert!(!default.has("Outside.fx"));
+
+        // Without `**` ReShade does not descend, so neither does Kalpa.
+        let shallow = EffectSearchPaths::resolve(&client, Some(r".\reshade-shaders\Shaders"));
+        assert!(shallow.has("Flat.fx"));
+        assert!(!shallow.has("Deep.fx"));
+
+        // Forward slashes, which a hand-edited ini has — and which `Path` alone
+        // would not split on Linux, where Kalpa runs ESO through Proton.
+        assert!(
+            EffectSearchPaths::resolve(&client, Some("reshade-shaders/Shaders/**")).has("Deep.fx")
+        );
+
+        // A second entry, absolute, outside the client folder.
+        let both = EffectSearchPaths::resolve(
+            &client,
+            Some(&format!(
+                r".\reshade-shaders\Shaders\**,{}",
+                outside.display()
+            )),
+        );
+        assert!(both.has("Flat.fx"));
+        assert!(both.has("Outside.fx"));
+
+        // An empty value is not "look nowhere": ReShade rewrites it to the
+        // default, and no roots at all would report every shader as missing.
+        assert!(EffectSearchPaths::resolve(&client, Some("  ")).has("Flat.fx"));
+
+        // None of it weakens the guard on the preset-supplied source name.
+        assert!(!default.has("../../elsewhere/Outside.fx"));
+        assert!(!default.has("C:Outside.fx"));
     }
 
     #[test]
@@ -3669,6 +3895,77 @@ PresetPath=.\\ReShadePreset.ini
         );
     }
 
+    /// The half beta.23's gate could not reach.
+    ///
+    /// `.\reshade-shaders\Shaders\**` is ReShade's own default, so nothing was
+    /// suppressed — and `**` is recursive while the lookup stopped one level
+    /// down. A pack that nests twice, which is how iMMERSE ships, produced one
+    /// Danger per enabled technique about a preset that compiles fine.
+    #[test]
+    fn a_shader_nested_below_the_first_level_is_still_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        healthy_stack(tmp.path());
+        let shaders = tmp.path().join("reshade-shaders").join("Shaders");
+        let nested = shaders.join("MartysMods").join("iMMERSE");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::rename(
+            shaders.join("MartysMods_LAUNCHPAD.fx"),
+            nested.join("MartysMods_LAUNCHPAD.fx"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(tmp.path());
+        assert!(
+            !ids(&stack).contains(&"stack-technique-source-missing"),
+            "`**` is recursive and the file is under it, got {:?}",
+            ids(&stack)
+        );
+    }
+
+    /// The Shaders slot asks the same search paths.
+    ///
+    /// `launchpad_installed` hard-coded `reshade-shaders\Shaders` too, so a
+    /// user who keeps their shaders anywhere else had LaunchPad read as absent
+    /// and the slot silently downgraded from `InstalledUnused` (keep this,
+    /// Kalpa cannot refetch it) to `NotOnThisPath` (nothing to see) — the same
+    /// downgrade the case-folding bug caused on Linux, and with the same cost:
+    /// the reason to keep an unfetchable file disappears along with it.
+    #[test]
+    fn launchpad_is_seen_through_the_configured_search_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        direct_path_stack(tmp.path());
+        write(
+            tmp.path(),
+            "ReShade.ini",
+            &DIRECT_RESHADE_INI.replace(
+                r"EffectSearchPaths=.\reshade-shaders\Shaders\**",
+                r"EffectSearchPaths=.\my-shaders\**",
+            ),
+        );
+        let mine = tmp.path().join("my-shaders").join("iMMERSE");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::rename(
+            tmp.path()
+                .join("reshade-shaders")
+                .join("Shaders")
+                .join("MartysMods_LAUNCHPAD.fx"),
+            mine.join("MartysMods_LAUNCHPAD.fx"),
+        )
+        .unwrap();
+
+        let stack = inspect_stack(tmp.path());
+        let shaders = slot(&stack, StackSlot::Shaders);
+        assert_eq!(
+            shaders.need,
+            SlotNeed::InstalledUnused,
+            "LaunchPad is installed, just not under the default root"
+        );
+        assert!(
+            shaders.keep_because.is_some(),
+            "the reason to keep a file Kalpa cannot refetch has to survive"
+        );
+    }
+
     // ── The two paths ────────────────────────────────────────────────────
 
     /// The headline regression. Every finding this module can emit about the
@@ -3781,6 +4078,58 @@ PresetPath=.\\ReShadePreset.ini
             "the line is in the file; only its encoding is odd, got {:?}",
             ids(&stack)
         );
+    }
+
+    /// A `ReShade.ini` that is *there* and cannot be read.
+    ///
+    /// beta.23 fixed the decode half — a file whose bytes are not UTF-8 is now
+    /// read lossily — but a read that fails outright still fell back to empty
+    /// text. `DisabledAddons`, `LoadFromDllMain`, `PresetPath` and every tuning
+    /// section then read as absent, so a configured install was reported as
+    /// unconfigured: `stack-addon-not-in-dllmain` told the primary user to add
+    /// a line their file already has, reached the other way round from the
+    /// non-UTF-8 bug above.
+    ///
+    /// The real causes are a permission error and the sharing violation a
+    /// running ESO produces, neither of which a test can create portably. A
+    /// directory under the file's name fails identically where it matters: the
+    /// path is present and the error is not `NotFound`.
+    ///
+    /// The verdict is [`ActivePath::Unknown`] rather than a guess, because
+    /// `detect_active_path` needs `DisabledAddons` as much as it needs the
+    /// folder listing — an add-on sitting in the folder may be one ReShade has
+    /// been told not to load. That is the same answer the folder walk already
+    /// gives for a folder it cannot list.
+    #[test]
+    fn an_unreadable_reshade_ini_is_not_an_absent_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        direct_path_stack(tmp.path());
+        std::fs::remove_file(tmp.path().join("ReShade.ini")).unwrap();
+        std::fs::create_dir(tmp.path().join("ReShade.ini")).unwrap();
+
+        let stack = inspect_stack(tmp.path());
+
+        assert_eq!(
+            stack.active_path,
+            ActivePath::Unknown,
+            "DisabledAddons is unreadable, so liveness is unprovable"
+        );
+        assert_eq!(
+            stack.tuning_owner,
+            TuningProvenance::Unknown,
+            "and nothing may be called live or fossil from it"
+        );
+        assert_eq!(slot(&stack, StackSlot::Addons).need, SlotNeed::Unknown);
+        assert!(
+            !ids(&stack).contains(&"stack-addon-not-in-dllmain"),
+            "LoadFromDllMain is empty because Kalpa could not read the file, got {:?}",
+            ids(&stack)
+        );
+
+        // Absent is still absent. A client folder with no `ReShade.ini` at all
+        // is ordinary, and the verdict must still come from the folder.
+        std::fs::remove_dir(tmp.path().join("ReShade.ini")).unwrap();
+        assert_eq!(inspect_stack(tmp.path()).active_path, ActivePath::Direct);
     }
 
     /// The feed fixture is the older shape and still has to behave exactly as
@@ -4331,21 +4680,19 @@ PresetPath=.\\ReShadePreset.ini
         std::fs::create_dir_all(&shaders).unwrap();
         std::fs::write(shaders.join("MartysMods_LAUNCHPAD.fx"), "").unwrap();
 
-        assert!(shader_source_exists(&shaders, LAUNCHPAD_SOURCE));
-        assert!(shader_source_exists(&shaders, "MARTYSMODS_LAUNCHPAD.FX"));
-        assert!(!shader_source_exists(&shaders, "NotHere.fx"));
+        let search = EffectSearchPaths::resolve(tmp.path(), None);
+        assert!(search.has(LAUNCHPAD_SOURCE));
+        assert!(search.has("MARTYSMODS_LAUNCHPAD.FX"));
+        assert!(!search.has("NotHere.fx"));
 
         // The nested layout shader packs actually ship in.
         let nested = shaders.join("MartysMods");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("MartysMods_LAUNCHPAD.fx"), "").unwrap();
-        assert!(shader_source_exists(&shaders, LAUNCHPAD_SOURCE));
+        assert!(search.has(LAUNCHPAD_SOURCE));
 
         // The traversal guard is not weakened by the case-folding fallback.
-        assert!(!shader_source_exists(
-            &shaders,
-            "../MartysMods_LAUNCHPAD.fx"
-        ));
+        assert!(!search.has("../MartysMods_LAUNCHPAD.fx"));
     }
 
     /// Installed-but-unused is shown as exactly that, **with the reason to keep
