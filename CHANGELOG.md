@@ -30,6 +30,15 @@ could have damaged files it was in the middle of protecting.
 
 ### Features
 
+- **Discover has one search box instead of separate Search and Ask tabs.**
+  Type a name to find an addon, or ask a question in your own words — the
+  same box answers both, and the assistant explains its suggestions rather
+  than only listing them. Kalpa now keeps its own index of ESOUI addons and
+  refreshes it nightly, so a newly released addon becomes searchable without
+  waiting for anyone. Asking a question sends it off your machine; searching
+  by name does not. When the daily assistant budget is spent the box keeps
+  working and returns matches without the written answer.
+  ([#454](https://github.com/ESO-Toolkit/kalpa/pull/454))
 - **New: the graphics stack panel.** Kalpa can now manage the ReShade-based
   graphics setup in your ESO client folder. It reports what you have installed
   and what is wrong with it, installs shader packs from their authors' GitHub
