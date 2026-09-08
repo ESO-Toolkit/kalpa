@@ -24,6 +24,10 @@
  *   --base <url>   Worker base URL (default: production)
  *   --max <n>      Stop after n backfill pages (for a smoke test)
  *   --sync-only    Run phase 1 and stop
+ *   --embed        After descriptions are current, rebuild the vector index.
+ *                  Nothing else does this, so without it the embeddings drift
+ *                  stale against D1 and newly published addons — exactly the
+ *                  case semantic search exists for — stay invisible to it.
  */
 
 const DEFAULT_BASE = "https://kalpa-pack-hub.eso-toolkit.workers.dev";
@@ -36,6 +40,8 @@ function arg(name, fallback = undefined) {
 const BASE = arg("base", DEFAULT_BASE).replace(/\/$/, "");
 const MAX_PAGES = Number.parseInt(arg("max", "0"), 10) || Infinity;
 const SYNC_ONLY = process.argv.includes("--sync-only");
+/** Rebuild the semantic (embedding) index after the descriptions are current. */
+const WITH_EMBED = process.argv.includes("--embed");
 const KEY = process.env.ADMIN_API_KEY;
 
 if (!KEY) {
@@ -102,6 +108,33 @@ async function post(path) {
   throw new Error(`${path} failed after ${MAX_ATTEMPTS} attempts: ${lastError}`);
 }
 
+/**
+ * Rebuild the embedding index.
+ *
+ * Only rows with `detail_stale = 0` are embedded, so this must run AFTER the
+ * description backfill has settled or it will skip whatever is still queued.
+ * Roughly 4.5k neurons for a full ~3000-row corpus.
+ */
+async function maybeEmbed() {
+  if (!WITH_EMBED) return;
+  console.log("\nPhase 3/3 — rebuilding the semantic index…");
+  let embedded = 0;
+  for (let i = 0; i < 200; i += 1) {
+    const out = await post("/admin/index/embed?limit=100");
+    embedded += out.embedded ?? 0;
+    if (out.complete) {
+      console.log(`  vector index rebuilt: ${embedded} embedded [${elapsed()}]`);
+      return;
+    }
+    if ((out.embedded ?? 0) === 0) {
+      console.error("  embed page returned nothing but is not complete; stopping.");
+      process.exit(1);
+    }
+  }
+  console.error("  embed did not complete within 200 pages; re-run to continue.");
+  process.exit(1);
+}
+
 const started = Date.now();
 const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
 
@@ -136,6 +169,7 @@ while (page < MAX_PAGES) {
   );
 
   if (outcome.complete) {
+    await maybeEmbed();
     console.log(`\nDone. ${fetched} described, ${removed} removed, ${failed} failed in ${elapsed()}.`);
     // Deliberately does NOT tell the operator to enable ADDON_INDEX_SYNC. The
     // in-worker cron manages one page a day (MAX_DETAIL_BATCH = 12) and a real

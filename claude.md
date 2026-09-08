@@ -227,23 +227,51 @@ Vectorize needed at this size), built by the paged `POST /admin/index/embed`.
 `/ask` appends up to `SEMANTIC_EXTRA` semantic-only candidates AFTER the
 keyword hits.
 
-It is appended, not interleaved, because reciprocal rank fusion was tried first
-and **made the slice it was meant to fix worse**: concept recall@20 fell
-0.732 -> 0.661, since a list capped at `CANDIDATE_COUNT` must evict BM25 hits
-from positions 10-20, and for natural-language questions those were the better
-ones. Appending cannot regress — every keyword candidate the model saw before,
-it still sees. Measured: concept recall 0.732 -> 0.750, name 0.969 -> 1.000.
-The gain is real but modest; embeddings were not the step change the vocabulary
-argument suggested.
+It is appended, not interleaved, for a **structural** reason: appending cannot
+regress, because every keyword candidate the model saw before, it still sees.
+That is the argument that holds.
+
+Reciprocal rank fusion was tried first and scored worse (concept recall@20
+0.732 -> 0.661), but **do not treat that as established**. The concept slice is
+28 rows, so a 95% CI near 0.73 is roughly ±0.16 and all three numbers are
+statistically indistinguishable — 0.732 -> 0.661 is about two rows. The two
+configurations also had unequal candidate budgets (RRF fused to 20, additive
+shows 26), so RRF was never given the same room. If you want to revisit it,
+equalise the budgets, score both at the same k, and grow the concept fixture
+past 100 rows first.
+
+Measured: concept recall 0.732 -> 0.750, name 0.969 -> 1.000. The gain is
+modest, and embeddings were not the step change the vocabulary argument
+suggested.
+
+`alsoConsidered` reserves `ALSO_CONSIDERED_SEMANTIC` of its slots for semantic
+extras. Without that reservation the feature is invisible: extras sit at
+positions 21-26 behind the keyword hits, so a plain `slice(0, 8)` over the
+unpicked tail never reaches them, and a user only ever sees one if the model
+picks it. Candidates are also labelled "(related by meaning)" in the prompt so
+the tail is not discounted for position alone.
 
 `/addons/search` stays pure BM25 and free. `?semantic=true` opts into the fused
 path and exists so the eval can score what `/ask` actually feeds the model —
 enabling it by default would put a metered embedding call behind every
 keystroke pause.
 
+`?semantic=true` is **admin-only** — it spends a query embedding, and the route
+is otherwise anonymous at 30/min per IP, which is ~8k neurons a day from one
+client. The eval harness is its only consumer.
+
+The embedding index is rebuilt by the **Sunday** run of
+`sync-addon-index.yml` (`--embed`, which drives `/admin/index/embed` to
+completion). Nothing else rebuilds it, and only rows with `detail_stale = 0`
+are embedded — so it must run after the description backfill has settled. A
+full rebuild is ~4.5k neurons, which is why it is off the daily path.
+
 **Search quality is measured, not argued.** `npm run eval:search` scores
 `test/fixtures/search-eval.json` (60 rows, 32 name lookups + 28 concept
-questions) and reports recall@20, recall@5 and MRR@5 split by kind. Baseline
+questions) and reports recall@20, recall@5 and MRR@5 split by kind. Note
+recall@k is hard-coded to k=20 regardless of `--limit`, so a `--semantic` run
+understates what the model actually sees, and the 28-row concept slice cannot
+resolve a move smaller than roughly 5 points. Baseline
 at the time of writing: overall recall@20 86.7%, name 96.9%, **concept 75.0%**.
 Any ranking change must show before/after — two earlier changes were made on
 hunches, one hypothesis survived only until the live scores were read, and a
