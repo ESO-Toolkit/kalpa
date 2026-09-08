@@ -165,13 +165,25 @@ export async function handleIndexBackfill(
 }
 
 /**
- * POST /ask  { "question": "..." }
+ * POST /ask  { "question": "...", "no_cache"?: true }
  *
  * Anonymous by design, like `/addons/search`. Requiring sign-in for the first
  * "is there an addon that…" question would gate the exact moment the feature is
  * most useful to someone who has not invested in Kalpa yet.
+ *
+ * `no_cache` is the one privileged field, and `isAdmin` is decided by the
+ * router with the same `requireAuth` guard `/admin/index/*` uses — this handler
+ * never inspects credentials itself. From an unauthenticated caller the field
+ * is IGNORED rather than rejected: it is not a capability an anonymous client
+ * can ask for, and 400-ing on an unknown body field would be a new way to break
+ * older clients. Ignoring is also the safe default — the request is served from
+ * cache, which costs nothing.
  */
-export async function handleAsk(request: Request, env: Env): Promise<Response> {
+export async function handleAsk(
+  request: Request,
+  env: Env,
+  isAdmin = false,
+): Promise<Response> {
   if (!env.ADDON_INDEX) return indexUnavailable(request);
 
   const body = await readJsonBody(request);
@@ -187,8 +199,12 @@ export async function handleAsk(request: Request, env: Env): Promise<Response> {
     return jsonResponse(request, { error: "Missing 'question'" }, 400);
   }
 
+  // Admin-only. A public cache bypass would force a model call per request and
+  // drain ASK_DAILY_BUDGET in a couple of minutes.
+  const bypassCache = isAdmin && (body.body as { no_cache?: unknown })?.no_cache === true;
+
   try {
-    const result = await answerQuestion(env, question);
+    const result = await answerQuestion(env, question, { bypassCache });
     if (!result.ok) {
       if (result.reason === "no-index") return indexUnavailable(request);
       return jsonResponse(

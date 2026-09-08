@@ -104,6 +104,10 @@ export interface AddonSearchHit {
   /** Higher is better. Sign-flipped bm25 — comparable within one result set
    *  only, never across queries. */
   score: number;
+  /** True when this came from the embedding index rather than keyword search.
+   *  Marked explicitly rather than inferred from `score === 0`, so the flag
+   *  cannot be confused with a genuine zero-scoring keyword hit. */
+  semantic?: boolean;
 }
 
 export interface AddonSearchResult {

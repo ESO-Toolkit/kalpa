@@ -65,6 +65,9 @@ const MAX_OUTPUT_TOKENS = 256;
 /** Extra ranked candidates surfaced beneath the answer, at no model cost. */
 const ALSO_CONSIDERED_LIMIT = 8;
 
+/** Of those slots, how many are held for semantic-only matches. */
+const ALSO_CONSIDERED_SEMANTIC = 3;
+
 /**
  * Semantic-only candidates appended after the keyword hits.
  *
@@ -84,7 +87,10 @@ const CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
 /** Default ceiling on model calls per UTC day. Beyond it the route keeps
  *  working but stops calling the model, so a runaway client cannot turn a free
  *  feature into a bill. Overridable via `ASK_DAILY_BUDGET`. */
-const DEFAULT_DAILY_BUDGET = 2000;
+// Matches wrangler.toml's ASK_DAILY_BUDGET. They must agree: if the var is ever
+// deleted the code default becomes the ceiling, and 2000 would have raised it
+// 6x silently — past the free neuron allocation.
+const DEFAULT_DAILY_BUDGET = 350;
 
 const SYSTEM_PROMPT = `You help Elder Scrolls Online players find addons.
 
@@ -137,7 +143,10 @@ function candidateKey(index: number): string {
 function renderCandidates(hits: AddonSearchHit[]): string {
   return hits
     .map((hit, i) => {
-      const parts = [`${candidateKey(i)}: ${hit.title}`];
+      // Flagged so the model does not discount the tail purely for being late
+      // in a flat list. These matched by meaning, not by shared words, which is
+      // precisely the case keyword search cannot reach.
+      const parts = [`${candidateKey(i)}${hit.semantic ? " (related by meaning)" : ""}: ${hit.title}`];
       if (hit.category) parts.push(`category: ${hit.category}`);
       if (hit.snippet) parts.push(`description: ${hit.snippet}`);
       return parts.join(" | ");
@@ -230,15 +239,29 @@ function toRecommendation(hit: AddonSearchHit, reason: string): AskRecommendatio
  * Costs nothing — no extra model call — and answers the common complaint that a
  * short answer looks like it missed things. The UI can show these collapsed.
  */
-function alsoConsidered(
+export function alsoConsidered(
   hits: AddonSearchHit[],
   picked: ReadonlyArray<{ esoui_id: number }>,
 ): AskRecommendation[] {
   const chosen = new Set(picked.map((p) => p.esoui_id));
-  return hits
-    .filter((hit) => !chosen.has(hit.esoui_id))
-    .slice(0, ALSO_CONSIDERED_LIMIT)
-    .map((hit) => toRecommendation(hit, ""));
+  const rest = hits.filter((hit) => !chosen.has(hit.esoui_id));
+
+  // Semantic extras are appended AFTER up to 20 keyword hits, so a plain
+  // slice(0, 8) could never reach them — the whole embedding feature was
+  // invisible unless the model happened to pick one from the tail. Reserve
+  // slots so a user sees the semantically-related matches that keyword search
+  // could not have found at all.
+  const semantic = rest.filter((hit) => hit.semantic).slice(0, ALSO_CONSIDERED_SEMANTIC);
+  const keyword = rest
+    .filter((hit) => !hit.semantic)
+    .slice(0, ALSO_CONSIDERED_LIMIT - semantic.length);
+
+  // Semantic FIRST. These are the finds keyword search could not make at all —
+  // "shows when I am in combat" cannot lexically reach "Fighting Display", which
+  // is precisely why the embedding index exists. Ordering them behind keyword
+  // hits the user could have found by typing buried the distinctive result at
+  // position 7 of a collapsed list.
+  return [...semantic, ...keyword].map((hit) => toRecommendation(hit, ""));
 }
 
 /**
@@ -370,8 +393,7 @@ const SEMANTIC_LIMIT = 20;
  * k = 20 against 20-item lists the last entry still carries about half the
  * weight of the first.
  */
-export const RRF_K = 20;
-
+export 
 /**
  * Guard (a): how far below the best cosine a neighbour may sit, and the
  * absolute floor beneath which nothing counts.
@@ -384,15 +406,6 @@ export const RRF_K = 20;
 const COSINE_RELATIVE_DROP = 0.12;
 const COSINE_ABSOLUTE_FLOOR = 0.5;
 
-/**
- * Guard (b): entries kept from the head of EACH list regardless of fused score.
- *
- * A query like "Dressing Room" is answered by exactly one addon and BM25 knows
- * it. If the semantic list happens to agree about three OTHER addons, RRF can
- * tie-break the exact title match out of a truncated candidate list. Pinning
- * the head of each list makes that impossible in either direction.
- */
-const ALWAYS_KEEP = 3;
 
 /** Drop semantic neighbours that are not actually near. Input must be sorted by
  *  descending cosine, which `semanticSearch` guarantees. */
@@ -402,60 +415,6 @@ export function applyCosineFloor(vector: AddonVectorHit[]): AddonVectorHit[] {
   return vector.filter((hit) => hit.cosine >= floor);
 }
 
-/**
- * Reciprocal Rank Fusion of two ranked uid lists.
- *
- *   score(d) = 1/(k + rank_bm25) + 1/(k + rank_vec)
- *
- * Ranks are 1-based; a list the document is absent from contributes 0. Returns
- * at most `limit` uids in fused order, with the top `ALWAYS_KEEP` of each input
- * list guaranteed present. Ties resolve in favour of BM25, because the union is
- * built keyword-first and the sort is stable.
- */
-export function fuseRankings(bm25: number[], vector: number[], limit: number): number[] {
-  const rankOf = (list: number[]) => new Map(list.map((uid, i) => [uid, i + 1]));
-  const bmRank = rankOf(bm25);
-  const vecRank = rankOf(vector);
-
-  const union: number[] = [];
-  const seen = new Set<number>();
-  for (const uid of [...bm25, ...vector]) {
-    if (seen.has(uid)) continue;
-    seen.add(uid);
-    union.push(uid);
-  }
-
-  const score = (uid: number) => {
-    const b = bmRank.get(uid);
-    const v = vecRank.get(uid);
-    return (b ? 1 / (RRF_K + b) : 0) + (v ? 1 / (RRF_K + v) : 0);
-  };
-
-  const sorted = [...union].sort((a, b) => score(b) - score(a));
-  const cap = Math.max(limit, 0);
-
-  const forced = new Set([...bm25.slice(0, ALWAYS_KEEP), ...vector.slice(0, ALWAYS_KEEP)]);
-  const chosen = new Set(sorted.slice(0, cap));
-
-  for (const uid of forced) {
-    if (chosen.has(uid) || cap === 0) continue;
-    if (chosen.size >= cap) {
-      // Evict the weakest entry that is not itself pinned. Walking the sorted
-      // list backwards makes the eviction the lowest fused score by definition.
-      for (let i = sorted.length - 1; i >= 0; i--) {
-        const candidate = sorted[i];
-        if (chosen.has(candidate) && !forced.has(candidate)) {
-          chosen.delete(candidate);
-          break;
-        }
-      }
-    }
-    if (chosen.size < cap) chosen.add(uid);
-  }
-
-  // Emit in fused order, not in the order the guard happened to add things.
-  return sorted.filter((uid) => chosen.has(uid));
-}
 
 /**
  * BM25 candidates, fused with semantic neighbours when a vector index exists.
@@ -498,7 +457,10 @@ export async function retrieveCandidates(
       .slice(0, SEMANTIC_EXTRA);
     if (extraUids.length === 0) return hits;
 
-    const extras = await fetchHitsByUid(db, extraUids);
+    const extras = (await fetchHitsByUid(db, extraUids)).map((hit) => ({
+      ...hit,
+      semantic: true,
+    }));
     return extras.length > 0 ? [...hits, ...extras] : hits;
   } catch (err) {
     console.error("semantic fusion failed, falling back to bm25:", err);
@@ -508,9 +470,25 @@ export async function retrieveCandidates(
 
 export type AskFailure = "no-index" | "empty-question" | "question-too-long";
 
+/**
+ * Options for a single ask.
+ *
+ * `bypassCache` is admin-only at the route layer. It exists for the eval
+ * harness: `/ask` caches for seven days, so a second eval run would score last
+ * week's answers and measure nothing. It is deliberately NOT a public flag —
+ * bypassing the cache forces a model call, which is exactly how the daily
+ * neuron budget gets burned by a loop of near-identical questions.
+ */
+export interface AskOptions {
+  /** Skip the cache READ, and skip the cache WRITE. Both halves matter: an
+   *  eval run must not populate the cache that real users are served from. */
+  bypassCache?: boolean;
+}
+
 export async function answerQuestion(
   env: Env,
   question: string,
+  options: AskOptions = {},
 ): Promise<{ ok: true; response: AskResponse } | { ok: false; reason: AskFailure }> {
   const db = env.ADDON_INDEX;
   if (!db) return { ok: false, reason: "no-index" };
@@ -520,11 +498,13 @@ export async function answerQuestion(
   if (trimmed.length > MAX_QUESTION_LENGTH) return { ok: false, reason: "question-too-long" };
 
   const cacheKey = cacheKeyFor(trimmed);
-  try {
-    const cached = await env.ESO_PACKS.get(cacheKey, "json");
-    if (cached) return { ok: true, response: { ...(cached as AskResponse), cached: true } };
-  } catch {
-    // Cache read failures are not answer failures.
+  if (!options.bypassCache) {
+    try {
+      const cached = await env.ESO_PACKS.get(cacheKey, "json");
+      if (cached) return { ok: true, response: { ...(cached as AskResponse), cached: true } };
+    } catch {
+      // Cache read failures are not answer failures.
+    }
   }
 
   const hits = await retrieveCandidates(env, db, trimmed);
@@ -579,7 +559,12 @@ export async function answerQuestion(
 
   // Only cache a real answer. Caching a degraded one would pin a temporary
   // outage in place for a week.
-  if (!response.degraded) {
+  //
+  // A bypassed answer is not written back either. The eval asks every fixture
+  // question in a burst; writing those would let a measurement run seed the
+  // cache that real users read from for the next seven days, so a harness bug
+  // (or a bad model day) would become everyone's answer.
+  if (!response.degraded && !options.bypassCache) {
     try {
       await env.ESO_PACKS.put(cacheKey, JSON.stringify(response), {
         expirationTtl: CACHE_TTL_SECONDS,
