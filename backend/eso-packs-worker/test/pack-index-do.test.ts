@@ -999,6 +999,57 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await e.ESO_PACKS.get("pack:w1-expired-orphan")).toBeNull();
   });
 
+  it("erases a staged restore body without enumerating its votes", async () => {
+    // deleteVotesForPack costs one list plus two subrequests per live vote --
+    // unknowable in advance and unbounded for a vote-heavy pack. The restore
+    // route's exclusion pass refuses exactly that spend on exactly these
+    // orphaned bodies; paying it here could push account deletion past the
+    // Durable Object's subrequest ceiling, where it throws and reports no
+    // removed ids at all, so the user can never finish erasing. The vote left
+    // behind hangs off a body nothing serves, and writeBackup keeps only votes
+    // on live packs.
+    const T0 = Date.now();
+    const index = packIndex();
+    const authorId = "staged-vote-author";
+    const voterId = "staged-vote-voter";
+    const staged = makePack("w1-staged-vote-orphan", { author_id: authorId });
+    // Give the id a tombstone from an earlier lifecycle -- the ordinary case a
+    // restore replays. hydrateDetailsByAuthor skips tombstoned ids, so this
+    // body is invisible to the pack loop and only the journal can reach it.
+    expect(await index.addPack(staged)).toMatchObject({ ok: true });
+    expect(await index.removePack(staged.id)).toBe("ok");
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "staged-vote-orphan",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) throw new Error("restore page was not claimed");
+    expect(
+      await index.writeRestorePage({
+        tokenHash,
+        claimId: claim.claimId,
+        jobId: started.job.jobId,
+        packs: [staged],
+        votes: [],
+        now: T0 + 2_000,
+      })
+    ).toMatchObject({ ok: true });
+    await putVote(e, staged.id, voterId);
+    expect(await e.ESO_PACKS.get(`pack:${staged.id}`)).not.toBeNull();
+
+    expect(await index.removePacksByAuthor(authorId)).toContain(staged.id);
+
+    expect(await e.ESO_PACKS.get(`pack:${staged.id}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`vote:${staged.id}:${voterId}`)).not.toBeNull();
+  });
+
   it("filters deleted authors while writing backups", async () => {
     const kept = makePack("w1-backup-kept", { author_id: "backup-kept-author" });
     const doomed = makePack("w1-backup-deleted", { author_id: "backup-deleted-author" });

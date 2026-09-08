@@ -66,6 +66,18 @@ namespace_id = "1003"
   limit = 20
   period = 60
 
+# DELETE /account only. Erasure is paged -- one request clears ~450 votes and
+# asks the caller to repeat -- so an account with a few thousand votes needs a
+# dozen or more rounds. WRITE_LIMITER's 10/min cut the user off partway through
+# deleting their own data. 60/min covers ~27,000 votes a minute and leaves the
+# write limit for pack mutations untouched.
+[[ratelimits]]
+name = "ERASURE_LIMITER"
+namespace_id = "1006"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
 [[ratelimits]]
 name = "ADDON_SEARCH_LIMITER"
 namespace_id = "1004"

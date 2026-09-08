@@ -524,11 +524,22 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   /**
-   * Publish one claimed restore page inside the same serialization boundary as
-   * account deletion. This is the last authoritative deletion check before
-   * external KV/D1 writes: whichever operation enters first completes first,
-   * so deletion either removes these writes afterward or its marker rejects
-   * them before they are made.
+   * Publish one claimed restore page, ordered against account deletion.
+   *
+   * The deletion check and the staging journal run under the serialization
+   * latch. The external KV/D1 writes deliberately do NOT: a full page is ~675
+   * subrequests, and holding `blockConcurrencyWhile` across them stalled every
+   * vote, install, create and delete in the Pack Hub for the whole page.
+   *
+   * Journalling before any external write is what keeps the ordering sound
+   * without that latch:
+   *  - deletion first — its marker filters this page out and nothing is written;
+   *  - deletion after — it finds the journal and erases the bodies;
+   *  - deletion DURING the unlatched writes — it erased what existed and
+   *    consumed the journal, so the rest of this page would outlive the
+   *    erasure. That is the one interleaving the journal cannot cover, so the
+   *    page re-reads the markers under the latch afterwards and erases its own
+   *    writes. A page nothing raced spends no subrequests there.
    */
   async writeRestorePage(input: {
     tokenHash: string;
@@ -541,17 +552,19 @@ export class PackIndexDO extends DurableObject<Env> {
     | { ok: true; restoredPacks: number; restoredVotes: number }
     | { ok: false; reason: "not-found" | "inactive" | "claim-mismatch" | "expired" }
   > {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    const prepared = await this.ctx.blockConcurrencyWhile(async () => {
       const now = input.now ?? Date.now();
       const found = await this.findRestoreJobByHash(input.tokenHash);
-      if (!found || found.job.jobId !== input.jobId) return { ok: false, reason: "not-found" };
+      if (!found || found.job.jobId !== input.jobId) {
+        return { ok: false, reason: "not-found" } as const;
+      }
       const job = found.job;
-      if (job.status !== "running") return { ok: false, reason: "inactive" };
+      if (job.status !== "running") return { ok: false, reason: "inactive" } as const;
       if (job.expiresAt <= now || (job.inFlight?.expiresAt ?? 0) <= now) {
-        return { ok: false, reason: "expired" };
+        return { ok: false, reason: "expired" } as const;
       }
       if (job.inFlight?.claimId !== input.claimId) {
-        return { ok: false, reason: "claim-mismatch" };
+        return { ok: false, reason: "claim-mismatch" } as const;
       }
 
       const deletedAuthors = await this.getDeletedAuthorMarkers();
@@ -574,25 +587,86 @@ export class PackIndexDO extends DurableObject<Env> {
         } satisfies RestoreStagedPack);
       }
 
-      // Keep external binding pressure bounded while the DO holds the
-      // deletion/restore ordering latch. A restore page is already capped by
-      // the route's subrequest budget.
-      await this.runBounded(
-        packs.map((pack) => async () => {
-          await this.env.ESO_PACKS.put(`pack:${pack.id}`, JSON.stringify(pack));
-          await this.mirrorD1Pack(pack);
-        }),
-        10,
-      );
-      await this.runBounded(
-        votes.map(({ vote }) => async () => {
-          await restoreVote(this.env, vote.packId, vote.userId, vote);
-        }),
-        10,
-      );
-
-      return { ok: true, restoredPacks: packs.length, restoredVotes: votes.length };
+      return { ok: true, packs, votes } as const;
     });
+    if (!prepared.ok) return prepared;
+
+    // Unlatched, but still bounded: the Durable Object shares the Worker's
+    // 1000-subrequest ceiling, and a page is already capped by the route's
+    // budget.
+    await this.runBounded(
+      prepared.packs.map((pack) => async () => {
+        await this.env.ESO_PACKS.put(`pack:${pack.id}`, JSON.stringify(pack));
+        await this.mirrorD1Pack(pack);
+      }),
+      10,
+    );
+    await this.runBounded(
+      prepared.votes.map(({ vote }) => async () => {
+        await restoreVote(this.env, vote.packId, vote.userId, vote);
+      }),
+      10,
+    );
+
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const erased = await this.eraseRestorePageRacedByDeletion(
+        input.jobId,
+        prepared.packs,
+        prepared.votes,
+      );
+      return {
+        ok: true as const,
+        restoredPacks: prepared.packs.length - erased.packs,
+        restoredVotes: prepared.votes.length - erased.votes,
+      };
+    });
+  }
+
+  /**
+   * Erase a restore page's own writes when an account deletion landed while
+   * they were in flight.
+   *
+   * That deletion consumed the staging journal before this page finished
+   * writing, so nothing else can find these records afterwards: without this
+   * the erased user's packs and votes would outlive their own deletion
+   * request. Called under the latch, so no further deletion can interleave
+   * between the marker read and the erasure.
+   */
+  private async eraseRestorePageRacedByDeletion(
+    jobId: string,
+    packs: Pack[],
+    votes: Array<{ vote: VoteRecord; pack: Pack }>,
+  ): Promise<{ packs: number; votes: number }> {
+    const deletedAuthors = await this.getDeletedAuthorMarkers();
+    if (deletedAuthors.size === 0) return { packs: 0, votes: 0 };
+
+    let erasedPacks = 0;
+    for (const pack of packs) {
+      if (!this.packPredatesDeletion(deletedAuthors, pack)) continue;
+      // Slugs are reusable, so a returning author may already hold this id with
+      // a NEW pack published after the deletion — the same trap applyReplacement
+      // guards. Erasing then would take the post-deletion data the timestamped
+      // marker exists to let through, so only claim a body nothing holds.
+      if (await this.ctx.storage.get<Pack>(this.packKey(pack.id))) continue;
+      await this.env.ESO_PACKS.delete(`pack:${pack.id}`);
+      await this.deleteD1Pack(pack.id);
+      await this.ctx.storage.delete(this.restoreStagedPackKey(jobId, pack.id));
+      this.forgetVotes(pack.id);
+      erasedPacks++;
+    }
+
+    let erasedVotes = 0;
+    for (const { vote, pack } of votes) {
+      if (
+        !this.packPredatesDeletion(deletedAuthors, pack) &&
+        !this.votePredatesDeletion(deletedAuthors, vote)
+      ) {
+        continue;
+      }
+      await deleteVote(this.env, vote.packId, vote.userId);
+      erasedVotes++;
+    }
+    return { packs: erasedPacks, votes: erasedVotes };
   }
 
   async completeRestorePage(input: {
@@ -861,12 +935,24 @@ export class PackIndexDO extends DurableObject<Env> {
       // A restore publishes bodies before its final canonical replacement.
       // Consume its pre-write journal so deletion also removes packs that were
       // published by a completed page but are not visible in storage yet.
+      //
+      // Body and D1 row only, at an exact 2 subrequests each: deliberately NOT
+      // deleteVotesForPack, whose cost is 1 list plus 2 per live vote --
+      // unknowable in advance and unbounded for a vote-heavy pack. That is the
+      // same spend the restore route's exclusion pass refuses for the same
+      // orphaned bodies (see EXCLUSION_SUBREQUEST_BUDGET), and paying it here
+      // could push this call past the Durable Object's subrequest ceiling,
+      // where it throws and reports NO removed ids at all -- an erasure the
+      // user can never complete. The votes left behind hang off a body nothing
+      // serves: writeBackup keeps only votes on live packs, and the deleting
+      // user's OWN votes are cleared by the budgeted loop in
+      // handleDeleteAccount. The residual is a recycled slug making an earlier
+      // voter's first vote toggle off, which self-corrects on their second.
       const staged = await this.getRestoreStagedPacksByAuthor(authorId);
       for (const [key, stagedPack] of staged) {
         if (!removedIds.has(stagedPack.pack.id)) {
           await this.env.ESO_PACKS.delete(`pack:${stagedPack.pack.id}`);
           await this.deleteD1Pack(stagedPack.pack.id);
-          await deleteVotesForPack(this.env, stagedPack.pack.id);
           this.forgetVotes(stagedPack.pack.id);
           removedIds.add(stagedPack.pack.id);
         }

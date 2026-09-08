@@ -185,6 +185,17 @@ export interface Env {
   READ_LIMITER: RateLimit;
   WRITE_LIMITER: RateLimit;
   VOTE_LIMITER: RateLimit;
+  /**
+   * DELETE /account only. Erasure is paged: ACCOUNT_DELETE_VOTE_BUDGET caps one
+   * request at ~450 votes and returns `complete: false` for the caller to
+   * repeat, so an account with a few thousand votes needs a dozen or more
+   * rounds. On WRITE_LIMITER's 10/min the user was 429'd partway through
+   * deleting their own data and could never finish the erasure.
+   *
+   * Optional so a deployment that has not added the binding yet still falls
+   * back to WRITE_LIMITER rather than losing rate limiting on the route.
+   */
+  ERASURE_LIMITER?: RateLimit;
   /** Durable Object for atomic pack index mutations */
   PACK_INDEX: DurableObjectNamespace<import("./pack-index-do").PackIndexDO>;
   /**
