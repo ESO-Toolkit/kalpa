@@ -460,7 +460,12 @@ export function Settings({
 
   const pathDirty = path.trim() !== addonsPath;
 
-  const toolsCtx = { minionDetected, graphicsStackDetected };
+  // One detection snapshot for the whole dialog. The Appearance tab's Toolbar
+  // list reads the same object, so the two tabs cannot disagree about whether a
+  // `pinnedWhen` feature is in the header — the Toolbar list having no context
+  // at all is exactly why it used to claim the graphics stack was pinned when
+  // the Tools tab was simultaneously listing it as not.
+  const featureCtx = { minionDetected, graphicsStackDetected };
   // Selected by `toolsGroup`, NOT by `placement`. A toolbar feature may also own
   // a permanent catalog row, and the graphics stack does: its header button is
   // conditional on `pinnedWhen`, so without a fixed row here, plugging in a
@@ -468,7 +473,7 @@ export function Settings({
   // to find it. Nothing else changes — a feature with no `toolsGroup` is still
   // absent from these blocks.
   const toolFeatures = (group: ToolsGroup) =>
-    FEATURES.filter((f) => f.toolsGroup === group && (f.visibleWhen?.(toolsCtx) ?? true));
+    FEATURES.filter((f) => f.toolsGroup === group && (f.visibleWhen?.(featureCtx) ?? true));
   // Pinnable features the user has unpinned from the header toolbar. Without
   // this block they would appear in NEITHER surface, leaving an unpinned Pack
   // Hub reachable only by deep link. This tab is the catalog, so it lists them
@@ -477,7 +482,7 @@ export function Settings({
   // Features carrying a `toolsGroup` are excluded: they already have a permanent
   // row below, and listing them here as well would print the same feature twice
   // in one tab whenever it happened to be unpinned.
-  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, toolsCtx).filter(
+  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, featureCtx).filter(
     (f) => f.pinnableToToolbar && !f.toolsGroup
   );
 
@@ -971,6 +976,7 @@ export function Settings({
                     onShowShortcuts={onShowShortcuts}
                     toolbarHidden={toolbarHidden}
                     onToolbarHiddenChange={onToolbarHiddenChange}
+                    featureCtx={featureCtx}
                   />
                 </motion.div>
               )}
