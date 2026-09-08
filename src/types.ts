@@ -473,7 +473,10 @@ export interface AddonSearchPage {
   hasMore: boolean;
   source: AddonSearchSource;
 }
-export type DiscoverTab = "search" | "ask" | "popular" | "categories" | "url";
+// Search and Ask were separate tabs until they were merged: both ran the same
+// index retrieval, so the split only made the user guess which box to type in.
+// The one Search surface now owns both — typing searches, the Ask button asks.
+export type DiscoverTab = "search" | "popular" | "categories" | "url";
 
 // ── Pack types (from roster-hub-api Pack Hub) ─────────────────────────────
 export interface PackAddonEntry {
