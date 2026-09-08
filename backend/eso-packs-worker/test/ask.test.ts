@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
+  alsoConsidered,
   answerQuestion,
   applyCosineFloor,
   cacheKeyFor,
-  fuseRankings,
   groundOutput,
   scrubProse,
 } from "../src/ask";
@@ -407,47 +407,6 @@ describe("answerQuestion", () => {
   });
 });
 
-describe("fuseRankings", () => {
-  it("orders by reciprocal rank, summing across both lists", () => {
-    // 2 is 2nd in bm25 and 1st in the vector list, so it outranks 1, which is
-    // 1st in bm25 and absent from the vector list.
-    //   score(1) = 1/21           = 0.0476
-    //   score(2) = 1/22 + 1/21    = 0.0931
-    expect(fuseRankings([1, 2], [2, 3], 10)).toEqual([2, 1, 3]);
-  });
-
-  it("breaks ties in favour of the keyword list", () => {
-    // Symmetric ranks: both appear once, at rank 1 of one list.
-    expect(fuseRankings([7], [9], 10)).toEqual([7, 9]);
-  });
-
-  it("respects the limit", () => {
-    expect(fuseRankings([1, 2, 3], [4, 5, 6], 2)).toHaveLength(2);
-  });
-
-  it("falls back to a single list when the other is empty", () => {
-    expect(fuseRankings([1, 2, 3], [], 10)).toEqual([1, 2, 3]);
-    expect(fuseRankings([], [4, 5], 10)).toEqual([4, 5]);
-  });
-
-  it("keeps the top three of each list even when the limit is tight", () => {
-    // Without the pin, a long agreeing vector list would fill a 4-slot budget
-    // and drop the exact-title bm25 match at rank 3.
-    const bm25 = [1, 2, 3, 4, 5];
-    const vector = [10, 11, 12, 13, 14, 15];
-    const fused = fuseRankings(bm25, vector, 6);
-
-    for (const uid of [1, 2, 3, 10, 11, 12]) expect(fused).toContain(uid);
-    expect(fused).toHaveLength(6);
-  });
-
-  it("never drops the strongest keyword hit to an embedding tie-break", () => {
-    const fused = fuseRankings([99], [1, 2, 3, 4, 5, 6, 7, 8], 4);
-    expect(fused).toContain(99);
-    // The vector list's own top three are pinned too, so the pins fill the cap.
-    expect(fused).toEqual(expect.arrayContaining([99, 1, 2, 3]));
-  });
-});
 
 describe("applyCosineFloor", () => {
   it("keeps only neighbours close to the best one", () => {
@@ -607,5 +566,40 @@ describe("semantic fusion in answerQuestion", () => {
     if (!result.ok) return;
     // Pure BM25 ordering survives: the combat addon leads, not the fish one.
     expect(result.response.recommendations[0].esoui_id).toBe(1543);
+  });
+});
+
+describe("alsoConsidered", () => {
+  /** 20 keyword hits then one semantic extra — the real shape of a fused list. */
+  const fused = [
+    ...Array.from({ length: 20 }, (_, i) => hit(i + 1, `Keyword Addon ${i + 1}`)),
+    { ...hit(999, "Semantic Only"), semantic: true },
+  ];
+
+  it("surfaces a semantic extra that a plain slice could never reach", () => {
+    // The delivery bug: extras are appended AFTER up to 20 keyword hits, so
+    // slice(0, 8) over the unpicked tail stopped long before them and the whole
+    // embedding feature was invisible unless the model picked one itself.
+    const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
+    expect(out.map((r) => r.esoui_id)).toContain(999);
+  });
+
+  it("still fills the remaining slots with keyword hits, in order", () => {
+    const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
+    expect(out).toHaveLength(8);
+    // 7 keyword (2..8) + the single semantic extra.
+    expect(out.slice(0, 7).map((r) => r.esoui_id)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it("gives every slot to keyword hits when there are no semantic extras", () => {
+    const keywordOnly = fused.filter((h) => !h.semantic);
+    const out = alsoConsidered(keywordOnly, []);
+    expect(out).toHaveLength(8);
+    expect(out.every((r) => r.esoui_id <= 20)).toBe(true);
+  });
+
+  it("omits anything the model already picked", () => {
+    const out = alsoConsidered(fused, [{ esoui_id: 999 }]);
+    expect(out.map((r) => r.esoui_id)).not.toContain(999);
   });
 });

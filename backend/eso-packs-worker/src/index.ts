@@ -1911,6 +1911,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   // ── Addon index routes ─────────────────────────────────────────
   if (method === "GET" && pathname === "/addons/search") {
+    // `?semantic=true` triggers a query embedding, so it is admin-only: the
+    // route is anonymous and rate-limited per IP at 30/min, which is ~8k
+    // neurons a day from one client — enough to starve /ask's allocation. The
+    // eval harness is the only consumer and it has the key.
+    if (url.searchParams.get("semantic") === "true" && !requireAuth(request, env)) {
+      return unauthorized(request);
+    }
     return handleAddonSearch(request, env, url);
   }
 
