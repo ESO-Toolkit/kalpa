@@ -15,7 +15,11 @@ const {
 const TAG = "v0.1.0-beta.22";
 const REPO = "ESO-Toolkit/kalpa";
 
-// The exact asset names tauri-action uploaded for v0.1.0-beta.22.
+// The exact asset names on the v0.1.0-beta.22 release. Four of them are what
+// the Tauri bundler writes to disk; the macOS updater archive is NOT — the
+// bundler names it Kalpa.app.tar.gz, and the versioned name was synthesised
+// at upload time (by tauri-action then, by release.yml's "Collect bundle
+// paths" step now). See the "raw macOS archive name" test below.
 const SIGNED_ASSETS = [
   "Kalpa_0.1.0-beta.22_x64-setup.exe",
   "Kalpa_0.1.0-beta.22_universal.app.tar.gz",
@@ -112,6 +116,19 @@ test("fails closed when a required platform has no signed asset", () => {
     () => manifest({ assets: assets(SIGNED_ASSETS.filter((n) => !n.endsWith(".AppImage"))) }),
     /linux-x86_64/
   );
+});
+
+// The bundler's on-disk name for the macOS updater archive carries no version
+// and no arch. release.yml renames it before upload; if that rename is ever
+// lost, this is the failure the publish job must produce instead of shipping
+// an asset whose name is identical on every release.
+test("refuses the raw macOS archive name the bundler writes to disk", () => {
+  const raw = SIGNED_ASSETS.filter((name) => !name.endsWith(".app.tar.gz"));
+  assert.throws(
+    () => manifest({ assets: assets([...raw, "Kalpa.app.tar.gz"]) }),
+    /does not carry version/
+  );
+  assert.throws(() => platformKeysFor("Kalpa.app.tar.gz"), /no known updater/);
 });
 
 test("refuses signed assets it cannot map to a platform rather than guessing", () => {

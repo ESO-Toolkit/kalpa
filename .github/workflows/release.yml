@@ -275,6 +275,7 @@ jobs:
         shell: bash
         env:
           ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          APP_VERSION: ${{ steps.tauri.outputs.appVersion }}
         run: |
           set -euo pipefail
           if [ -z "${ARTIFACT_PATHS:-}" ] || [ "$ARTIFACT_PATHS" = "null" ]; then
@@ -287,13 +288,34 @@ jobs:
             echo "__KALPA_PATHS_EOF__"
           } >> "$GITHUB_OUTPUT"
 
+          # The macOS updater archive is the one bundle the Tauri bundler
+          # names WITHOUT a version: on disk it is Kalpa.app.tar.gz (+ .sig).
+          # The Kalpa_<version>_universal.app.tar.gz name every previous
+          # release carried was synthesised by tauri-action's own uploader
+          # (getAssetName in its src/utils.ts), and that upload path is gone.
+          # Reproduce the rename here so the asset name stays unique per tag
+          # and updater-manifest.cjs can recognise it; provenance is
+          # unaffected because attestation matches by digest, not by name.
           mkdir -p release-assets
           printf '%s' "$ARTIFACT_PATHS" | jq -r '.[]' | while IFS= read -r bundle; do
-            if [ -f "$bundle" ]; then
-              cp -- "$bundle" release-assets/
-            else
+            if [ ! -f "$bundle" ]; then
               echo "Skipping non-file artifact path: ${bundle}"
+              continue
             fi
+            name=$(basename "$bundle")
+            case "$name" in
+              *.app.tar.gz|*.app.tar.gz.sig)
+                if [ -z "${APP_VERSION:-}" ]; then
+                  echo "::error::tauri-action reported no appVersion; cannot name ${name}"
+                  exit 1
+                fi
+                product="${name%%.app.tar.gz*}"
+                suffix="${name#"$product"}"
+                name="${product}_${APP_VERSION}_universal${suffix}"
+                echo "Renaming $(basename "$bundle") -> ${name}"
+                ;;
+            esac
+            cp -- "$bundle" "release-assets/${name}"
           done
           echo "--- release-assets ---"
           ls -l release-assets
@@ -520,9 +542,13 @@ jobs:
           if [ -n "$release" ]; then
             release_id=$(echo "$release" | jq -r '.id')
             echo "Reusing existing release ${release_id} for ${TAG} (draft=$(echo "$release" | jq -r '.draft'))."
-            # Refresh the body so a re-run after a CHANGELOG fix ships it.
+            # Refresh the body so a re-run after a CHANGELOG fix ships it,
+            # and pull the release back to draft: the upload step below
+            # deletes and re-uploads every asset, and a re-run on an already
+            # published release would otherwise leave releases/latest without
+            # a latest.json for the duration. The last step publishes again.
             jq -n --arg tag "$TAG" --rawfile body release-body.md \
-              '{name: $tag, body: $body}' \
+              '{name: $tag, body: $body, draft: true}' \
               | gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --input - > /dev/null
           else
             release=$(jq -n --arg tag "$TAG" --rawfile body release-body.md \
