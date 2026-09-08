@@ -2,7 +2,8 @@ import type { Env } from "./types";
 import { corsHeaders } from "./cors";
 import { indexStats, searchAddons } from "./addon-index";
 import { crawlDetails, reprocessDescriptions, syncFilelist, MAX_DETAIL_BATCH } from "./crawl";
-import { answerQuestion } from "./ask";
+import { answerQuestion, retrieveCandidates } from "./ask";
+import { DEFAULT_EMBED_PAGE, MAX_EMBED_PAGE, embedIndexPage } from "./embeddings";
 import { readJsonBody } from "./validate";
 
 /**
@@ -77,8 +78,18 @@ export async function handleAddonSearch(
   const offset = parsePositiveInt(url.searchParams.get("offset"), 0, 5000);
   const includeLibraries = url.searchParams.get("libraries") === "true";
   const includeDiscontinued = url.searchParams.get("discontinued") === "true";
+  // Opt-in, default OFF. The Discover search box stays pure BM25 — free, and
+  // already at 96.9% recall on name lookups. This flag exists so the eval
+  // harness can score the fused retrieval that /ask actually uses; enabling it
+  // by default would put a metered embedding call behind every keystroke pause.
+  const semantic = url.searchParams.get("semantic") === "true";
 
   try {
+    if (semantic) {
+      const hits = await retrieveCandidates(env, db, query);
+      return jsonResponse(request, { hits: hits.slice(0, limit), matched: hits.length, mode: "fused" }, 200, 300);
+    }
+
     const result = await searchAddons(db, query, {
       limit,
       offset,
@@ -195,6 +206,41 @@ export async function handleAsk(request: Request, env: Env): Promise<Response> {
   } catch (err) {
     console.error("ask failed:", err);
     return jsonResponse(request, { error: "Ask failed" }, 500);
+  }
+}
+
+/**
+ * POST /admin/index/embed?limit=N — embed one page of the corpus.
+ *
+ * Paged and resumable like `/admin/index/backfill`, and for the same reason: a
+ * Worker invocation that does too much is killed with `error code: 1102`. The
+ * operator loops on `complete`.
+ *
+ * The vectors accumulate under a build key and are only swapped into the live
+ * blob when the walk finishes, so an interrupted run leaves the previous index
+ * serving rather than half a corpus.
+ */
+export async function handleIndexEmbed(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  const db = env.ADDON_INDEX;
+  if (!db) return indexUnavailable(request);
+  if (!env.AI) {
+    return jsonResponse(request, { error: "AI binding is not configured" }, 503);
+  }
+
+  const limit = parsePositiveInt(url.searchParams.get("limit"), DEFAULT_EMBED_PAGE, MAX_EMBED_PAGE);
+  try {
+    return jsonResponse(request, await embedIndexPage(env, db, limit || DEFAULT_EMBED_PAGE));
+  } catch (err) {
+    console.error("index embed failed:", err);
+    return jsonResponse(
+      request,
+      { error: err instanceof Error ? err.message : "Embed failed" },
+      502,
+    );
   }
 }
 

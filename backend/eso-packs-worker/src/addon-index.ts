@@ -744,3 +744,65 @@ function hoursSince(iso: string | null): number | null {
 export function requireIndexDb(env: Env): D1Database | null {
   return env.ADDON_INDEX ?? null;
 }
+
+/**
+ * Rehydrate full hits for a list of uids, preserving the given order.
+ *
+ * Semantic retrieval returns uids and nothing else, on purpose: the vector
+ * store must never be the source of a title, a category or a link. Those come
+ * from here, under the same visibility rules `searchAddons` applies, so a
+ * fused candidate cannot smuggle in a library or a retired addon that keyword
+ * search would have hidden.
+ */
+export async function fetchHitsByUid(
+  db: D1Database,
+  uids: number[],
+  options: Pick<SearchOptions, "includeLibraries" | "includeDiscontinued"> = {},
+): Promise<AddonSearchHit[]> {
+  // D1 allows 100 bound parameters per query; stay well inside it.
+  const wanted = uids.slice(0, 50);
+  if (wanted.length === 0) return [];
+
+  const placeholders = wanted.map(() => "?").join(", ");
+  let rows: Array<SearchRow & { description: string }> = [];
+  try {
+    const result = await db
+      .prepare(
+        `SELECT uid, title, author, category_name, downloads, favorites, last_update,
+                file_info_uri, is_library, description, 0 AS score, '' AS snippet
+           FROM addons
+          WHERE uid IN (${placeholders})
+            AND removed = 0
+            ${options.includeLibraries ? "" : "AND is_library = 0"}
+            ${options.includeDiscontinued ? "" : `AND category_id != ${DISCONTINUED_CATEGORY_ID}`}`,
+      )
+      .bind(...wanted)
+      .all<SearchRow & { description: string }>();
+    rows = result.results ?? [];
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+
+  const byUid = new Map(rows.map((row) => [row.uid, row]));
+  return wanted
+    .map((uid) => byUid.get(uid))
+    .filter((row): row is SearchRow & { description: string } => row !== undefined)
+    .map((row) => ({
+      ...rowToHit(row),
+      // No MATCH ran, so there is no FTS snippet to take. The opening of the
+      // description is what the model needs to judge the candidate anyway.
+      snippet: describeBriefly(row.description),
+    }));
+}
+
+/** Roughly the length of an FTS snippet, cut on a word boundary. */
+const BRIEF_CHARS = 220;
+
+function describeBriefly(description: string): string {
+  const text = (description ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= BRIEF_CHARS) return text;
+  const cut = text.slice(0, BRIEF_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${space > 40 ? cut.slice(0, space) : cut}…`;
+}

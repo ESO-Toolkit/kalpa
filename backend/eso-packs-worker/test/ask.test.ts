@@ -1,7 +1,21 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { answerQuestion, cacheKeyFor, groundOutput, scrubProse } from "../src/ask";
+import {
+  answerQuestion,
+  applyCosineFloor,
+  cacheKeyFor,
+  fuseRankings,
+  groundOutput,
+  scrubProse,
+} from "../src/ask";
 import { applyDetail, ensureSchema, upsertMeta } from "../src/addon-index";
+import {
+  VECTORS_KEY,
+  VECTOR_DIM,
+  VECTOR_UIDS_KEY,
+  quantise,
+  resetVectorCache,
+} from "../src/embeddings";
 import type { AddonSearchHit, Env } from "../src/types";
 
 const testEnv = env as unknown as Env;
@@ -65,6 +79,11 @@ beforeEach(async () => {
   // Answer and budget keys live in KV; clear both so tests do not bleed.
   const list = await testEnv.ESO_PACKS.list({ prefix: "ask:" });
   for (const key of list.keys) await testEnv.ESO_PACKS.delete(key.name);
+  // Vector blobs are module-cached per isolate, so a test that writes one must
+  // not leak into the next.
+  const vectors = await testEnv.ESO_PACKS.list({ prefix: "vec:" });
+  for (const key of vectors.keys) await testEnv.ESO_PACKS.delete(key.name);
+  resetVectorCache();
 });
 
 describe("groundOutput", () => {
@@ -385,5 +404,208 @@ describe("answerQuestion", () => {
   it("reports no-index when the binding is absent", async () => {
     const result = await answerQuestion({ ...testEnv, ADDON_INDEX: undefined }, "anything at all");
     expect(result).toEqual({ ok: false, reason: "no-index" });
+  });
+});
+
+describe("fuseRankings", () => {
+  it("orders by reciprocal rank, summing across both lists", () => {
+    // 2 is 2nd in bm25 and 1st in the vector list, so it outranks 1, which is
+    // 1st in bm25 and absent from the vector list.
+    //   score(1) = 1/21           = 0.0476
+    //   score(2) = 1/22 + 1/21    = 0.0931
+    expect(fuseRankings([1, 2], [2, 3], 10)).toEqual([2, 1, 3]);
+  });
+
+  it("breaks ties in favour of the keyword list", () => {
+    // Symmetric ranks: both appear once, at rank 1 of one list.
+    expect(fuseRankings([7], [9], 10)).toEqual([7, 9]);
+  });
+
+  it("respects the limit", () => {
+    expect(fuseRankings([1, 2, 3], [4, 5, 6], 2)).toHaveLength(2);
+  });
+
+  it("falls back to a single list when the other is empty", () => {
+    expect(fuseRankings([1, 2, 3], [], 10)).toEqual([1, 2, 3]);
+    expect(fuseRankings([], [4, 5], 10)).toEqual([4, 5]);
+  });
+
+  it("keeps the top three of each list even when the limit is tight", () => {
+    // Without the pin, a long agreeing vector list would fill a 4-slot budget
+    // and drop the exact-title bm25 match at rank 3.
+    const bm25 = [1, 2, 3, 4, 5];
+    const vector = [10, 11, 12, 13, 14, 15];
+    const fused = fuseRankings(bm25, vector, 6);
+
+    for (const uid of [1, 2, 3, 10, 11, 12]) expect(fused).toContain(uid);
+    expect(fused).toHaveLength(6);
+  });
+
+  it("never drops the strongest keyword hit to an embedding tie-break", () => {
+    const fused = fuseRankings([99], [1, 2, 3, 4, 5, 6, 7, 8], 4);
+    expect(fused).toContain(99);
+    // The vector list's own top three are pinned too, so the pins fill the cap.
+    expect(fused).toEqual(expect.arrayContaining([99, 1, 2, 3]));
+  });
+});
+
+describe("applyCosineFloor", () => {
+  it("keeps only neighbours close to the best one", () => {
+    const kept = applyCosineFloor([
+      { uid: 1, cosine: 0.9 },
+      { uid: 2, cosine: 0.82 },
+      { uid: 3, cosine: 0.7 },
+    ]);
+    // Floor is max(0.9 - 0.12, 0.5) = 0.78.
+    expect(kept.map((h) => h.uid)).toEqual([1, 2]);
+  });
+
+  it("drops everything when nothing is semantically near", () => {
+    // A question with no match in the corpus still gets 20 nearest neighbours
+    // back. Importing them would swamp the keyword hits.
+    expect(
+      applyCosineFloor([
+        { uid: 1, cosine: 0.44 },
+        { uid: 2, cosine: 0.4 },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("uses the absolute floor rather than the relative one near the bottom", () => {
+    const kept = applyCosineFloor([
+      { uid: 1, cosine: 0.55 },
+      { uid: 2, cosine: 0.51 },
+      { uid: 3, cosine: 0.49 },
+    ]);
+    expect(kept.map((h) => h.uid)).toEqual([1, 2]);
+  });
+
+  it("handles an empty list", () => {
+    expect(applyCosineFloor([])).toEqual([]);
+  });
+});
+
+describe("semantic fusion in answerQuestion", () => {
+  function unit(i: number): number[] {
+    const vec = new Array(VECTOR_DIM).fill(0);
+    vec[i] = 1;
+    return vec;
+  }
+
+  /** Publish a vector index for the given uids, one basis axis apiece. */
+  async function publishVectors(entries: Array<[number, number]>): Promise<void> {
+    const blob = new Int8Array(entries.length * VECTOR_DIM);
+    entries.forEach(([, axis], row) => blob.set(quantise(unit(axis)), row * VECTOR_DIM));
+    await testEnv.ESO_PACKS.put(VECTOR_UIDS_KEY, JSON.stringify(entries.map(([uid]) => uid)));
+    await testEnv.ESO_PACKS.put(VECTORS_KEY, blob.buffer as ArrayBuffer);
+    resetVectorCache();
+  }
+
+  /** AI stub that answers embedding calls with `queryVector` and chat calls
+   *  with `payload`. */
+  function hybridEnv(queryVector: number[], payload: unknown): Env {
+    return {
+      ...testEnv,
+      AI: {
+        run: vi.fn(async (_model: unknown, input: { text?: string[] }) =>
+          input.text ? { data: [queryVector] } : { response: payload },
+        ),
+      } as unknown as Ai,
+    } as Env;
+  }
+
+  it("surfaces an addon that keyword search never retrieved", async () => {
+    await seed(10, "BagSpace", "Inventory management and bag space.");
+    // No word here overlaps the question — this is the vocabulary gap BM25
+    // cannot cross, and the only route to this addon is the vector index.
+    await seed(20, "Compass Tint", "Turns your compass outline red while you fight.");
+    await publishVectors([
+      [20, 0],
+      [10, 5],
+    ]);
+
+    const e = hybridEnv(unit(0), {
+      answer: "This one.",
+      no_good_match: false,
+      recommendations: [{ candidate: "C1", reason: "fits" }],
+    });
+
+    const result = await answerQuestion(e, "am i flagged in combat");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const surfaced = [...result.response.recommendations, ...result.response.also_considered];
+    expect(surfaced.map((r) => r.esoui_id)).toContain(20);
+    // Rehydrated candidates carry real index data, never anything model-authored.
+    const compass = surfaced.find((r) => r.esoui_id === 20);
+    expect(compass?.file_info_uri).toBe("https://www.esoui.com/downloads/info20.html");
+  });
+
+  it("still answers when the vector blob has never been built", async () => {
+    await seed(1543, "CombatIndicator", "Shows an icon when you are flagged in combat.");
+    const e = envWithAi({
+      answer: "Yes.",
+      no_good_match: false,
+      recommendations: [{ candidate: "C1", reason: "fits" }],
+    });
+
+    const result = await answerQuestion(e, "in combat indicator");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.response.degraded).toBe(false);
+    expect(result.response.recommendations[0].esoui_id).toBe(1543);
+    // Exactly one model call: the answer. No blob means no query embed.
+    expect(e.AI!.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to bm25 when the embedding call fails", async () => {
+    await seed(1543, "CombatIndicator", "Shows an icon when you are flagged in combat.");
+    await publishVectors([[1543, 0]]);
+
+    const e = {
+      ...testEnv,
+      AI: {
+        run: vi.fn(async (_model: unknown, input: { text?: string[] }) => {
+          if (input.text) throw new Error("embedding model down");
+          return {
+            response: {
+              answer: "Yes.",
+              no_good_match: false,
+              recommendations: [{ candidate: "C1", reason: "fits" }],
+            },
+          };
+        }),
+      } as unknown as Ai,
+    } as Env;
+
+    const result = await answerQuestion(e, "in combat indicator");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // A broken embedding model must never be visible in the answer.
+    expect(result.response.degraded).toBe(false);
+    expect(result.response.recommendations[0].esoui_id).toBe(1543);
+  });
+
+  it("ignores distant neighbours rather than importing them", async () => {
+    await seed(1543, "CombatIndicator", "Shows an icon when you are flagged in combat.");
+    await seed(4242, "Fishing Helper", "Tells you which bait to use at each hole.");
+    // The stored vectors are orthogonal to the query, so every cosine is 0 and
+    // the floor rejects the whole vector list.
+    await publishVectors([
+      [4242, 3],
+      [1543, 4],
+    ]);
+
+    const e = hybridEnv(unit(0), {
+      answer: "Yes.",
+      no_good_match: false,
+      recommendations: [{ candidate: "C1", reason: "fits" }],
+    });
+
+    const result = await answerQuestion(e, "in combat indicator");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Pure BM25 ordering survives: the combat addon leads, not the fish one.
+    expect(result.response.recommendations[0].esoui_id).toBe(1543);
   });
 });

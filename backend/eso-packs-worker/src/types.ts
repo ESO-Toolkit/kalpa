@@ -111,7 +111,7 @@ export interface AddonSearchResult {
   matched: number;
   /** Which pass produced the hits: the strict pass only, the permissive pass
    *  only, both merged, or nothing matched. */
-  mode: "and" | "or" | "union" | "none";
+  mode: "and" | "or" | "union" | "fused" | "none";
 }
 
 export interface AddonIndexStats {
@@ -125,6 +125,17 @@ export interface AddonIndexStats {
   last_sync: string | null;
   /** Hours since the last successful filelist sync, or null if never synced. */
   stale_hours: number | null;
+}
+
+/**
+ * One semantic-retrieval hit: an addon uid and its cosine similarity to the
+ * question. Deliberately carries no addon fields — the row is rehydrated from
+ * D1, so the vector store can never be the source of a title or a link.
+ */
+export interface AddonVectorHit {
+  uid: number;
+  /** -1..1. Comparable within one question's result set. */
+  cosine: number;
 }
 
 // ── Ask (natural-language addon assistant) ───────────────────────────

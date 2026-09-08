@@ -20,6 +20,7 @@ import {
   handleAddonStats,
   handleAsk,
   handleIndexBackfill,
+  handleIndexEmbed,
   handleIndexReprocess,
   handleIndexSync,
 } from "./addon-routes";
@@ -1932,6 +1933,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (method === "POST" && pathname === "/admin/index/backfill") {
     if (!requireAuth(request, env)) return unauthorized(request);
     return handleIndexBackfill(request, env, url);
+  }
+
+  if (method === "POST" && pathname === "/admin/index/embed") {
+    if (!requireAuth(request, env)) return unauthorized(request);
+    return handleIndexEmbed(request, env, url);
   }
 
   if (method === "POST" && pathname === "/admin/index/reprocess") {

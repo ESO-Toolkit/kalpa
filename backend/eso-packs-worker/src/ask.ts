@@ -1,5 +1,12 @@
-import type { Env, AddonSearchHit, AskRecommendation, AskResponse } from "./types";
-import { INDEX_VERSION, searchAddons } from "./addon-index";
+import type {
+  Env,
+  AddonSearchHit,
+  AddonVectorHit,
+  AskRecommendation,
+  AskResponse,
+} from "./types";
+import { fetchHitsByUid, INDEX_VERSION, searchAddons } from "./addon-index";
+import { semanticSearch } from "./embeddings";
 
 /**
  * Natural-language addon assistant.
@@ -57,6 +64,15 @@ const MAX_OUTPUT_TOKENS = 256;
 
 /** Extra ranked candidates surfaced beneath the answer, at no model cost. */
 const ALSO_CONSIDERED_LIMIT = 8;
+
+/**
+ * Semantic-only candidates appended after the keyword hits.
+ *
+ * Six is ~200 extra prompt tokens, about one neuron on a ~23-neuron call, and
+ * it is a ceiling rather than a target — a question whose neighbours all fall
+ * below the cosine floor appends nothing.
+ */
+const SEMANTIC_EXTRA = 6;
 
 const MAX_QUESTION_LENGTH = 500;
 const MIN_QUESTION_LENGTH = 3;
@@ -140,7 +156,7 @@ function renderCandidates(hits: AddonSearchHit[]): string {
 /** Bumped whenever retrieval, candidate count, or the prompt changes.
  *  Without it, a week of cached answers from the previous behaviour keeps being
  *  served and the improvement looks like it did not land. */
-const ASK_VERSION = 2;
+const ASK_VERSION = 3;
 
 export function cacheKeyFor(question: string): string {
   const tokens = [
@@ -329,6 +345,167 @@ async function overBudget(env: Env): Promise<boolean> {
   }
 }
 
+
+// ── Hybrid retrieval ─────────────────────────────────────────────────
+//
+// BM25 answers a name lookup almost perfectly (~97% recall) and a concept
+// question badly (~73%), because "flagged in combat" and "turns your compass
+// outline red when you are in combat" share no terms. Embeddings answer the
+// second and are worse at the first — an exact title is a lexical fact, not a
+// semantic one. So the two lists are FUSED, never swapped, and the guards below
+// exist specifically to stop the semantic list displacing a good keyword hit.
+//
+// This applies to /ask ONLY. `/addons/search` stays pure BM25: it is
+// keystroke-driven, free, and already at 96.9% on the lookups it serves.
+
+/** How many semantic neighbours to consider. */
+const SEMANTIC_LIMIT = 20;
+
+/**
+ * Reciprocal Rank Fusion constant.
+ *
+ * RRF scores by RANK, not by score, which is what makes it safe here: BM25
+ * scores and cosines are not on a shared scale and never will be. k dampens the
+ * head of each list, so one list cannot dominate on its first entry alone. At
+ * k = 20 against 20-item lists the last entry still carries about half the
+ * weight of the first.
+ */
+export const RRF_K = 20;
+
+/**
+ * Guard (a): how far below the best cosine a neighbour may sit, and the
+ * absolute floor beneath which nothing counts.
+ *
+ * Vector search ALWAYS returns its k nearest neighbours, however far away they
+ * are. A question with no semantic match in the corpus would otherwise import
+ * 20 arbitrary addons and hand each of them fused score, pushing real keyword
+ * hits down the list.
+ */
+const COSINE_RELATIVE_DROP = 0.12;
+const COSINE_ABSOLUTE_FLOOR = 0.5;
+
+/**
+ * Guard (b): entries kept from the head of EACH list regardless of fused score.
+ *
+ * A query like "Dressing Room" is answered by exactly one addon and BM25 knows
+ * it. If the semantic list happens to agree about three OTHER addons, RRF can
+ * tie-break the exact title match out of a truncated candidate list. Pinning
+ * the head of each list makes that impossible in either direction.
+ */
+const ALWAYS_KEEP = 3;
+
+/** Drop semantic neighbours that are not actually near. Input must be sorted by
+ *  descending cosine, which `semanticSearch` guarantees. */
+export function applyCosineFloor(vector: AddonVectorHit[]): AddonVectorHit[] {
+  if (vector.length === 0) return [];
+  const floor = Math.max(vector[0].cosine - COSINE_RELATIVE_DROP, COSINE_ABSOLUTE_FLOOR);
+  return vector.filter((hit) => hit.cosine >= floor);
+}
+
+/**
+ * Reciprocal Rank Fusion of two ranked uid lists.
+ *
+ *   score(d) = 1/(k + rank_bm25) + 1/(k + rank_vec)
+ *
+ * Ranks are 1-based; a list the document is absent from contributes 0. Returns
+ * at most `limit` uids in fused order, with the top `ALWAYS_KEEP` of each input
+ * list guaranteed present. Ties resolve in favour of BM25, because the union is
+ * built keyword-first and the sort is stable.
+ */
+export function fuseRankings(bm25: number[], vector: number[], limit: number): number[] {
+  const rankOf = (list: number[]) => new Map(list.map((uid, i) => [uid, i + 1]));
+  const bmRank = rankOf(bm25);
+  const vecRank = rankOf(vector);
+
+  const union: number[] = [];
+  const seen = new Set<number>();
+  for (const uid of [...bm25, ...vector]) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    union.push(uid);
+  }
+
+  const score = (uid: number) => {
+    const b = bmRank.get(uid);
+    const v = vecRank.get(uid);
+    return (b ? 1 / (RRF_K + b) : 0) + (v ? 1 / (RRF_K + v) : 0);
+  };
+
+  const sorted = [...union].sort((a, b) => score(b) - score(a));
+  const cap = Math.max(limit, 0);
+
+  const forced = new Set([...bm25.slice(0, ALWAYS_KEEP), ...vector.slice(0, ALWAYS_KEEP)]);
+  const chosen = new Set(sorted.slice(0, cap));
+
+  for (const uid of forced) {
+    if (chosen.has(uid) || cap === 0) continue;
+    if (chosen.size >= cap) {
+      // Evict the weakest entry that is not itself pinned. Walking the sorted
+      // list backwards makes the eviction the lowest fused score by definition.
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const candidate = sorted[i];
+        if (chosen.has(candidate) && !forced.has(candidate)) {
+          chosen.delete(candidate);
+          break;
+        }
+      }
+    }
+    if (chosen.size < cap) chosen.add(uid);
+  }
+
+  // Emit in fused order, not in the order the guard happened to add things.
+  return sorted.filter((uid) => chosen.has(uid));
+}
+
+/**
+ * BM25 candidates, fused with semantic neighbours when a vector index exists.
+ *
+ * Every failure — no blob, no AI binding, a model error, a D1 hiccup — falls
+ * back to the BM25 list silently. Semantic retrieval is an enhancement to /ask,
+ * never a dependency of it.
+ */
+/**
+ * Exported so `/addons/search?semantic=true` can measure the SAME retrieval the
+ * model sees. Without it the eval harness scores BM25 only and says nothing
+ * about fusion, which would make the whole change unmeasurable.
+ */
+export async function retrieveCandidates(
+  env: Env,
+  db: D1Database,
+  question: string,
+): Promise<AddonSearchHit[]> {
+  const { hits } = await searchAddons(db, question, { limit: CANDIDATE_COUNT });
+
+  try {
+    const vector = applyCosineFloor(await semanticSearch(env, question, SEMANTIC_LIMIT));
+    if (vector.length === 0) return hits;
+
+    // ADDITIVE, not interleaved. Reciprocal rank fusion was measured against
+    // the 60-row eval and made the slice it was meant to fix WORSE: concept
+    // recall@20 fell 0.732 -> 0.661, because a list capped at CANDIDATE_COUNT
+    // has to evict BM25 hits from positions 10-20 to seat vector hits, and for
+    // natural-language questions those BM25 tail hits were the better ones.
+    //
+    // So keyword order is preserved untouched and semantic-only hits are
+    // appended. Recall can then only rise: every BM25 candidate the model used
+    // to see, it still sees, plus up to SEMANTIC_EXTRA more that share no
+    // vocabulary with the question — which is the case BM25 provably cannot
+    // reach ("flagged in combat" vs "turns your compass outline red").
+    const known = new Set(hits.map((hit) => hit.esoui_id));
+    const extraUids = vector
+      .map((hit) => hit.uid)
+      .filter((uid) => !known.has(uid))
+      .slice(0, SEMANTIC_EXTRA);
+    if (extraUids.length === 0) return hits;
+
+    const extras = await fetchHitsByUid(db, extraUids);
+    return extras.length > 0 ? [...hits, ...extras] : hits;
+  } catch (err) {
+    console.error("semantic fusion failed, falling back to bm25:", err);
+    return hits;
+  }
+}
+
 export type AskFailure = "no-index" | "empty-question" | "question-too-long";
 
 export async function answerQuestion(
@@ -350,7 +527,7 @@ export async function answerQuestion(
     // Cache read failures are not answer failures.
   }
 
-  const { hits } = await searchAddons(db, trimmed, { limit: CANDIDATE_COUNT });
+  const hits = await retrieveCandidates(env, db, trimmed);
 
   // Nothing retrieved means nothing to ground an answer in. Returning early
   // also avoids spending a model call to say "I don't know".
