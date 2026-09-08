@@ -943,16 +943,26 @@ function AskAnswer({
                     : "border-structure-06 hover:bg-structure-05"
                 )}
               >
-                <span className="block truncate text-xs text-foreground">{rec.title}</span>
                 {/* The tail is no longer relevance-capped, so it can trail
                     weak matches on a vague question. Bare titles gave no cue
                     which rows those were; the category is the cheapest signal
-                    that "Deconstruction Junk Marker" is not a combat addon. */}
-                {rec.category && (
-                  <InfoPill color="muted" className="mt-1 max-w-full whitespace-nowrap">
-                    <span className="truncate">{rec.category}</span>
-                  </InfoPill>
-                )}
+                    that "Deconstruction Junk Marker" is not a combat addon.
+
+                    Inline rather than stacked, because this list is long and
+                    its container is short. A second line took tail rows from
+                    28px to 54px, and at 23 rows that is 1249px of scroll
+                    inside a 189px region — expanding the disclosure pushed the
+                    answer and the picks off screen entirely. */}
+                <span className="flex items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+                    {rec.title}
+                  </span>
+                  {rec.category && (
+                    <InfoPill color="muted" className="shrink-0 whitespace-nowrap">
+                      {rec.category}
+                    </InfoPill>
+                  )}
+                </span>
               </button>
             ))}
           </div>
