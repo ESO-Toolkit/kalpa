@@ -62,12 +62,6 @@ const MAX_RECOMMENDATIONS = 5;
  */
 const MAX_OUTPUT_TOKENS = 256;
 
-/** Extra ranked candidates surfaced beneath the answer, at no model cost. */
-const ALSO_CONSIDERED_LIMIT = 8;
-
-/** Of those slots, how many are held for semantic-only matches. */
-const ALSO_CONSIDERED_SEMANTIC = 3;
-
 /**
  * Semantic-only candidates appended after the keyword hits.
  *
@@ -76,6 +70,15 @@ const ALSO_CONSIDERED_SEMANTIC = 3;
  * below the cosine floor appends nothing.
  */
 const SEMANTIC_EXTRA = 6;
+
+/** Extra ranked candidates surfaced beneath the answer, at no model cost.
+ *  Declared after SEMANTIC_EXTRA because it is derived from it — a const
+ *  referencing a later const is a temporal-dead-zone throw at module load. */
+const ALSO_CONSIDERED_LIMIT = CANDIDATE_COUNT + SEMANTIC_EXTRA;
+
+/** How many semantic-only matches are pulled to the FRONT of that list.
+ *  Not a quota carved out of the budget — nothing is dropped to make room. */
+const ALSO_CONSIDERED_SEMANTIC = 3;
 
 const MAX_QUESTION_LENGTH = 500;
 const MIN_QUESTION_LENGTH = 3;
@@ -251,17 +254,33 @@ export function alsoConsidered(
   // invisible unless the model happened to pick one from the tail. Reserve
   // slots so a user sees the semantically-related matches that keyword search
   // could not have found at all.
-  const semantic = rest.filter((hit) => hit.semantic).slice(0, ALSO_CONSIDERED_SEMANTIC);
-  const keyword = rest
-    .filter((hit) => !hit.semantic)
-    .slice(0, ALSO_CONSIDERED_LIMIT - semantic.length);
-
   // Semantic FIRST. These are the finds keyword search could not make at all —
   // "shows when I am in combat" cannot lexically reach "Fighting Display", which
   // is precisely why the embedding index exists. Ordering them behind keyword
   // hits the user could have found by typing buried the distinctive result at
   // position 7 of a collapsed list.
-  return [...semantic, ...keyword].map((hit) => toRecommendation(hit, ""));
+  //
+  // This only FRONT-LOADS; nothing is dropped for being semantic or keyword.
+  // The earlier form reserved these slots out of a list capped at 8, which
+  // discarded keyword hits to make room. On "an addon that shows if you're
+  // flagged in combat", that cap dropped "Combat Indicator" — BM25 rank 8, the
+  // 8th unpicked hit — off the end of a disclosure whose entire purpose is that
+  // "a short answer never looks like it missed something".
+  const front = new Set(
+    rest.filter((hit) => hit.semantic).slice(0, ALSO_CONSIDERED_SEMANTIC).map((hit) => hit.esoui_id),
+  );
+
+  // The cap is now the size of the retrieved set, not a display budget, so the
+  // list is bounded but never truncating: every candidate the model was offered
+  // and did not pick is reachable. It is collapsed behind a disclosure, so the
+  // cost of the extra rows is a scroll, and the cost of omitting one is the
+  // user concluding the assistant does not know about an addon that it ranked.
+  return [
+    ...rest.filter((hit) => front.has(hit.esoui_id)),
+    ...rest.filter((hit) => !front.has(hit.esoui_id)),
+  ]
+    .slice(0, ALSO_CONSIDERED_LIMIT)
+    .map((hit) => toRecommendation(hit, ""));
 }
 
 /**

@@ -593,19 +593,30 @@ describe("alsoConsidered", () => {
     expect(out.map((r) => r.esoui_id)).toContain(999);
   });
 
-  it("puts semantic finds first, then fills with keyword hits in order", () => {
+  it("puts semantic finds first, then keyword hits in rank order", () => {
     const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
-    expect(out).toHaveLength(8);
     // The semantic-only match leads: it is the one keyword search could not
     // find, so burying it behind hits the user could have typed is backwards.
     expect(out[0].esoui_id).toBe(999);
-    expect(out.slice(1).map((r) => r.esoui_id)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(out.slice(1).map((r) => r.esoui_id)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    ]);
+  });
+
+  it("drops nothing that retrieval found and the model did not pick", () => {
+    // The list is collapsed behind a disclosure whose promise is that a short
+    // answer never looks like it missed something. A display cap broke that
+    // promise silently: on a real question "Combat Indicator" was BM25 rank 8,
+    // the 8th unpicked hit, and fell off the end of an 8-slot list that had
+    // already committed 3 slots to semantic extras.
+    const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
+    expect(out).toHaveLength(fused.length - 1);
   });
 
   it("gives every slot to keyword hits when there are no semantic extras", () => {
     const keywordOnly = fused.filter((h) => !h.semantic);
     const out = alsoConsidered(keywordOnly, []);
-    expect(out).toHaveLength(8);
+    expect(out).toHaveLength(keywordOnly.length);
     expect(out.every((r) => r.esoui_id <= 20)).toBe(true);
   });
 
