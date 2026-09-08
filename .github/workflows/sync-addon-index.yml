@@ -1,0 +1,94 @@
+# Nightly ESOUI addon-index refresh.
+#
+# Why an Action and not the in-worker cron:
+#
+# `runDailySync` in src/crawl.ts does one bulk `syncFilelist` plus exactly ONE
+# page of `crawlDetails` (MAX_DETAIL_BATCH = 12). That is 12 descriptions a day.
+# ESOUI updates tens of addons daily and hundreds after a patch, and a new addon
+# has NO FTS row until its detail is fetched — so the in-worker cron would keep
+# the index looking alive while newly published addons stayed unsearchable for
+# weeks.
+#
+# Raising MAX_DETAIL_BATCH is not the fix. It is 12 because Cloudflare killed
+# larger pages with "error code: 1102" (worker exceeded resource limits) at
+# ~10s per invocation. The page size is a hard platform bound, so catching up
+# needs MORE pages — which means an external driver that can make ~60
+# sequential requests without living inside one worker invocation.
+#
+# This job drives the worker's own admin routes (`/admin/index/sync`, then
+# `/admin/index/backfill` until `complete: true`), so the crawl still runs
+# through exactly the code the worker tests cover. `ADDON_INDEX_SYNC` stays
+# "disabled" in wrangler.toml — this workflow is the updater.
+#
+# Requires repository secret ADMIN_API_KEY (the same value as the worker's
+# `wrangler secret put ADMIN_API_KEY`).
+
+name: Sync Addon Index
+
+on:
+  schedule:
+    # 04:10 UTC — quiet hour, and deliberately not 00:00, which is when the
+    # worker's own pack-index backup cron runs.
+    - cron: "10 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: "Max backfill pages before stopping (progress is saved; re-run to continue)"
+        required: false
+        default: "60"
+      base_url:
+        description: "Worker base URL"
+        required: false
+        default: "https://kalpa-pack-hub.eso-toolkit.workers.dev"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      # Two crawls at once would fight over the same detail_stale queue.
+      group: sync-addon-index
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: backend/eso-packs-worker
+    env:
+      # `inputs` is empty on the scheduled run, so the defaults live here too.
+      BASE_URL: ${{ inputs.base_url || 'https://kalpa-pack-hub.eso-toolkit.workers.dev' }}
+      MAX_PAGES: ${{ inputs.max_pages || '60' }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Verify the admin key is configured
+        env:
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+        run: |
+          if [ -z "$ADMIN_API_KEY" ]; then
+            echo "::error::ADMIN_API_KEY secret is not set; the crawl cannot authenticate."
+            exit 1
+          fi
+
+      # scripts/build-addon-index.mjs already does sync + paged backfill with
+      # retry/backoff on 429/5xx and on non-JSON bodies, prints per-page
+      # progress, and exits non-zero when a phase fails outright — so a failure
+      # here fails the run and GitHub emails the watchers. The script needs
+      # nothing but Node builtins, hence no `npm ci`.
+      - name: Sync filelist and backfill descriptions
+        env:
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+        run: node scripts/build-addon-index.mjs --base "$BASE_URL" --max "$MAX_PAGES"
+
+      # Health snapshot in the run log: pending_details is how far behind the
+      # crawl still is, stale_hours how long since the last successful sync.
+      - name: Report index health
+        if: always()
+        run: curl -sS --max-time 30 "$BASE_URL/addons/stats" || echo "::warning::could not read /addons/stats"

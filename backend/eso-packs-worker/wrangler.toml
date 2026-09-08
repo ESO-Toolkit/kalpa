@@ -15,10 +15,15 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 [vars]
 # Remains log-only until a maintainer approves deletion-capable apply mode.
 D1_RECONCILIATION_MODE = "dry-run"
-# Nightly ESOUI addon-index crawl. Fail-closed: only the exact value "enabled"
-# turns it on. Flip this to "enabled" AFTER provisioning ADDON_INDEX and running
-# the initial backfill to completion — not before, or the cron starts calling a
-# third-party API on a half-built index.
+# In-worker nightly ESOUI addon-index crawl. Fail-closed: only the exact value
+# "enabled" turns it on.
+#
+# It stays "disabled" on purpose. The updater is now
+# .github/workflows/sync-addon-index.yml, which drives /admin/index/sync plus a
+# paged /admin/index/backfill loop. The in-worker cron can only manage one
+# 12-addon detail page per day (MAX_DETAIL_BATCH — larger pages hit Cloudflare
+# "error code: 1102"), which is far below ESOUI's daily churn and would leave
+# new addons unsearchable for weeks while the index looked healthy.
 ADDON_INDEX_SYNC = "disabled"
 # Workers AI model for /ask. Swappable without a code change.
 ASK_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8"
@@ -102,5 +107,11 @@ class_name = "PackIndexDO"
 tag = "v1"
 new_sqlite_classes = ["PackIndexDO"]
 
+# Worker Logs. Without this, every console.error in the worker goes nowhere:
+# `console.error("ask model call failed")` was invisible while EVERY /ask call
+# failed (AiError 5025 — the model rejects json_schema), so the route silently
+# served degraded answers with no signal that anything was wrong. Logs are how
+# that gets caught next time, without needing someone to be attached to
+# `wrangler tail` at the moment it breaks.
 [observability]
-enabled = false
+enabled = true
