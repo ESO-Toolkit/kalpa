@@ -11,11 +11,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const STAGING_DIR: &str = ".kalpa-staging";
+pub(crate) const STAGING_DIR: &str = ".kalpa-staging";
 const HASHES_DIR: &str = ".kalpa-hashes";
 /// Marks a folder whose hash baseline this transaction promoted when there was
 /// no previous one, so a rollback can tell its own work from the user's.
 const ABSENT_BASELINE_SUFFIX: &str = ".absent";
+/// Marks a transaction whose publication is irreversible: every folder swapped
+/// and every hash baseline promoted. Written durably at that instant and
+/// removed only once everything else under the root is gone, so it outlives a
+/// cleanup that half-fails. Recovery reads it *before* the journal, because a
+/// half-finished cleanup leaves the journal either missing (which routes into
+/// `rollback_unjournaled_tombstones`) or still reading `Swapped` — and both of
+/// those restore the tombstoned old version over the update the caller has
+/// already recorded as installed.
+const COMMITTED_SENTINEL: &str = "committed";
+const JOURNAL_FILE: &str = "journal.json";
 const RENAME_ATTEMPTS: usize = 5;
 const RENAME_BACKOFF: Duration = Duration::from_millis(40);
 const CREATE_ATTEMPTS: usize = 16;
@@ -315,6 +325,11 @@ impl InstallTransaction {
             ));
         }
         phase.mark("promote hashes");
+        // Point of no return: nothing below may roll this back, and neither may
+        // a later recovery pass. Mark it before the journal write, because the
+        // journal is the record a failed write or a half-finished cleanup
+        // destroys.
+        mark_committed(&self.root);
         journal.phase = Phase::Promoted;
         finish_committed_transaction(&self.addons_dir, &self.root, &journal);
         phase.mark("cleanup (tombstone delete)");
@@ -414,7 +429,24 @@ fn recover_staging_locked(addons_dir: &Path) -> Result<(), String> {
                 root.display()
             ));
         }
-        let journal = fs::read(root.join("journal.json"))
+        // A committed publication is live, and its tombstones hold the version
+        // it replaced — so every rollback path below would revert an update the
+        // user already has and the caller already recorded. Consult the durable
+        // sentinel before the journal, which a half-finished cleanup can leave
+        // missing or still reading `Swapped`.
+        if root.join(COMMITTED_SENTINEL).is_file() {
+            // Nothing under a committed root is needed again. A leftover the OS
+            // will not let us delete (a locked tombstoned DLL, antivirus) must
+            // therefore not fail recovery: that would block every future
+            // install behind a directory whose contents no longer matter.
+            if let Err(error) = fs::remove_dir_all(&root) {
+                eprintln!(
+                    "Warning: a committed installer transaction could not be cleaned up: {error}"
+                );
+            }
+            continue;
+        }
+        let journal = fs::read(root.join(JOURNAL_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok());
         match journal {
@@ -732,16 +764,54 @@ fn rollback_hashes(addons_dir: &Path, root: &Path, hash_folders: &[String]) -> R
 fn write_journal(root: &Path, journal: &Journal) -> Result<(), String> {
     let bytes = serde_json::to_vec(journal)
         .map_err(|e| format!("Failed to encode installer journal: {e}"))?;
-    atomic_file::atomic_write(&root.join("journal.json"), &bytes)
+    atomic_file::atomic_write(&root.join(JOURNAL_FILE), &bytes)
         .map_err(|e| format!("Failed to persist installer journal: {e}"))
+}
+
+/// Record the commit point durably (staging file, fsync, rename) so recovery
+/// can recognise a published transaction without trusting the journal.
+///
+/// Best effort on purpose: every folder is already swapped and every baseline
+/// already promoted, so failing the commit here would report a failure the user
+/// can see on disk did not happen. Losing the sentinel only leaves recovery
+/// reading the journal, which is all it did before.
+fn mark_committed(root: &Path) {
+    if let Err(error) = atomic_file::atomic_write(&root.join(COMMITTED_SENTINEL), b"") {
+        eprintln!(
+            "Warning: install publication committed, but its committed marker could not be written: {error}"
+        );
+    }
 }
 
 fn finish_committed_transaction(addons_dir: &Path, root: &Path, journal: &Journal) {
     finish_committed_transaction_with(
         || write_journal(root, journal),
-        || fs::remove_dir_all(root),
+        || cleanup_committed_root(root),
         || cleanup_empty_staging(addons_dir),
     );
+}
+
+/// Remove a committed transaction root, taking the committed sentinel last.
+///
+/// `fs::remove_dir_all` deletes in directory order, which on NTFS puts
+/// `committed` well before `tombstone`. A single locked file in the old tree
+/// would then leave the tombstoned previous version sitting under a root with
+/// no marker — the exact state the next recovery pass restores over the install
+/// the user already has. Clearing the recoverable content first keeps the
+/// marker outliving everything that can fail.
+fn cleanup_committed_root(root: &Path) -> io::Result<()> {
+    for child in ["stage", "tombstone", "hashes", "hash-tombstone"] {
+        ignore_missing(fs::remove_dir_all(root.join(child)))?;
+    }
+    ignore_missing(fs::remove_file(root.join(JOURNAL_FILE)))?;
+    fs::remove_dir_all(root)
+}
+
+fn ignore_missing(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 fn finish_committed_transaction_with(
@@ -1119,6 +1189,119 @@ mod tests {
             );
             assert!(!addons_dir.join(STAGING_DIR).exists());
         }
+    }
+
+    #[test]
+    fn recovery_keeps_a_committed_install_whose_journal_still_reads_swapped() {
+        // The `Promoted` journal write can fail after publication is already
+        // live (full disk, antivirus, Controlled Folder Access). The on-disk
+        // journal then still reads `Swapped`, and recovery's `Swapped` arm
+        // restores the tombstoned old version — reverting an update the caller
+        // has already recorded in metadata, so nothing ever re-offers it.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "committed-swapped");
+        write_addon(&addons_dir.join("Example"), "new");
+        write_addon(&root.join("tombstone/Example"), "old");
+        write_journal(
+            &root,
+            &Journal {
+                phase: Phase::Swapped,
+                folders: vec!["Example".to_string()],
+                pre_existing: vec!["Example".to_string()],
+                hash_folders: Vec::new(),
+                root_files: Vec::new(),
+                pre_existing_root_files: Vec::new(),
+            },
+        )
+        .expect("write journal");
+        mark_committed(&root);
+
+        recover_staging(&addons_dir).expect("recover transaction");
+
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("Example/main.lua")).expect("read live addon"),
+            "new",
+            "recovery reverted a committed install"
+        );
+        assert!(!addons_dir.join(STAGING_DIR).exists());
+    }
+
+    #[test]
+    fn recovery_keeps_a_committed_install_whose_journal_cleanup_won_the_race() {
+        // A cleanup that half-fails can take `journal.json` and leave the
+        // tombstone tree, which drops recovery into
+        // `rollback_unjournaled_tombstones` — the path that assumes an
+        // unjournaled tombstone means an interrupted swap and restores it over
+        // the live folder.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "committed-unjournaled");
+        write_addon(&addons_dir.join("Example"), "new");
+        write_addon(&root.join("tombstone/Example"), "old");
+        mark_committed(&root);
+
+        recover_staging(&addons_dir).expect("recover transaction");
+
+        assert_eq!(
+            fs::read_to_string(addons_dir.join("Example/main.lua")).expect("read live addon"),
+            "new",
+            "recovery reverted a committed install"
+        );
+        assert!(!addons_dir.join(STAGING_DIR).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_file_in_the_old_tree_does_not_block_the_post_commit_cleanup() {
+        // The tombstoned old tree carries whatever attributes the live folder
+        // had, including FILE_ATTRIBUTE_READONLY on files an addon or the user
+        // marked. `std::fs::remove_dir_all` deletes with POSIX semantics and
+        // the ignore-read-only-attribute flag, so the attribute is not a
+        // blocker — this pins that, because if it ever were, a committed
+        // transaction would be left undeletable and (before the sentinel above)
+        // its tombstones would have been restored over the live install.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "read-only-tombstone");
+        write_addon(&root.join("tombstone/Example"), "old");
+        let read_only = root.join("tombstone/Example/main.lua");
+        let mut permissions = fs::metadata(&read_only).expect("stat").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&read_only, permissions).expect("mark read-only");
+        mark_committed(&root);
+
+        cleanup_committed_root(&root).expect("a read-only old file must not block cleanup");
+
+        assert!(!root.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_blocked_cleanup_leaves_the_committed_sentinel_behind() {
+        // The sentinel is only worth writing if it survives the failure it
+        // exists for: `remove_dir_all` giving up partway through the tombstoned
+        // old tree.
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_dir = temp.path().join("AddOns");
+        let root = prepare_root(&addons_dir, "blocked-cleanup");
+        write_addon(&root.join("tombstone/Example"), "old");
+        mark_committed(&root);
+        let held_file = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("tombstone/Example/main.lua"))
+            .expect("hold tombstoned file without delete sharing");
+
+        let error = cleanup_committed_root(&root).expect_err("a locked tombstone blocks cleanup");
+        drop(held_file);
+
+        assert!(
+            root.join(COMMITTED_SENTINEL).is_file(),
+            "the sentinel must outlive a cleanup that fails: {error}"
+        );
     }
 
     #[test]
