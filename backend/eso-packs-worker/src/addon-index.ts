@@ -98,9 +98,35 @@ const POPULARITY_LADDER = `CASE
  * contains that sentence.
  */
 const TITLE_PHRASE_WEIGHT = 3.0;
+
+/**
+ * The ratio is CUBED, not linear.
+ *
+ * Linear scaling did not separate "this title IS the query" from "this title
+ * merely contains it", and the gap it produced was smaller than the BM25 gap
+ * created by total-row-length normalisation. So a patch kept beating the addon
+ * it patches: "KR Patch for Bandits User Interface" outranked the real Bandits
+ * UI (6.2M downloads), and the same shape appeared in 9 of 32 name lookups.
+ *
+ * Cubing leaves an exact title alone (1.0 -> 1.0) while collapsing a partial
+ * one ("Bandits User Interface" inside a 35-character patch title,
+ * 0.63 -> 0.25), widening the separation from ~1.1 to ~2.3 — enough to cover
+ * the normalisation penalty a long-description addon carries. The ratio is
+ * bounded by (0, 1] because a title containing the query is never shorter than
+ * it, so cubing can only shrink a partial match, never inflate anything.
+ *
+ * Written as repeated multiplication because **D1 does not authorize POWER**
+ * ("not authorized to use function: POWER") — the same allowlist that rejects
+ * log10. Arithmetic operators are always available.
+ *
+ * Measured on the 60-row eval set: name MRR@5 0.779 -> 0.823, name recall@5
+ * 0.906 -> 0.938, rank-1 22/32 -> 24/32, with the concept slice bit-identical
+ * (MRR@5 0.321, 7 rank-1) since no title contains a whole question.
+ */
+const TITLE_MATCH_RATIO = `(CAST(length(?2) AS REAL) / length(a.title))`;
 const TITLE_PHRASE_BOOST = `CASE
          WHEN ?2 != '' AND instr(lower(a.title), ?2) > 0
-         THEN ${TITLE_PHRASE_WEIGHT} * (CAST(length(?2) AS REAL) / length(a.title))
+         THEN ${TITLE_PHRASE_WEIGHT} * ${TITLE_MATCH_RATIO} * ${TITLE_MATCH_RATIO} * ${TITLE_MATCH_RATIO}
          ELSE 0
        END`;
 
