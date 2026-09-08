@@ -191,10 +191,14 @@ describe("Kalpa's records: placed versus adopted", () => {
 
     // The adopted row is `present` too, so state alone produced that same
     // sentence twice. It must say who owns the bytes instead.
-    expect(screen.getByText(/Your own file\. Kalpa recorded it but never wrote it/)).toBeVisible();
-    expect(screen.getAllByText(/Safe to remove\./)).toHaveLength(1);
+    expect(
+      await screen.findByText(/Your own file\. Kalpa recorded it but never wrote it/)
+    ).toBeVisible();
     // And point at the operation that does exist for it.
-    expect(screen.getByText(/stop managing this folder to drop the record/)).toBeVisible();
+    expect(await screen.findByText(/stop managing this folder to drop the record/)).toBeVisible();
+    // Counted last, once both rows have settled: the placed row keeps the
+    // sentence and the adopted row must not have produced a second one.
+    expect(screen.getAllByText(/Safe to remove\./)).toHaveLength(1);
   });
 
   it("does not promise an adopted file restores an original when removed", async () => {
@@ -238,7 +242,7 @@ describe("Kalpa's records: placed versus adopted", () => {
 
     // Two rows, one removable. The button used to read "(2)" and remove one.
     expect(await screen.findByRole("button", { name: /Remove all \(1\)/ })).toBeInTheDocument();
-    expect(screen.getByText(/One of these files is your own/)).toBeVisible();
+    expect(await screen.findByText(/One of these files is your own/)).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: /Remove all \(1\)/ }));
     expect(await screen.findByText(/Remove 1 file\?/)).toBeInTheDocument();
