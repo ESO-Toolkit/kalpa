@@ -150,7 +150,13 @@ pub enum RenoDxPath {
 /// and both of the extra ones are load-bearing here: this module **writes**, so
 /// "both are loaded" and "I could not look" must never be silently folded into
 /// a verdict. See [`writable_section_guard`].
-pub use crate::client_stack::{detect_active_path, ActivePath, TuningProvenance};
+///
+/// [`LoadedAddons`] is the same rule asked about one add-on *file* rather than
+/// about a path, and it is what [`provenance_for`] uses: a section's provenance
+/// is a fact about the add-on that writes it, and `[RenoDX.DLSS5]` was reading
+/// as "In force" — and writable — off an [`ActivePath::Feed`] that
+/// `dlss5-feed.addon64` had earned on its own.
+pub use crate::client_stack::{detect_active_path, ActivePath, LoadedAddons, TuningProvenance};
 
 /// A raw `key=value` pair, exactly as the file has it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -168,6 +174,10 @@ pub struct SectionSpec {
     /// only match: `RENODX-DLSS-preset1` is one of a family, and a user running
     /// preset 2 or 3 would have `RENODX-DLSS-preset2`. Matching by prefix keeps
     /// those visible instead of silently dropping them.
+    ///
+    /// A prefix-matched spec is **one** section here over every matching header
+    /// in the file, which is why it is named by [`SectionSpec::display_name`]
+    /// rather than by any one header it collected.
     pub prefix_match: bool,
     pub path: RenoDxPath,
     /// The add-on file whose presence makes this section live.
@@ -176,6 +186,26 @@ pub struct SectionSpec {
     /// path's sections are read-only, and do not flip this without doing the
     /// binary string-table reading that earned [`FIELDS`].
     pub editable: bool,
+}
+
+impl SectionSpec {
+    /// How the panel names this section when it is not naming one concrete
+    /// header out of the file.
+    ///
+    /// The canonical spelling, or the family's glob `RENODX-DLSS-preset*` for a
+    /// prefix match — because that card is every `[RENODX-DLSS-preset*]` header
+    /// in the file merged into one, and heading it `[RENODX-DLSS-preset1]`
+    /// (the first header seen) told a user running preset 3 that the rows in
+    /// front of them were preset 1's. The rows themselves already say
+    /// otherwise: they are qualified with the block each came from, so the
+    /// heading was the last thing still claiming to be preset 1.
+    pub fn display_name(&self) -> String {
+        if self.prefix_match {
+            format!("{}*", self.name)
+        } else {
+            self.name.to_string()
+        }
+    }
 }
 
 /// Every section Kalpa reads out of `ReShade.ini`, in the order the panel
@@ -294,7 +324,11 @@ pub struct TuningField {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TuningSection {
     /// The section name as it appears in the file when present, otherwise the
-    /// canonical spelling from [`SECTIONS`].
+    /// canonical spelling from [`SECTIONS`] — except for the prefix-matched
+    /// family, which is always [`SectionSpec::display_name`]'s glob
+    /// `RENODX-DLSS-preset*` because it is one section over every matching
+    /// header rather than the first one found. `client_stack` carries this same
+    /// string as its `TuningBlock::section`, so both panels name it identically.
     pub section: String,
     pub path: RenoDxPath,
     /// The add-on file that writes this section.
@@ -320,6 +354,12 @@ pub struct TuningSection {
     /// design. For `[RenoDX.DLSS5]` an entry here is a newer add-on build, and
     /// silently dropping it on the next write would delete a setting the user
     /// relies on.
+    ///
+    /// One exception to "verbatim": the prefix-matched `RENODX-DLSS-preset*`
+    /// family shares one section here, so its keys are prefixed with the block
+    /// they came from — `RENODX-DLSS-preset3/DirectNeuralRenderingIntensity`.
+    /// See [`collect_sections`]; without it preset 3's value was shown as
+    /// preset 1's.
     pub entries: Vec<TuningEntry>,
 }
 
@@ -614,7 +654,7 @@ pub fn spec_index_for_section(name: &str) -> Option<usize> {
             SECTIONS.iter().position(|spec| {
                 spec.prefix_match
                     && name.len() >= spec.name.len()
-                    && name[..spec.name.len()].eq_ignore_ascii_case(spec.name)
+                    && name.as_bytes()[..spec.name.len()].eq_ignore_ascii_case(spec.name.as_bytes())
             })
         })
 }
@@ -648,14 +688,21 @@ impl RawSection {
 ///
 /// A section written twice — which ReShade does not do but a hand-edited file
 /// can — merges into one, last-value-wins, which is what ReShade's own reader
-/// would resolve to. The prefix-matched preset family also merges: all of
-/// `RENODX-DLSS-preset1..3` land in one bucket, because Kalpa shows them
-/// read-only and has no way to know which preset the add-on will select.
+/// would resolve to. The prefix-matched preset family shares one bucket for the
+/// same reason (Kalpa shows them read-only and has no way to know which preset
+/// the add-on will select), but its keys are **qualified with the header they
+/// came from** — `RENODX-DLSS-preset3/DirectNeuralRenderingIntensity`. Without
+/// that, preset 3's value collapsed onto preset 1's row and was shown as
+/// preset 1's: a value from somewhere else presented as this one's current
+/// value, which is the exact failure this module exists to prevent.
 fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
     let mut sections: Vec<RawSection> = SECTIONS.iter().map(|_| RawSection::default()).collect();
     let mut addon = RawSection::default();
     // Index into `sections`, or `usize::MAX` for `[ADDON]`, or `None`.
     let mut current: Option<usize> = None;
+    // The header of the block being read right now, which for a prefix-matched
+    // family is not the same as `sections[index].header` (the first one seen).
+    let mut current_header = String::new();
     let mut in_addon = false;
 
     for raw in reshade_ini.split_inclusive('\n') {
@@ -663,6 +710,7 @@ fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
         let trimmed = without_bom(content).trim();
         if let Some(name) = section_header(trimmed) {
             in_addon = name.eq_ignore_ascii_case("ADDON");
+            current_header = name.to_string();
             current = spec_index_for_section(name).inspect(|&index| {
                 if sections[index].header.is_none() {
                     sections[index].header = Some(name.to_string());
@@ -670,6 +718,7 @@ fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
             });
             continue;
         }
+        let qualify = current.is_some_and(|index| SECTIONS[index].prefix_match);
         let target = match (current, in_addon) {
             (Some(index), _) => &mut sections[index],
             (None, true) => &mut addon,
@@ -681,7 +730,14 @@ fn collect_sections(reshade_ini: &str) -> (Vec<RawSection>, RawSection) {
         let Some((key, value)) = trimmed.split_once('=') else {
             continue;
         };
-        let key = key.trim().to_string();
+        // Only the prefix-matched family is qualified. The exact-match sections
+        // are looked up by key name (`RawSection::get`) and written back with
+        // that name, so a prefix on them would break both.
+        let key = if qualify {
+            format!("{current_header}/{}", key.trim())
+        } else {
+            key.trim().to_string()
+        };
         let value = value.trim().to_string();
         if let Some(existing) = target
             .entries
@@ -721,21 +777,32 @@ pub fn disabled_addons(reshade_ini: &str) -> Vec<String> {
 // won, and it now decides liveness for the whole panel rather than for one
 // half of it.
 
-/// What a section's provenance is, given the active path.
+/// What a section's provenance is, given what the folder actually loads.
 ///
-/// Two of the five paths need saying out loud. [`ActivePath::Both`] makes
-/// *every* section live — both add-ons are loaded, so both paths' saved
-/// settings are in force, and Kalpa picking a winner would be Kalpa labelling
-/// live configuration a fossil. [`ActivePath::Unknown`] makes every section
-/// unknown, which is not-writable: the folder could not be read, and a module
-/// that writes does not guess in the direction of writing.
-fn provenance_for(spec: &SectionSpec, active: ActivePath) -> TuningProvenance {
-    match (active, spec.path) {
-        (ActivePath::Unknown, _) => TuningProvenance::Unknown,
-        (ActivePath::Both, _) => TuningProvenance::Live,
-        (ActivePath::Direct, RenoDxPath::Direct) => TuningProvenance::Live,
-        (ActivePath::Feed, RenoDxPath::Feed) => TuningProvenance::Live,
-        _ => TuningProvenance::Fossil,
+/// The question is about the section's **owner**, never about the path. A path
+/// verdict is a summary of more than one add-on: [`ActivePath::Feed`] is
+/// reached when *either* `renodx-dlss5.addon64` or `dlss5-feed.addon64` is
+/// loaded, so deciding from it labelled `[RenoDX.DLSS5]` "In force" — and,
+/// because it is the one section with a verified field table, made it
+/// **writable** — in a folder where its own add-on sat in `DisabledAddons` and
+/// only the feeder was live. [`ActivePath::Both`] produced the same wrong
+/// answer behind a friendlier verdict. Asking
+/// [`LoadedAddons::owner_is_live`] about `spec.owner` is the same liveness rule
+/// applied to the file that actually writes the section.
+///
+/// `None` is [`ActivePath::Unknown`]: the folder could not be listed, so
+/// nothing is known and nothing is writable. A module that writes does not
+/// guess in the direction of writing.
+///
+/// [`ActivePath::Both`] still makes *every* section live, because both owners
+/// really are loaded and Kalpa picking a winner would be Kalpa labelling live
+/// configuration a fossil — but it is now that conclusion rather than an
+/// assumption baked into the match.
+fn provenance_for(spec: &SectionSpec, loaded: &LoadedAddons) -> TuningProvenance {
+    match loaded.owner_is_live(spec.owner) {
+        Some(true) => TuningProvenance::Live,
+        Some(false) => TuningProvenance::Fossil,
+        None => TuningProvenance::Unknown,
     }
 }
 
@@ -766,7 +833,8 @@ pub fn writable_section_guard(
             "[{}] is written by {}, which is closed source and whose settings Kalpa has \
              not been able to verify. Kalpa shows them exactly as they are on disk and \
              will not change them.",
-            spec.name, spec.owner
+            spec.display_name(),
+            spec.owner
         ));
     }
     match provenance {
@@ -775,7 +843,8 @@ pub fn writable_section_guard(
                 "[{}] belongs to {}, which is not loaded in this client folder. These are \
                  the settings you last used with it, kept for if you switch back — they \
                  are not in force, so Kalpa will not write to them.",
-                spec.name, spec.owner
+                spec.display_name(),
+                spec.owner
             ));
         }
         TuningProvenance::Unknown => {
@@ -791,7 +860,8 @@ pub fn writable_section_guard(
         return Err(format!(
             "{TUNING_FILE} has no [{}] section, so {} has never run here. Kalpa will not \
              write a section from nothing.",
-            spec.name, spec.owner
+            spec.display_name(),
+            spec.owner
         ));
     }
     Ok(())
@@ -799,42 +869,55 @@ pub fn writable_section_guard(
 
 /// Build the panel's data from the text of `ReShade.ini`.
 ///
-/// `active` and `evidence` come from [`detect_active_path`]; this function is
-/// pure over them so that the whole live/fossil split is testable from a string
-/// fixture. Callers that cannot list the client directory pass
-/// [`ActivePath::Unknown`], which makes everything read-only rather than
-/// guessing.
+/// `loaded` is one folder's whole liveness answer — see [`LoadedAddons`]; this
+/// function is pure over it, so the entire live/fossil split is testable from a
+/// string fixture and a list of file names. A caller that could not list the
+/// client directory passes [`LoadedAddons::unlisted`], which makes everything
+/// read-only rather than guessing.
+///
+/// It takes the whole value rather than an [`ActivePath`] because provenance is
+/// decided per owning add-on file, not per path: passing a path and a listing
+/// separately would let the two disagree, which is precisely the bug
+/// [`provenance_for`] documents.
 ///
 /// Values are reported exactly as they appear. Nothing is normalised, defaulted
 /// or clamped: a value Kalpa does not understand still belongs to the user.
-pub fn read_form(
-    reshade_ini: &str,
-    client_dir: &str,
-    active: ActivePath,
-    evidence: Vec<String>,
-) -> TuningForm {
+pub fn read_form(reshade_ini: &str, client_dir: &str, loaded: &LoadedAddons) -> TuningForm {
     let (raw_sections, _) = collect_sections(reshade_ini);
 
     let sections = SECTIONS
         .iter()
         .zip(raw_sections.iter())
-        .map(|(spec, raw)| build_section(spec, raw, active))
+        .map(|(spec, raw)| build_section(spec, raw, loaded))
         .collect();
 
     TuningForm {
         client_dir: client_dir.to_string(),
-        active_path: active,
-        path_evidence: evidence,
+        active_path: loaded.path(),
+        path_evidence: loaded.evidence().to_vec(),
         sections,
         apply_note: APPLY_TIMING_NOTE.to_string(),
     }
 }
 
+/// What the panel heads a section's card with.
+///
+/// The file's own spelling for an exact-match section, so the card names a
+/// header the user can go and find. The family's glob for a prefix-matched one,
+/// because that card is every matching header in the file at once — see
+/// [`SectionSpec::display_name`].
+fn section_title(spec: &SectionSpec, raw: &RawSection) -> String {
+    match &raw.header {
+        Some(header) if !spec.prefix_match => header.clone(),
+        _ => spec.display_name(),
+    }
+}
+
 /// One section of the form: its provenance, its typed fields if it has a table,
 /// and every key the table does not describe.
-fn build_section(spec: &SectionSpec, raw: &RawSection, active: ActivePath) -> TuningSection {
+fn build_section(spec: &SectionSpec, raw: &RawSection, loaded: &LoadedAddons) -> TuningSection {
     let present = raw.header.is_some();
-    let provenance = provenance_for(spec, active);
+    let provenance = provenance_for(spec, loaded);
     let guard = writable_section_guard(spec, provenance, present);
 
     // Only the section with a verified field table gets typed controls. The
@@ -859,7 +942,7 @@ fn build_section(spec: &SectionSpec, raw: &RawSection, active: ActivePath) -> Tu
         .collect();
 
     TuningSection {
-        section: raw.header.clone().unwrap_or_else(|| spec.name.to_string()),
+        section: section_title(spec, raw),
         path: spec.path,
         owner: spec.owner.to_string(),
         present,
@@ -1016,7 +1099,13 @@ fn dominant_line_ending(lines: &[Line]) -> String {
 /// (ReShade writes CRLF on Windows; rewriting the file as LF would be a
 /// gratuitous whole-file diff and would confuse any tool diffing it). Within the
 /// section, a key that is already present is edited in place; a key that is not
-/// is appended at the end of the section, before the next `[header]`.
+/// is appended at the end of the section, before the next `[header]`. A file
+/// that names the section more than once has *every* one of its blocks
+/// rewritten, and an appended key goes at the end of the **last** of them,
+/// which is the block a reader resolves to.
+///
+/// Values are written trimmed — the same string [`validate_edit`] parsed, so
+/// what is on disk is what was checked.
 ///
 /// Returns `Err` when the section does not exist — writing one from nothing
 /// would be Kalpa inventing configuration for an add-on that has never run.
@@ -1052,23 +1141,41 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
         .filter(|(_, line)| section_header(without_bom(&line.content).trim()).is_some())
         .map(|(i, _)| i)
         .collect();
-    let section_start = *headers
+    // Every block the file gives the section, not just the first, each running
+    // to the next header of any kind. ReShade will not write the section twice
+    // but a hand-edited file can, and `collect_sections` — like ReShade's own
+    // reader — resolves a key to its *last* occurrence. Taking only the first
+    // block meant an apply rewrote a block nobody reads: the panel showed the
+    // last block's value, the user changed it, the first block was already at
+    // that value so nothing was appended either, and the toast reported success
+    // over a file that had not changed.
+    let section_blocks: Vec<(usize, usize)> = headers
         .iter()
-        .find(|&&i| {
+        .copied()
+        .filter(|&i| {
             section_header(without_bom(&lines[i].content).trim())
                 .is_some_and(|name| name.eq_ignore_ascii_case(TUNING_SECTION))
         })
-        .ok_or_else(|| format!("The [{TUNING_SECTION}] section was not found in {TUNING_FILE}."))?;
-    // The section runs to the next header of any kind. Derived from the header
-    // list rather than tracked in one pass so that a file with the section
-    // written twice — which ReShade will not produce but a hand-edited file
-    // can — still yields an end that is after the start, instead of a reversed
-    // range that would append the edit above the section it belongs to.
-    let section_end = headers
-        .iter()
-        .copied()
-        .find(|&i| i > section_start)
-        .unwrap_or(lines.len());
+        .map(|start| {
+            let end = headers
+                .iter()
+                .copied()
+                .find(|&i| i > start)
+                .unwrap_or(lines.len());
+            (start, end)
+        })
+        .collect();
+    if section_blocks.is_empty() {
+        return Err(format!(
+            "The [{TUNING_SECTION}] section was not found in {TUNING_FILE}."
+        ));
+    }
+    // Anything left over is appended to the *last* block, because that is the
+    // one both `read_form` and ReShade resolve a key to.
+    let append_at = section_blocks
+        .last()
+        .map(|&(_, end)| end)
+        .expect("section_blocks is not empty");
 
     // A key named twice in one edit list has no meaningful answer once every
     // occurrence is rewritten: the first edit would claim all the lines and the
@@ -1094,22 +1201,30 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
     // correct whichever occurrence the reader happens to take.
     let mut applied = vec![false; edits.len()];
 
-    for line in lines.iter_mut().take(section_end).skip(section_start + 1) {
-        let trimmed = line.content.trim();
-        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some(eq_pos) = line.content.find('=') else {
-            continue;
-        };
-        let key_trimmed = line.content[..eq_pos].trim();
-        if let Some(pos) = edits
-            .iter()
-            .position(|edit| edit.key.eq_ignore_ascii_case(key_trimmed))
-        {
-            let key_part = &line.content[..eq_pos];
-            line.content = format!("{key_part}={}", edits[pos].value);
-            applied[pos] = true;
+    for &(start, end) in &section_blocks {
+        for line in lines.iter_mut().take(end).skip(start + 1) {
+            let trimmed = line.content.trim();
+            if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(eq_pos) = line.content.find('=') else {
+                continue;
+            };
+            let key_trimmed = line.content[..eq_pos].trim();
+            if let Some(pos) = edits
+                .iter()
+                .position(|edit| edit.key.eq_ignore_ascii_case(key_trimmed))
+            {
+                let key_part = &line.content[..eq_pos];
+                // The trimmed value, which is the one `validate_edit` parsed.
+                // Writing the raw string put whatever padding the caller sent
+                // straight into the file: a value of `"\n1.5\n"` passes the
+                // float check and then lands as `NRIntensity=` followed by a
+                // stray `1.5` line, blanking the setting while the apply
+                // reports the key as changed.
+                line.content = format!("{key_part}={}", edits[pos].value.trim());
+                applied[pos] = true;
+            }
         }
     }
 
@@ -1129,18 +1244,20 @@ pub fn apply_edits(reshade_ini: &str, edits: &[TuningEdit]) -> Result<String, St
             let key = field_for(&edit.key)
                 .map(|spec| spec.key)
                 .unwrap_or(&edit.key);
-            appended.push(format!("{key}={}", edit.value));
+            // Trimmed for the same reason as the in-place rewrite above: the
+            // bytes on disk are the bytes `validate_edit` accepted.
+            appended.push(format!("{key}={}", edit.value.trim()));
         }
 
         // A key appended right at end-of-file needs the preceding line to end
         // with a newline first, or it would land on the same physical line.
-        if section_end > 0 && lines[section_end - 1].terminator.is_empty() {
-            lines[section_end - 1].terminator = dominant_line_ending(&lines);
+        if append_at > 0 && lines[append_at - 1].terminator.is_empty() {
+            lines[append_at - 1].terminator = dominant_line_ending(&lines);
         }
         let terminator = dominant_line_ending(&lines);
         for (offset, content) in appended.into_iter().enumerate() {
             lines.insert(
-                section_end + offset,
+                append_at + offset,
                 Line {
                     content,
                     terminator: terminator.clone(),
@@ -1180,17 +1297,14 @@ fn list_file_names(dir: &Path) -> Option<Vec<String>> {
 /// and `ReShade.ini`'s own `DisabledAddons`, then read every section against it.
 pub fn read_form_for_dir(client_dir: &Path, reshade_ini: &str) -> TuningForm {
     let disabled = disabled_addons(reshade_ini);
-    let (active, evidence) = match list_file_names(client_dir) {
-        Some(names) => detect_active_path(&names, &disabled),
-        None => (
-            ActivePath::Unknown,
-            vec![format!(
-                "Kalpa could not read {}, so it cannot tell which RenoDX add-on is loaded.",
-                client_dir.display()
-            )],
-        ),
+    let loaded = match list_file_names(client_dir) {
+        Some(names) => LoadedAddons::from_listing(&names, &disabled),
+        None => LoadedAddons::unlisted(vec![format!(
+            "Kalpa could not read {}, so it cannot tell which RenoDX add-on is loaded.",
+            client_dir.display()
+        )]),
     };
-    read_form(reshade_ini, &client_dir.to_string_lossy(), active, evidence)
+    read_form(reshade_ini, &client_dir.to_string_lossy(), &loaded)
 }
 
 /// Read-only: the current tuning values, with each section's provenance.
@@ -1198,7 +1312,19 @@ pub fn read_form_for_dir(client_dir: &Path, reshade_ini: &str) -> TuningForm {
 pub fn read_client_tuning(client_dir: String) -> Result<TuningForm, String> {
     let location = crate::client_install::validate_client_dir(Path::new(&client_dir))?;
     let ini_path = tuning_file_path(&location.client_dir);
-    let contents = std::fs::read_to_string(&ini_path).unwrap_or_default();
+    let contents = match std::fs::read_to_string(&ini_path) {
+        Ok(contents) => contents,
+        // A client folder with no `ReShade.ini` is ordinary, and empty text is
+        // the honest reading of it: every section reports absent. Every *other*
+        // failure is not — a permission error, a sharing violation, or a file
+        // hand-saved as UTF-16 — and swallowing it told the user "[RenoDX.DLSS5]
+        // is missing, so the add-on has never run here", which sends them to fix
+        // a problem they do not have. It also made `disabled_addons("")` empty,
+        // scoring an add-on they had disabled as live. Same sentence the write
+        // path in `apply_client_tuning` already uses.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("Could not read {TUNING_FILE}: {e}")),
+    };
     Ok(read_form_for_dir(&location.client_dir, &contents))
 }
 
@@ -1282,6 +1408,27 @@ mod tests {
     fn field_for_unknown_key_is_none() {
         assert!(field_for("NotARealKey").is_none());
     }
+    // ── spec_index_for_section ─────────────────────────────
+
+    /// Section names come from the user's own `ReShade.ini`. The prefix test
+    /// used to slice by byte index, so a header whose byte at the boundary is
+    /// mid-character panicked -- and `panic = "abort"` in the release profile
+    /// turns that into the whole app dying, at every launch, because
+    /// `collect_sections` runs on every client inspection.
+    #[test]
+    fn spec_index_for_section_survives_a_multibyte_boundary() {
+        // 17 ASCII bytes then a two-byte char straddling byte 18, which is
+        // exactly the length of the only prefix spec ("RENODX-DLSS-preset").
+        let name = format!("{}\u{e9}", "A".repeat(17));
+        assert_eq!(name.len(), 19);
+        assert_eq!(spec_index_for_section(&name), None);
+    }
+
+    #[test]
+    fn spec_index_for_section_still_matches_a_preset_prefix() {
+        assert!(spec_index_for_section("RENODX-DLSS-preset3").is_some());
+        assert!(spec_index_for_section("renodx-dlss-preset12").is_some());
+    }
 
     // ── slider_range ────────────────────────────────────────────────────
 
@@ -1319,8 +1466,19 @@ mod tests {
 
     /// Read a form with the feed path live, which is what the pre-provenance
     /// tests assumed without ever saying so.
+    ///
+    /// The folder is named rather than the verdict asserted, because provenance
+    /// is decided per owning add-on file: `renodx-dlss5.addon64` has to be in
+    /// the listing for `[RenoDX.DLSS5]` to be live, and an `ActivePath::Feed`
+    /// that `dlss5-feed.addon64` earned on its own is no longer enough. See
+    /// [`provenance_for`].
     fn feed_form(ini: &str) -> TuningForm {
-        read_form(ini, "C:/client", ActivePath::Feed, Vec::new())
+        read_form(ini, "C:/client", &loaded(&["renodx-dlss5.addon64"]))
+    }
+
+    /// A folder listing with nothing in `DisabledAddons`.
+    fn loaded(files: &[&str]) -> LoadedAddons {
+        LoadedAddons::from_listing(&names(files), &[])
     }
 
     /// The one writable section, by name rather than by index.
@@ -1443,17 +1601,17 @@ mod tests {
             "nvngx_dlssnr.dll",
         ]);
         let ini = three_section_fixture();
-        let (active, evidence) = detect_active_path(&files, &disabled_addons(&ini));
-        assert_eq!(active, ActivePath::Direct);
+        let loaded = LoadedAddons::from_listing(&files, &disabled_addons(&ini));
+        assert_eq!(loaded.path(), ActivePath::Direct);
 
-        let form = read_form(&ini, "C:/client", active, evidence);
+        let form = read_form(&ini, "C:/client", &loaded);
 
         assert_eq!(
             section_named(&form, "RENODX-DLSS").provenance,
             TuningProvenance::Live
         );
         assert_eq!(
-            section_named(&form, "RENODX-DLSS-preset1").provenance,
+            section_named(&form, "RENODX-DLSS-preset*").provenance,
             TuningProvenance::Live
         );
 
@@ -1500,16 +1658,16 @@ mod tests {
             "dlss5-feed.addon64",
         ]);
         let ini = three_section_fixture();
-        let (active, evidence) = detect_active_path(&files, &disabled_addons(&ini));
-        assert_eq!(active, ActivePath::Feed);
+        let loaded = LoadedAddons::from_listing(&files, &disabled_addons(&ini));
+        assert_eq!(loaded.path(), ActivePath::Feed);
 
-        let form = read_form(&ini, "C:/client", active, evidence);
+        let form = read_form(&ini, "C:/client", &loaded);
         assert_eq!(
             section_named(&form, "RENODX-DLSS").provenance,
             TuningProvenance::Fossil
         );
         assert_eq!(
-            section_named(&form, "RENODX-DLSS-preset1").provenance,
+            section_named(&form, "RENODX-DLSS-preset*").provenance,
             TuningProvenance::Fossil
         );
 
@@ -1531,8 +1689,7 @@ mod tests {
         let form = read_form(
             &three_section_fixture(),
             "C:/client",
-            ActivePath::Direct,
-            Vec::new(),
+            &loaded(&["renodx-dlss.addon64"]),
         );
         let base = section_named(&form, "RENODX-DLSS");
         assert!(
@@ -1549,11 +1706,11 @@ mod tests {
             base.entries
         );
 
-        let preset = section_named(&form, "RENODX-DLSS-preset1");
+        let preset = section_named(&form, "RENODX-DLSS-preset*");
         assert!(preset
             .entries
             .iter()
-            .any(|e| e.key == "DirectNeuralRenderingStyle"));
+            .any(|e| e.key == "RENODX-DLSS-preset1/DirectNeuralRenderingStyle"));
     }
 
     /// Presets 2 and 3 exist in the add-on's own UI, so a user who moves off
@@ -1561,10 +1718,81 @@ mod tests {
     #[test]
     fn every_preset_block_is_read_not_just_preset_one() {
         let ini = "[RENODX-DLSS-preset3]\nDirectNeuralRenderingIntensity=2\n";
-        let form = read_form(ini, "C:/client", ActivePath::Direct, Vec::new());
-        let preset = section_named(&form, "RENODX-DLSS-preset3");
+        let form = read_form(ini, "C:/client", &loaded(&["renodx-dlss.addon64"]));
+        let preset = section_named(&form, "RENODX-DLSS-preset*");
         assert!(preset.present);
         assert_eq!(preset.entries.len(), 1);
+    }
+
+    /// Two preset blocks in one file used to collapse onto each other: the
+    /// family shares one bucket and last-occurrence won, so preset 3's
+    /// `DirectNeuralRenderingIntensity` was displayed on preset 1's row, under
+    /// a card headed `[RENODX-DLSS-preset1]`. A value from somewhere else,
+    /// presented as this one's current value — the failure the whole module
+    /// exists to prevent, in read-only form.
+    #[test]
+    fn two_preset_blocks_keep_their_own_values_each_attributed() {
+        let ini = concat!(
+            "[RENODX-DLSS-preset1]\n",
+            "DirectNeuralRenderingIntensity=1\n",
+            "[RENODX-DLSS-preset3]\n",
+            "DirectNeuralRenderingIntensity=0.4\n",
+        );
+        let form = read_form(ini, "C:/client", &loaded(&["renodx-dlss.addon64"]));
+        let preset = section_named(&form, "RENODX-DLSS-preset*");
+
+        let values: Vec<(&str, &str)> = preset
+            .entries
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.value.as_str()))
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                ("RENODX-DLSS-preset1/DirectNeuralRenderingIntensity", "1"),
+                ("RENODX-DLSS-preset3/DirectNeuralRenderingIntensity", "0.4"),
+            ],
+            "both blocks' values must survive, each naming the block it came from"
+        );
+    }
+
+    /// The card over a family of blocks may not claim to be one of them. With
+    /// presets 1 and 3 both in the file, heading it `[RENODX-DLSS-preset1]` put
+    /// preset 3's rows under preset 1's name. The rows themselves were already
+    /// saying otherwise — they carry the block each came from — so the heading
+    /// was the last thing still claiming to be preset 1.
+    #[test]
+    fn the_preset_family_card_is_headed_with_the_family_not_the_first_block() {
+        let ini = concat!(
+            "[RENODX-DLSS-preset1]\n",
+            "DirectNeuralRenderingIntensity=1\n",
+            "[RENODX-DLSS-preset3]\n",
+            "DirectNeuralRenderingIntensity=0.4\n",
+        );
+        let form = read_form(ini, "C:/client", &loaded(&["renodx-dlss.addon64"]));
+        let preset = section_named(&form, "RENODX-DLSS-preset*");
+
+        assert_eq!(preset.section, "RENODX-DLSS-preset*");
+        assert!(preset.present);
+        assert!(
+            preset.read_only_reason.contains("[RENODX-DLSS-preset*]"),
+            "the refusal names the card the user is actually looking at: {}",
+            preset.read_only_reason
+        );
+    }
+
+    /// A family with only one block in the file is still the family: the card
+    /// is one section over every `[RENODX-DLSS-preset*]` header there could be,
+    /// and naming it after the single header present would go back to claiming
+    /// a preset number the panel has no way to confirm the add-on will select.
+    #[test]
+    fn one_preset_block_is_still_headed_with_the_family() {
+        let ini = "[RENODX-DLSS-preset3]\nDirectNeuralRenderingIntensity=2\n";
+        let form = read_form(ini, "C:/client", &loaded(&["renodx-dlss.addon64"]));
+        assert_eq!(
+            section_named(&form, "RENODX-DLSS-preset*").section,
+            "RENODX-DLSS-preset*"
+        );
     }
 
     /// The direct path's keys are undocumented, so they appear as raw key and
@@ -1576,10 +1804,9 @@ mod tests {
         let form = read_form(
             &three_section_fixture(),
             "C:/client",
-            ActivePath::Direct,
-            Vec::new(),
+            &loaded(&["renodx-dlss.addon64"]),
         );
-        for name in ["RENODX-DLSS", "RENODX-DLSS-preset1"] {
+        for name in ["RENODX-DLSS", "RENODX-DLSS-preset*"] {
             let section = section_named(&form, name);
             assert!(
                 section.fields.is_empty(),
@@ -1641,9 +1868,9 @@ mod tests {
     #[test]
     fn nothing_installed_makes_every_section_a_fossil() {
         let ini = three_section_fixture();
-        let (active, evidence) = detect_active_path(&names(&["ReShade.ini"]), &[]);
-        assert_eq!(active, ActivePath::Neither);
-        let form = read_form(&ini, "C:/client", active, evidence);
+        let loaded = loaded(&["ReShade.ini"]);
+        assert_eq!(loaded.path(), ActivePath::Neither);
+        let form = read_form(&ini, "C:/client", &loaded);
         assert!(form
             .sections
             .iter()
@@ -1682,14 +1909,71 @@ mod tests {
     /// in which Kalpa gets to pick a winner and call the other one dead.
     #[test]
     fn both_addons_present_makes_both_paths_live() {
-        let files = names(&["renodx-dlss.addon64", "renodx-dlss5.addon64"]);
-        let (active, _) = detect_active_path(&files, &[]);
-        assert_eq!(active, ActivePath::Both);
-        let form = read_form(&three_section_fixture(), "C:/client", active, Vec::new());
+        let loaded = loaded(&["renodx-dlss.addon64", "renodx-dlss5.addon64"]);
+        assert_eq!(loaded.path(), ActivePath::Both);
+        let form = read_form(&three_section_fixture(), "C:/client", &loaded);
         assert!(form
             .sections
             .iter()
             .all(|s| s.provenance == TuningProvenance::Live));
+    }
+
+    /// The provenance bug this model still had in it. `[RenoDX.DLSS5]` is
+    /// written by `renodx-dlss5.addon64`, but the feed *path* is live when
+    /// **either** feed add-on is — so a folder running only
+    /// `dlss5-feed.addon64` had the section labelled "In force" and, because it
+    /// is the one section with a verified field table, offered as editable.
+    /// Kalpa would have written settings that nothing in that folder reads.
+    #[test]
+    fn the_feeder_alone_does_not_make_the_feed_section_live() {
+        let loaded = loaded(&["ReShade.ini", "dlss5-feed.addon64"]);
+        assert_eq!(
+            loaded.path(),
+            ActivePath::Feed,
+            "the path verdict is unchanged: a loaded feed add-on is a live feed path"
+        );
+
+        let form = read_form(&three_section_fixture(), "C:/client", &loaded);
+        let section = dlss5(&form);
+        assert_eq!(
+            section.provenance,
+            TuningProvenance::Fossil,
+            "the add-on that writes this section is not in the folder"
+        );
+        assert!(!section.writable, "and a fossil is never writable");
+        assert!(
+            section.read_only_reason.contains(FEED_NR_ADDON),
+            "the reason names the add-on that is not loaded: {}",
+            section.read_only_reason
+        );
+        assert!(form.writable_section().is_none());
+    }
+
+    /// The same rule under the friendliest verdict there is. Both *paths* are
+    /// genuinely live here — `renodx-dlss.addon64` and `dlss5-feed.addon64` are
+    /// both loaded — while the add-on that owns `[RenoDX.DLSS5]` sits in
+    /// `DisabledAddons`. Its section is a fossil; the direct path's are not.
+    #[test]
+    fn a_disabled_owner_is_a_fossil_even_when_both_paths_are_live() {
+        let files = names(&[
+            "renodx-dlss.addon64",
+            "renodx-dlss5.addon64",
+            "dlss5-feed.addon64",
+        ]);
+        let loaded = LoadedAddons::from_listing(&files, &["renodx-dlss5.addon64".to_string()]);
+        assert_eq!(loaded.path(), ActivePath::Both);
+
+        let form = read_form(&three_section_fixture(), "C:/client", &loaded);
+        let fossil = dlss5(&form);
+        assert_eq!(fossil.provenance, TuningProvenance::Fossil);
+        assert!(!fossil.writable);
+        for name in ["RENODX-DLSS", "RENODX-DLSS-preset*"] {
+            assert_eq!(
+                section_named(&form, name).provenance,
+                TuningProvenance::Live,
+                "{name} belongs to an add-on that really is loaded"
+            );
+        }
     }
 
     /// An unreadable client folder must not be reported as "nothing
@@ -1700,8 +1984,7 @@ mod tests {
         let form = read_form(
             &three_section_fixture(),
             "C:/client",
-            ActivePath::Unknown,
-            Vec::new(),
+            &LoadedAddons::unlisted(Vec::new()),
         );
         assert!(form
             .sections
@@ -2179,7 +2462,9 @@ mod tests {
     }
 
     /// A hand-edited file can name the section twice. The edit has to land
-    /// inside a section, not above one.
+    /// inside a section, not above one — and inside the *last* one, because
+    /// that is the block `read_form` and ReShade both resolve a key to.
+    /// Appending into the first block wrote where nobody reads.
     #[test]
     fn apply_edits_survives_the_section_appearing_twice() {
         let original =
@@ -2192,9 +2477,113 @@ mod tests {
         let updated = apply_edits(original, &edits).expect("section exists");
         assert_eq!(
             updated,
-            "[RenoDX.DLSS5]\nNRStyle=0\n\nNRIntensity=0.50\n[GENERAL]\nFoo=1\n\n\
-             [RenoDX.DLSS5]\nNRPreset=2\n",
-            "the appended key must sit inside a [RenoDX.DLSS5] block"
+            "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n\
+             [RenoDX.DLSS5]\nNRPreset=2\nNRIntensity=0.50\n",
+            "the appended key must sit inside the last [RenoDX.DLSS5] block"
+        );
+
+        let form = feed_form(&updated);
+        let intensity = dlss5(&form)
+            .fields
+            .iter()
+            .find(|f| f.key == "NRIntensity")
+            .expect("NRIntensity is a known field")
+            .clone();
+        assert_eq!(
+            intensity.current.as_deref(),
+            Some("0.50"),
+            "and the panel must read back what was written"
+        );
+    }
+
+    /// The silent no-op: the panel shows the last block's value, the user
+    /// changes it, and the first block already happens to hold the new value —
+    /// so the old apply marked the edit done, appended nothing, and left the
+    /// block ReShade reads untouched while reporting success and a backup id.
+    #[test]
+    fn apply_edits_rewrites_a_key_present_in_both_duplicated_blocks() {
+        let original =
+            "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n[RenoDX.DLSS5]\nNRStyle=1\n";
+        let edits = vec![TuningEdit {
+            key: "NRStyle".to_string(),
+            value: "0".to_string(),
+        }];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nNRStyle=0\n\n[GENERAL]\nFoo=1\n\n[RenoDX.DLSS5]\nNRStyle=0\n",
+            "both blocks must carry the new value"
+        );
+
+        let form = feed_form(&updated);
+        let style = dlss5(&form)
+            .fields
+            .iter()
+            .find(|f| f.key == "NRStyle")
+            .expect("NRStyle is a known field")
+            .clone();
+        assert_eq!(style.current.as_deref(), Some("0"));
+    }
+
+    /// `validate_edit` parses the trimmed value, so the trimmed value is what
+    /// gets written. A raw `"\n1.5\n"` passed the float check and then landed
+    /// as `NRIntensity=` plus a stray `1.5` line: the setting blanked, the
+    /// apply reporting the key as changed.
+    #[test]
+    fn apply_edits_writes_the_value_that_was_validated_not_its_padding() {
+        let original = "[RenoDX.DLSS5]\nNRIntensity=0.1\n";
+        let edits = vec![
+            TuningEdit {
+                key: "NRIntensity".to_string(),
+                value: "\n0.50\n".to_string(),
+            },
+            TuningEdit {
+                key: "NRLocalTone".to_string(),
+                value: "  0.25  ".to_string(),
+            },
+        ];
+
+        let updated = apply_edits(original, &edits).expect("section exists");
+        assert_eq!(
+            updated, "[RenoDX.DLSS5]\nNRIntensity=0.50\nNRLocalTone=0.25\n",
+            "no padding on either the rewritten line or the appended one"
+        );
+    }
+
+    // ── read_client_tuning ──────────────────────────────────────────────
+
+    fn client_dir_with_exe() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(tmp.path().join("eso64.exe"), b"").expect("write exe");
+        tmp
+    }
+
+    /// No `ReShade.ini` at all is an ordinary client folder, and the panel's
+    /// "the add-on has never run here" is the right thing to say about it.
+    #[test]
+    fn read_client_tuning_treats_a_missing_ini_as_an_empty_one() {
+        let tmp = client_dir_with_exe();
+        let form = read_client_tuning(tmp.path().to_string_lossy().to_string())
+            .expect("a client folder with no ReShade.ini is not an error");
+        assert!(form.sections.iter().all(|section| !section.present));
+    }
+
+    /// An unreadable `ReShade.ini` is not an absent one. Swallowing the error
+    /// reported a UTF-16 or locked file to the user as "renodx-dlss5.addon64
+    /// has never run here", and made `disabled_addons` empty on top of it, so
+    /// an add-on they had disabled scored as live.
+    #[test]
+    fn read_client_tuning_surfaces_an_unreadable_ini_instead_of_calling_it_absent() {
+        let tmp = client_dir_with_exe();
+        // A UTF-16LE `[` — present, and not valid UTF-8.
+        std::fs::write(tuning_file_path(tmp.path()), [0xff, 0xfe, 0x5b, 0x00]).expect("write ini");
+
+        let err = read_client_tuning(tmp.path().to_string_lossy().to_string())
+            .expect_err("an unreadable ReShade.ini must not read as an absent section");
+        assert!(err.contains(TUNING_FILE), "{err}");
+        assert!(
+            !err.contains("has never run here"),
+            "the message must not blame the add-on: {err}"
         );
     }
 }

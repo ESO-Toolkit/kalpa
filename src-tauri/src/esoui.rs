@@ -95,6 +95,13 @@ fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiF
         }
     })?;
 
+    const MAX_DETAIL_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+    if let Some(len) = response.content_length() {
+        if len > MAX_DETAIL_SIZE {
+            return Err("ESOUI response too large.".to_string());
+        }
+    }
+
     let entries: Vec<ApiFileDetail> = response
         .json()
         .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))?;
@@ -1754,6 +1761,35 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<HashMap<String, Arc<Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every ESOUI response buffered into memory has to be size-capped. The
+    /// 30-second client timeout is not a bound: on a fast link it admits
+    /// hundreds of megabytes. `filedetails` shipped without one because the cap
+    /// is written inline at each reader with nothing tying them together — this
+    /// is that tie. Source-level because the caps guard a network read, which
+    /// no unit test can drive.
+    #[test]
+    fn every_esoui_response_reader_is_size_capped() {
+        const SOURCE: &str = include_str!("esoui.rs");
+        for reader in [
+            // `fetch_page` itself is a thin wrapper; the body is read here.
+            "fn fetch_page_with_url(",
+            "fn fetch_file_detail(",
+            "fn fetch_filelist_entries(",
+        ] {
+            let at = SOURCE
+                .find(reader)
+                .unwrap_or_else(|| panic!("{reader} is still defined here"));
+            let body = &SOURCE[at..];
+            // Functions here close on a brace in column 0, so this is the end
+            // of this reader and the start of the next item.
+            let end = body.find("\n}").unwrap_or(body.len());
+            assert!(
+                body[..end].contains("content_length()"),
+                "{reader} buffers an ESOUI response with no size cap"
+            );
+        }
+    }
 
     #[test]
     fn resolves_id_from_redirected_detail_url() {

@@ -13,7 +13,6 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "dialog:allow-open",
-    "dialog:allow-save",
     "store:allow-get-store",
     "store:allow-get",
     "store:allow-set",
@@ -47,6 +46,18 @@
         },
         {
           "url": "https://discord.gg/*"
+        },
+        {
+          "url": "https://github.com/martymcmodding/iMMERSE"
+        },
+        {
+          "url": "https://github.com/martymcmodding/iMMERSE/*"
+        },
+        {
+          "url": "https://github.com/JakobPCoder/ReshadeMotionEstimation"
+        },
+        {
+          "url": "https://github.com/JakobPCoder/ReshadeMotionEstimation/*"
         },
         {
           "url": "https://discord.com/channels/1375703719995244686/*"

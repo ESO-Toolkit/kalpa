@@ -34,6 +34,21 @@ below as **`{app data}`**. Its location depends on your operating system:
 | Upload history | `{app data}/upload-history.json` | Show past uploads in the uploader panel |
 | Auth tokens | OS credential store | Sign in to Pack Hub |
 | Upload session cookie | OS credential store | Direct upload to ESO Logs |
+| Approved folders | `{app data}/approved-roots.json` | Remember folders you picked yourself, so you are not asked again every launch |
+| Graphics stack manifest | `{app data}/client-managed.json` | Track which files Kalpa placed in your ESO client folder |
+| Graphics stack backups | `{app data}/client-backups/` | Restore whatever was there before a graphics stack change |
+| Graphics stack quarantine | `{app data}/client-quarantine/` | Hold files removed from the client folder instead of deleting them |
+
+**The graphics stack panel writes into your ESO game folder.** If you use it,
+Kalpa places shader files under `reshade-shaders/` in your client directory,
+edits `ReShade.ini` and its preset files, and renames files in place when you
+switch the stack off. Nothing is sent anywhere when it does this. Installing a
+shader pack downloads it directly from that pack author's GitHub repository,
+which means GitHub sees your IP address and the request, as it would in a
+browser. Kalpa does not host or mirror any of it. To undo everything, use the
+panel's uninstall: it restores the files it displaced from
+`{app data}/client-backups/`. Deleting the `{app data}` directory by hand
+removes those backups, so uninstall from inside the app first.
 
 **Upload history** records the uploads you have made from Kalpa: the local path
 and file name of the log you uploaded, the resulting ESO Logs report code and
@@ -241,7 +256,7 @@ WebView2 browser cache.
 | ESO Logs | Authentication (OAuth) and log uploads | [esologs.com](https://www.esologs.com) |
 | ESO Log Aggregator (esotk.com) | Build-evidence sidecar for public/unlisted direct uploads; hosts the shared database that published Pack Hub packs are copied into | [esotk.com](https://esotk.com) |
 | Cloudflare | Pack Hub and ESO Log Aggregator hosting, rate limiting | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) |
-| GitHub | App update distribution | [github.com/privacy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) |
+| GitHub | App update distribution; downloading shader packs you choose to install | [github.com/privacy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) |
 
 ---
 

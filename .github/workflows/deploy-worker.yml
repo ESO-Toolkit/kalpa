@@ -99,7 +99,12 @@ jobs:
       # both cases under bash's fail-fast behavior.
       - name: Roll back failed deployment
         if: ${{ failure() && steps.deploy.outcome == 'success' && steps.pre_deploy.outputs.version_id != '' }}
-        run: npx wrangler rollback "${{ steps.pre_deploy.outputs.version_id }}" --yes --message "Automatic rollback after failed post-deploy validation"
+        # version_id via env, never spliced into the script text: it is the
+        # output of a command written to $GITHUB_OUTPUT, and GitHub expands
+        # `${{ }}` before the shell parses this line. Same pattern as
+        # release.yml's REF_NAME and ARTIFACT_PATHS steps.
+        run: npx wrangler rollback "$VERSION_ID" --yes --message "Automatic rollback after failed post-deploy validation"
         env:
+          VERSION_ID: ${{ steps.pre_deploy.outputs.version_id }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

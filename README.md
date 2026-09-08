@@ -77,7 +77,7 @@ A pack is a named set of addons that someone can install in one click. Packs com
 
 ### Themes
 
-Fifty-four built-in themes live under Settings → Appearance: eight Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora and others), ESO faction palettes, editor classics like Dracula, Nord, and Catppuccin, and five built for legibility.
+Fifty-eight built-in themes live under Settings → Appearance: twelve Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora and others), ESO faction palettes, editor classics like Dracula, Nord, and Catppuccin, and five built for legibility.
 
 The theme builder takes twelve seed colors and previews the result live, with a WCAG AA contrast check to catch unreadable combinations. Themes copy and paste as plain text. Whichever theme is active is applied before the window first paints, so there's no flash of the wrong palette on launch.
 
@@ -122,7 +122,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 
 ### Also
 
-- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 85 MB from around 135 MB. It suspends when minimized too, releasing its working set and dropping to about 11 MB — measured on the sidecar binary itself, so expect a little more with a large addon list loaded. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
+- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 85 MB from around 250 MB. It suspends when minimized too, releasing its working set and dropping to about 11 MB — measured on the sidecar binary itself, so expect a little more with a large addon list loaded. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
 - **Addon file browser** — read and edit an addon's Lua, XML, and text files in place, with a backup taken before each edit.
 - **Tags and filters** — preset and custom tags, live-counted filters, and built-in views for Addons, Libraries, Favorites, Outdated, and Issues. Sort by name, author, recently updated, or recently downloaded.
 - **API compatibility check** against the current game version.

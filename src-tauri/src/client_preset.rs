@@ -20,12 +20,25 @@
 //!
 //! # Surgical edits only
 //!
-//! Both writes here change exactly one line of one file: `PresetPath` in
-//! `ReShade.ini`, or `Techniques` in the preset. Everything else in the file
-//! survives byte for byte, including comments, key order, per-effect uniform
-//! blocks and the file's line endings. ReShade and its add-ons own these files;
-//! Kalpa is editing one value in someone else's document, and a reserialised
-//! file would be a whole-file diff for a one-value change.
+//! Both writes here change one file and at most two of its lines: `PresetPath`
+//! in `ReShade.ini`, or `Techniques` and `TechniqueSorting` in the preset.
+//! Everything else in the file survives byte for byte, including comments, key
+//! order, per-effect uniform blocks, a leading BOM and the file's line endings.
+//! ReShade and its add-ons own these files; Kalpa is editing one value in
+//! someone else's document, and a reserialised file would be a whole-file diff
+//! for a one-value change.
+//!
+//! # Two keys carry the order
+//!
+//! ReShade sorts the techniques it runs by `TechniqueSorting` and only falls
+//! back to `Techniques` when that key is absent, and it writes both on every
+//! save — so a really misordered preset has both misordered. The fix used to
+//! rewrite `Techniques` alone: the finding cleared, the toast said the provider
+//! now runs first, and ReShade went on running the feed first. Whichever key
+//! the preset has, the one the runtime reads is the one that gets moved — and
+//! the one that decides whether there is anything to move. Diagnosing that from
+//! `Techniques` while `client_stack` diagnosed it from `TechniqueSorting` put a
+//! finding on screen whose fix button returned "does not need a fix".
 
 use crate::client_stack::ClientStack;
 use crate::client_write::{AllowedGameInstallPath, ManagedKind};
@@ -51,7 +64,7 @@ pub struct PresetChoice {
     pub technique_count: usize,
 }
 
-/// The `Techniques` reordering Kalpa would perform.
+/// The technique reordering Kalpa would perform.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OrderFix {
     /// The technique that has to run first, resolved from the preset's own
@@ -60,8 +73,17 @@ pub struct OrderFix {
     pub feed_technique: String,
     /// The `Techniques=` value as it is now.
     pub before: String,
-    /// The `Techniques=` value the fix would write.
+    /// The `Techniques=` value the fix would write. Equal to `before` when only
+    /// `TechniqueSorting` is misordered: ReShade orders by that key, so a
+    /// preset can run the feed first with `Techniques` already correct — the
+    /// state Kalpa's own one-key fix left every install it "repaired" in.
     pub after: String,
+    /// The `TechniqueSorting=` value the fix would write, or `None` when the
+    /// preset has no such key (ReShade then falls back to `Techniques`) or
+    /// already sorts the provider first. See the module doc: this is the key
+    /// ReShade actually orders by, so a fix that skipped it changed nothing the
+    /// runtime reads.
+    pub sorting_after: Option<String>,
     /// One line the confirmation shows verbatim.
     pub summary: String,
 }
@@ -81,7 +103,9 @@ pub struct PresetOptions {
     /// `None` when the order is right, when there is no feed technique, or when
     /// no provider technique is enabled at all — that last case is a different
     /// problem (`stack-mv-provider-missing`) that reordering cannot solve, and
-    /// offering a reorder for it would be a fix that changes nothing.
+    /// offering a reorder for it would be a fix that changes nothing. Same for
+    /// a hand-edited `TechniqueSorting` that names the feed but not the
+    /// provider: no move of those two names changes what ReShade runs.
     pub fix: Option<OrderFix>,
 }
 
@@ -103,6 +127,21 @@ fn top_section_value(contents: &str, key: &str) -> Option<String> {
     section_value(contents, "", key)
 }
 
+/// A UTF-8 BOM, if the file opens with one.
+///
+/// `str::trim` does not remove `U+FEFF` — it is a format character, not
+/// whitespace — so a preset saved by an editor that writes a BOM has a first
+/// line of `\u{feff}Techniques=...`, which no `split_once('=')` key comparison
+/// matches. That made [`find_presets`] skip the file entirely (it vanished from
+/// the switch list) while `client_stack`'s own BOM-aware parser still read it
+/// and raised the ordering finding — so the panel reported a bad technique
+/// order the fix button said needed no fix. Stripped for matching only; the
+/// bytes written back are the line's own. Same reason and same shape as
+/// [`crate::client_tuning`]'s helper of this name.
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Read one `key=value` out of a named section, comparisons case-insensitive
 /// on both section and key. A minimal reader deliberately kept local to this
 /// module: [`crate::client_stack`]'s own parser is private to that module.
@@ -112,7 +151,7 @@ fn section_value(contents: &str, section: &str, key: &str) -> Option<String> {
     let mut current_section = String::new();
 
     for raw_line in contents.lines() {
-        let trimmed = raw_line.trim();
+        let trimmed = without_bom(raw_line).trim();
         if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
             continue;
         }
@@ -210,43 +249,151 @@ pub fn from_preset_path(preset_path: &str) -> String {
     trimmed.to_string()
 }
 
+/// The entries of one ReShade technique list (`Techniques` or
+/// `TechniqueSorting`), trimmed, with empties dropped.
+fn technique_entries(value: &str) -> Vec<&str> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// The index of the entry whose technique name is `name`.
+fn index_of(entries: &[&str], name: &str) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| technique_name(entry).eq_ignore_ascii_case(name))
+}
+
+/// Move `provider` to sit immediately before `feed` in one technique list.
+///
+/// Every other entry keeps its existing relative order, including the ones the
+/// preset has disabled — `TechniqueSorting` lists those too, and dropping them
+/// would be Kalpa rewriting the user's effect list rather than reordering two
+/// of it. Entries keep their `name@source.fx` spelling exactly as the preset
+/// had them.
+///
+/// `None` when either name is absent from this list, or the provider already
+/// runs first: nothing to write for that key, which is not an error.
+fn reorder_before(value: &str, provider: &str, feed: &str) -> Option<String> {
+    let mut entries = technique_entries(value);
+    let feed_idx = index_of(&entries, feed)?;
+    let provider_idx = index_of(&entries, provider)?;
+    if provider_idx <= feed_idx {
+        return None;
+    }
+    let moved = entries.remove(provider_idx);
+    entries.insert(feed_idx, moved);
+    Some(entries.join(","))
+}
+
+/// The entries of `Techniques`, in the order ReShade will actually run them.
+///
+/// `Techniques` decides the *set*, `TechniqueSorting` decides the *order*, and
+/// ReShade falls back to the `Techniques` order only when the preset has no
+/// sorting line. A technique the sorting line does not name keeps its
+/// `Techniques` place, after every technique it does name — so the sort is
+/// stable, exactly as `client_stack::order_as_reshade_will_run` sorts.
+///
+/// That function is the source of truth for this rule and is private to
+/// `client_stack`, so this is a mirror of it rather than a call to it. The two
+/// must not drift: while this module read the order out of `Techniques` alone,
+/// a preset whose keys disagreed got a `stack-technique-order` finding from
+/// `client_stack` and `None` from [`plan_order_fix`] — the panel showed a
+/// problem with no fix behind it.
+fn run_order<'a>(techniques: &'a str, sorting: Option<&str>) -> Vec<&'a str> {
+    let mut entries = technique_entries(techniques);
+    let sorting = sorting.map(technique_entries).unwrap_or_default();
+    if sorting.is_empty() {
+        return entries;
+    }
+    entries.sort_by_key(|entry| index_of(&sorting, technique_name(entry)).unwrap_or(usize::MAX));
+    entries
+}
+
+/// Does the feed run *before* the technique that supplies its motion vectors?
+///
+/// This is the question `client_stack` asks to raise `stack-technique-order`,
+/// asked of the same order. `false` when either name is missing: there is no
+/// misorder between a technique and one the list does not have.
+fn feed_runs_first(techniques: &str, sorting: Option<&str>, provider: &str, feed: &str) -> bool {
+    let order = run_order(techniques, sorting);
+    match (index_of(&order, feed), index_of(&order, provider)) {
+        (Some(feed_idx), Some(provider_idx)) => feed_idx < provider_idx,
+        _ => false,
+    }
+}
+
 /// Work out the ordering fix for a stack, or `None` when there is nothing to
 /// fix. See [`PresetOptions::fix`] for exactly when this is `None`.
 ///
-/// The fix moves the provider technique to sit immediately before the feed,
-/// leaving every other technique in its existing relative order. Techniques
-/// keep their `name@source.fx` spelling exactly as the preset had them.
+/// The misorder is diagnosed from the order ReShade will actually run — see
+/// [`run_order`] — and not from `Techniques` alone, because the run order is
+/// what `client_stack` diagnoses
+/// [`crate::client_stack::PresetInfo::techniques`] from, and this decides
+/// whether the fix its finding offers exists at all. Reading `Techniques` here
+/// made the two disagree: a preset with `TechniqueSorting` misordered while
+/// `Techniques` is not — the exact state Kalpa's own one-key order fix left
+/// every install it "repaired" in — showed the finding with no fix, and the
+/// reverse pair offered a fix for an order that already runs right.
+///
+/// The *write* still covers both keys: `after` for `Techniques`,
+/// `sorting_after` for `TechniqueSorting` when the preset has one.
 pub fn plan_order_fix(stack: &ClientStack, preset_contents: &str) -> Option<OrderFix> {
     let preset = stack.preset.as_ref()?;
     let provider = preset.mv_provider.as_ref()?;
     let provider_technique = provider.technique.as_ref()?;
 
+    // The names come from `Techniques` because that is the key deciding which
+    // techniques are enabled at all, and they are echoed back in the preset's
+    // own spelling.
     let before = top_section_value(preset_contents, "Techniques")?;
-    let mut entries: Vec<String> = before
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let sorting_before = top_section_value(preset_contents, "TechniqueSorting");
+    let entries = technique_entries(&before);
 
-    let feed_idx = entries
-        .iter()
-        .position(|e| technique_name(e).eq_ignore_ascii_case(FEED_TECHNIQUE_NAME))?;
-    let provider_idx = entries
-        .iter()
-        .position(|e| technique_name(e).eq_ignore_ascii_case(provider_technique))?;
+    let feed_name = technique_name(entries[index_of(&entries, FEED_TECHNIQUE_NAME)?]).to_string();
+    let provider_name =
+        technique_name(entries[index_of(&entries, provider_technique)?]).to_string();
 
-    if provider_idx <= feed_idx {
-        // Already correctly ordered — or, if the two indices somehow matched,
-        // there is nothing sane to move.
+    if !feed_runs_first(
+        &before,
+        sorting_before.as_deref(),
+        &provider_name,
+        &feed_name,
+    ) {
+        // Already runs in the right order — or, if the two names resolved to
+        // one entry, there is nothing sane to move.
         return None;
     }
 
-    let feed_name = technique_name(&entries[feed_idx]).to_string();
-    let provider_name = technique_name(&entries[provider_idx]).to_string();
+    // `reorder_before` returning `None` for a key that is already ordered is
+    // not a failure here: with `TechniqueSorting` misordered and `Techniques`
+    // already right, the sorting rewrite *is* the whole fix, and `Techniques`
+    // is written back unchanged.
+    let after =
+        reorder_before(&before, &provider_name, &feed_name).unwrap_or_else(|| before.clone());
+    // `None` here means the preset has no `TechniqueSorting` — ReShade then
+    // falls back to `Techniques`, which `after` already fixes — or that key is
+    // ordered correctly on its own and needs no write.
+    let sorting_after = sorting_before
+        .as_deref()
+        .and_then(|sorting| reorder_before(sorting, &provider_name, &feed_name));
 
-    let moved = entries.remove(provider_idx);
-    entries.insert(feed_idx, moved);
-    let after = entries.join(",");
+    // Offer the fix only when it would change what ReShade runs. A sorting line
+    // that names the feed but not its provider is hand-edited — ReShade lists
+    // every technique it knows in that key — and no move of two names repairs
+    // it: rewriting `Techniques` would change nothing the runtime reads while
+    // reporting success, which is the failure the module doc exists for. The
+    // finding stands on its own instead.
+    if feed_runs_first(
+        &after,
+        sorting_after.as_deref().or(sorting_before.as_deref()),
+        &provider_name,
+        &feed_name,
+    ) {
+        return None;
+    }
 
     Some(OrderFix {
         summary: format!(
@@ -257,13 +404,15 @@ pub fn plan_order_fix(stack: &ClientStack, preset_contents: &str) -> Option<Orde
         feed_technique: feed_name,
         before,
         after,
+        sorting_after,
     })
 }
 
 /// Rewrite one `key=value` line in an INI file, leaving the rest byte for byte.
 ///
 /// `section` is `""` for the preset's headerless top block, where `Techniques`
-/// lives. Preserves the line's original terminator and the file's; returns `Err`
+/// lives. Preserves the line's original terminator and the file's, and a
+/// leading BOM (see [`without_bom`]); returns `Err`
 /// when the key is not present, because inventing a `PresetPath` or a
 /// `Techniques` line in a file that has none would be Kalpa writing
 /// configuration rather than editing it.
@@ -294,13 +443,22 @@ pub fn replace_ini_value(
             (raw_line, "")
         };
         let trimmed = content.trim();
+        // A BOM only ever leads the file's first line, and that line can be the
+        // `Techniques=` one. Stripped for the tests below; `trimmed` — which
+        // still carries it — is what gets split and pushed, so the BOM is
+        // written back untouched.
+        let matchable = without_bom(trimmed);
 
-        if found || trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') {
+        if found || matchable.is_empty() || matchable.starts_with(';') || matchable.starts_with('#')
+        {
             out.push_str(raw_line);
             continue;
         }
 
-        if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        if let Some(name) = matchable
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+        {
             current_section = name.trim().to_ascii_lowercase();
             out.push_str(raw_line);
             continue;
@@ -308,7 +466,7 @@ pub fn replace_ini_value(
 
         if current_section == target_section {
             if let Some((k, _)) = trimmed.split_once('=') {
-                if k.trim().to_ascii_lowercase() == target_key {
+                if without_bom(k).trim().to_ascii_lowercase() == target_key {
                     out.push_str(k.trim());
                     out.push('=');
                     out.push_str(value);
@@ -425,7 +583,8 @@ pub async fn set_client_preset(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Reorder the active preset's `Techniques` so the provider runs before the feed.
+/// Reorder the active preset — `Techniques`, and `TechniqueSorting` when it has
+/// one — so the provider runs before the feed.
 ///
 /// The fix is recomputed here from the folder rather than accepted from the
 /// caller, for the same reason `adopt_stack` recomputes its own plan.
@@ -460,6 +619,15 @@ pub async fn fix_client_technique_order(
                 "The active preset's technique order does not need a fix.".to_string()
             })?;
             let updated = replace_ini_value(&contents, "", "Techniques", &fix.after)?;
+            // `TechniqueSorting` is the key ReShade actually orders by, so a
+            // preset that has one needs both rewritten — chained into the same
+            // string so this is still one write of one file. See the module
+            // doc: rewriting `Techniques` alone cleared the finding and left
+            // the runtime running the feed first.
+            let updated = match &fix.sorting_after {
+                Some(sorting) => replace_ini_value(&updated, "", "TechniqueSorting", sorting)?,
+                None => updated,
+            };
             let outcome =
                 transaction.edit_file(&relative, ManagedKind::Preset, updated.as_bytes())?;
 
@@ -559,6 +727,39 @@ mod tests {
         let contents = "[A]\nX=1\n[B]\nX=2\n";
         let updated = replace_ini_value(contents, "B", "X", "9").expect("edit");
         assert_eq!(updated, "[A]\nX=1\n[B]\nX=9\n");
+    }
+
+    /// `str::trim` does not strip `U+FEFF`, so a BOM on line 1 used to make
+    /// `Techniques` unreadable: the preset dropped out of the switch list and
+    /// the fix button said the order needed no fix, while `client_stack`'s own
+    /// BOM-aware parser went on reporting the misorder.
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_top_level_keys() {
+        let contents = "\u{feff}Techniques=A@A.fx,B@B.fx\r\nTechniqueSorting=A@A.fx,B@B.fx\r\n";
+        assert_eq!(
+            top_section_value(contents, "Techniques").as_deref(),
+            Some("A@A.fx,B@B.fx")
+        );
+
+        let updated = replace_ini_value(contents, "", "Techniques", "B@B.fx,A@A.fx").expect("edit");
+        assert_eq!(
+            updated, "\u{feff}Techniques=B@B.fx,A@A.fx\r\nTechniqueSorting=A@A.fx,B@B.fx\r\n",
+            "the BOM is stripped for matching only and must be written back"
+        );
+    }
+
+    #[test]
+    fn find_presets_picks_up_a_preset_saved_with_a_bom() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "BomLook.ini",
+            "\u{feff}Techniques=A@A.fx,B@B.fx\r\n",
+        );
+
+        let choices = find_presets(tmp.path(), None);
+        assert_eq!(choices.len(), 1, "a BOM must not hide a preset");
+        assert_eq!(choices[0].technique_count, 2);
     }
 
     /// Real preset files are CRLF on Windows; everything but the one edited
@@ -680,6 +881,159 @@ mod tests {
         );
     }
 
+    /// ReShade sorts the techniques it runs by `TechniqueSorting`, so a fix
+    /// that rewrote `Techniques` alone cleared the finding, reported success,
+    /// and left the runtime feeding DLSS last frame's vectors. A real
+    /// misordered preset has both keys, both misordered — ReShade writes both
+    /// on every save.
+    #[test]
+    fn plan_order_fix_reorders_technique_sorting_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preset = concat!(
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+            "TechniqueSorting=DLSS5_Feed@DLSS5_Feed.fx,Daltonize@Daltonize.fx,",
+            "MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+        );
+        healthy_client(tmp.path(), preset);
+        let stack = inspect_stack(tmp.path());
+
+        let fix = plan_order_fix(&stack, preset).expect("a fix should be offered");
+        assert_eq!(
+            fix.sorting_after.as_deref(),
+            Some(
+                "MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx,\
+                 Daltonize@Daltonize.fx"
+            ),
+            "the provider moves ahead of the feed, and Daltonize — which the \
+             preset does not even enable — keeps its place in the list"
+        );
+        assert_eq!(
+            fix.after, "MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx",
+            "both keys present and both misordered still rewrites both"
+        );
+    }
+
+    /// The state Kalpa's own one-key order fix left every install it
+    /// "repaired" in: `Techniques` reordered, `TechniqueSorting` untouched and
+    /// still running the feed first. `client_stack` diagnoses the order out of
+    /// the sorting key, so the finding is raised — while this function, reading
+    /// `Techniques` alone, answered `None` and the panel showed that finding
+    /// above a button that reported "does not need a fix".
+    #[test]
+    fn plan_order_fix_offers_a_fix_when_only_technique_sorting_is_misordered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preset = concat!(
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\n",
+            "TechniqueSorting=DLSS5_Feed@DLSS5_Feed.fx,\
+             MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+        );
+        healthy_client(tmp.path(), preset);
+        // `stack-technique-order` is gated on the feed path being live.
+        write(tmp.path(), "renodx-dlss5.addon64", "");
+        write(tmp.path(), "dlss5-feed.addon64", "");
+        let stack = inspect_stack(tmp.path());
+        assert!(
+            stack
+                .findings
+                .iter()
+                .any(|f| f.id == "stack-technique-order"),
+            "the finding this fix belongs to must be raised, got {:?}",
+            stack.findings
+        );
+
+        let fix = plan_order_fix(&stack, preset).expect("the finding must come with a fix");
+        assert_eq!(
+            fix.sorting_after.as_deref(),
+            Some("MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx"),
+            "the key ReShade orders by is the one that moves"
+        );
+        assert_eq!(
+            fix.after, fix.before,
+            "`Techniques` already runs the provider first, so it is written back unchanged"
+        );
+
+        // The write clearing the finding is the only proof that the fix and the
+        // finding are answering the same question.
+        let updated = replace_ini_value(preset, "", "Techniques", &fix.after).expect("rewrite");
+        let updated = replace_ini_value(
+            &updated,
+            "",
+            "TechniqueSorting",
+            fix.sorting_after.as_deref().expect("the sorting key moves"),
+        )
+        .expect("rewrite");
+        write(tmp.path(), "ReShadePreset.ini", &updated);
+        assert!(
+            !inspect_stack(tmp.path())
+                .findings
+                .iter()
+                .any(|f| f.id == "stack-technique-order"),
+            "the fix must clear the finding it was offered for"
+        );
+    }
+
+    /// No `TechniqueSorting` means ReShade falls back to `Techniques`, which
+    /// the fix already rewrites. Nothing to write, and the write path must not
+    /// then error on a key the file does not have.
+    #[test]
+    fn plan_order_fix_leaves_sorting_alone_when_the_preset_has_no_such_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preset =
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n";
+        healthy_client(tmp.path(), preset);
+        let stack = inspect_stack(tmp.path());
+
+        let fix = plan_order_fix(&stack, preset).expect("a fix should be offered");
+        assert_eq!(fix.sorting_after, None);
+    }
+
+    /// The other half of the same disagreement: `Techniques` lists the feed
+    /// first, but ReShade orders by `TechniqueSorting` and that key already
+    /// runs the provider first. Nothing is wrong, `client_stack` raises no
+    /// finding — and a fix offered here would be a button for a problem the
+    /// user does not have, rewriting a key that is already correct.
+    #[test]
+    fn plan_order_fix_is_none_when_technique_sorting_already_runs_the_provider_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preset = concat!(
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+            "TechniqueSorting=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,\
+             DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        healthy_client(tmp.path(), preset);
+        write(tmp.path(), "renodx-dlss5.addon64", "");
+        write(tmp.path(), "dlss5-feed.addon64", "");
+        let stack = inspect_stack(tmp.path());
+
+        assert!(
+            !stack
+                .findings
+                .iter()
+                .any(|f| f.id == "stack-technique-order"),
+            "the sorting key runs the provider first, so there is no finding: {:?}",
+            stack.findings
+        );
+        assert!(plan_order_fix(&stack, preset).is_none());
+    }
+
+    /// A sorting line that names the feed but not its provider is hand-edited:
+    /// ReShade lists every technique it knows in that key. No move of those two
+    /// names repairs it — rewriting `Techniques` leaves the runtime reading the
+    /// sorting line — so no fix is offered rather than one that reports success
+    /// and changes nothing, which is exactly what the old one-key write did.
+    #[test]
+    fn plan_order_fix_is_none_when_the_sorting_key_does_not_name_the_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preset = concat!(
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n",
+            "TechniqueSorting=DLSS5_Feed@DLSS5_Feed.fx\n",
+        );
+        healthy_client(tmp.path(), preset);
+        let stack = inspect_stack(tmp.path());
+
+        assert!(plan_order_fix(&stack, preset).is_none());
+    }
+
     #[test]
     fn plan_order_fix_is_none_when_the_order_is_already_right() {
         let tmp = tempfile::tempdir().unwrap();
@@ -727,6 +1081,13 @@ mod tests {
         let preset =
             "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\n";
         healthy_client(&client, preset);
+        // `stack-technique-order` is gated on the feed path being live — see
+        // `feed_is_live` in `client_stack`: a preset left behind by a parked
+        // add-on runs nothing, so there is no order to be wrong. This fix only
+        // ever reaches a user whose feed add-ons are loaded, so the fixture
+        // loads them.
+        write(&client, "renodx-dlss5.addon64", "");
+        write(&client, "dlss5-feed.addon64", "");
 
         let before = inspect_stack(&client);
         assert!(
@@ -760,5 +1121,51 @@ mod tests {
             "expected the ordering finding to be gone, got {:?}",
             after.findings
         );
+    }
+
+    /// The whole write, on the shape a real ReShade save produces: both keys
+    /// present, both misordered. The old fix rewrote `Techniques`, cleared the
+    /// finding and reported success while `TechniqueSorting` — the key ReShade
+    /// orders by — still ran the feed first.
+    #[test]
+    fn the_write_reorders_both_keys_and_touches_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let preset = concat!(
+            "Techniques=DLSS5_Feed@DLSS5_Feed.fx,MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\r\n",
+            "TechniqueSorting=DLSS5_Feed@DLSS5_Feed.fx,\
+             MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx\r\n",
+            "\r\n",
+            "[DLSS5_Feed.fx]\r\n",
+            "MV_PROVIDER=0\r\n",
+        );
+        healthy_client(tmp.path(), preset);
+        let stack = inspect_stack(tmp.path());
+
+        let fix = plan_order_fix(&stack, preset).expect("a fix should be offered");
+        // Exactly what `fix_client_technique_order` chains before its one write.
+        let updated = replace_ini_value(preset, "", "Techniques", &fix.after).expect("rewrite");
+        let updated = replace_ini_value(
+            &updated,
+            "",
+            "TechniqueSorting",
+            fix.sorting_after.as_deref().expect("both keys misordered"),
+        )
+        .expect("rewrite");
+
+        let expected = concat!(
+            "Techniques=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,DLSS5_Feed@DLSS5_Feed.fx\r\n",
+            "TechniqueSorting=MartysMods_Launchpad@MartysMods_LAUNCHPAD.fx,\
+             DLSS5_Feed@DLSS5_Feed.fx\r\n",
+            "\r\n",
+            "[DLSS5_Feed.fx]\r\n",
+            "MV_PROVIDER=0\r\n",
+        );
+        assert_eq!(updated, expected);
+
+        // And the fix is idempotent: re-planning against the written file finds
+        // nothing left to do, on either key.
+        write(tmp.path(), "ReShadePreset.ini", &updated);
+        let after = inspect_stack(tmp.path());
+        assert!(plan_order_fix(&after, &updated).is_none());
     }
 }

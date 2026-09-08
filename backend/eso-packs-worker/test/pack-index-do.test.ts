@@ -715,6 +715,60 @@ describe("PackIndexDO authoritative mutations", () => {
     );
   });
 
+  it("keeps a returning author's fresh pack when a restore replays their slug", async () => {
+    // Slugs are reusable, so a snapshot body and a returning author's newly
+    // published pack can occupy the same id. Refusing to republish the old
+    // body dropped that id out of the desired set entirely, and the final
+    // replacement then deleted the pack the returning author had just
+    // created -- erasing post-deletion data the tombstone is supposed to let
+    // through.
+    const authorId = "restore-returning-author";
+    const index = packIndex();
+    await index.removePacksByAuthor(authorId);
+
+    const afterDeletion = new Date(Date.now() + 60_000).toISOString();
+    const republished = makePack("w1-restore-returning", {
+      author_id: authorId,
+      created_at: afterDeletion,
+      updated_at: afterDeletion,
+    });
+    expect(await index.addPack(republished)).toMatchObject({ ok: true });
+
+    const stale = makePack("w1-restore-returning", { author_id: authorId });
+    const T0 = Date.now();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "returning-author",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) throw new Error("restore page was not claimed");
+
+    const completed = await index.completeRestorePage({
+      tokenHash,
+      claimId: claim.claimId,
+      end: claim.end,
+      finalReplacement: { packs: [stale], restoredIds: [stale.id] },
+      now: T0 + 2_000,
+    });
+
+    expect(completed).toMatchObject({ ok: true, job: { status: "done" } });
+    expect((await index.getIndex()).packs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: republished.id, updated_at: afterDeletion }),
+      ])
+    );
+    expect(await e.ESO_PACKS.get("pack:w1-restore-returning", "json")).toMatchObject({
+      updated_at: afterDeletion,
+    });
+  });
+
   it("removes expired restore jobs from alarm cleanup", async () => {
     const index = packIndex();
     const started = await index.beginRestoreJob({
@@ -818,6 +872,131 @@ describe("PackIndexDO authoritative mutations", () => {
         (await state.storage.list({ prefix: `restore:staged-pack:${started.job.jobId}:` })).size
     );
     expect(stagedCount).toBe(0);
+  });
+
+  it("erases a cancelled restore's orphaned body instead of dropping its journal", async () => {
+    // A cancelled page leaves a `pack:` value in KV and a row in the shared D1
+    // mirror that no index references. Dropping the staging journal with the
+    // job threw away the only record of who wrote them, so the author's own
+    // deletion could not find them and the nightly D1 reconcile will not sweep
+    // them either -- it reports an id the DO never owned as unowned.
+    const T0 = Date.now();
+    const index = packIndex();
+    const orphan = makePack("w1-cancelled-orphan", { author_id: "cancelled-orphan-author" });
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "cancelled-orphan",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) throw new Error("restore page was not claimed");
+    expect(
+      await index.writeRestorePage({
+        tokenHash,
+        claimId: claim.claimId,
+        jobId: started.job.jobId,
+        packs: [orphan],
+        votes: [],
+        now: T0 + 2_000,
+      })
+    ).toMatchObject({ ok: true });
+    expect(await e.ESO_PACKS.get("pack:w1-cancelled-orphan")).not.toBeNull();
+
+    expect(await index.cancelActiveRestoreJob(tokenHash, T0 + 3_000)).toBe(true);
+
+    expect(await e.ESO_PACKS.get("pack:w1-cancelled-orphan")).toBeNull();
+    const staged = await runInDurableObject(
+      index,
+      async (_instance, state) =>
+        (await state.storage.list({ prefix: `restore:staged-pack:${started.job.jobId}:` })).size
+    );
+    expect(staged).toBe(0);
+  });
+
+  it("keeps a live pack that an aborted restore was replaying", async () => {
+    // The common recovery case replays packs that are already live. Retiring
+    // the journal must only erase bodies nothing references, or cancelling a
+    // restore would delete the corpus it was trying to protect.
+    const live = makePack("w1-cancelled-live");
+    const index = packIndex();
+    expect(await index.addPack(live)).toMatchObject({ ok: true });
+
+    const T0 = Date.now();
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "cancelled-live",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) throw new Error("restore page was not claimed");
+    expect(
+      await index.writeRestorePage({
+        tokenHash,
+        claimId: claim.claimId,
+        jobId: started.job.jobId,
+        packs: [live],
+        votes: [],
+        now: T0 + 2_000,
+      })
+    ).toMatchObject({ ok: true });
+
+    expect(await index.cancelActiveRestoreJob(tokenHash, T0 + 3_000)).toBe(true);
+
+    expect(await e.ESO_PACKS.get("pack:w1-cancelled-live")).not.toBeNull();
+    expect((await index.getIndex()).packs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: live.id })])
+    );
+  });
+
+  it("erases an expired restore's orphaned body from alarm cleanup", async () => {
+    const T0 = Date.now();
+    const index = packIndex();
+    const orphan = makePack("w1-expired-orphan", { author_id: "expired-orphan-author" });
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: "2026-01-01T00:00:00.000Z",
+      snapshotFingerprint: "expired-orphan",
+      total: 1,
+      now: T0,
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1, now: T0 + 1_000 });
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) throw new Error("restore page was not claimed");
+    expect(
+      await index.writeRestorePage({
+        tokenHash,
+        claimId: claim.claimId,
+        jobId: started.job.jobId,
+        packs: [orphan],
+        votes: [],
+        now: T0 + 2_000,
+      })
+    ).toMatchObject({ ok: true });
+
+    await runInDurableObject(index, async (_instance, state) => {
+      const key = `restore:job:${started.job.jobId}`;
+      const job = await state.storage.get<Record<string, unknown>>(key);
+      await state.storage.put(key, { ...(job ?? {}), expiresAt: Date.now() - 1 });
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+
+    expect(await e.ESO_PACKS.get("pack:w1-expired-orphan")).toBeNull();
   });
 
   it("filters deleted authors while writing backups", async () => {

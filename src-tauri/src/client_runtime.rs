@@ -221,8 +221,10 @@ fn kept_copy_exists(backup_root: &Path, id: &str, relative_path: &str) -> bool {
 ///
 /// For each managed entry whose role [`is_drift_prone`]:
 ///
-/// * `parked` entries are [`DriftState::Parked`] and never counted as drift.
-/// * A file that is not on disk is [`DriftState::Missing`].
+/// * An entry with a `.kalpa-off` copy beside it is [`DriftState::Parked`] and
+///   never counted as drift. The **folder** answers that, not the manifest's
+///   `parked` flag, which nothing corrects outside a toggle batch.
+/// * A file that is neither parked nor on disk is [`DriftState::Missing`].
 /// * A file whose SHA-256 matches the manifest is [`DriftState::Unchanged`].
 /// * Otherwise it has drifted, and which of the two drifted states it gets
 ///   depends on one thing only: whether `displaced_backup` names a backup folder
@@ -253,6 +255,24 @@ pub fn inspect_runtimes(
             };
 
         let on_disk = resolved.is_file();
+        // The folder decides, not the flag -- the same rule `client_toggle`'s
+        // planner states, and for the same reason. `reconcile_parked_flags`
+        // only runs inside a toggle batch, so nothing corrects `file.parked` on
+        // a plain refresh: a runtime the user un-parked by hand still carries
+        // the flag, and believing it would report "Parked" for a live file that
+        // a game update has since overwritten -- never offering the reapply fix
+        // that is the whole point of this report. Asking the folder is exactly
+        // what `reconcile_parked_flags` asks, so the two can never disagree.
+        let parked_on_disk = crate::client_write::safe_relative_join(
+            client_root,
+            &format!(
+                "{}{}",
+                file.relative_path,
+                crate::client_stack::PARKED_SUFFIX
+            ),
+        )
+        .map(|path| path.is_file())
+        .unwrap_or(false);
         let size_bytes = if on_disk {
             std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0)
         } else {
@@ -272,7 +292,13 @@ pub fn inspect_runtimes(
             .filter(|path| path.is_file())
             .and_then(|path| crate::client_health::file_version(&path));
 
-        let state = if file.parked {
+        // A `.kalpa-off` copy is present, so switching the stack off is what
+        // put whatever is under the live name there. Checked before `on_disk`
+        // because for an ESO-shipped runtime *both* names exist once it is
+        // parked: park renames the swap aside and `RestoreInPlace` copies the
+        // user's own original back over the freed name, so the live bytes are
+        // supposed to differ from the manifest.
+        let state = if parked_on_disk {
             DriftState::Parked
         } else if !on_disk {
             DriftState::Missing
@@ -549,6 +575,22 @@ mod tests {
             inspect_runtimes(&self.managed(), &self.backups, &self.client)
         }
 
+        /// Write the manifest's `parked` flag directly, without moving any
+        /// bytes, so a test can put the flag and the folder deliberately out of
+        /// step -- which is the state `reconcile_parked_flags` does not run
+        /// often enough to prevent.
+        fn set_parked_flag(&self, relative: &str, parked: bool) {
+            let mut manifest = crate::client_backup::load_manifest_at(&self.manifest);
+            let key = crate::client_backup::install_key(&self.client);
+            for entry in manifest.installs.get_mut(&key).unwrap() {
+                if entry.relative_path == relative {
+                    entry.parked = parked;
+                }
+            }
+            let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+            std::fs::write(&self.manifest, bytes).expect("write manifest directly for the test");
+        }
+
         fn entry(&self, relative: &str) -> ManagedFile {
             self.managed()
                 .into_iter()
@@ -784,25 +826,22 @@ mod tests {
         assert!(!report.recoverable.contains(&"nvngx_dlss.dll".to_string()));
     }
 
+    /// The shape a real switch-off leaves: the swap renamed aside to
+    /// `.kalpa-off`, the user's own stock DLL copied back over the live name.
+    /// Both names exist, and the live bytes are *supposed* to differ from the
+    /// manifest, so this must not be reported as drift.
     #[test]
     fn a_parked_entry_is_parked_not_drift_even_with_different_live_bytes() {
         let h = Harness::new();
         h.adopt();
+        h.set_parked_flag("nvngx_dlss.dll", true);
 
-        // Mark the manifest entry parked directly; parking in the real flow
-        // also moves the bytes aside, but the state check only consults the
-        // flag plus whatever is at the live path.
-        let mut manifest = crate::client_backup::load_manifest_at(&h.manifest);
-        let key = crate::client_backup::install_key(&h.client);
-        for entry in manifest.installs.get_mut(&key).unwrap() {
-            if entry.relative_path == "nvngx_dlss.dll" {
-                entry.parked = true;
-            }
-        }
-        let bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
-        std::fs::write(&h.manifest, bytes).expect("write manifest directly for the test");
-
-        std::fs::write(h.client.join("nvngx_dlss.dll"), "different bytes entirely").unwrap();
+        std::fs::rename(
+            h.client.join("nvngx_dlss.dll"),
+            h.client.join("nvngx_dlss.dll.kalpa-off"),
+        )
+        .unwrap();
+        std::fs::write(h.client.join("nvngx_dlss.dll"), "the stock dlss, put back").unwrap();
 
         let report = h.report();
         let dlss = report
@@ -813,6 +852,60 @@ mod tests {
         assert_eq!(dlss.state, DriftState::Parked);
         assert!(!report.recoverable.contains(&"nvngx_dlss.dll".to_string()));
         assert!(!report.unrecoverable.contains(&"nvngx_dlss.dll".to_string()));
+    }
+
+    /// The user renamed `nvngx_dlss.dll.kalpa-off` back by hand, so the folder
+    /// is switched on again and only Kalpa's record is stale --
+    /// `reconcile_parked_flags` runs inside a toggle batch and nothing else
+    /// clears it. A game update then put ESO's own build over the swap.
+    /// Believing the flag would report "Parked" and never offer the one fix
+    /// this whole report exists to offer.
+    #[test]
+    fn a_stale_parked_flag_does_not_hide_real_drift() {
+        let h = Harness::new();
+        h.adopt();
+        h.set_parked_flag("nvngx_dlss.dll", true);
+
+        // No `.kalpa-off` anywhere; the live name holds ESO's build.
+        std::fs::write(h.client.join("nvngx_dlss.dll"), "eso's own 2.2.16").unwrap();
+
+        let report = h.report();
+        let dlss = report
+            .runtimes
+            .iter()
+            .find(|r| r.relative_path == "nvngx_dlss.dll")
+            .unwrap();
+        assert_eq!(
+            dlss.state,
+            DriftState::DriftedRecoverable,
+            "the folder says this file is live, so the drift is real"
+        );
+        assert!(report.recoverable.contains(&"nvngx_dlss.dll".to_string()));
+    }
+
+    /// The mirror case: a `.kalpa-off` copy is sitting there but the manifest
+    /// flag was never written -- a batch that died between moving the file and
+    /// recording it. The live name is gone, so believing the flag reports
+    /// "Missing" for a file that is right there under its parked name.
+    #[test]
+    fn a_parked_file_the_flag_never_recorded_is_still_parked() {
+        let h = Harness::new();
+        h.adopt();
+        h.set_parked_flag("nvngx_dlss.dll", false);
+
+        std::fs::rename(
+            h.client.join("nvngx_dlss.dll"),
+            h.client.join("nvngx_dlss.dll.kalpa-off"),
+        )
+        .unwrap();
+
+        let report = h.report();
+        let dlss = report
+            .runtimes
+            .iter()
+            .find(|r| r.relative_path == "nvngx_dlss.dll")
+            .unwrap();
+        assert_eq!(dlss.state, DriftState::Parked);
     }
 
     #[test]

@@ -1022,14 +1022,20 @@ async function handleScheduled(env: Env): Promise<void> {
  * KV/D1/DO binding call against the same per-request subrequest ceiling as
  * `fetch`, so this is what actually bounds a page:
  *
- * - a published pack: `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
- *   tag batch) = 3
- * - a draft pack: `putPack` + one D1 batch = 2
+ * - a published pack: the `pack:` KV put + the D1 upsert + the tag batch = 3
+ * - a draft pack: the KV put + one D1 batch = 2
  * - a vote: `restoreVote` writes both `vote:` and the user index = 2
  *
- * Tombstone checks are synchronous Map lookups against one per-request
- * enumeration and cost nothing here. Keeping the constant at 4 deliberately
- * over-reserves per record; the slack absorbs cost growth without retuning.
+ * Tombstone checks are synchronous Map lookups against one enumeration and
+ * cost nothing here. Keeping the constant at 4 deliberately over-reserves per
+ * record; the slack absorbs cost growth without retuning.
+ *
+ * The ceiling this protects is now the DURABLE OBJECT's, not this route's:
+ * PackIndexDO.writeRestorePage performs those writes so they land inside the
+ * same serialization boundary as account deletion, and a Durable Object gets
+ * its own 1000-subrequest budget. The route itself now spends a couple of
+ * dozen. Do not read that slack as room to raise the page cap — the writes did
+ * not get cheaper, they moved, and the DO is what would throw.
  *
  * Derive the caps from this rather than picking a round number: a page cap of
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which

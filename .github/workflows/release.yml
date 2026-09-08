@@ -40,7 +40,15 @@ jobs:
           tagged_commit=$(git rev-parse HEAD^{commit})
           main_commit=$(git rev-parse origin/main^{commit})
           if [ "$tagged_commit" != "$main_commit" ]; then
-            echo "::error::Release tag targets ${tagged_commit}, but origin/main is ${main_commit}."
+            # Two bare SHAs told a maintainer nothing about which of the
+            # two failure shapes they hit, and the ancestor test is the
+            # only thing that separates them.
+            if git merge-base --is-ancestor "$tagged_commit" "$main_commit"; then
+              diagnosis="main has advanced since you tagged: this commit is on main, but is no longer its tip."
+            else
+              diagnosis="this commit is not on main at all — the tag was pushed from an unmerged branch."
+            fi
+            echo "::error::Release tag ${GITHUB_REF_NAME} targets ${tagged_commit}, but origin/main is ${main_commit}. Diagnosis: ${diagnosis} This gate deliberately requires the tag to sit exactly on the tip of origin/main, not merely to be an ancestor of it: exact equality is what stops a tag pushed from an unmerged branch from producing a signed, auto-updating release. To fix: merge to main first, then re-tag the merged commit — git tag -d ${GITHUB_REF_NAME} && git push origin :refs/tags/${GITHUB_REF_NAME}, then re-tag at origin/main and push." >&2
             exit 1
           fi
 

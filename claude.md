@@ -58,6 +58,7 @@ src/                        # React frontend
   components/               # Feature components (addon list, packs, settings)
   components/__tests__/     # Feature-component tests
   components/animate-ui/    # Motion primitives grouped by animate/base/buttons/effects/texts
+  components/client-stack/  # Client stack panels (slots, tuning, presets, shader packs)
   components/ui/            # shadcn-ui primitives
   components/uploader/      # ESO Logs uploader workspace
   components/uploader/__tests__/ # Uploader component and reducer tests
@@ -81,6 +82,7 @@ src-tauri/src/              # Rust backend
   edit_backups.rs           # Backups for addon file edits
   safe_migration.rs         # Minion migration with dry-run and snapshots
   game_instances.rs         # Multi-instance detection (native/Steam)
+  client_*.rs               # ESO client stack: detection, presets, tuning, shader packs, backups
   platform.rs               # Cross-platform helpers (Steam/Proton discovery, open_url)
   settings_store.rs         # Atomic app-settings persistence
   saved_variables/          # SavedVariables parsing, scrubbing, per-character backups
@@ -131,7 +133,7 @@ Two strings per feature look redundant but are not: `label` is the menu/row text
 ("Backup & Restore") and `dialogTitle` is the dialog's loading-fallback title
 ("Backups"). Leave `dialogTitle` unset when they agree.
 
-Both `commands.rs` files register handlers into the single `generate_handler!` list in `lib.rs`. When adding new logic, pick the closest existing file that matches the concern before creating new modules — uploader and SavedVariables work belongs in `uploader/` and `saved_variables/`, not in the root `commands.rs`.
+All three `commands.rs` files register handlers into the single `generate_handler!` list in `lib.rs`. When adding new logic, pick the closest existing file that matches the concern before creating new modules — uploader and SavedVariables work belongs in `uploader/` and `saved_variables/`, not in the root `commands.rs`.
 
 ---
 

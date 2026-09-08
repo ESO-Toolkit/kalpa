@@ -84,6 +84,22 @@ const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
   { id: "data", label: "Data", icon: Database },
 ];
 
+/**
+ * Mirrors `DELETE_INCOMPLETE_MESSAGE` in `src-tauri/src/pack_hub/commands.rs`,
+ * asserted byte-for-byte by `settings-delete-account.test.tsx`.
+ *
+ * `delete_pack_hub_account` returns this as an `Err` because erasure is not
+ * finished, but it is the ONE error on that command that is not a failure: by
+ * the time it is sent, the packs, share codes and backup scrub are already
+ * done and only a bounded remainder of votes is left. Reporting it through the
+ * generic "Failed to delete account data" branch told a user finishing a GDPR
+ * erasure that nothing had happened, and implied re-running it was pointless —
+ * when re-running is the one thing that finishes the job.
+ */
+export const DELETE_INCOMPLETE_MESSAGE =
+  "Most of your data is deleted, but there was too much to finish in one go. " +
+  "Run Delete Account once more to clear the rest.";
+
 export function Settings({
   addonsPath,
   authUser,
@@ -354,7 +370,20 @@ export function Settings({
         `Deleted ${result.packs} pack${result.packs !== 1 ? "s" : ""}, ${result.votes} vote${result.votes !== 1 ? "s" : ""}, and ${result.shares} share code${result.shares !== 1 ? "s" : ""}.`
       );
     } catch (e) {
-      toast.error(`Failed to delete account data: ${getTauriErrorMessage(e)}`);
+      const message = getTauriErrorMessage(e);
+      if (message === DELETE_INCOMPLETE_MESSAGE) {
+        // Not `toast.error`: this is partial success, and the backend says so.
+        // The sign-out is skipped on purpose too — the leftover votes can only
+        // be cleared by a signed-in session, so calling `onAuthChange(null)`
+        // here would lock the user out of finishing their own erasure. The
+        // confirm panel is left open for the same reason: the second run the
+        // message asks for is then one click away, not five.
+        toast.warning(message, {
+          description: "Your packs and share codes are already gone.",
+        });
+        return;
+      }
+      toast.error(`Failed to delete account data: ${message}`);
     } finally {
       setDeletingAccount(false);
     }
@@ -431,7 +460,12 @@ export function Settings({
 
   const pathDirty = path.trim() !== addonsPath;
 
-  const toolsCtx = { minionDetected, graphicsStackDetected };
+  // One detection snapshot for the whole dialog. The Appearance tab's Toolbar
+  // list reads the same object, so the two tabs cannot disagree about whether a
+  // `pinnedWhen` feature is in the header — the Toolbar list having no context
+  // at all is exactly why it used to claim the graphics stack was pinned when
+  // the Tools tab was simultaneously listing it as not.
+  const featureCtx = { minionDetected, graphicsStackDetected };
   // Selected by `toolsGroup`, NOT by `placement`. A toolbar feature may also own
   // a permanent catalog row, and the graphics stack does: its header button is
   // conditional on `pinnedWhen`, so without a fixed row here, plugging in a
@@ -439,7 +473,7 @@ export function Settings({
   // to find it. Nothing else changes — a feature with no `toolsGroup` is still
   // absent from these blocks.
   const toolFeatures = (group: ToolsGroup) =>
-    FEATURES.filter((f) => f.toolsGroup === group && (f.visibleWhen?.(toolsCtx) ?? true));
+    FEATURES.filter((f) => f.toolsGroup === group && (f.visibleWhen?.(featureCtx) ?? true));
   // Pinnable features the user has unpinned from the header toolbar. Without
   // this block they would appear in NEITHER surface, leaving an unpinned Pack
   // Hub reachable only by deep link. This tab is the catalog, so it lists them
@@ -448,7 +482,7 @@ export function Settings({
   // Features carrying a `toolsGroup` are excluded: they already have a permanent
   // row below, and listing them here as well would print the same feature twice
   // in one tab whenever it happened to be unpinned.
-  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, toolsCtx).filter(
+  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, featureCtx).filter(
     (f) => f.pinnableToToolbar && !f.toolsGroup
   );
 
@@ -942,6 +976,7 @@ export function Settings({
                     onShowShortcuts={onShowShortcuts}
                     toolbarHidden={toolbarHidden}
                     onToolbarHiddenChange={onToolbarHiddenChange}
+                    featureCtx={featureCtx}
                   />
                 </motion.div>
               )}

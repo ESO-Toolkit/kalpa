@@ -4,19 +4,41 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-The graphics stack panel (formerly "Client Health") used to say "Everything
-agrees" over a setup that could not possibly work. It now knows there are two
-mutually exclusive Neural Rendering paths, checks each slot against the one
-you actually have, and only claims success when it has real proof. The panel
-also moved: it's pinned to the header toolbar when you have a stack to manage,
-and renamed to "Graphics stack" everywhere. Alongside that, two audit passes
-over recent work closed a set of concurrency, stale-state and accessibility
-defects, tightened who is allowed to approve a folder Kalpa writes to, and
-fixed two ways an interrupted operation could have damaged files it was in the
-middle of protecting.
+_Nothing yet._
+
+## [0.1.0-beta.23] — 2026-09-06
+
+This release introduces the **graphics stack** panel — new, optional tooling
+for the ReShade-based setup in your ESO client folder, the one behind Neural
+Rendering and DLSS. **It writes into your game install**, so read this part
+even if you skip the rest: Kalpa can install shader packs from their authors'
+GitHub repositories, edit `ReShade.ini` and its presets, switch the whole stack
+off and back on, adopt a setup you installed by hand, and remove one. Every
+file it displaces is backed up first, and files it removes are quarantined
+rather than deleted, so each change can be undone. Kalpa hosts and mirrors
+nothing, and it downloads no add-on runtimes — those stay bring-your-own. The
+panel is opt-in: until you ask it to change something, it only reads.
+
+The rest of the release is the panel earning its claims. It used to say
+"Everything agrees" over a setup that could not possibly work; it now knows
+there are two mutually exclusive Neural Rendering paths, checks each slot
+against the one you actually have, and only claims success when it has real
+proof. Alongside that, two audit passes over recent work closed a set of
+concurrency, stale-state and accessibility defects, tightened who is allowed to
+approve a folder Kalpa writes to, and fixed two ways an interrupted operation
+could have damaged files it was in the middle of protecting.
 
 ### Features
 
+- **New: the graphics stack panel.** Kalpa can now manage the ReShade-based
+  graphics setup in your ESO client folder. It reports what you have installed
+  and what is wrong with it, installs shader packs from their authors' GitHub
+  repositories, edits `ReShade.ini` and its presets, switches the stack off and
+  on again, adopts a setup you installed by hand, and uninstalls one. Files it
+  displaces are backed up and files it removes are quarantined, so every change
+  is reversible. It is reached from Settings > Tools, and pins itself to the
+  header toolbar once you have a stack to manage.
+  ([#423](https://github.com/ESO-Toolkit/kalpa/pull/423), [#425](https://github.com/ESO-Toolkit/kalpa/pull/425), [#432](https://github.com/ESO-Toolkit/kalpa/pull/432), [#433](https://github.com/ESO-Toolkit/kalpa/pull/433))
 - **The graphics stack panel now detects which Neural Rendering setup is
   actually live — "direct" or "feed" — and reads every row against it.** A
   slot the live setup doesn't want (like an empty motion-vector provider on a
@@ -50,6 +72,73 @@ middle of protecting.
 
 ### Bug Fixes
 
+- **Kalpa no longer crashes at launch on a `ReShade.ini` that contains a
+  non-ASCII section name.** The section matcher compared text by byte position,
+  so a name whose bytes fell mid-character ended the process outright. Because
+  the graphics stack is inspected at every startup, this could stop the app
+  opening at all — including for people who never use the panel.
+- **Graphics stack changes now apply on every install layout.** The folder the
+  panel detected and the folder its actions were checked against could be
+  spelled differently for the same directory — a moved or junctioned Steam
+  library on Windows, and every native Steam install on Linux. Each change
+  reported success and did nothing.
+- **Detecting your ESO install no longer freezes the window.** The scan ran on
+  the interface thread at every launch, so a slow or unreachable Steam library
+  locked the app up while it waited.
+- **The shader-pack "Open page" links now open** instead of failing silently.
+- **A file you installed yourself is no longer described as one Kalpa wrote.**
+  A stack Kalpa adopted showed your own files as "Unchanged since Kalpa wrote
+  it. Safe to remove." and offered them under Remove all, where removing them
+  did nothing and reported back that they had been modified — the wrong reason
+  about the wrong file. Adopted files are now labelled as yours and excluded
+  from removal, which "Stop managing" handles instead.
+- **Your original file survives a re-install.** Placing a file over one Kalpa
+  had already placed dropped the record pointing at whatever was there before
+  you started, and housekeeping then deleted that copy. The record is now
+  carried forward, so the file you began with stays restorable.
+- **A damaged graphics-stack record now stops the operation instead of being
+  overwritten.** An unreadable record was treated as an empty one, saved over
+  the real one, and used to decide which backups were unreferenced and could
+  be deleted.
+- **The "fix technique order" button now actually fixes the order.** It
+  rewrote one key while ReShade orders by another, so it reported success and
+  changed nothing the game reads.
+- **Settings are no longer shown as live when the add-on that owns them is
+  switched off**, and a preset family no longer displays every preset's values
+  under the first preset's name.
+- **"Everything agrees" now depends on evidence newer than the last change.**
+  ReShade truncates its log every launch, so proof from before a change Kalpa
+  itself had just applied could still earn the all-clear.
+- **Confirmations no longer outlive what you agreed to.** Removing managed
+  files, stopping management, and the technique-order fix each stayed armed
+  across a reload, a switch-off or a preset change, so a confirmation given
+  for one thing could be spent on another.
+- **Installing a shader pack is bounded and keeps each pack's licence.** There
+  was no limit on how much a downloaded archive could expand to, and every
+  pack's licence file landed on the same path, so a second pack overwrote the
+  first one's.
+- **The four new Elder Scrolls themes now work in performance mode**, which
+  was silently rendering a different theme because they had never been
+  exported to the native sidecar.
+- **Installing a dependency during an update no longer disables that update's
+  Stop button**, and removing a dependency refreshes the addon instead of
+  leaving it shown as satisfied.
+- **Picking your AddOns folder no longer freezes the window** while Kalpa
+  checks the folder and scans for game installs.
+- **Deleting your account no longer reports failure when it mostly
+  succeeded.** When there is too much to erase in one pass, Kalpa now says so
+  and asks you to run it once more, instead of showing an error.
+- **Several graphics-stack diagnoses that could never be right have been
+  corrected**, including a warning that fired on a correctly configured
+  install, one that fired inside a slot it had just called correctly empty,
+  and drift on a file whose result could never reach the screen.
+- **Text damaged by an earlier bad encoding pass has been repaired**, and a
+  check now catches that class of damage before it can return.
+  ([#411](https://github.com/ESO-Toolkit/kalpa/pull/411))
+- **Addon removals are serialized**, so two started close together can no
+  longer interleave and confuse each other. ([#420](https://github.com/ESO-Toolkit/kalpa/pull/420))
+- **An addon you just uninstalled no longer shows as installed.**
+  ([#424](https://github.com/ESO-Toolkit/kalpa/pull/424))
 - **Fixed several release-audit defects:** managed file writes are now
   serialized with real file locks so concurrent operations can't corrupt each
   other, a slow installation check can no longer overwrite a newer result with
@@ -83,6 +172,12 @@ middle of protecting.
 
 ### Security
 
+- **Network and device-namespace paths are refused before they are used.**
+  A path naming a network share or a raw device is now rejected up front,
+  rather than being resolved and written to. ([#413](https://github.com/ESO-Toolkit/kalpa/pull/413))
+- **Pack file paths are bound to the dialog you picked them in**, so an import
+  or export cannot be redirected to a file you did not choose.
+  ([#414](https://github.com/ESO-Toolkit/kalpa/pull/414))
 - **Only folders you picked yourself can become somewhere Kalpa writes.**
   Approving a game install used to require nothing more than a file named
   `eso64.exe` being present, with no link to the folder picker you actually
@@ -955,7 +1050,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...HEAD
+[0.1.0-beta.23]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...v0.1.0-beta.23
 [0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
 [0.1.0-beta.21]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...v0.1.0-beta.21
 [0.1.0-beta.20]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.19...v0.1.0-beta.20

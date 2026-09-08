@@ -753,6 +753,19 @@ fn finish_committed_transaction_with(
         eprintln!(
             "Warning: install publication committed, but its recovery journal could not be finalized: {error}"
         );
+        // The journal still reads `Swapped`, and `recover_staging_locked` no
+        // longer completes a Swapped transaction the way beta.22 did — it
+        // rolls the whole install back, and deletes a first-time install
+        // outright, while the caller has already recorded the new version in
+        // metadata. The publication is live, so drop the root instead of
+        // deferring: with nothing left in staging there is nothing to revert.
+        if let Err(cleanup) = cleanup_root() {
+            eprintln!(
+                "Warning: install publication committed, but staging cleanup was deferred: {cleanup}"
+            );
+            return;
+        }
+        cleanup_staging();
         return;
     }
     if let Err(error) = cleanup_root() {
@@ -1313,18 +1326,40 @@ mod tests {
         assert_eq!(waits.get(), 2);
     }
 
+    /// A failed `Promoted` journal write leaves the on-disk journal reading
+    /// `Swapped`, which the next recovery pass rolls back — deleting a
+    /// first-time install outright — even though the publication is live and
+    /// the caller is about to record it. The root has to go anyway.
+    #[test]
+    fn committed_publication_cleans_up_after_a_failed_journal_write() {
+        let root_cleanups = std::cell::Cell::new(0);
+        let staging_cleanups = std::cell::Cell::new(0);
+        finish_committed_transaction_with(
+            || Err("journal unavailable".to_string()),
+            || {
+                root_cleanups.set(root_cleanups.get() + 1);
+                Ok(())
+            },
+            || staging_cleanups.set(staging_cleanups.get() + 1),
+        );
+        assert_eq!(root_cleanups.get(), 1);
+        assert_eq!(staging_cleanups.get(), 1);
+    }
+
     #[test]
     fn committed_publication_defers_bookkeeping_failures() {
         let staging_cleanups = std::cell::Cell::new(0);
         finish_committed_transaction_with(
-            || Err("journal unavailable".to_string()),
-            || panic!("cleanup must wait when the promoted journal is not durable"),
+            || Ok(()),
+            || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
             || staging_cleanups.set(staging_cleanups.get() + 1),
         );
         assert_eq!(staging_cleanups.get(), 0);
 
+        // An unremovable root still defers the staging sweep: whatever is
+        // left under it is what the next recovery pass reads.
         finish_committed_transaction_with(
-            || Ok(()),
+            || Err("journal unavailable".to_string()),
             || Err(io::Error::from(io::ErrorKind::PermissionDenied)),
             || staging_cleanups.set(staging_cleanups.get() + 1),
         );
