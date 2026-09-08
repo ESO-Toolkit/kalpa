@@ -37,6 +37,25 @@
 //! already in place when that path is built rather than being retrofitted onto
 //! a shipping write. Whoever builds it should read the revocation note on
 //! `win_verify_trust` before wiring this in.
+//!
+//! # ReShade needs a pinned certificate, not [`is_signed_by`]
+//!
+//! ReShade's setup executable is **self-signed**, so `WinVerifyTrust` answers
+//! `CERT_E_UNTRUSTEDROOT` for it and [`is_signed_by`] can never pass: that
+//! helper requires `trusted`, and `trusted` means a chain to a root the OS
+//! already knows. A caller that reaches for it on the ReShade path watches it
+//! fail on every machine and is then tempted to drop the check altogether,
+//! which is the worst of the outcomes available. The signature is worth
+//! something — it provably covers the ZIP overlay appended to that executable
+//! — but the check that means anything there is pinning ReShade's *own*
+//! certificate rather than asking the OS whether it likes the chain.
+//!
+//! Note what pinning actually needs. Subject and CN are attacker-chosen in a
+//! self-signed certificate, so anyone can sign a payload as `ReShade`;
+//! matching [`SignatureInfo::signer_common_name`] against that string would be
+//! theatre. Pinning has to compare the leaf's public key or its thumbprint,
+//! and this module exposes neither yet — adding one is part of the work that
+//! path implies, not something to be worked around at the call site.
 
 use serde::Serialize;
 use std::path::Path;

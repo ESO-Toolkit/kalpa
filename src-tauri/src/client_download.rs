@@ -7,6 +7,13 @@
 //! supply-chain target — which is precisely how DLSS Swapper's community DLL
 //! manifest ended up serving malware in 2026.
 //!
+//! Only the shader-package half of that has a caller today. `reshade.me` sits
+//! in [`ALLOWED_HOSTS`] for the ReShade fetch this module is built for, but
+//! nothing calls it, so no ReShade binary is downloaded in this release. Read
+//! the allowlist entry as the shape of the feature; it is not evidence that a
+//! fetch exists, and the signature note below is the same story for the same
+//! reason.
+//!
 //! Nothing NVIDIA-authored is ever fetched here — those runtimes are not
 //! licensed for redistribution, so the DLSS and Neural Rendering files are the
 //! user's own, and the Authenticode gate in [`crate::client_signature`] is what
