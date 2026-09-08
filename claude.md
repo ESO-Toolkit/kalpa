@@ -244,12 +244,35 @@ Measured: concept recall 0.732 -> 0.750, name 0.969 -> 1.000. The gain is
 modest, and embeddings were not the step change the vocabulary argument
 suggested.
 
-`alsoConsidered` reserves `ALSO_CONSIDERED_SEMANTIC` of its slots for semantic
-extras. Without that reservation the feature is invisible: extras sit at
+`alsoConsidered` pulls `ALSO_CONSIDERED_SEMANTIC` semantic extras to the FRONT
+of the unpicked tail. Without that the feature is invisible: extras sit at
 positions 21-26 behind the keyword hits, so a plain `slice(0, 8)` over the
 unpicked tail never reaches them, and a user only ever sees one if the model
 picks it. Candidates are also labelled "(related by meaning)" in the prompt so
 the tail is not discounted for position alone.
+
+It front-loads but **drops nothing**, and that distinction was itself a bug.
+While the 3 slots were a reservation carved out of a list capped at 8, they
+displaced keyword hits: on "an addon that shows if you're flagged in combat",
+`Combat Indicator` was BM25 rank 8 and the 8th unpicked hit, so it fell off the
+end of the one UI element whose stated promise is that "a short answer never
+looks like it missed something". `ALSO_CONSIDERED_LIMIT` is now
+`CANDIDATE_COUNT + SEMANTIC_EXTRA` — the size of the retrieved set, not a
+display budget. End-to-end `hit@rec+also` went 86.7% -> 93.3% overall and
+71.4% -> 85.7% on the concept slice, and that gain cannot be noise: the new
+list is a strict superset of the old one.
+
+The open cost is the other direction. The tail is no longer relevance-filtered
+at all, so a weak query trails obvious junk (`Deconstruction Junk Marker` for a
+combat question). The right fix is a score floor rather than a count cap; it
+needs data to set, so it is deliberately not guessed at.
+
+**Model-dependent metrics have a noise floor of about +/-2 rows.** Three runs of
+the same unchanged 60-row fixture scored `hit@rec` 66.7%, 63.3% and 65.0%, so a
+3-point move in `hit@rec` or `precision` is not a result. `hit@rec+also` is the
+metric to trust for retrieval and delivery changes, because a change that only
+adds candidates cannot regress it. One earlier change was briefly called a
+regression on a 2-row difference; it was not one, it simply had no effect.
 
 `/addons/search` stays pure BM25 and free. `?semantic=true` opts into the fused
 path and exists so the eval can score what `/ask` actually feeds the model —
