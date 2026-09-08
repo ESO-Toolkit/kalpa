@@ -22,10 +22,11 @@ on:
       - "src-tauri/src/**"
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
-  # Also run on main pushes: GitHub Actions caches saved on PR branches are
-  # not visible to tag refs, so without a main-scope run the release job would
-  # compile slint/skia cold (~20 min) on every tag. Main-branch caches ARE
-  # inherited by tags.
+  # Also run on main pushes so the debug-profile check cache lives on main,
+  # where every PR can read it. This does NOT warm the release build: this
+  # job's cache is debug-profile and keyed by job id (v0-rust-check-slint-*),
+  # while release.yml reads `shared-key: release-sidecar`. The release-profile
+  # sidecar cache is produced by warm-release-cache.yml.
   push:
     branches: [main]
     paths:

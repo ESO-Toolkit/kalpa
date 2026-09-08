@@ -1,5 +1,18 @@
 name: Build & Release
 
+# Job graph (wall time is the longest path, not the sum):
+#
+#   authorize ─┬─> sidecar ──> build-windows ─┐
+#              └─> build (macos, linux) ──────┴─> publish
+#
+# Before this shape, the three platform builds ran strictly one after another
+# (max-parallel: 1) and the Windows job compiled the Slint sidecar inline
+# before compiling the app, so a release took ~68 minutes (beta.22: Windows
+# 30 min, macOS 19, Linux 12, serialized). Now every build job only builds and
+# hands its bundles to `publish` as workflow artifacts; `publish` is the only
+# job that talks to the GitHub release, so nothing races and nothing needs
+# serializing.
+
 on:
   push:
     tags:
@@ -9,8 +22,10 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Read by default; the one job that touches the release (`publish`) widens to
+# write, and the build jobs add only what provenance attestation needs.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   authorize:
@@ -52,38 +67,96 @@ jobs:
             exit 1
           fi
 
+  # The Slint native UI ships as a Windows sidecar (tauri.windows.conf.json
+  # externalBin). It is a separate Rust workspace that takes ~14 minutes cold,
+  # and until now the Windows job's beforeBuildCommand compiled it inline,
+  # BEFORE the app's own ~14-minute compile, on the critical path. Building it
+  # here, in parallel with the macOS and Linux app builds, and handing the
+  # binary to build-windows as an artifact takes it off that path entirely.
+  # macOS and Linux never build or bundle the sidecar; that is unchanged.
+  sidecar:
+    needs: authorize
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.94.0"
+
+      # save-if: false on every release job. A cache saved from a tag ref is
+      # invisible to every other ref, so saving here would spend ~2 minutes
+      # uploading something no later run can read. The warm-release-cache
+      # workflow on main is the only writer of these shared keys; tags only
+      # read them (main-branch caches ARE visible to tag refs).
+      - name: Rust cache
+        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: release-sidecar
+          workspaces: prototypes/slint-kalpa
+          save-if: false
+
+      # The same script the Windows app job's beforeBuildCommand runs
+      # (npm run build:release-assets -> build:native-slint); that later
+      # invocation sees KALPA_SIDECAR_PREBUILT=1 and reuses this binary.
+      - name: Build the Slint sidecar
+        run: node scripts/build-native-slint-sidecar.mjs
+
+      - name: Upload the sidecar
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sidecar-windows
+          path: src-tauri/binaries/kalpa-slint-x86_64-pc-windows-msvc.exe
+          if-no-files-found: error
+          compression-level: 0
+
+  # macOS and Linux app builds. Windows is `build-windows` below: it is the
+  # same recipe, but it has to wait for `sidecar`, and `needs` is a job-level
+  # edge — putting Windows in this matrix would make the macOS and Linux legs
+  # wait for the sidecar too. Keep the two jobs' shared steps in sync.
+  #
+  # These jobs only BUILD. tauri-action gets no tagName/releaseName/
+  # releaseBody/releaseDraft, so it never creates a release, never uploads,
+  # and never touches latest.json; it just builds and reports `artifactPaths`.
+  # The `publish` job creates the draft, assembles latest.json itself, and
+  # uploads everything in one deterministic place. That is what lets the
+  # platforms run in parallel: the old per-platform latest.json merge
+  # (read-merge-delete-reupload of a shared asset) is gone, not serialized.
   build:
     needs: authorize
     strategy:
       fail-fast: false
-      # Serialize the matrix: tauri-action merges each platform's entry into the
-      # shared latest.json with a read-merge-delete-reupload cycle, so parallel
-      # jobs can clobber each other's platform entry (and race the draft-release
-      # creation). One job at a time makes the merge deterministic; the publish
-      # job below still verifies the result before anything goes live.
-      max-parallel: 1
       matrix:
         include:
-          - platform: windows-latest
-            args: ""
           # arm64 runner; --target universal-apple-darwin cross-compiles the
           # x86_64 half so one binary serves Intel Macs (ESO's Mac client is
           # Intel-only) and Apple Silicon.
           - platform: macos-latest
             args: "--target universal-apple-darwin"
+            artifact: bundles-macos
           # ubuntu-22.04 pins the compatibility baseline (WebKitGTK 4.1,
           # glibc 2.35). TODO: migrate to ubuntu-24.04 before the 22.04 runner
           # image is retired in April 2027 (raises the glibc baseline to 2.39).
           - platform: ubuntu-22.04
             args: ""
+            artifact: bundles-linux
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 60
     permissions:
-      # `contents: write` uploads the bundles to the draft release; the other
-      # two are what `attest-build-provenance` needs to mint a signed statement
-      # against this workflow run. Stated per job rather than inherited so the
-      # extra scopes stop at the job that actually builds artifacts.
-      contents: write
+      # id-token + attestations are what `attest-build-provenance` needs to
+      # mint a signed statement against this workflow run. Nothing here writes
+      # to the release any more, so `contents` stays at read. Stated per job
+      # so the extra scopes stop at the jobs that actually build artifacts.
+      contents: read
       id-token: write
       attestations: write
     steps:
@@ -98,15 +171,13 @@ jobs:
       # Same check CI runs on every PR, plus the tag comparison. The publish
       # gate already asserts latest.json's version equals the tag, but only
       # after all three platforms have built — so a tag cut before the bump
-      # landed burns an hour before failing. This fails it in seconds, on the
-      # first job, and additionally catches Cargo.toml drift that the publish
-      # gate cannot see.
+      # landed would burn half an hour before failing. This fails it in
+      # seconds, on every build job, and additionally catches Cargo.toml drift
+      # that the publish gate cannot see.
       - name: Version consistency
         # ref_name via env, never spliced into the script text: git ref names
         # permit `$()` and backticks, which GitHub would expand before the
-        # shell parses this line. The publish job already uses this pattern.
-        # shell: bash so `$REF_NAME` reads the env var on the Windows matrix
-        # job too (its default shell is pwsh, where $REF_NAME would be empty).
+        # shell parses this line. The publish job uses the same pattern.
         shell: bash
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -119,16 +190,14 @@ jobs:
           # Both halves of the universal macOS binary; harmless elsewhere.
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+      # See the `sidecar` job for why save-if is false: tags read the caches
+      # the warm-release-cache workflow saves from main; they never write.
       - name: Rust cache
         uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          # prototypes/slint-kalpa is compiled by the Windows job's
-          # beforeBuildCommand (build:release-assets → Slint sidecar); caching
-          # it saves ~15-25 min of slint/skia compile per release. Harmless on
-          # macOS/Linux, which never build the sidecar.
-          workspaces: |
-            src-tauri
-            prototypes/slint-kalpa
+          shared-key: release
+          workspaces: src-tauri
+          save-if: false
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -141,15 +210,6 @@ jobs:
       # --legacy-peer-deps: typescript-eslint 8.x doesn't yet support TypeScript 6
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
-
-      - name: Generate release notes from CHANGELOG
-        id: release-notes
-        # See the Version consistency step: ref_name as data, not source text,
-        # and shell: bash so it resolves on the Windows matrix job.
-        shell: bash
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: node .github/scripts/release-body.cjs --version "$REF_NAME" --github-output
 
       # macOS code signing + notarization activate automatically once an Apple
       # Developer ID certificate is added to the repo secrets. The env vars are
@@ -183,40 +243,17 @@ jobs:
           done
           echo "Apple certificate secret found — macOS signing enabled."
 
+      # No GITHUB_TOKEN: with no release inputs the action never calls the
+      # GitHub API. The signing key is what produces the updater .sig files,
+      # which `publish` turns into latest.json.
       - name: Build Tauri app
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "${{ github.ref_name }}"
           args: ${{ matrix.args }}
-          # The matching tagged section is required and parsed fail-closed;
-          # release-specific copy now has one source of truth in CHANGELOG.md.
-          releaseBody: ${{ steps.release-notes.outputs.body }}
-          # Draft during the build so users never see a partially-assembled
-          # release: the updater endpoint (releases/latest/download/latest.json)
-          # cannot see drafts, and `releases/latest` never points at one. The
-          # `publish` job below verifies the merged latest.json and flips the
-          # draft to published — a tagged release is NOT done until that job is
-          # green. If it fails, the draft is left in place for inspection.
-          releaseDraft: true
-          # MUST stay false, including for -beta.N tags. The updater fetches
-          # releases/latest/download/latest.json, and GitHub's releases/latest
-          # endpoint skips every release with the "pre-release" flag set — so
-          # flipping this to true does not just mislabel a beta, it silently
-          # breaks auto-update for every existing install the moment this tag
-          # is no longer the newest non-prerelease release. A `-beta.N` version
-          # string is just this project's versioning convention; it has no
-          # bearing on GitHub's separate "pre-release" release flag, and the
-          # two must not be conflated when editing this block. The publish job's
-          # "Guard against a mis-flagged prerelease" step fails the run if this
-          # ever ends up true, but do not rely on that catch — it exists only
-          # to backstop this line.
-          prerelease: false
 
       # SHA256SUMS.txt and the updater .sig prove integrity and that whoever
       # holds the Tauri signing key blessed these bytes. Neither ties an
@@ -228,9 +265,11 @@ jobs:
       # GitHub's transparency log rather than from anything in the release.
       #
       # `artifactPaths` is a JSON array from tauri-action, so this lists the
-      # bundles this matrix leg actually produced instead of guessing at
-      # per-platform globs that would have to match nothing on two legs out of
-      # three.
+      # bundles this job actually produced instead of guessing at
+      # per-platform globs. The same list is copied flat into release-assets/
+      # for the workflow artifact: on macOS it also names the bare Kalpa.app
+      # directory (tauri-action tars it up only when uploading itself), which
+      # is not a release asset, so only regular files are copied.
       - name: Collect bundle paths
         id: bundles
         shell: bash
@@ -248,33 +287,293 @@ jobs:
             echo "__KALPA_PATHS_EOF__"
           } >> "$GITHUB_OUTPUT"
 
+          mkdir -p release-assets
+          printf '%s' "$ARTIFACT_PATHS" | jq -r '.[]' | while IFS= read -r bundle; do
+            if [ -f "$bundle" ]; then
+              cp -- "$bundle" release-assets/
+            else
+              echo "Skipping non-file artifact path: ${bundle}"
+            fi
+          done
+          echo "--- release-assets ---"
+          ls -l release-assets
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: ${{ steps.bundles.outputs.paths }}
 
-  # Gate + publish: a release only goes live after every platform built and the
-  # merged latest.json provably contains all updater entries. Auto-update is
-  # dead until this runs — the updater reads releases/latest/download/latest.json,
-  # which drafts are invisible to — so a red publish job means the release DID
-  # NOT ship, even though all three build jobs are green.
+      # Installers are already compressed; zipping them again costs minutes
+      # for no size win.
+      - name: Upload bundles for publish
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+
+  # Windows app build. Identical to `build` apart from the sidecar hand-off;
+  # see the comment on `build` for why it is a separate job.
+  build-windows:
+    needs: [authorize, sidecar]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      # See `build`: shell: bash so `$REF_NAME` reads the env var here too
+      # (the Windows default shell is pwsh, where $REF_NAME would be empty).
+      - name: Version consistency
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node scripts/check-versions.js --expect "$REF_NAME"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.94.0"
+
+      # See the `sidecar` job for why save-if is false.
+      - name: Rust cache
+        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: release
+          workspaces: src-tauri
+          save-if: false
+
+      # --legacy-peer-deps: typescript-eslint 8.x doesn't yet support TypeScript 6
+      - name: Install frontend dependencies
+        run: npm ci --legacy-peer-deps
+
+      # Lands exactly where tauri.windows.conf.json's externalBin and the
+      # sidecar script expect it. tauri-build requires the file to exist at
+      # compile time, and the bundler embeds it into the NSIS installer.
+      - name: Download the prebuilt sidecar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sidecar-windows
+          path: src-tauri/binaries/
+
+      # The sidecar script repeats this check, but failing here names the
+      # hand-off as the culprit before any compile time is spent.
+      - name: Verify the prebuilt sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l src-tauri/binaries/
+          if [ ! -s src-tauri/binaries/kalpa-slint-x86_64-pc-windows-msvc.exe ]; then
+            echo "::error::The sidecar artifact did not produce src-tauri/binaries/kalpa-slint-x86_64-pc-windows-msvc.exe"
+            exit 1
+          fi
+
+      # KALPA_SIDECAR_PREBUILT makes the beforeBuildCommand
+      # (npm run build:release-assets -> build:native-slint) reuse the binary
+      # downloaded above instead of recompiling it; the script fails loudly
+      # if the file is missing or empty. No GITHUB_TOKEN: see `build`.
+      - name: Build Tauri app
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          KALPA_SIDECAR_PREBUILT: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # See `build` for what provenance adds over the checksums and .sig.
+      - name: Collect bundle paths
+        id: bundles
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ARTIFACT_PATHS:-}" ] || [ "$ARTIFACT_PATHS" = "null" ]; then
+            echo "::error::tauri-action reported no artifact paths; refusing to publish an unattested build."
+            exit 1
+          fi
+          {
+            echo "paths<<__KALPA_PATHS_EOF__"
+            printf '%s' "$ARTIFACT_PATHS" | jq -r '.[]'
+            echo "__KALPA_PATHS_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+          mkdir -p release-assets
+          printf '%s' "$ARTIFACT_PATHS" | jq -r '.[]' | while IFS= read -r bundle; do
+            if [ -f "$bundle" ]; then
+              cp -- "$bundle" release-assets/
+            else
+              echo "Skipping non-file artifact path: ${bundle}"
+            fi
+          done
+          echo "--- release-assets ---"
+          ls -l release-assets
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: ${{ steps.bundles.outputs.paths }}
+
+      - name: Upload bundles for publish
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundles-windows
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+
+  # Assemble + gate + publish: the only job that touches the GitHub release.
+  # A release goes live only after every platform built and latest.json
+  # provably contains all updater entries. Auto-update is dead until this
+  # runs — the updater reads releases/latest/download/latest.json, which
+  # drafts are invisible to — so a red publish job means the release DID NOT
+  # ship, even though all the build jobs are green. Every step is safe to
+  # re-run: an existing draft for the tag is reused and its assets replaced.
   publish:
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ github.ref_name }}
     steps:
+      # CHANGELOG.md and the .github/scripts helpers come from the tagged
+      # commit, so the release body describes the version being shipped.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Download every platform's bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bundles-*
+          merge-multiple: true
+          path: release-assets
+
+      # The matching tagged section is required and parsed fail-closed;
+      # release-specific copy has one source of truth in CHANGELOG.md.
+      - name: Generate release notes from CHANGELOG
+        run: node .github/scripts/release-body.cjs --version "$TAG" > release-body.md
+
+      # Written from the .sig files before anything is uploaded: the URL of
+      # every asset is a pure function of the tag and its file name, so this
+      # is deterministic and identical on a re-run. The script fails closed if
+      # any of the four platform keys the shipped updaters read is missing.
+      - name: Assemble latest.json
+        run: |
+          set -euo pipefail
+          node .github/scripts/updater-manifest.cjs \
+            --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --assets-dir release-assets \
+            --notes-file release-body.md \
+            --output release-assets/latest.json
+          echo "--- release-assets ---"
+          ls -l release-assets
+
+      # Draft while assembling, so users never see a partially-uploaded
+      # release: the updater endpoint (releases/latest/download/latest.json)
+      # cannot see drafts, and `releases/latest` never points at one. The
+      # last step flips it to published — a tagged release is NOT done until
+      # that step is green. If anything fails, the draft is left in place for
+      # inspection and the job can simply be re-run.
+      #
+      # Drafts are not addressable by tag via releases/tags/<tag>, so an
+      # existing one is found by listing and matching tag_name. Re-using it
+      # (rather than creating a second draft for the same tag) is what makes
+      # a re-run idempotent.
+      #
+      # prerelease MUST stay false, including for -beta.N tags. The updater
+      # fetches releases/latest/download/latest.json, and GitHub's
+      # releases/latest endpoint skips every release with the "pre-release"
+      # flag set — so flipping this to true does not just mislabel a beta, it
+      # silently breaks auto-update for every existing install the moment
+      # this tag is no longer the newest non-prerelease release. A `-beta.N`
+      # version string is just this project's versioning convention; it has
+      # no bearing on GitHub's separate "pre-release" release flag, and the
+      # two must not be conflated when editing this block. The "Guard against
+      # a mis-flagged prerelease" step below fails the run if this ever ends
+      # up true, but do not rely on that catch — it exists only to backstop
+      # this line.
+      - name: Create or reuse the draft release
+        run: |
+          set -euo pipefail
+          # The tag goes in as jq data (--arg), never spliced into the
+          # program text; see the Version consistency step for why.
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq -c --arg tag "$TAG" '[.[] | select(.tag_name == $tag)] | first // empty')
+          if [ -n "$release" ]; then
+            release_id=$(echo "$release" | jq -r '.id')
+            echo "Reusing existing release ${release_id} for ${TAG} (draft=$(echo "$release" | jq -r '.draft'))."
+            # Refresh the body so a re-run after a CHANGELOG fix ships it.
+            jq -n --arg tag "$TAG" --rawfile body release-body.md \
+              '{name: $tag, body: $body}' \
+              | gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --input - > /dev/null
+          else
+            release=$(jq -n --arg tag "$TAG" --rawfile body release-body.md \
+              '{tag_name: $tag, name: $tag, body: $body, draft: true, prerelease: false}' \
+              | gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" --input -)
+            release_id=$(echo "$release" | jq -r '.id')
+            echo "Created draft release ${release_id} for ${TAG}."
+          fi
+          upload_url=$(echo "$release" | jq -r '.upload_url' | sed 's/{?name,label}$//')
+          {
+            echo "release_id=${release_id}"
+            echo "upload_url=${upload_url}"
+          } >> "$GITHUB_ENV"
+
+      # Upload via the API's upload_url. `gh release upload` resolves the
+      # release by tag, which does not find drafts. An existing asset with the
+      # same name is deleted first (the API rejects duplicates), which is the
+      # "--clobber" that lets a re-run replace a partial upload. Each upload
+      # is then checked against the size GitHub reports, so a truncated
+      # transfer fails here rather than shipping.
+      - name: Upload bundles, signatures and latest.json
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            --jq '.assets[] | "\(.id)\t\(.name)"')
+          for file in release-assets/*; do
+            name=$(basename "$file")
+            old_id=$(printf '%s\n' "$existing" | awk -F'\t' -v n="$name" '$2 == n { print $1 }')
+            if [ -n "$old_id" ]; then
+              echo "Replacing existing asset ${name} (${old_id})"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${old_id}"
+            fi
+            expected=$(wc -c < "$file")
+            uploaded=$(curl --fail --silent --show-error -X POST \
+              "${upload_url}?name=${name}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${file}" | jq -r '.size')
+            if [ "$uploaded" != "$expected" ]; then
+              echo "::error::${name}: GitHub stored ${uploaded} bytes, expected ${expected}"
+              exit 1
+            fi
+            echo "Uploaded ${name} (${expected} bytes)"
+          done
+
+      # Verified from the release itself, not from the local file: this is
+      # what the updater will fetch.
       - name: Verify latest.json covers every platform
         run: |
           set -euo pipefail
-          # Drafts are not addressable by tag via releases/tags/<tag>; list and
-          # match tag_name the same way tauri-action locates the draft.
-          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq ".[] | select(.tag_name==\"${TAG}\")")
-          [ -n "$release" ] || { echo "::error::No release found for ${TAG}"; exit 1; }
-          release_id=$(echo "$release" | jq -r '.id')
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")
 
           asset_id=$(echo "$release" | jq -r '.assets[] | select(.name=="latest.json") | .id')
           [ -n "$asset_id" ] || { echo "::error::latest.json missing from release assets"; exit 1; }
@@ -287,24 +586,31 @@ jobs:
           version=$(jq -r '.version' latest.json)
           [ "v${version}" = "${TAG}" ] || { echo "::error::latest.json version ${version} != tag ${TAG}"; exit 1; }
 
-          # tauri-action@v1 keys: the universal macOS build fills BOTH darwin
-          # arches; windows/linux use their native arch.
+          # The keys every shipped updater reads: the universal macOS build
+          # fills BOTH darwin arches; windows/linux use their native arch.
+          assets=$(echo "$release" | jq -r '.assets[].name')
           for platform in windows-x86_64 darwin-x86_64 darwin-aarch64 linux-x86_64; do
             jq -e --arg p "$platform" \
               '.platforms[$p] | (.url | length > 0) and (.signature | length > 0)' \
               latest.json > /dev/null \
-              || { echo "::error::latest.json is missing a valid ${platform} entry — a build job's updater merge was lost"; exit 1; }
+              || { echo "::error::latest.json is missing a valid ${platform} entry"; exit 1; }
+            # Every URL must name an asset that is actually on this release
+            # under this tag, or the updater downloads a 404.
+            url=$(jq -r --arg p "$platform" '.platforms[$p].url' latest.json)
+            case "$url" in
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/"*) ;;
+              *) echo "::error::${platform} url ${url} does not point at this release"; exit 1 ;;
+            esac
+            echo "$assets" | grep -qxF "${url##*/}" \
+              || { echo "::error::${platform} url names ${url##*/}, which is not a release asset"; exit 1; }
           done
 
           # The installers users download by hand must exist alongside the
           # updater artifacts.
-          assets=$(echo "$release" | jq -r '.assets[].name')
           for pattern in '\.exe$' '\.dmg$' '\.AppImage$' '\.deb$' '\.rpm$'; do
             echo "$assets" | grep -qE "$pattern" \
               || { echo "::error::No release asset matches ${pattern}"; exit 1; }
           done
-
-          echo "release_id=${release_id}" >> "$GITHUB_ENV"
 
       # Runs while the release is still a draft, so a published release always
       # carries its checksums — docs/verify-download.md tells users the file is
@@ -348,7 +654,6 @@ jobs:
 
           # Upload via the API's upload_url. `gh release upload` resolves the
           # release by tag, which does not find drafts.
-          upload_url=$(echo "$release" | jq -r '.upload_url' | sed 's/{?name,label}$//')
           curl --fail --silent --show-error -X POST \
             "${upload_url}?name=SHA256SUMS.txt" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -357,22 +662,22 @@ jobs:
 
           echo "SHA256SUMS.txt attached to ${TAG}."
 
-      # The build job hardcodes prerelease: false and explains why at length,
-      # but nothing there stops a future edit (or a manually-created release
-      # for this tag) from setting it anyway. GitHub's releases/latest
-      # endpoint — which is what the updater's
-      # releases/latest/download/latest.json fetch resolves against — skips
-      # every prerelease-flagged release, so publishing one here would go
-      # live while silently breaking auto-update for every existing install.
-      # Check the real release object (by id, not `gh release view "$TAG"`:
-      # per the comment above, drafts are not addressable by tag) before the
-      # next step ever flips it to published.
+      # The create step hardcodes prerelease: false and explains why at
+      # length, but nothing there stops a future edit (or a manually-created
+      # release for this tag, which the create step would happily reuse) from
+      # setting it anyway. GitHub's releases/latest endpoint — which is what
+      # the updater's releases/latest/download/latest.json fetch resolves
+      # against — skips every prerelease-flagged release, so publishing one
+      # here would go live while silently breaking auto-update for every
+      # existing install. Check the real release object (by id, not
+      # `gh release view "$TAG"`: per the comment above, drafts are not
+      # addressable by tag) before the next step ever flips it to published.
       - name: Guard against a mis-flagged prerelease
         run: |
           set -euo pipefail
           is_prerelease=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" --jq '.prerelease')
           if [ "$is_prerelease" = "true" ]; then
-            echo "::error::Release ${TAG} is flagged as a GitHub pre-release. GitHub's releases/latest endpoint skips prereleases, and the Kalpa updater reads releases/latest/download/latest.json — publishing this would silently break auto-update for every existing install. A -beta.N version string does not require the GitHub pre-release flag; unset it on the release (or on the tauri-action prerelease input) and re-run." >&2
+            echo "::error::Release ${TAG} is flagged as a GitHub pre-release. GitHub's releases/latest endpoint skips prereleases, and the Kalpa updater reads releases/latest/download/latest.json — publishing this would silently break auto-update for every existing install. A -beta.N version string does not require the GitHub pre-release flag; unset it on the release and re-run." >&2
             exit 1
           fi
           echo "Release ${TAG} is not flagged as a pre-release — safe to publish."
