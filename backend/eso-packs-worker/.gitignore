@@ -4,3 +4,4 @@ node_modules/
 
 # Local-only copy of the admin key used by the index crawl scripts.
 .admin-key.tmp
+.tail-sweep-cache.json

@@ -407,16 +407,6 @@ async function overBudget(env: Env): Promise<boolean> {
 const SEMANTIC_LIMIT = 20;
 
 /**
- * Reciprocal Rank Fusion constant.
- *
- * RRF scores by RANK, not by score, which is what makes it safe here: BM25
- * scores and cosines are not on a shared scale and never will be. k dampens the
- * head of each list, so one list cannot dominate on its first entry alone. At
- * k = 20 against 20-item lists the last entry still carries about half the
- * weight of the first.
- */
-export 
-/**
  * Guard (a): how far below the best cosine a neighbour may sit, and the
  * absolute floor beneath which nothing counts.
  *

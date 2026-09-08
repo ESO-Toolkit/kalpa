@@ -944,6 +944,15 @@ function AskAnswer({
                 )}
               >
                 <span className="block truncate text-xs text-foreground">{rec.title}</span>
+                {/* The tail is no longer relevance-capped, so it can trail
+                    weak matches on a vague question. Bare titles gave no cue
+                    which rows those were; the category is the cheapest signal
+                    that "Deconstruction Junk Marker" is not a combat addon. */}
+                {rec.category && (
+                  <InfoPill color="muted" className="mt-1 max-w-full whitespace-nowrap">
+                    <span className="truncate">{rec.category}</span>
+                  </InfoPill>
+                )}
               </button>
             ))}
           </div>

@@ -277,15 +277,46 @@ combat question), and the "N more matches" count is now nearly constant at
 ~18-26 so it carries no relevance signal. The tail also renders bare titles
 only, with no category, so an expanded list gives no cue which rows are junk.
 
-The right fix is a score floor rather than a count cap. `DEGRADED_SCORE_RATIO`
-(0.4) already applies exactly this idea elsewhere in `ask.ts`, and it can be
-swept for free: the tail is now fully determined by retrieval, so
-`/addons/search?semantic=true&limit=26` returns the `score` and `semantic` flag
-needed to score candidate ratios with zero `/ask` calls. One wrinkle before
-trying it — `score` is raw `bm25(...)` while the ORDER BY is
-`RANK_EXPRESSION` (which also subtracts the popularity ladder and title-phrase
-boost), so score order and rank order can disagree and a naive floor can drop a
-row ranked above one it keeps.
+A BM25 score floor was the obvious fix. **It was swept and it does not work** —
+do not re-propose it without reading this. `scripts/sweep-tail-floor.mjs`
+fetches the fixture once and scores every ratio offline, so re-running it costs
+60 search requests and zero model calls.
+
+| ratio | overall / concept / name | mean tail | rows losing an expected addon |
+|-------|--------------------------|-----------|-------------------------------|
+| 0.00  | 93.3 / 85.7 / 100        | 17.5      | 0                             |
+| 0.40  | 93.3 / 85.7 / 100        | 15.9      | 0                             |
+| 0.50  | 93.3 / 85.7 / 100        | 14.2      | 0                             |
+| 0.60  | 90.0 / **78.6** / 100    | 11.0      | 2                             |
+| 0.70  | 85.0 / **67.9** / 100    |  7.6      | 7                             |
+
+0.5 looks like a free win, but it is not, because the mean hides the failure.
+On the motivating question — "shows if you're flagged in combat" — a floor cuts
+**nothing at any safe ratio**. The whole keyword list spans 0.76-1.00 of the top
+score: `Deconstruction Junk Marker` scores 0.78 while `Combat Indicator`, a
+correct answer, scores 0.82. Four points of BM25 separate right from wrong,
+which is noise. A long natural-language question has many terms and almost
+every addon matches a few, so the scores compress into a band no threshold can
+split. Cutting the junk needs a ratio above 0.78, and the sweep shows that
+range destroying concept recall.
+
+The lesson generalises: **BM25 score magnitude is not a relevance signal on
+long questions**, only its ordering is, and even the ordering is weak here (the
+top keyword hit for that question is "In Combat Menu Block", and both correct
+answers are at ranks 8 and 22). Anything that tries to separate relevant from
+irrelevant by thresholding `score` will hit the same wall. A cross-encoder
+reranker over the 26 candidates is the technique that could work; a threshold
+is not.
+
+Two mechanical notes for whoever tries next. `AddonSearchHit.score` is NEGATED
+at `addon-index.ts:342`, so it is positive and higher-is-better despite
+SQLite's `bm25()` being the opposite — `DEGRADED_SCORE_RATIO`'s `top > 0` guard
+is correct, not dead code. And semantic hits carry `0 AS score`, so any floor
+must exempt them or it deletes every semantic match.
+
+What shipped instead is a display fix: tail rows now render the category pill,
+so `Deconstruction Junk Marker` is visibly a crafting addon in a combat answer.
+It does not shorten the list; it makes the list legible.
 
 **Model-dependent metrics have a noise floor of about +/-2 rows.** Three runs of
 the same unchanged 60-row fixture scored `hit@rec` 66.7%, 63.3% and 65.0%, so a
