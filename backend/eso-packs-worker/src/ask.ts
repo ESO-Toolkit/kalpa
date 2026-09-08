@@ -165,10 +165,18 @@ function renderCandidates(hits: AddonSearchHit[]): string {
  * this corpus a reordering is essentially always the same question, and the
  * answer is built from a BM25 retrieval that is itself order-independent.
  */
-/** Bumped whenever retrieval, candidate count, or the prompt changes.
- *  Without it, a week of cached answers from the previous behaviour keeps being
- *  served and the improvement looks like it did not land. */
-const ASK_VERSION = 3;
+/** Bumped whenever retrieval, candidate count, the prompt, or the SHAPE OF THE
+ *  CACHED RESPONSE changes. Without it, a week of cached answers from the
+ *  previous behaviour keeps being served and the improvement looks like it did
+ *  not land.
+ *
+ *  "Response shape" is in that list because it was missed once: widening
+ *  `also_considered` changed only the stored body, not retrieval or the prompt,
+ *  so the narrower rule did not require a bump — and the eval measured it with
+ *  `bypassCache`, so nothing caught that live users would keep getting the old
+ *  truncated tail for seven days. If a change alters what is written to KV,
+ *  bump this. */
+const ASK_VERSION = 4;
 
 export function cacheKeyFor(question: string): string {
   const tokens = [
@@ -249,11 +257,6 @@ export function alsoConsidered(
   const chosen = new Set(picked.map((p) => p.esoui_id));
   const rest = hits.filter((hit) => !chosen.has(hit.esoui_id));
 
-  // Semantic extras are appended AFTER up to 20 keyword hits, so a plain
-  // slice(0, 8) could never reach them — the whole embedding feature was
-  // invisible unless the model happened to pick one from the tail. Reserve
-  // slots so a user sees the semantically-related matches that keyword search
-  // could not have found at all.
   // Semantic FIRST. These are the finds keyword search could not make at all —
   // "shows when I am in combat" cannot lexically reach "Fighting Display", which
   // is precisely why the embedding index exists. Ordering them behind keyword

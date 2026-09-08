@@ -259,13 +259,33 @@ end of the one UI element whose stated promise is that "a short answer never
 looks like it missed something". `ALSO_CONSIDERED_LIMIT` is now
 `CANDIDATE_COUNT + SEMANTIC_EXTRA` — the size of the retrieved set, not a
 display budget. End-to-end `hit@rec+also` went 86.7% -> 93.3% overall and
-71.4% -> 85.7% on the concept slice, and that gain cannot be noise: the new
-list is a strict superset of the old one.
+71.4% -> 85.7% on the concept slice. The new list is a strict superset of the
+old one, so the gain cannot be a **regression** — but do not read the magnitude
+as exact either: the 86.7% "before" still depended on model picks, and only the
+"after" is deterministic.
+
+`hit@rec+also` is now, by construction, exactly retrieval recall@26 — every
+retrieved candidate is either picked or in the tail. That makes it
+model-independent, and also **saturated**: it cannot move again for any
+delivery change short of reintroducing a truncation, and it equals what
+`eval:search --semantic --limit 26` reports for free. Do not spend ~1500
+neurons on `eval:ask` to re-measure it.
 
 The open cost is the other direction. The tail is no longer relevance-filtered
 at all, so a weak query trails obvious junk (`Deconstruction Junk Marker` for a
-combat question). The right fix is a score floor rather than a count cap; it
-needs data to set, so it is deliberately not guessed at.
+combat question), and the "N more matches" count is now nearly constant at
+~18-26 so it carries no relevance signal. The tail also renders bare titles
+only, with no category, so an expanded list gives no cue which rows are junk.
+
+The right fix is a score floor rather than a count cap. `DEGRADED_SCORE_RATIO`
+(0.4) already applies exactly this idea elsewhere in `ask.ts`, and it can be
+swept for free: the tail is now fully determined by retrieval, so
+`/addons/search?semantic=true&limit=26` returns the `score` and `semantic` flag
+needed to score candidate ratios with zero `/ask` calls. One wrinkle before
+trying it — `score` is raw `bm25(...)` while the ORDER BY is
+`RANK_EXPRESSION` (which also subtracts the popularity ladder and title-phrase
+boost), so score order and rank order can disagree and a naive floor can drop a
+row ranked above one it keeps.
 
 **Model-dependent metrics have a noise floor of about +/-2 rows.** Three runs of
 the same unchanged 60-row fixture scored `hit@rec` 66.7%, 63.3% and 65.0%, so a

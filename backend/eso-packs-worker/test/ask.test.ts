@@ -603,6 +603,28 @@ describe("alsoConsidered", () => {
     ]);
   });
 
+  it("keeps semantic extras beyond the front-loaded three, in place", () => {
+    // The 20+1 fixture cannot tell ALSO_CONSIDERED_LIMIT (26) apart from the
+    // CANDIDATE_COUNT (20) it replaced, and never exercises more semantic
+    // extras than the 3 that get front-loaded. This pins both: the full
+    // retrieved set survives, and extras 4-6 stay where retrieval put them
+    // rather than being dropped for missing the front-load quota.
+    const full = [
+      ...Array.from({ length: 20 }, (_, i) => hit(i + 1, `Keyword Addon ${i + 1}`)),
+      ...Array.from({ length: 6 }, (_, i) => ({
+        ...hit(900 + i, `Semantic Only ${i + 1}`),
+        semantic: true,
+      })),
+    ];
+
+    const out = alsoConsidered(full, []).map((r) => r.esoui_id);
+
+    expect(out).toHaveLength(26);
+    expect(out.slice(0, 3)).toEqual([900, 901, 902]);
+    expect(out.slice(3, 23)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+    expect(out.slice(23)).toEqual([903, 904, 905]);
+  });
+
   it("drops nothing that retrieval found and the model did not pick", () => {
     // The list is collapsed behind a disclosure whose promise is that a short
     // answer never looks like it missed something. A display cap broke that
