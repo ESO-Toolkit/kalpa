@@ -10,6 +10,7 @@ import {
   markRemoved,
   pendingDetailUids,
   searchAddons,
+  setMeta,
   sweepUnseen,
   toMatchTokens,
   upsertMetaBatch,
@@ -358,6 +359,63 @@ describe("indexStats", () => {
     expect(stats.live).toBe(2);
     expect(stats.described).toBe(1);
   });
+
+  it("reports the description backlog as pending_details", async () => {
+    // The depth of this queue is the whole reason the crawl is driven
+    // externally: one in-worker page is 12 addons a day.
+    await seed(1, "CombatIndicator", "Shows combat state.");
+    await upsertMeta(db(), meta(2), Date.now());
+    await upsertMeta(db(), meta(3), Date.now());
+    // A tombstoned row is not a backlog item — nobody will ever fetch it.
+    await seed(4, "Gone", "removed soon");
+    await markRemoved(db(), [4]);
+
+    const stats = await indexStats(db());
+    expect(stats.pending_details).toBe(2);
+    expect(stats.described).toBe(1);
+    expect(stats.live).toBe(3);
+  });
+
+  it("drops pending_details back to zero once details land", async () => {
+    await upsertMeta(db(), meta(1), Date.now());
+    expect((await indexStats(db())).pending_details).toBe(1);
+
+    await applyDetail(db(), 1, "now described", "Combat Mods", Date.now());
+    expect((await indexStats(db())).pending_details).toBe(0);
+  });
+
+  it("reports stale_hours as null when the index has never been synced", async () => {
+    // Never-synced and just-synced are opposite alerts, so the never case must
+    // not collapse to 0.
+    await seed(1, "CombatIndicator", "Shows combat state.");
+
+    const stats = await indexStats(db());
+    expect(stats.last_sync).toBeNull();
+    expect(stats.stale_hours).toBeNull();
+  });
+
+  it("derives stale_hours from last_sync", async () => {
+    await seed(1, "CombatIndicator", "Shows combat state.");
+    await setMeta(db(), "last_sync", new Date(Date.now() - 30 * 3_600_000).toISOString());
+
+    const stats = await indexStats(db());
+    expect(stats.stale_hours).toBeGreaterThanOrEqual(29.9);
+    expect(stats.stale_hours).toBeLessThanOrEqual(30.1);
+  });
+
+  it("clamps a future last_sync to zero rather than going negative", async () => {
+    await seed(1, "CombatIndicator", "Shows combat state.");
+    await setMeta(db(), "last_sync", new Date(Date.now() + 60_000).toISOString());
+
+    expect((await indexStats(db())).stale_hours).toBe(0);
+  });
+
+  it("reports stale_hours as null when last_sync is unparseable", async () => {
+    await seed(1, "CombatIndicator", "Shows combat state.");
+    await setMeta(db(), "last_sync", "not-a-date");
+
+    expect((await indexStats(db())).stale_hours).toBeNull();
+  });
 });
 
 describe("unbuilt index", () => {
@@ -382,6 +440,8 @@ describe("unbuilt index", () => {
     const stats = await indexStats(db());
     expect(stats.total).toBe(0);
     expect(stats.last_sync).toBeNull();
+    expect(stats.pending_details).toBe(0);
+    expect(stats.stale_hours).toBeNull();
 
     await ensureSchema(db());
   });

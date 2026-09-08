@@ -207,8 +207,28 @@ an `addons_fts` row. Anything that invalidates the indexed text — a moved
 `last_update`, a changed `category_name`, or **un-tombstoning** — has to
 re-arm it, or the addons table and the search index quietly disagree.
 
-**The nightly crawl is fail-closed.** It runs only when `ADDON_INDEX_SYNC` is
-exactly `"enabled"` AND the `ADDON_INDEX` binding exists. Provision the database
+**The updater is `.github/workflows/sync-addon-index.yml`, not the in-worker
+cron.** `runDailySync` does one bulk sync plus exactly ONE page of
+`crawlDetails`, and `MAX_DETAIL_BATCH` is 12 — twelve descriptions a day
+against ESOUI's normal churn, and a new addon has no FTS row until its detail
+is fetched, so that cron would keep the index looking alive while new addons
+stayed unsearchable for weeks. The batch cannot be raised: 12 is what stopped
+Cloudflare killing pages with `error code: 1102` (worker exceeded resource
+limits) at ~10s per invocation. The Action loops the backfill to completion
+instead, reusing `scripts/build-addon-index.mjs` for its retry/backoff, and
+needs the `ADMIN_API_KEY` repo secret.
+
+**Search quality is measured, not argued.** `npm run eval:search` scores
+`test/fixtures/search-eval.json` (60 rows, 32 name lookups + 28 concept
+questions) and reports recall@20, recall@5 and MRR@5 split by kind. Baseline
+at the time of writing: overall recall@20 86.7%, name 96.9%, **concept 75.0%**.
+Any ranking change must show before/after — two earlier changes were made on
+hunches, one hypothesis survived only until the live scores were read, and a
+hand-rolled check reported 10/12 where the truth was 6/12. The known open
+weakness is that a patch or extension can outrank the addon it patches.
+
+**The in-worker cron remains fail-closed.** It runs only when
+`ADDON_INDEX_SYNC` is exactly `"enabled"` AND the `ADDON_INDEX` binding exists. Provision the database
 and finish the backfill _before_ flipping the var — and note that this is the
 one sanctioned exception to "no background spam": one bulk request plus a
 bounded page of changed descriptions per day. Do not widen it to hourly, and do

@@ -650,32 +650,68 @@ export async function pendingDetailUids(db: D1Database, limit: number): Promise<
   return (result.results ?? []).map((row) => row.uid);
 }
 
+interface StatsRow {
+  total: number;
+  live: number;
+  described: number;
+  pending_details: number;
+  indexed_at: number;
+}
+
+/**
+ * Whole-index health, cheap enough to serve on every `GET /addons/stats`.
+ *
+ * `pending_details` and `stale_hours` are the two numbers that answer "is this
+ * healthy?" without attaching `wrangler tail`: the first is the depth of the
+ * description backlog (a crawl that stopped early shows up as a number that
+ * never falls), the second is how long since a successful filelist sync (a
+ * crawler that stopped running shows up as a number that only grows).
+ */
 export async function indexStats(db: D1Database): Promise<AddonIndexStats> {
-  let row: { total: number; live: number; described: number; indexed_at: number } | null = null;
+  let row: StatsRow | null = null;
   try {
     row = await db
-    .prepare(
-      `SELECT
+      .prepare(
+        `SELECT
          COUNT(*) AS total,
          SUM(CASE WHEN removed = 0 THEN 1 ELSE 0 END) AS live,
          SUM(CASE WHEN removed = 0 AND detail_stale = 0 THEN 1 ELSE 0 END) AS described,
+         SUM(CASE WHEN removed = 0 AND detail_stale = 1 THEN 1 ELSE 0 END) AS pending_details,
          MAX(indexed_at) AS indexed_at
        FROM addons`,
-    )
-    .first<{ total: number; live: number; described: number; indexed_at: number }>();
+      )
+      .first<StatsRow>();
   } catch (err) {
     // An unbuilt index reports zeros, which is exactly what it contains.
     if (!isMissingTable(err)) throw err;
   }
+
+  const lastSync = row ? ((await getMeta(db, "last_sync")) ?? null) : null;
 
   return {
     version: INDEX_VERSION,
     total: row?.total ?? 0,
     live: row?.live ?? 0,
     described: row?.described ?? 0,
+    pending_details: row?.pending_details ?? 0,
     indexed_at: row?.indexed_at ?? 0,
-    last_sync: row ? ((await getMeta(db, "last_sync")) ?? null) : null,
+    last_sync: lastSync,
+    stale_hours: hoursSince(lastSync),
   };
+}
+
+/**
+ * Hours since an ISO timestamp, to one decimal.
+ *
+ * Null — never synced, or the stored value is unparseable — is reported as
+ * null rather than as 0, because "no sync has ever happened" and "a sync just
+ * happened" are the opposite alert.
+ */
+function hoursSince(iso: string | null): number | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return null;
+  return Math.max(0, Math.round(((Date.now() - then) / 3_600_000) * 10) / 10);
 }
 
 /** Narrow the optional binding once, with a message that says what to do. */

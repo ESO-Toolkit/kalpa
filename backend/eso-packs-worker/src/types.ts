@@ -119,8 +119,12 @@ export interface AddonIndexStats {
   total: number;
   live: number;
   described: number;
+  /** Live rows still awaiting a description fetch — how far behind the crawl is. */
+  pending_details: number;
   indexed_at: number;
   last_sync: string | null;
+  /** Hours since the last successful filelist sync, or null if never synced. */
+  stale_hours: number | null;
 }
 
 // ── Ask (natural-language addon assistant) ───────────────────────────
