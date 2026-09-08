@@ -64,7 +64,7 @@ export function SlotPane({
   mutation: StackMutationCoordinator;
   onOpenGuide: (url: string) => void;
 }) {
-  const findings = findingsForSlot(slot, stack);
+  const findings = keyedFindings(findingsForSlot(slot, stack));
   const source = SLOT_SOURCE[slot];
   const sourceLabel = SOURCE_LABEL[source];
 
@@ -134,8 +134,8 @@ export function SlotPane({
 
         {findings.length > 0 && (
           <ul className="space-y-2">
-            {findings.map((finding) => (
-              <SlotFinding key={finding.id} finding={finding} onOpenGuide={onOpenGuide} />
+            {findings.map(({ key, finding }) => (
+              <SlotFinding key={key} finding={finding} onOpenGuide={onOpenGuide} />
             ))}
           </ul>
         )}
@@ -232,6 +232,33 @@ function SourceGlyph({ source, className }: { source: SlotSource; className?: st
 /* -------------------------------------------------------------------------- */
 /* Findings                                                                   */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * A stable key per finding, not per *kind* of finding.
+ *
+ * `HealthFinding.id` names the problem, and `build_findings` emits one
+ * `stack-addon-disabled` for every entry in `DisabledAddons` — the feed add-on
+ * and its host are switched off as a pair, so two findings under one id is the
+ * ordinary case in this slot rather than an edge one. Keying the list on the id
+ * alone handed React two children with the same key, which reuses the wrong
+ * row's DOM when one of the pair clears, and logs an error while doing it.
+ *
+ * `detail` is what tells them apart: it names the file, and it is the only
+ * field of the two that differs. The ordinal covers a `DisabledAddons` value
+ * that lists the same add-on twice — `comma_list` trims but does not dedupe —
+ * where the rows are interchangeable but must still not collide. The position
+ * is deliberately not the identity: `findingsForSlot` re-sorts by level, so one
+ * finding changing severity between rescans renumbers every row after it.
+ */
+function keyedFindings(findings: HealthFinding[]): { key: string; finding: HealthFinding }[] {
+  const seen = new Map<string, number>();
+  return findings.map((finding) => {
+    const base = `${finding.id}:${finding.detail}`;
+    const nth = seen.get(base) ?? 0;
+    seen.set(base, nth + 1);
+    return { key: nth === 0 ? base : `${base}#${nth}`, finding };
+  });
+}
 
 /**
  * A finding, led by what the user will notice.
