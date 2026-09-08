@@ -98,9 +98,35 @@ const POPULARITY_LADDER = `CASE
  * contains that sentence.
  */
 const TITLE_PHRASE_WEIGHT = 3.0;
+
+/**
+ * The ratio is CUBED, not linear.
+ *
+ * Linear scaling did not separate "this title IS the query" from "this title
+ * merely contains it", and the gap it produced was smaller than the BM25 gap
+ * created by total-row-length normalisation. So a patch kept beating the addon
+ * it patches: "KR Patch for Bandits User Interface" outranked the real Bandits
+ * UI (6.2M downloads), and the same shape appeared in 9 of 32 name lookups.
+ *
+ * Cubing leaves an exact title alone (1.0 -> 1.0) while collapsing a partial
+ * one ("Bandits User Interface" inside a 35-character patch title,
+ * 0.63 -> 0.25), widening the separation from ~1.1 to ~2.3 — enough to cover
+ * the normalisation penalty a long-description addon carries. The ratio is
+ * bounded by (0, 1] because a title containing the query is never shorter than
+ * it, so cubing can only shrink a partial match, never inflate anything.
+ *
+ * Written as repeated multiplication because **D1 does not authorize POWER**
+ * ("not authorized to use function: POWER") — the same allowlist that rejects
+ * log10. Arithmetic operators are always available.
+ *
+ * Measured on the 60-row eval set: name MRR@5 0.779 -> 0.823, name recall@5
+ * 0.906 -> 0.938, rank-1 22/32 -> 24/32, with the concept slice bit-identical
+ * (MRR@5 0.321, 7 rank-1) since no title contains a whole question.
+ */
+const TITLE_MATCH_RATIO = `(CAST(length(?2) AS REAL) / length(a.title))`;
 const TITLE_PHRASE_BOOST = `CASE
          WHEN ?2 != '' AND instr(lower(a.title), ?2) > 0
-         THEN ${TITLE_PHRASE_WEIGHT} * (CAST(length(?2) AS REAL) / length(a.title))
+         THEN ${TITLE_PHRASE_WEIGHT} * ${TITLE_MATCH_RATIO} * ${TITLE_MATCH_RATIO} * ${TITLE_MATCH_RATIO}
          ELSE 0
        END`;
 
@@ -717,4 +743,66 @@ function hoursSince(iso: string | null): number | null {
 /** Narrow the optional binding once, with a message that says what to do. */
 export function requireIndexDb(env: Env): D1Database | null {
   return env.ADDON_INDEX ?? null;
+}
+
+/**
+ * Rehydrate full hits for a list of uids, preserving the given order.
+ *
+ * Semantic retrieval returns uids and nothing else, on purpose: the vector
+ * store must never be the source of a title, a category or a link. Those come
+ * from here, under the same visibility rules `searchAddons` applies, so a
+ * fused candidate cannot smuggle in a library or a retired addon that keyword
+ * search would have hidden.
+ */
+export async function fetchHitsByUid(
+  db: D1Database,
+  uids: number[],
+  options: Pick<SearchOptions, "includeLibraries" | "includeDiscontinued"> = {},
+): Promise<AddonSearchHit[]> {
+  // D1 allows 100 bound parameters per query; stay well inside it.
+  const wanted = uids.slice(0, 50);
+  if (wanted.length === 0) return [];
+
+  const placeholders = wanted.map(() => "?").join(", ");
+  let rows: Array<SearchRow & { description: string }> = [];
+  try {
+    const result = await db
+      .prepare(
+        `SELECT uid, title, author, category_name, downloads, favorites, last_update,
+                file_info_uri, is_library, description, 0 AS score, '' AS snippet
+           FROM addons
+          WHERE uid IN (${placeholders})
+            AND removed = 0
+            ${options.includeLibraries ? "" : "AND is_library = 0"}
+            ${options.includeDiscontinued ? "" : `AND category_id != ${DISCONTINUED_CATEGORY_ID}`}`,
+      )
+      .bind(...wanted)
+      .all<SearchRow & { description: string }>();
+    rows = result.results ?? [];
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+
+  const byUid = new Map(rows.map((row) => [row.uid, row]));
+  return wanted
+    .map((uid) => byUid.get(uid))
+    .filter((row): row is SearchRow & { description: string } => row !== undefined)
+    .map((row) => ({
+      ...rowToHit(row),
+      // No MATCH ran, so there is no FTS snippet to take. The opening of the
+      // description is what the model needs to judge the candidate anyway.
+      snippet: describeBriefly(row.description),
+    }));
+}
+
+/** Roughly the length of an FTS snippet, cut on a word boundary. */
+const BRIEF_CHARS = 220;
+
+function describeBriefly(description: string): string {
+  const text = (description ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= BRIEF_CHARS) return text;
+  const cut = text.slice(0, BRIEF_CHARS);
+  const space = cut.lastIndexOf(" ");
+  return `${space > 40 ? cut.slice(0, space) : cut}…`;
 }

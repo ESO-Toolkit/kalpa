@@ -137,8 +137,10 @@ while (page < MAX_PAGES) {
 
   if (outcome.complete) {
     console.log(`\nDone. ${fetched} described, ${removed} removed, ${failed} failed in ${elapsed()}.`);
-    console.log("\nNext: set ADDON_INDEX_SYNC = \"enabled\" in wrangler.toml and redeploy");
-    console.log("to turn on the nightly delta.");
+    // Deliberately does NOT tell the operator to enable ADDON_INDEX_SYNC. The
+    // in-worker cron manages one page a day (MAX_DETAIL_BATCH = 12) and a real
+    // observed delta was 13, so it would fall behind on a quiet day and badly
+    // after a patch. .github/workflows/sync-addon-index.yml is the updater.
     process.exit(0);
   }
 

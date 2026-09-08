@@ -110,6 +110,9 @@ function parseArgs(argv) {
       case "--min-recall":
         opts.minRecall = Number(next());
         break;
+      case "--semantic":
+        // Read via the SEMANTIC const; listed here so the validator accepts it.
+        break;
       default:
         throw new Error(`unknown option: ${arg}`);
     }
@@ -151,8 +154,16 @@ function loadFixture(path) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Score the fused (BM25 + embedding) retrieval instead of pure BM25. */
+const SEMANTIC = process.argv.includes("--semantic");
+
 async function search(base, query, limit) {
-  const url = `${base}/addons/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+  // --semantic scores the FUSED retrieval that /ask feeds the model, rather
+  // than the pure-BM25 path the Discover search box uses. Both are worth
+  // measuring; they are different surfaces.
+  const url =
+    `${base}/addons/search?q=${encodeURIComponent(query)}&limit=${limit}` +
+    (SEMANTIC ? "&semantic=true" : "");
   // One retry on 429/5xx. The limiter is per-minute, so a flat 20s wait clears
   // a burst without turning a rate limit into a fake ranking regression.
   for (let attempt = 0; attempt < 2; attempt += 1) {

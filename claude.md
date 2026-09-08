@@ -220,6 +220,27 @@ limits) at ~10s per invocation. The Action loops the backfill to completion
 instead, reusing `scripts/build-addon-index.mjs` for its retry/backoff, and
 needs the `ADMIN_API_KEY` repo secret.
 
+**Semantic retrieval is ADDITIVE, and that distinction was measured.**
+`src/embeddings.ts` embeds the corpus with `@cf/baai/bge-small-en-v1.5` into a
+single int8 KV blob (~1.6MB at ~3000 rows, brute-forced in the worker — no
+Vectorize needed at this size), built by the paged `POST /admin/index/embed`.
+`/ask` appends up to `SEMANTIC_EXTRA` semantic-only candidates AFTER the
+keyword hits.
+
+It is appended, not interleaved, because reciprocal rank fusion was tried first
+and **made the slice it was meant to fix worse**: concept recall@20 fell
+0.732 -> 0.661, since a list capped at `CANDIDATE_COUNT` must evict BM25 hits
+from positions 10-20, and for natural-language questions those were the better
+ones. Appending cannot regress — every keyword candidate the model saw before,
+it still sees. Measured: concept recall 0.732 -> 0.750, name 0.969 -> 1.000.
+The gain is real but modest; embeddings were not the step change the vocabulary
+argument suggested.
+
+`/addons/search` stays pure BM25 and free. `?semantic=true` opts into the fused
+path and exists so the eval can score what `/ask` actually feeds the model —
+enabling it by default would put a metered embedding call behind every
+keystroke pause.
+
 **Search quality is measured, not argued.** `npm run eval:search` scores
 `test/fixtures/search-eval.json` (60 rows, 32 name lookups + 28 concept
 questions) and reports recall@20, recall@5 and MRR@5 split by kind. Baseline
