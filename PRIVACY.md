@@ -17,27 +17,43 @@ In accordance with the Elder Scrolls Online Terms of Service, users must be at l
 Kalpa keeps its own files in a per-user application-data directory, referred to
 below as **`{app data}`**. Its location depends on your operating system:
 
-| Platform | `{app data}` |
-|---|---|
-| Windows | `%APPDATA%\com.kalpa.desktop\` |
-| macOS | `~/Library/Application Support/com.kalpa.desktop/` |
-| Linux | `~/.local/share/com.kalpa.desktop/` (or `$XDG_DATA_HOME/com.kalpa.desktop/`) |
+| Platform | `{app data}`                                                                 |
+| -------- | ---------------------------------------------------------------------------- |
+| Windows  | `%APPDATA%\com.kalpa.desktop\`                                               |
+| macOS    | `~/Library/Application Support/com.kalpa.desktop/`                           |
+| Linux    | `~/.local/share/com.kalpa.desktop/` (or `$XDG_DATA_HOME/com.kalpa.desktop/`) |
 
-| Data | Location | Purpose |
-|------|----------|---------|
-| Addon metadata (ESOUI IDs, versions, tags) | `{AddOns folder}/kalpa.json` | Track installed addons |
-| User preferences (sort mode, theme, paths) | `{app data}/settings.json` | Remember your settings |
-| Addon profiles | `{AddOns folder}/kalpa-profiles.json` | Addon profile switching |
-| SavedVariables backups | `{ESO folder}/kalpa-backups/` | Backup/restore functionality |
-| File hash manifests | `{AddOns folder}/.kalpa-hashes/` | Detect user-modified files |
-| Manifest cache (SQLite) | `{app data}/manifest-cache.db` | Speed up addon scanning |
-| Upload history | `{app data}/upload-history.json` | Show past uploads in the uploader panel |
-| Auth tokens | OS credential store | Sign in to Pack Hub |
-| Upload session cookie | OS credential store | Direct upload to ESO Logs |
-| Approved folders | `{app data}/approved-roots.json` | Remember folders you picked yourself, so you are not asked again every launch |
-| Graphics stack manifest | `{app data}/client-managed.json` | Track which files Kalpa placed in your ESO client folder |
-| Graphics stack backups | `{app data}/client-backups/` | Restore whatever was there before a graphics stack change |
-| Graphics stack quarantine | `{app data}/client-quarantine/` | Hold files removed from the client folder instead of deleting them |
+| Data                                       | Location                              | Purpose                                                                       |
+| ------------------------------------------ | ------------------------------------- | ----------------------------------------------------------------------------- |
+| Addon metadata (ESOUI IDs, versions, tags) | `{AddOns folder}/kalpa.json`          | Track installed addons                                                        |
+| User preferences (sort mode, theme, paths) | `{app data}/settings.json`            | Remember your settings                                                        |
+| Addon profiles                             | `{AddOns folder}/kalpa-profiles.json` | Addon profile switching                                                       |
+| SavedVariables backups                     | `{ESO folder}/kalpa-backups/`         | Backup/restore functionality                                                  |
+| File hash manifests                        | `{AddOns folder}/.kalpa-hashes/`      | Detect user-modified files                                                    |
+| Manifest cache (SQLite)                    | `{app data}/manifest-cache.db`        | Speed up addon scanning                                                       |
+| Upload history                             | `{app data}/upload-history.json`      | Show past uploads in the uploader panel                                       |
+| Auth tokens                                | OS credential store                   | Sign in to Pack Hub                                                           |
+| Upload session cookie                      | OS credential store                   | Direct upload to ESO Logs                                                     |
+| Approved folders                           | `{app data}/approved-roots.json`      | Remember folders you picked yourself, so you are not asked again every launch |
+| Graphics stack manifest                    | `{app data}/client-managed.json`      | Track which files Kalpa placed in your ESO client folder                      |
+| Graphics stack backups                     | `{app data}/client-backups/`          | Restore whatever was there before a graphics stack change                     |
+| Graphics stack quarantine                  | `{app data}/client-quarantine/`       | Hold files removed from the client folder instead of deleting them            |
+
+**Asking a question in Discover sends that question off your machine.** The
+search box answers plain-language questions as well as names. When you ask
+one, the text you typed is sent to Kalpa's Pack Hub worker — only the
+question, with no account name, no addon list and no file paths. The worker
+searches its ESOUI addon index and passes your question, plus the matching
+addon descriptions, to Cloudflare Workers AI to write the answer.
+
+The answer is cached for seven days so a repeat question is free. The cache
+key is built from the words of your question — lowercased, de-duplicated and
+sorted, with punctuation removed — so those words are stored on the server
+for that week. Nothing ties them to you: no account, no IP address and no
+device identifier is part of the key or the stored value.
+
+Searching by name never reaches the model, and neither does anything else in
+Kalpa. If you would rather send nothing, search by name instead.
 
 **The graphics stack panel writes into your ESO game folder.** If you use it,
 Kalpa places shader files under `reshade-shaders/` in your client directory,
@@ -60,11 +76,11 @@ not a separate transmission — and is capped at the 200 most recent entries.
 cookie** (`wcl_session` for ESO Logs authentication) are stored in your
 operating system's credential store rather than in plaintext files:
 
-| Platform | Credential store |
-|---|---|
-| Windows | Credential Manager (encrypted with your Windows account credentials) |
-| macOS | Keychain |
-| Linux | Secret Service (GNOME Keyring / KWallet, via D-Bus) |
+| Platform | Credential store                                                     |
+| -------- | -------------------------------------------------------------------- |
+| Windows  | Credential Manager (encrypted with your Windows account credentials) |
+| macOS    | Keychain                                                             |
+| Linux    | Secret Service (GNOME Keyring / KWallet, via D-Bus)                  |
 
 On Linux systems with no Secret Service daemon running, credential storage is
 unavailable and Kalpa simply asks you to sign in again each launch — nothing is
@@ -85,20 +101,25 @@ No personal information, auth tokens, or machine identifiers are sent to ESOUI.
 The Pack Hub (`kalpa-pack-hub.eso-toolkit.workers.dev`) powers community addon collections. When you sign in and use Pack Hub features, the following data is transmitted:
 
 **When you create or edit a pack:**
+
 - Your ESO Logs display name and user ID (as the pack author)
 - Pack content: title, description, addon list (ESOUI IDs and names), tags
 
 **When you vote on a pack:**
+
 - Your ESO Logs user ID (to track your vote)
 
 **When you share a pack via share code:**
+
 - Your ESO Logs display name (visible to anyone with the share code)
 - Pack content (title, description, addon list)
 
 **When you install a pack (install count tracking):**
+
 - Your IP address is stored in a rate-limiting key for **1 hour** to prevent duplicate counting, then automatically deleted
 
 **When you export a `.esopack` file with settings:**
+
 - SavedVariables data is scrubbed of personal information (account names, character names, character IDs, and world names are replaced with placeholders) before export
 
 #### Published packs are also copied to the ESO Log Aggregator's database
@@ -161,7 +182,7 @@ When you upload a log using Kalpa's **direct (in-app) uploader** and that ESO Lo
 **Current limitations you should know about:**
 
 - Publishing is keyed to the ESO Logs report code and is **not tied to ESO Logs' anonymization** — if you upload a public/unlisted report, the identities of everyone in your group are included in the build evidence.
-- There is currently **no automatic deletion**: making the report private or deleting it on ESO Logs later does **not** automatically remove the stored build-evidence record. See *Your Rights* below for removal.
+- There is currently **no automatic deletion**: making the report private or deleting it on ESO Logs later does **not** automatically remove the stored build-evidence record. See _Your Rights_ below for removal.
 
 ### Data sent to GitHub
 
@@ -181,17 +202,17 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 
 ## Data Retention
 
-| Data | Retention |
-|------|-----------|
-| Published packs | Indefinite (until you delete them) |
-| Copies of published packs in the ESO Log Aggregator database | Deleted together with the pack |
-| Votes | Indefinite (until you remove your vote) |
-| Share codes | 7 days (auto-deleted) |
-| Install rate-limit keys (IP) | 1 hour (auto-deleted) |
-| Pack Hub dated daily backups | 90 days (auto-deleted) |
-| Pack Hub "latest" backup snapshot | Overwritten daily, no expiry; scrubbed of your data when you delete it |
-| Build-evidence records (ESO Log Aggregator) | Indefinite — no automatic deletion yet (see *Your Rights*) |
-| Local backups | Until you delete them manually |
+| Data                                                         | Retention                                                              |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Published packs                                              | Indefinite (until you delete them)                                     |
+| Copies of published packs in the ESO Log Aggregator database | Deleted together with the pack                                         |
+| Votes                                                        | Indefinite (until you remove your vote)                                |
+| Share codes                                                  | 7 days (auto-deleted)                                                  |
+| Install rate-limit keys (IP)                                 | 1 hour (auto-deleted)                                                  |
+| Pack Hub dated daily backups                                 | 90 days (auto-deleted)                                                 |
+| Pack Hub "latest" backup snapshot                            | Overwritten daily, no expiry; scrubbed of your data when you delete it |
+| Build-evidence records (ESO Log Aggregator)                  | Indefinite — no automatic deletion yet (see _Your Rights_)             |
+| Local backups                                                | Until you delete them manually                                         |
 
 ---
 
@@ -226,7 +247,7 @@ Two further limits worth stating plainly:
 
 ### Remove build-evidence records
 
-Build-evidence records published to the ESO Log Aggregator are keyed to the ESO Logs report code. In-app deletion is planned but not yet available; until then, to have a build-evidence record removed, contact us (see *Contact* below) with the report code. Note that build evidence is only ever published for reports you made **public or unlisted** on ESO Logs.
+Build-evidence records published to the ESO Log Aggregator are keyed to the ESO Logs report code. In-app deletion is planned but not yet available; until then, to have a build-evidence record removed, contact us (see _Contact_ below) with the report code. Note that build evidence is only ever published for reports you made **public or unlisted** on ESO Logs.
 
 ### Sign out
 
@@ -238,8 +259,8 @@ after sign-out.
 
 All local data (addon metadata, backups, profiles, cache, upload history) is
 stored on your computer. To remove it, uninstall the app and delete the
-`{app data}` directory for your platform — see the table under *Data stored on
-your computer* — along with the `kalpa-*` files and folders in your ESO AddOns
+`{app data}` directory for your platform — see the table under _Data stored on
+your computer_ — along with the `kalpa-*` files and folders in your ESO AddOns
 directory and the `kalpa-backups` folder in your ESO folder.
 
 On Windows, note that Kalpa's data lives in `%APPDATA%` (roaming), not
@@ -250,13 +271,14 @@ WebView2 browser cache.
 
 ## Third-Party Services
 
-| Service | Purpose | Their Privacy Policy |
-|---------|---------|---------------------|
-| ESOUI | Addon catalog and downloads | [esoui.com](https://www.esoui.com) |
-| ESO Logs | Authentication (OAuth) and log uploads | [esologs.com](https://www.esologs.com) |
-| ESO Log Aggregator (esotk.com) | Build-evidence sidecar for public/unlisted direct uploads; hosts the shared database that published Pack Hub packs are copied into | [esotk.com](https://esotk.com) |
-| Cloudflare | Pack Hub and ESO Log Aggregator hosting, rate limiting | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) |
-| GitHub | App update distribution; downloading shader packs you choose to install | [github.com/privacy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) |
+| Service                        | Purpose                                                                                                                            | Their Privacy Policy                                                      |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| ESOUI                          | Addon catalog and downloads                                                                                                        | [esoui.com](https://www.esoui.com)                                        |
+| ESO Logs                       | Authentication (OAuth) and log uploads                                                                                             | [esologs.com](https://www.esologs.com)                                    |
+| ESO Log Aggregator (esotk.com) | Build-evidence sidecar for public/unlisted direct uploads; hosts the shared database that published Pack Hub packs are copied into | [esotk.com](https://esotk.com)                                            |
+| Cloudflare                     | Pack Hub and ESO Log Aggregator hosting, rate limiting                                                                             | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) |
+| GitHub                         | App update distribution; downloading shader packs you choose to install                                                            |
+| Cloudflare Workers AI          | Writing the answer to a question you type into Discover                                                                            | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) | [github.com/privacy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) |
 
 ---
 
