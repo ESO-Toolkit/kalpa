@@ -368,7 +368,12 @@ fn copy_into_backup(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create the copy folder: {e}"))?;
     }
-    std::fs::copy(source, &destination).map_err(|e| format!("{e}"))?;
+    // `atomic_copy`, not `fs::copy`: the verify below reads the copy back
+    // through the page cache, so it proves the bytes were written and not that
+    // they are on disk. This copy is the only thing standing behind "Kalpa can
+    // put this back after a game update", which is a promise redeemed weeks
+    // later — long after any crash that would have lost an unsynced copy.
+    crate::atomic_file::atomic_copy(source, &destination).map_err(|e| format!("{e}"))?;
 
     let source_hash = crate::client_backup::hash_file(source)?;
     let copy_hash = crate::client_backup::hash_file(&destination)?;

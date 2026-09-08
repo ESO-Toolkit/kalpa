@@ -271,7 +271,14 @@ fn primary_may_hold_settings(path: &Path) -> bool {
 /// frontend's own `load` had, not less. [`ensure_loaded`] runs too, so a retry
 /// that does open the store still gets the taint guard rather than an
 /// unprotected empty cache.
-#[tauri::command]
+///
+/// `(async)` because both halves touch the disk: `ensure_open` reads
+/// `settings.json` to build the store, and `ensure_loaded`'s retry loop can
+/// spend up to nine `LOAD_BACKOFF` sleeps — 450 ms — waiting out a lock. A
+/// non-async `#[tauri::command]` runs on the main thread, so that would be a
+/// visibly frozen window. Nothing here is main-thread-affine: the store plugin
+/// is `Mutex`-guarded and `get_store` is a resource-table lookup.
+#[tauri::command(async)]
 pub fn ensure_settings_store(app: AppHandle) -> Result<bool, String> {
     ensure_open(&app);
     ensure_loaded(&app);
@@ -465,6 +472,25 @@ pub fn detach_on_exit<R: Runtime>(app: &AppHandle<R>) {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    /// A non-async `#[tauri::command]` runs on the main thread, and this one
+    /// reads `settings.json` and can sleep out a 450 ms retry loop before it
+    /// answers. Source-level because an attribute has no runtime seam to
+    /// assert on.
+    #[test]
+    fn ensure_settings_store_stays_off_the_main_thread() {
+        const SOURCE: &str = include_str!("settings_store.rs");
+        let at = SOURCE
+            .find("pub fn ensure_settings_store(")
+            .expect("ensure_settings_store is still defined here");
+        // `trim_end` because this file is CRLF and `include_str!` preserves it.
+        assert!(
+            SOURCE[..at]
+                .trim_end()
+                .ends_with("#[tauri::command(async)]"),
+            "ensure_settings_store must be #[tauri::command(async)]"
+        );
+    }
 
     /// Unique temp dir per test, no external crates and no `Date`/random.
     fn temp_dir(tag: &str) -> PathBuf {

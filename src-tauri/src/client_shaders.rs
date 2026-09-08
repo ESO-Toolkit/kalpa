@@ -329,8 +329,9 @@ pub fn read_library(client_dir: &Path) -> ShaderLibrary {
 /// common case: an archive is mostly not shaders.
 ///
 /// `entry` is the path inside the zip **after** the single top-level directory
-/// GitHub adds has been stripped.
-fn destination_for(entry: &str, layout: ArchiveLayout) -> Option<String> {
+/// GitHub adds has been stripped. `pack_id` names the pack being installed and
+/// is used only to namespace its licence files — see the `is_notice` branch.
+fn destination_for(entry: &str, layout: ArchiveLayout, pack_id: &str) -> Option<String> {
     let normalized = entry.replace('\\', "/");
     // A directory entry, or something that escaped the strip. Both are nothing
     // to write; the containment check below is what makes that safe rather than
@@ -358,25 +359,34 @@ fn destination_for(entry: &str, layout: ArchiveLayout) -> Option<String> {
         return None;
     }
 
-    let rest = match layout {
-        ArchiveLayout::FlatRoot => {
-            // Flat archives have no directories worth preserving; everything
-            // lands directly under Shaders/.
-            let name = normalized.rsplit('/').next()?;
-            format!("Shaders/{name}")
-        }
-        ArchiveLayout::ShadersAndTextures => {
-            if is_notice {
-                // Notices live at the archive root, which maps nowhere on its
-                // own. Park them beside the shaders they belong to.
+    // Notices live at the archive root, which maps nowhere on its own, so they
+    // are parked beside the shaders they belong to — under a folder named for
+    // the pack. Every fetchable pack ships a root licence file, so the bare
+    // `Shaders/LICENSE` this used to produce meant installing a second pack
+    // displaced the first pack's licence and replaced its manifest row: one
+    // licence survived, for whichever pack went in last. That is attribution by
+    // omission for the others, and MIT and GPL-2.0 both require the notice
+    // accompany the copy. Only this branch is namespaced; shader and texture
+    // destinations are unchanged, so no installed layout moves.
+    let rest = if is_notice {
+        let name = normalized.rsplit('/').next()?;
+        format!("Shaders/{pack_id}/{name}")
+    } else {
+        match layout {
+            ArchiveLayout::FlatRoot => {
+                // Flat archives have no directories worth preserving;
+                // everything lands directly under Shaders/.
                 let name = normalized.rsplit('/').next()?;
                 format!("Shaders/{name}")
-            } else if lower.starts_with("shaders/") || lower.starts_with("textures/") {
-                normalized.clone()
-            } else {
-                // Anything outside those two directories is not part of the
-                // shader tree — docs, CI config, screenshots.
-                return None;
+            }
+            ArchiveLayout::ShadersAndTextures => {
+                if lower.starts_with("shaders/") || lower.starts_with("textures/") {
+                    normalized.clone()
+                } else {
+                    // Anything outside those two directories is not part of the
+                    // shader tree — docs, CI config, screenshots.
+                    return None;
+                }
             }
         }
     };
@@ -422,15 +432,22 @@ fn archive_root(names: &[String]) -> Option<String> {
 /// Split out from the extraction so the mapping is testable without building a
 /// zip: this is where a path escape would happen, and it is worth being able to
 /// assert on it directly.
+///
+/// Each pair is `(archive entry name, destination relative to the client
+/// folder)`. The first element is the name **exactly as the zip spells it**,
+/// because `stage_entries` looks entries up with `ZipArchive::by_name`; the
+/// destination is the normalised, gated form.
 pub fn plan_destinations(
     entry_names: &[String],
     layout: ArchiveLayout,
+    pack_id: &str,
     client_root: &Path,
 ) -> Result<Vec<(String, String)>, String> {
     let root = archive_root(entry_names)
         .ok_or_else(|| "This archive does not have the single top-level folder a GitHub source archive has. Refusing to install it.".to_string())?;
 
     let mut out = Vec::new();
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
     for name in entry_names {
         let normalized = name.replace('\\', "/");
         let Some(rest) = strip_archive_root(&normalized, &root) else {
@@ -454,9 +471,22 @@ pub fn plan_destinations(
             ));
         }
 
-        let Some(destination) = destination_for(rest, layout) else {
+        let Some(destination) = destination_for(rest, layout, pack_id) else {
             continue;
         };
+
+        // Two entries mapping to one destination is refused here, by name.
+        // Both flattening branches can produce it — a repo with a root
+        // `LICENSE` and a `Shaders/sub/LICENSE`, say. Left to the extraction it
+        // still fails, but as "Source file is missing", because `place_one`
+        // *moves* the staged file and the second placement finds the staged
+        // path already consumed. That message describes Kalpa's staging
+        // directory rather than the archive's problem.
+        if !claimed.insert(destination.clone()) {
+            return Err(format!(
+                "Two files in this archive both map to {destination}. Kalpa will not install it."
+            ));
+        }
 
         // Both gates, on every entry, before it counts as a destination.
         //
@@ -470,7 +500,12 @@ pub fn plan_destinations(
         safe_relative_join(client_root, &destination)?;
         validate_placement(ManagedKind::Shader, &destination)?;
 
-        out.push((normalized, destination));
+        // The archive's own spelling, not `normalized`: `stage_entries` feeds
+        // this straight to `ZipArchive::by_name`, and an entry whose name
+        // really contains a backslash would miss under the rewritten form and
+        // fail the whole install with "Could not read ... from the archive".
+        // The destination stays normalised — it is the thing that gets written.
+        out.push((name.clone(), destination));
     }
 
     if out.is_empty() {
@@ -529,6 +564,26 @@ pub fn archive_url(owner: &str, repo: &str, sha: &str) -> String {
 /// multi-hundred-megabyte body from being streamed to disk at all.
 pub const MAX_PACK_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Refuse an extraction whose *decompressed* total passes this.
+///
+/// [`MAX_PACK_BYTES`] bounds only the compressed body, and a zip bomb is
+/// precisely a small body that is not small once expanded. The extension
+/// allowlist is no help either: a zero-filled `Shaders/bomb.fx` passes it and
+/// compresses to nothing. These repositories are fetched from third-party
+/// GitHub accounts at branch HEAD, so a compromised upstream is the reachable
+/// case, and `installer.rs` guards addon zips the same way for the same reason.
+/// 256 MB is two orders of magnitude above the largest real pack (~4 MB) and
+/// far below a disk-filling one.
+pub const MAX_PACK_EXTRACT_BYTES: u64 = 256 * 1024 * 1024;
+
+fn over_budget(max_extract_bytes: u64) -> String {
+    format!(
+        "Refusing to extract this pack: it expands past the {} MB limit. \
+         The archive is not what it claims to be.",
+        max_extract_bytes / (1024 * 1024)
+    )
+}
+
 // ── Placements ───────────────────────────────────────────────────────────
 
 /// Extract the planned entries into `staging` and return the placements.
@@ -537,11 +592,24 @@ pub const MAX_PACK_BYTES: u64 = 64 * 1024 * 1024;
 /// that reaches `apply_placements` must already exist as a real file, because
 /// that is what lets the batch be transactional. A failure part-way through
 /// extraction leaves the client folder untouched, and the staging directory is
-/// a `TempDir` the caller drops.
+/// a `TempDir` the caller drops — which is also why the
+/// [`MAX_PACK_EXTRACT_BYTES`] budget below needs no rollback of its own: the
+/// half-written bomb goes out with the temp dir.
 pub fn stage_entries(
     archive: &Path,
     plan: &[(String, String)],
     staging: &Path,
+) -> Result<Vec<Placement>, String> {
+    stage_entries_within(archive, plan, staging, MAX_PACK_EXTRACT_BYTES)
+}
+
+/// Inner form of [`stage_entries`] with the budget as a parameter, so a test
+/// can drive the zip-bomb refusal without writing a quarter of a gigabyte.
+fn stage_entries_within(
+    archive: &Path,
+    plan: &[(String, String)],
+    staging: &Path,
+    max_extract_bytes: u64,
 ) -> Result<Vec<Placement>, String> {
     let file = std::fs::File::open(archive)
         .map_err(|e| format!("Could not open the downloaded archive: {e}"))?;
@@ -549,12 +617,21 @@ pub fn stage_entries(
         .map_err(|e| format!("The download was not a valid zip archive: {e}"))?;
 
     let mut placements = Vec::new();
+    let mut total_extracted: u64 = 0;
     for (entry_name, destination) in plan {
         let mut entry = zip
             .by_name(entry_name)
             .map_err(|e| format!("Could not read {entry_name} from the archive: {e}"))?;
         if !entry.is_file() {
             continue;
+        }
+
+        // Declared size first, so a bomb is refused before a byte of it is
+        // written. Checked again against what `io::copy` actually produced
+        // below, because the declaration is the archive's claim, not a fact.
+        let declared_size = entry.size();
+        if total_extracted + declared_size > max_extract_bytes {
+            return Err(over_budget(max_extract_bytes));
         }
 
         // The staging path is derived from the *destination*, which has already
@@ -567,8 +644,21 @@ pub fn stage_entries(
         }
         let mut out = std::fs::File::create(&staged)
             .map_err(|e| format!("Could not write a staged file: {e}"))?;
-        std::io::copy(&mut entry, &mut out)
+        let bytes_written = std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("Could not extract {entry_name}: {e}"))?;
+
+        if bytes_written != declared_size {
+            return Err(format!(
+                "Could not extract {entry_name}: the archive declared {declared_size} bytes but \
+                 produced {bytes_written}; it may be corrupt."
+            ));
+        }
+        total_extracted += bytes_written;
+        // The declared size is the archive's claim; this is what it actually
+        // produced. A body that lies about its own sizes gets caught here.
+        if total_extracted > max_extract_bytes {
+            return Err(over_budget(max_extract_bytes));
+        }
 
         placements.push(Placement {
             relative_path: destination.clone(),
@@ -682,7 +772,7 @@ pub async fn install_shader_pack(
         };
 
         let client_root = root.path().to_path_buf();
-        let plan = plan_destinations(&entry_names, pack.layout, &client_root)?;
+        let plan = plan_destinations(&entry_names, pack.layout, pack.id, &client_root)?;
 
         let staging =
             tempfile::tempdir().map_err(|e| format!("Could not create a staging folder: {e}"))?;
@@ -752,6 +842,7 @@ mod tests {
         let plan = plan_destinations(
             &entries,
             ArchiveLayout::ShadersAndTextures,
+            "lumenite",
             Path::new("C:/game"),
         )
         .expect("plan");
@@ -760,8 +851,9 @@ mod tests {
         assert!(destinations.contains(&"reshade-shaders/Shaders/lumenite_Kernel.fx"));
         assert!(destinations.contains(&"reshade-shaders/Shaders/include/lumenite_Helpers.fxh"));
         assert!(destinations.contains(&"reshade-shaders/Textures/lumenite_bluenoise256.png"));
-        // The MIT attributions have to travel with the shaders.
-        assert!(destinations.contains(&"reshade-shaders/Shaders/NOTICE"));
+        // The MIT attributions have to travel with the shaders, under a folder
+        // named for the pack so the next pack's notice cannot displace them.
+        assert!(destinations.contains(&"reshade-shaders/Shaders/lumenite/NOTICE"));
         // A README is not a shader and not a notice.
         assert!(!destinations.iter().any(|d| d.ends_with("README.md")));
     }
@@ -776,8 +868,13 @@ mod tests {
             "ReshadeMotionEstimation-main/MotionVectors.fxh",
             "ReshadeMotionEstimation-main/README.md",
         ]);
-        let plan = plan_destinations(&entries, ArchiveLayout::FlatRoot, Path::new("C:/game"))
-            .expect("plan");
+        let plan = plan_destinations(
+            &entries,
+            ArchiveLayout::FlatRoot,
+            "drme",
+            Path::new("C:/game"),
+        )
+        .expect("plan");
         let destinations: Vec<&str> = plan.iter().map(|(_, d)| d.as_str()).collect();
 
         assert_eq!(
@@ -816,6 +913,7 @@ mod tests {
             let result = plan_destinations(
                 &entries,
                 ArchiveLayout::ShadersAndTextures,
+                "lumenite",
                 Path::new("C:/game"),
             );
             assert!(
@@ -832,7 +930,12 @@ mod tests {
     fn a_flat_archive_cannot_escape_either() {
         for evil in ["pack-main/../../evil.fx", "pack-main/C:evil.fx"] {
             let entries = names(&["pack-main/", evil]);
-            let result = plan_destinations(&entries, ArchiveLayout::FlatRoot, Path::new("C:/game"));
+            let result = plan_destinations(
+                &entries,
+                ArchiveLayout::FlatRoot,
+                "drme",
+                Path::new("C:/game"),
+            );
             assert!(
                 result.is_err(),
                 "{evil} should have been refused, got {result:?}"
@@ -856,6 +959,7 @@ mod tests {
         let plan = plan_destinations(
             &entries,
             ArchiveLayout::ShadersAndTextures,
+            "lumenite",
             Path::new("C:/game"),
         )
         .expect("plan");
@@ -872,6 +976,7 @@ mod tests {
         let result = plan_destinations(
             &entries,
             ArchiveLayout::ShadersAndTextures,
+            "lumenite",
             Path::new("C:/game"),
         );
         assert!(result.is_err(), "got {result:?}");
@@ -883,6 +988,7 @@ mod tests {
         let result = plan_destinations(
             &entries,
             ArchiveLayout::ShadersAndTextures,
+            "lumenite",
             Path::new("C:/game"),
         );
         assert!(result.is_err(), "got {result:?}");
@@ -930,6 +1036,189 @@ mod tests {
     fn archive_urls_stay_on_an_allowed_host() {
         let url = archive_url("umar-afzaal", "LumeniteFX", &"a".repeat(40));
         assert!(crate::client_download::host_allowed(&url), "{url}");
+    }
+
+    /// Every fetchable pack ships a root licence file, and they used to flatten
+    /// to the same `reshade-shaders/Shaders/LICENSE`. Installing a second pack
+    /// therefore displaced the first pack's licence and replaced its manifest
+    /// row, leaving one licence for whichever pack went in last — attribution
+    /// by omission for MIT and GPL-2.0 alike.
+    #[test]
+    fn two_packs_notices_do_not_land_on_each_other() {
+        let plan_for = |root: &str, pack_id: &str| {
+            let entries = vec![
+                format!("{root}/"),
+                format!("{root}/LICENSE"),
+                format!("{root}/Shaders/one.fx"),
+            ];
+            plan_destinations(
+                &entries,
+                ArchiveLayout::ShadersAndTextures,
+                pack_id,
+                Path::new("C:/game"),
+            )
+            .expect("plan")
+        };
+
+        let first = plan_for("vort_Shaders-main", "vort");
+        let second = plan_for("dh-reshade-shaders-master", "dh_uber");
+
+        let licence = |plan: &[(String, String)]| {
+            plan.iter()
+                .map(|(_, d)| d.clone())
+                .find(|d| d.ends_with("/LICENSE"))
+                .expect("a licence destination")
+        };
+        assert_eq!(licence(&first), "reshade-shaders/Shaders/vort/LICENSE");
+        assert_eq!(licence(&second), "reshade-shaders/Shaders/dh_uber/LICENSE");
+        assert_ne!(licence(&first), licence(&second));
+    }
+
+    /// The notice destination now contains the pack id as a path segment, so a
+    /// pack id has to *be* one. Nothing in the table breaks this today; this is
+    /// what stops the next entry doing so.
+    #[test]
+    fn every_pack_id_is_a_safe_single_path_segment() {
+        for pack in PACKS {
+            assert!(
+                !pack.id.is_empty()
+                    && pack
+                        .id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{} is used as a folder name under reshade-shaders/Shaders/",
+                pack.id
+            );
+        }
+    }
+
+    /// Two entries mapping to one destination must be refused by name. Left to
+    /// the extraction it fails anyway — `place_one` moves the staged file, so
+    /// the second placement reports "Source file is missing", which describes
+    /// Kalpa's staging directory rather than the archive's problem.
+    #[test]
+    fn an_archive_with_two_files_for_one_destination_is_refused() {
+        let entries = names(&[
+            "pack-main/",
+            "pack-main/LICENSE",
+            "pack-main/Shaders/sub/LICENSE",
+            "pack-main/Shaders/one.fx",
+        ]);
+        let error = plan_destinations(
+            &entries,
+            ArchiveLayout::ShadersAndTextures,
+            "lumenite",
+            Path::new("C:/game"),
+        )
+        .expect_err("two files for one destination must be refused");
+        assert!(
+            error.contains("reshade-shaders/Shaders/lumenite/LICENSE"),
+            "the error must name the destination: {error}"
+        );
+    }
+
+    /// `stage_entries` looks entries up with `ZipArchive::by_name`, so the plan
+    /// has to carry the archive's own spelling. Handing back the
+    /// backslash-normalised form meant an entry whose name really contains a
+    /// backslash missed the lookup and failed the whole install.
+    #[test]
+    fn the_plan_keeps_the_archives_own_entry_name_for_lookup() {
+        let entries = names(&["pack-main/", "pack-main\\Shaders\\one.fx"]);
+        let plan = plan_destinations(
+            &entries,
+            ArchiveLayout::ShadersAndTextures,
+            "lumenite",
+            Path::new("C:/game"),
+        )
+        .expect("plan");
+
+        assert_eq!(
+            plan,
+            vec![(
+                "pack-main\\Shaders\\one.fx".to_string(),
+                "reshade-shaders/Shaders/one.fx".to_string()
+            )]
+        );
+    }
+
+    /// Build a zip with the given entries, for the staging tests.
+    fn zip_with(dir: &Path, entries: &[(&str, &[u8])]) -> std::path::PathBuf {
+        use std::io::Write as _;
+        let path = dir.join("pack.zip");
+        let file = std::fs::File::create(&path).expect("create zip");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in entries {
+            archive.start_file(*name, options).expect("start file");
+            archive.write_all(body).expect("write entry");
+        }
+        archive.finish().expect("finish zip");
+        path
+    }
+
+    /// `MAX_PACK_BYTES` bounds only the *compressed* body, which is exactly what
+    /// a zip bomb is small in. The extension allowlist is no help either — a
+    /// zero-filled `Shaders/bomb.fx` passes it and compresses to nothing.
+    #[test]
+    fn extraction_refuses_an_archive_that_expands_past_its_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = zip_with(
+            tmp.path(),
+            &[
+                ("pack-main/Shaders/one.fx", &[0u8; 64]),
+                ("pack-main/Shaders/bomb.fx", &[0u8; 4096]),
+            ],
+        );
+        let plan = plan_destinations(
+            &names(&["pack-main/Shaders/one.fx", "pack-main/Shaders/bomb.fx"]),
+            ArchiveLayout::ShadersAndTextures,
+            "lumenite",
+            Path::new("C:/game"),
+        )
+        .expect("plan");
+
+        let staging = tempfile::tempdir().unwrap();
+        let error = stage_entries_within(&archive, &plan, staging.path(), 1024)
+            .expect_err("a pack that expands past the budget must be refused");
+        assert!(error.contains("expands past"), "{error}");
+
+        // The budget is a ceiling, not a ban: the same archive stages fine when
+        // it fits, so the guard cannot be passing for some other reason.
+        let staging = tempfile::tempdir().unwrap();
+        let placements = stage_entries_within(&archive, &plan, staging.path(), 1024 * 1024)
+            .expect("a real pack still installs");
+        assert_eq!(placements.len(), 2);
+    }
+
+    /// The budget counts the whole archive, not each entry: many small files
+    /// that add up past it are the same attack as one big one.
+    #[test]
+    fn the_extraction_budget_is_cumulative_across_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = zip_with(
+            tmp.path(),
+            &[
+                ("pack-main/Shaders/a.fx", &[0u8; 400]),
+                ("pack-main/Shaders/b.fx", &[0u8; 400]),
+                ("pack-main/Shaders/c.fx", &[0u8; 400]),
+            ],
+        );
+        let plan = plan_destinations(
+            &names(&[
+                "pack-main/Shaders/a.fx",
+                "pack-main/Shaders/b.fx",
+                "pack-main/Shaders/c.fx",
+            ]),
+            ArchiveLayout::ShadersAndTextures,
+            "lumenite",
+            Path::new("C:/game"),
+        )
+        .expect("plan");
+
+        let staging = tempfile::tempdir().unwrap();
+        let error = stage_entries_within(&archive, &plan, staging.path(), 1000)
+            .expect_err("three 400-byte files must not slip past a 1000-byte budget");
+        assert!(error.contains("expands past"), "{error}");
     }
 
     /// A link-only pack must never grow a fetchable URL by accident: the

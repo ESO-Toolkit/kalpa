@@ -608,17 +608,21 @@ function SlotActions({
 }) {
   // The drift card is scoped to the runtime files of its own slot. It used to
   // be handed every managed path from the overview as well as the per-layer
-  // list, so it mounted twice and fetched twice.
-  if (slot === "nr" || slot === "sr") {
-    const filePaths = stack.items
-      .filter((item) => ROLE_TO_SLOT[item.role] === slot)
-      .map((item) => item.file_name);
+  // list, so it mounted twice and fetched twice — only one slot pane is mounted
+  // at a time, so listing a third slot here does not bring that back.
+  //
+  // ReShade is that third slot. `d3dcompiler_47.dll` is drift-prone
+  // (`client_runtime.rs::is_drift_prone`) and `ROLE_TO_SLOT` files
+  // `shader_compiler` under "reshade", so without this branch half the drift
+  // feature was computed for a card that was never mounted anywhere it could
+  // be seen.
+  if (slot === "nr" || slot === "sr" || slot === "reshade") {
     return (
       <RuntimeDriftCard
         clientDir={stack.client_dir}
         stack={stack}
         mutation={mutation}
-        filePaths={filePaths}
+        slot={slot}
       />
     );
   }

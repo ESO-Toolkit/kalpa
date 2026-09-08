@@ -7,9 +7,12 @@
 //! supply-chain target — which is precisely how DLSS Swapper's community DLL
 //! manifest ended up serving malware in 2026.
 //!
-//! Nothing NVIDIA-authored is ever fetched here. DLSS and Neural Rendering
-//! runtimes are supplied by the user from their own machine and verified by
-//! Authenticode signer, because they are not licensed for redistribution.
+//! Nothing NVIDIA-authored is ever fetched here — those runtimes are not
+//! licensed for redistribution, so the DLSS and Neural Rendering files are the
+//! user's own, and the Authenticode gate in [`crate::client_signature`] is what
+//! will admit them when that path lands. It has not landed in this release:
+//! nothing yet installs a user-picked DLL, so read that as the shape of the
+//! feature rather than a check running today.
 //!
 //! The host allowlist is re-checked *after* redirects, mirroring
 //! `esoui::download_addon`: an allowed host that 302s to an arbitrary one must

@@ -406,8 +406,12 @@ pub fn validate_placement(kind: ManagedKind, relative_path: &str) -> Result<(), 
         ManagedKind::Addon => {
             at_root && matches!(extension.as_str(), "addon64" | "addon32" | "addon")
         }
-        // Kalpa never downloads these; they are user-supplied and signature
-        // checked. The name still has to look like an NGX runtime.
+        // Kalpa never downloads these. In this release the kind is only ever
+        // recorded for a runtime already sitting in the folder (adoption) or
+        // parked by the toggle — there is no path that places one from a file
+        // the user picked, and `client_signature` is the gate waiting for that
+        // path rather than a check running today. The name still has to look
+        // like an NGX runtime.
         ManagedKind::NvidiaRuntime => {
             at_root && file_name.starts_with("nvngx_") && extension == "dll"
         }
@@ -452,13 +456,12 @@ pub fn assert_contained(root: &Path, candidate: &Path) -> Result<(), String> {
 
 // ── Gates ────────────────────────────────────────────────────────────────
 
-/// Resolve the approved client root, or explain why there isn't one.
-pub fn require_allowed_client_path(
-    state: &tauri::State<'_, AllowedGameInstallPath>,
-    client_dir: &str,
-) -> Result<PathBuf, String> {
-    resolve_allowed_client_path(state, client_dir).map(|(configured, _, _)| configured)
-}
+// Deliberately no `require_allowed_client_path` here handing back a bare
+// `PathBuf`. The only way to name a client directory to the placement path is
+// [`begin_write`]'s [`ApprovedRoot`] token, and a convenience wrapper that
+// returned the path instead — skipping the sandbox refusal, the ESO-running
+// check and the generation the token re-asserts — is exactly what a future
+// caller would reach for.
 
 fn resolve_allowed_client_path(
     state: &AllowedGameInstallPath,
@@ -721,6 +724,13 @@ fn is_detected_client_path(canonical: &Path) -> bool {
 /// `detected` is a parameter so the gate can be tested without a machine that
 /// happens to have ESO installed, and so a test can pin the "not detected"
 /// case that the check exists to refuse.
+///
+/// The order matters beyond readability: [`set_game_install_path`] calls this
+/// under the approval mutex with `|_| false` precisely because the two gates
+/// above `detected` are pure memory comparisons, and only runs the real
+/// (registry / Steam VDF / filesystem) probe afterwards, off the lock and off
+/// the main thread. Moving `detected` first would put that probe back inside
+/// the mutex.
 fn approval_is_authorized(
     current: Option<&ApprovedClientPath>,
     picks: &NativeClientPicks,
@@ -748,8 +758,16 @@ fn approval_is_authorized(
 /// to `invoke` -- a compromised dependency in the webview, say -- could nominate
 /// any directory containing a file named `eso64.exe` as the write root without a
 /// dialog ever opening.
+///
+/// Async, and the detection fallback runs on the blocking pool, for the reason
+/// commit 917a116a gave for `detect_eso_clients` itself: it reads the registry,
+/// parses Steam's VDFs and probes the filesystem, and a non-async
+/// `#[tauri::command]` runs that on the **main** thread and freezes the window.
+/// Every client mutation calls this first, so the sync form stalled the first
+/// write click of every session — the two cheap gates only short-circuit it
+/// from the *second* click on, or when the folder came from Browse.
 #[tauri::command]
-pub fn set_game_install_path(
+pub async fn set_game_install_path(
     state: tauri::State<'_, AllowedGameInstallPath>,
     picks: tauri::State<'_, NativeClientPicks>,
     path: String,
@@ -757,20 +775,29 @@ pub fn set_game_install_path(
     let location = validate_client_dir(Path::new(&path))?;
     let canonical = canonical_client_dir(&location)?;
 
-    let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
-    if !approval_is_authorized(
-        guard.current.as_ref(),
-        &picks,
-        &canonical,
-        is_detected_client_path,
-    )? {
-        return Err(
-            "That client folder was not detected by Kalpa and has not been chosen in the \
-             file picker. Use Browse to locate eso64.exe first."
-                .to_string(),
-        );
+    // Two locks, not one held across the probe. Detection must not run inside
+    // the approval mutex: it is slow, and every other holder of that mutex --
+    // including the write-authority check `begin_write` installs -- would queue
+    // behind a registry walk.
+    let authorized_cheaply = {
+        let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+        approval_is_authorized(guard.current.as_ref(), &picks, &canonical, |_| false)?
+    };
+    if !authorized_cheaply {
+        let probe = canonical.clone();
+        let detected = tokio::task::spawn_blocking(move || is_detected_client_path(&probe))
+            .await
+            .map_err(|e| format!("Task failed: {e}"))?;
+        if !detected {
+            return Err(
+                "That client folder was not detected by Kalpa and has not been chosen in the \
+                 file picker. Use Browse to locate eso64.exe first."
+                    .to_string(),
+            );
+        }
     }
 
+    let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
     guard.generation = guard.generation.wrapping_add(1);
     guard.current = Some(ApprovedClientPath {
         configured: location.client_dir.clone(),
@@ -869,6 +896,43 @@ mod tests {
 
         assert!(
             approval_is_authorized(Some(&current), &picks, &candidate, |_| false).expect("gate")
+        );
+    }
+
+    /// `set_game_install_path` decides the two cheap gates under the approval
+    /// mutex and only then probes for a detected install, on the blocking pool.
+    /// That split is only sound while neither cheap gate needs the probe: if
+    /// `detected` were consulted first, the registry read and Steam VDF parse
+    /// would be back inside the lock, on the main thread, on every approval.
+    #[test]
+    fn the_cheap_gates_never_reach_for_the_detection_probe() {
+        let picks = NativeClientPicks::new();
+        let candidate = root();
+        let probed = std::cell::Cell::new(false);
+        let probe = |_: &Path| {
+            probed.set(true);
+            true
+        };
+
+        let current = ApprovedClientPath {
+            configured: candidate.clone(),
+            canonical: candidate.clone(),
+        };
+        assert!(approval_is_authorized(Some(&current), &picks, &candidate, probe).expect("gate"));
+        assert!(!probed.get(), "the already-approved folder needs no probe");
+
+        let picked = candidate.parent().expect("parent").join("client-picked");
+        picks.remember(picked.clone()).expect("remember");
+        assert!(approval_is_authorized(None, &picks, &picked, probe).expect("gate"));
+        assert!(!probed.get(), "a native pick needs no probe either");
+
+        // And the fallback really is the probe, so the split does not quietly
+        // drop the detected-install route.
+        let neither = candidate.parent().expect("parent").join("client-detected");
+        assert!(approval_is_authorized(None, &picks, &neither, probe).expect("gate"));
+        assert!(
+            probed.get(),
+            "a folder matching neither gate must be probed"
         );
     }
 

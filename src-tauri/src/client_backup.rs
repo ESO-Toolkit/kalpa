@@ -52,10 +52,12 @@
 //! The token proves approval and client-idle state held when it was minted;
 //! either can change while an operation waits.
 //!
-//! Restore is done by copying the backup *over* the placed file rather than
-//! deleting and then copying. A half-failed overwrite leaves wrong bytes; a
-//! failed copy after a successful delete leaves no file at all. Wrong is
-//! recoverable and visible, missing is a silent behaviour change.
+//! Restore *publishes* the backup over the placed file: the bytes are staged
+//! beside the destination and swapped in with a single rename, so the path
+//! holds Kalpa's complete file right up until it holds the original's complete
+//! file. Neither of the two ways an overwrite can fail applies — there is no
+//! moment with wrong bytes and no moment with no file at all — which makes an
+//! interrupted rollback simply re-runnable. See `restore_displaced`.
 //!
 //! # Why hashes matter
 //!
@@ -73,7 +75,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Serializes every manifest read-modify-write sequence in this module.
 ///
-/// `load_manifest_at` -> mutate -> `save_manifest_at` is not safe to run
+/// `load_manifest_for_update` -> mutate -> `save_manifest_at` is not safe to run
 /// concurrently: `atomic_write` only guarantees the *write* half is atomic,
 /// not the read-then-write sequence around it. Two concurrent callers (a
 /// double-clicked button, an install racing a preset switch) can both load
@@ -209,6 +211,10 @@ pub fn save_manifest(app: &tauri::AppHandle, manifest: &ManagedManifest) -> Resu
 }
 
 /// Inner form of [`load_manifest`], testable without an `AppHandle`.
+///
+/// Read-only consumers only. Anything that is about to save the result back
+/// must use [`load_manifest_for_update`] instead, or a manifest Kalpa merely
+/// failed to read gets replaced by the empty default it degraded to.
 pub fn load_manifest_at(path: &Path) -> ManagedManifest {
     let Ok(bytes) = fs::read(path) else {
         return ManagedManifest::default();
@@ -219,6 +225,47 @@ pub fn load_manifest_at(path: &Path) -> ManagedManifest {
             path.display()
         );
         ManagedManifest::default()
+    })
+}
+
+/// Load the manifest for a read-modify-write, refusing rather than guessing.
+///
+/// [`load_manifest_at`] degrades an unreadable manifest to "Kalpa does not
+/// believe it placed anything here", which is the safe direction for a *read* —
+/// nothing is deleted on that basis. It is the opposite of safe for a mutation,
+/// because every mutating path in this module is load -> mutate -> save: one
+/// transient `fs::read` failure (a Windows sharing violation while antivirus
+/// has the file open is exactly the class of failure this layer designs around)
+/// would save the empty default over the real manifest, and every original it
+/// no longer mentions would become a [`prune_unreferenced_backups`] candidate.
+///
+/// So an absent file is the only thing that reads as empty; anything else
+/// refuses the operation. The message names the path because a genuinely
+/// corrupt manifest is only recoverable by deleting it, and the user cannot do
+/// that without being told where it is.
+fn load_manifest_for_update(path: &Path) -> Result<ManagedManifest, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        // No manifest yet is the first-install case, not a failure.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManagedManifest::default())
+        }
+        Err(error) => {
+            return Err(format!(
+                "Kalpa could not read its client manifest at {} ({error}), so it refused to \
+                 change it. Nothing was altered. Try again once whatever is holding that file \
+                 has let go of it.",
+                path.display()
+            ))
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "Kalpa's client manifest at {} is unreadable ({error}), so it refused to change \
+             it. Nothing was altered. Deleting that file starts a fresh one, but Kalpa then \
+             no longer knows what it placed in your game folder.",
+            path.display()
+        )
     })
 }
 
@@ -592,18 +639,23 @@ fn record_incomplete_rollback_locked(
         .collect();
     let names = names.join(", ");
 
-    let mut manifest = load_manifest_at(manifest_path);
-    let bucket = manifest
-        .installs
-        .entry(install_key(client_root))
-        .or_default();
-    for entry in &entries {
-        bucket.retain(|existing| existing.relative_path != entry.relative_path);
-        bucket.push(entry.clone());
-    }
-    bucket.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-
-    let save = save_manifest_at(manifest_path, &manifest);
+    // Strict load, for the same reason as every other mutation here: writing
+    // the empty default over a manifest Kalpa only failed to *read* would
+    // unreference every other install's backups while trying to protect this
+    // one's. A refusal falls through to the warning below, which is exactly
+    // what a failed save already produces.
+    let save = load_manifest_for_update(manifest_path).and_then(|mut manifest| {
+        let bucket = manifest
+            .installs
+            .entry(install_key(client_root))
+            .or_default();
+        for entry in &entries {
+            bucket.retain(|existing| existing.relative_path != entry.relative_path);
+            bucket.push(entry.clone());
+        }
+        bucket.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        save_manifest_at(manifest_path, &manifest)
+    });
 
     let mut message = format!(
         "{cause}\n\nRollback was incomplete, so the client folder is in a mixed state. \
@@ -723,6 +775,15 @@ fn apply_placements_in_with_locked(
     root.reassert_write_allowed()?;
     let client_root = root.path();
 
+    // Loaded before the first byte moves, for two reasons. A manifest Kalpa
+    // cannot read must refuse the whole batch rather than be replaced by the
+    // empty default, and refusing here costs nothing to undo. And what this
+    // install already has recorded is what tells a re-install of a path apart
+    // from a first install — see `carry_displaced_backup_forward`.
+    let mut manifest = load_manifest_for_update(manifest_path)?;
+    let key = install_key(client_root);
+    let previous: Vec<ManagedFile> = manifest.installs.get(&key).cloned().unwrap_or_default();
+
     let mut placed: Vec<PlacedRecord> = Vec::new();
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut entries: Vec<ManagedFile> = Vec::new();
@@ -752,8 +813,10 @@ fn apply_placements_in_with_locked(
         }
     }
 
-    let mut manifest = load_manifest_at(manifest_path);
-    let key = install_key(client_root);
+    for entry in &mut entries {
+        carry_displaced_backup_forward(backup_root, &previous, entry);
+    }
+
     let bucket = manifest.installs.entry(key).or_default();
     for entry in &entries {
         bucket.retain(|existing| existing.relative_path != entry.relative_path);
@@ -829,6 +892,56 @@ fn place_one(
     })
 }
 
+/// Keep a re-installed path pointing at the *user's* original rather than at a
+/// backup of Kalpa's own previous copy.
+///
+/// Every shader pack maps into the same `reshade-shaders/Shaders/` tree, so
+/// reinstalling a pack — or installing a second pack that ships the same helper
+/// header — displaces a file Kalpa itself placed. `place_one` backs those bytes
+/// up like any other, and the new manifest entry replaces the old one. Left
+/// alone, that drops the only reference to the folder holding the user's true
+/// original: it becomes a [`prune_unreferenced_backups`] candidate, and until
+/// it is pruned a revert would put Kalpa's *old* copy back and call it the
+/// user's file.
+///
+/// So when the displaced bytes are exactly what Kalpa recorded placing there,
+/// the earlier entry's `displaced_backup` is carried forward — including when
+/// that is `None`, which is the case where there was never a user file at this
+/// path and revert must remove rather than restore. The fresh folder is then
+/// unreferenced, which is correct: it holds nothing but Kalpa's own bytes.
+///
+/// Any other bytes mean something else wrote the file after Kalpa did, and the
+/// fresh backup is the only copy of that, so it is kept. Adopted entries are
+/// left alone for the same reason — an adopted file *is* the user's.
+fn carry_displaced_backup_forward(
+    backup_root: &Path,
+    previous: &[ManagedFile],
+    entry: &mut ManagedFile,
+) {
+    let Some(fresh) = entry.displaced_backup.as_deref() else {
+        // Nothing was displaced, so there is nothing to attribute.
+        return;
+    };
+    let Some(earlier) = previous
+        .iter()
+        .find(|existing| existing.relative_path == entry.relative_path)
+    else {
+        return;
+    };
+    if earlier.origin != FileOrigin::Placed {
+        return;
+    }
+    let Ok(displaced) = backup_file_path(backup_root, fresh, &entry.relative_path) else {
+        return;
+    };
+    // A hash failure falls through to keeping the fresh id: an unverifiable
+    // displacement is treated as "not provably Kalpa's own", which errs towards
+    // keeping a copy of the bytes rather than dropping one.
+    if hash_file(&displaced).ok().as_deref() == Some(earlier.sha256.as_str()) {
+        entry.displaced_backup = earlier.displaced_backup.clone();
+    }
+}
+
 // ── Adoption ─────────────────────────────────────────────────────────────
 
 /// Record entries for files that were already in the client directory.
@@ -857,7 +970,7 @@ fn record_adopted_locked(
     client_root: &Path,
     entries: Vec<ManagedFile>,
 ) -> Result<(), String> {
-    let mut manifest = load_manifest_at(manifest_path);
+    let mut manifest = load_manifest_for_update(manifest_path)?;
     let bucket = manifest
         .installs
         .entry(install_key(client_root))
@@ -901,7 +1014,7 @@ pub struct ForgetOutcome {
 /// to reverse.
 pub fn forget_adopted(manifest_path: &Path, client_root: &Path) -> Result<ForgetOutcome, String> {
     let _guard = lock_manifest(manifest_path)?;
-    let mut manifest = load_manifest_at(manifest_path);
+    let mut manifest = load_manifest_for_update(manifest_path)?;
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get_mut(&key) else {
         return Ok(ForgetOutcome::default());
@@ -1026,7 +1139,7 @@ fn revert_placements_in_locked(
     root.reassert_write_allowed()?;
     let client_root = root.path();
 
-    let mut manifest = load_manifest_at(manifest_path);
+    let mut manifest = load_manifest_for_update(manifest_path)?;
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get(&key).cloned() else {
         // Nothing recorded for this install: there is nothing Kalpa may delete.
@@ -1597,7 +1710,7 @@ fn undo_ops(client_root: &Path, done: &[&FileOp]) -> Vec<String> {
 /// batch runs instead of persisting forever. Disk is the truth here exactly as
 /// it is in `client_toggle::plan_enable`; the flag is a cache of it.
 fn reconcile_parked_flags(manifest_path: &Path, client_root: &Path) -> Result<(), String> {
-    let mut manifest = load_manifest_at(manifest_path);
+    let mut manifest = load_manifest_for_update(manifest_path)?;
     let key = install_key(client_root);
     let Some(bucket) = manifest.installs.get_mut(&key) else {
         return Ok(());
@@ -1763,9 +1876,14 @@ pub fn run_managed_transaction_in<R>(
 /// normal case here rather than evidence of tampering — the backup is what
 /// makes the edit reversible instead.
 ///
-/// That backup folder is *unreferenced*, so [`prune_unreferenced_backups`]
-/// will eventually reclaim it. For a small config file rewritten repeatedly
-/// that is the right trade; nothing irreplaceable is stored this way.
+/// That backup folder is *unreferenced*, and nothing in the app restores from
+/// it: [`EditOutcome::backup_id`] reaches the UI only so the panel can say the
+/// previous file was kept, and no command takes an id and puts an `ini` back.
+/// It is reclaimed by [`prune_unreferenced_backups`], which runs from
+/// [`apply_placements`] and nowhere else — so on an install that never adds a
+/// shader pack these folders simply accumulate. For a small config file
+/// rewritten repeatedly that is the right trade; nothing irreplaceable is
+/// stored this way.
 pub fn edit_managed_file(
     app: &tauri::AppHandle,
     root: &ApprovedRoot,
@@ -1889,7 +2007,21 @@ fn edit_managed_file_with_locked(
     let backup_id = backup_existing_in(backup_root, client_root, relative_path)?;
     write(&target)?;
 
-    let mut manifest = load_manifest_at(manifest_path);
+    // The new bytes are already published, so a manifest Kalpa cannot read is
+    // handled exactly like the hash failure below: put the previous file back
+    // rather than record the edit against an empty default.
+    let mut manifest = match load_manifest_for_update(manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Err(rollback_edited_file(
+                backup_root,
+                &target,
+                relative_path,
+                backup_id.as_deref(),
+                error,
+            ));
+        }
+    };
     let mut manifest_updated = false;
     if let Some(entry) = manifest
         .installs
@@ -2455,6 +2587,85 @@ mod tests {
         assert!(load_manifest_at(&missing).installs.is_empty());
     }
 
+    /// The read side degrades to empty; the *mutating* side must not, or the
+    /// empty default gets saved over the real manifest and every original it no
+    /// longer mentions becomes a prune candidate.
+    #[test]
+    fn an_unreadable_manifest_refuses_the_placement_instead_of_replacing_it() {
+        const CORRUPT: &[u8] = b"{ this is not json at all ]";
+
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-own").expect("seed original");
+        h.apply(vec![h.placement("dxgi.dll", "kalpa-proxy")])
+            .expect("first placement");
+        let real = fs::read(&h.manifest).expect("read manifest");
+
+        fs::write(&h.manifest, CORRUPT).expect("corrupt the manifest");
+        let error = h
+            .apply(vec![h.placement("ReShade.ini", "[GENERAL]")])
+            .expect_err("a manifest Kalpa cannot read must not be replaced");
+        assert!(
+            error.contains("client-managed.json"),
+            "the refusal must name the manifest, since deleting it is the only way out: \
+             {error}"
+        );
+        assert_eq!(
+            fs::read(&h.manifest).expect("read manifest"),
+            CORRUPT,
+            "the unreadable manifest must be left exactly as it was found"
+        );
+        assert!(
+            !h.client.join("ReShade.ini").exists(),
+            "nothing may be placed on the strength of a manifest that could not be read"
+        );
+
+        // And the recorded install is still intact once the manifest is back.
+        fs::write(&h.manifest, &real).expect("restore manifest");
+        assert_eq!(h.entries().len(), 1);
+        assert!(h
+            .revert(&["dxgi.dll".to_string()])
+            .expect("revert")
+            .is_empty());
+        assert_eq!(h.read("dxgi.dll"), "the-users-own");
+    }
+
+    #[test]
+    fn an_unreadable_manifest_refuses_revert_rather_than_finding_nothing_to_revert() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-own").expect("seed original");
+        h.apply(vec![h.placement("dxgi.dll", "kalpa-proxy")])
+            .expect("placement");
+
+        fs::write(&h.manifest, b"{ this is not json at all ]").expect("corrupt the manifest");
+        let error = h
+            .revert(&["dxgi.dll".to_string()])
+            .expect_err("revert must refuse rather than report the path as unknown");
+        assert!(
+            error.contains("client-managed.json"),
+            "the refusal must name the manifest: {error}"
+        );
+        assert_eq!(
+            h.read("dxgi.dll"),
+            "kalpa-proxy",
+            "a refused revert must change nothing on disk"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_manifest_refuses_forget() {
+        let h = Harness::new();
+        h.apply(vec![h.placement("dxgi.dll", "kalpa-proxy")])
+            .expect("placement");
+
+        fs::write(&h.manifest, b"{ this is not json at all ]").expect("corrupt the manifest");
+        let error = forget_adopted(&h.manifest, &h.client)
+            .expect_err("forget must refuse rather than silently drop nothing");
+        assert!(
+            error.contains("client-managed.json"),
+            "the refusal must name the manifest: {error}"
+        );
+    }
+
     #[test]
     fn manifest_round_trips_through_an_atomic_save() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2495,8 +2706,67 @@ mod tests {
         assert_eq!(entries.len(), 1, "no duplicate rows: {entries:?}");
         assert_eq!(entries[0].sha256, sha256_of("v2"));
         assert!(
-            entries[0].displaced_backup.is_some(),
-            "the v1 file it overwrote must have been backed up"
+            entries[0].displaced_backup.is_none(),
+            "v1 was Kalpa's own file and there was never a user file at this path, so the \
+             entry must keep saying so rather than start pointing at a backup of Kalpa's \
+             own bytes: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn replacing_kalpas_own_file_keeps_pointing_at_the_users_original() {
+        let h = Harness::new();
+        // The user's own copy of a shader helper, there before Kalpa.
+        fs::write(h.client.join("ReShade.fxh"), "the-users-own").expect("seed original");
+
+        h.apply(vec![h.placement("ReShade.fxh", "pack-one")])
+            .expect("first pack");
+        let original = h.entries()[0]
+            .displaced_backup
+            .clone()
+            .expect("the user's file must have been backed up");
+
+        // A second pack ships the same helper, so what Kalpa displaces this
+        // time is Kalpa's own copy.
+        h.apply(vec![h.placement("ReShade.fxh", "pack-two")])
+            .expect("second pack");
+
+        let entries = h.entries();
+        assert_eq!(entries.len(), 1, "no duplicate rows: {entries:?}");
+        assert_eq!(
+            entries[0].displaced_backup.as_deref(),
+            Some(original.as_str()),
+            "the entry must still reference the user's original, not the backup of pack \
+             one's file: {entries:?}"
+        );
+
+        // Which is the whole point: revert gives the user their file back.
+        assert!(h
+            .revert(&["ReShade.fxh".to_string()])
+            .expect("revert")
+            .is_empty());
+        assert_eq!(h.read("ReShade.fxh"), "the-users-own");
+    }
+
+    #[test]
+    fn replacing_a_file_someone_else_edited_keeps_the_fresh_backup() {
+        let h = Harness::new();
+        h.apply(vec![h.placement("ReShade.fxh", "pack-one")])
+            .expect("first pack");
+        // Hand-edited after Kalpa placed it, so these bytes exist nowhere else.
+        fs::write(h.client.join("ReShade.fxh"), "hand-edited").expect("edit");
+
+        h.apply(vec![h.placement("ReShade.fxh", "pack-two")])
+            .expect("second pack");
+
+        let id = h.entries()[0]
+            .displaced_backup
+            .clone()
+            .expect("bytes Kalpa cannot account for must stay referenced");
+        let kept = backup_file_path(&h.backups, &id, "ReShade.fxh").expect("backup path");
+        assert_eq!(
+            fs::read_to_string(kept).expect("read backup"),
+            "hand-edited"
         );
     }
 

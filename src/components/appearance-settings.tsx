@@ -9,7 +9,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { getTauriErrorMessage, invokeResult, type TauriResult } from "@/lib/tauri";
 import { ambientAnimationsEnabled, setAmbientAnimations } from "@/lib/ambient-animations";
-import { FEATURES, type FeatureId } from "@/lib/features";
+import { FEATURES, visibleToolbar, type FeatureContext, type FeatureId } from "@/lib/features";
 import {
   TEXT_ZOOM_CHANGE_EVENT,
   TEXT_ZOOM_STOPS,
@@ -29,6 +29,16 @@ import { Kbd } from "@/components/ui/kbd";
 import type { Theme, ThemeColors } from "@/lib/theme-types";
 
 type Mode = { view: "gallery" } | { view: "editor"; draft: Theme; isNew: boolean };
+
+/**
+ * The context to assume when the caller supplies none.
+ *
+ * Both flags start false in App.tsx too and are filled in by startup probes, so
+ * "nothing detected yet" is the state the header itself is in at that moment —
+ * this list agreeing with it is the conservative answer, not a guess. Module
+ * scope keeps the identity stable across renders.
+ */
+const NOTHING_DETECTED: FeatureContext = { minionDetected: false, graphicsStackDetected: false };
 
 /** Validate + normalize a pasted theme JSON into a custom Theme, or null. */
 function parseImportedTheme(raw: string): Theme | null {
@@ -64,6 +74,7 @@ export function AppearanceSettings({
   onShowShortcuts,
   toolbarHidden,
   onToolbarHiddenChange,
+  featureCtx = NOTHING_DETECTED,
 }: {
   onShowShortcuts: () => void;
   toolbarHidden: FeatureId[];
@@ -75,6 +86,16 @@ export function AppearanceSettings({
    * this component never persists anything itself.
    */
   onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
+  /**
+   * The same detection snapshot the header consults, so this list can tell the
+   * truth about which rows are actually up there.
+   *
+   * `pinnableToToolbar` only says a feature MAY be pinned. Without this, the
+   * Toolbar list had no way to apply `pinnedWhen` and drew "Graphics stack" as
+   * a checked, pinned row on every machine — including the majority of ESO
+   * installs with no ReShade at all, where that header button does not exist.
+   */
+  featureCtx?: FeatureContext;
 }) {
   const {
     activeThemeId,
@@ -97,6 +118,14 @@ export function AppearanceSettings({
   const logUploadCheckInFlight = useRef(false);
 
   const pinnableFeatures = useMemo(() => FEATURES.filter((f) => f.pinnableToToolbar), []);
+  // What the header is showing RIGHT NOW, from the very function the header
+  // calls. Re-deriving "is it pinned?" from `pinnableToToolbar` alone is what
+  // let this list and the header disagree, so the `pinnedWhen` half is not
+  // reimplemented here — it is imported. Recomputed each render rather than
+  // memoised: it is one filter over a dozen registry entries, and `featureCtx`
+  // arrives as a fresh object from Settings, so a memo keyed on it would
+  // recompute anyway.
+  const pinnedNow = new Set(visibleToolbar(FEATURES, toolbarHidden, featureCtx).map((f) => f.id));
 
   const handleToolbarPinChange = async (id: FeatureId, pinned: boolean) => {
     if (!pinned && id === "log-upload") {
@@ -328,6 +357,13 @@ export function AppearanceSettings({
             {pinnableFeatures.map((feature, index) => {
               const Icon = feature.icon;
               const hidden = toolbarHidden.includes(feature.id);
+              // Pinned by preference, but not in the header: `pinnedWhen` has
+              // not been satisfied yet. The checkbox deliberately stays checked
+              // and live — this is a standing preference that takes effect the
+              // moment the feature earns its slot — so the row explains the gap
+              // instead of leaving a checked box pointing at a button that is
+              // not there.
+              const awaitingSlot = !hidden && !pinnedNow.has(feature.id);
               const rowBusy = feature.id === "log-upload" && checkingLogUpload;
               return (
                 <label
@@ -354,8 +390,17 @@ export function AppearanceSettings({
                         />
                       )}
                       {!rowBusy && hidden && <InfoPill color="muted">In Settings › Tools</InfoPill>}
+                      {!rowBusy && awaitingSlot && (
+                        <InfoPill color="muted">Not in the header yet</InfoPill>
+                      )}
                     </div>
                     <p className="text-xs text-muted-foreground">{feature.description}</p>
+                    {awaitingSlot && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        It joins the header once Kalpa detects the setup it manages. Until then it
+                        lives in Settings › Tools, and this choice applies as soon as it appears.
+                      </p>
+                    )}
                   </div>
                 </label>
               );

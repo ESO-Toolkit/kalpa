@@ -129,7 +129,13 @@ pub struct TogglePlan {
 ///    name. Park first — the copy needs the name to be free.
 /// 2. The injector, parked last, so a failure part-way through leaves a folder
 ///    whose injector is still the thing loading it rather than a half-stock mix.
-/// 3. One [`ToggleOpKind::LeaveInPlace`] line per remaining managed file.
+/// 3. One [`ToggleOpKind::LeaveInPlace`] line per remaining managed file —
+///    except shader files, which get a single collapsed line for the lot.
+///    `apply_placements` records one manifest row per placed file, so one
+///    installed shader pack is hundreds of `.fx`/`.fxh`/`.png` rows, and the
+///    confirmation renders every operation with the button below them. Listing
+///    them individually pushed "Confirm switch off" off the end of a list that
+///    said the same thing hundreds of times.
 ///
 /// ## Enable
 ///
@@ -242,6 +248,8 @@ fn plan_disable(
         );
     }
 
+    let mut shaders_left_in_place = 0usize;
+
     for entry in managed {
         // The folder decides, not the flag. A record saying "parked" whose
         // `.kalpa-off` file is not there is stale — most often because the user
@@ -278,15 +286,22 @@ fn plan_disable(
 
         let must_go_stock = role_of(stack, &entry.relative_path).is_some_and(game_loads_itself);
         if !must_go_stock {
-            operations.push(PlannedOp {
-                kind: ToggleOpKind::LeaveInPlace,
-                file_name: entry.relative_path.clone(),
-                partner: None,
-                summary: format!("Leave {} in place", entry.relative_path),
-                detail: "Nothing loads this file once the injector is parked, so it can stay \
-                         in the folder, switched off along with the rest of the stack."
-                    .to_string(),
-            });
+            // Shader files are counted, not listed. A pack is hundreds of
+            // manifest rows that all say the same inert thing, and enumerating
+            // them buries the confirm button under a wall of identical lines.
+            if entry.kind == ManagedKind::Shader {
+                shaders_left_in_place += 1;
+            } else {
+                operations.push(PlannedOp {
+                    kind: ToggleOpKind::LeaveInPlace,
+                    file_name: entry.relative_path.clone(),
+                    partner: None,
+                    summary: format!("Leave {} in place", entry.relative_path),
+                    detail: "Nothing loads this file once the injector is parked, so it can \
+                             stay in the folder, switched off along with the rest of the stack."
+                        .to_string(),
+                });
+            }
             continue;
         }
 
@@ -338,6 +353,27 @@ fn plan_disable(
                 ));
             }
         }
+    }
+
+    // One line for the whole shader tree. `LeaveInPlace` produces no `FileOp`,
+    // so collapsing changes nothing about what runs -- including the
+    // "nothing to switch off" check in `plan_toggle`, which asks whether every
+    // operation is a `LeaveInPlace` and gets the same answer either way.
+    if shaders_left_in_place > 0 {
+        let noun = if shaders_left_in_place == 1 {
+            "shader file"
+        } else {
+            "shader files"
+        };
+        operations.push(PlannedOp {
+            kind: ToggleOpKind::LeaveInPlace,
+            file_name: "reshade-shaders".to_string(),
+            partner: None,
+            summary: format!("Leave {shaders_left_in_place} {noun} in place"),
+            detail: "Nothing loads these once the injector is parked, so they can stay in the \
+                     folder, switched off along with the rest of the stack."
+                .to_string(),
+        });
     }
 
     // Parked last: a failure part-way through this batch leaves the folder
@@ -929,6 +965,88 @@ mod tests {
                 .unwrap_or_else(|| panic!("no operation for {name}"));
             assert_eq!(op.kind, ToggleOpKind::LeaveInPlace, "{name}");
         }
+    }
+
+    /// One installed shader pack is hundreds of manifest rows, and the switch-off
+    /// confirmation renders every operation with the confirm button underneath.
+    /// Enumerating them made the plan unreadable, so they collapse to one line.
+    #[test]
+    fn a_shader_pack_collapses_to_one_line_in_the_switch_off_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+
+        let mut managed = managed_stack();
+        for name in [
+            "reshade-shaders/Shaders/lumenite_Kernel.fx",
+            "reshade-shaders/Shaders/include/lumenite_Helpers.fxh",
+            "reshade-shaders/Textures/lumenite_bluenoise256.png",
+            "reshade-shaders/Shaders/lumenite/NOTICE",
+        ] {
+            managed.push(managed_file(name, ManagedKind::Shader, None, false));
+        }
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        assert!(
+            !plan
+                .operations
+                .iter()
+                .any(|op| op.file_name.starts_with("reshade-shaders/")),
+            "no individual shader file may get its own line: {:?}",
+            plan.operations
+        );
+        let collapsed: Vec<&PlannedOp> = plan
+            .operations
+            .iter()
+            .filter(|op| op.file_name == "reshade-shaders")
+            .collect();
+        assert_eq!(collapsed.len(), 1, "{:?}", plan.operations);
+        assert_eq!(collapsed[0].kind, ToggleOpKind::LeaveInPlace);
+        assert_eq!(collapsed[0].summary, "Leave 4 shader files in place");
+
+        // Collapsing is presentation only: the batch that actually runs is the
+        // same one it was before the shader rows existed.
+        assert_eq!(
+            to_file_ops(&plan).expect("plan is complete"),
+            to_file_ops(&plan_toggle(&stack, &managed_stack(), &stack.client_dir))
+                .expect("plan is complete"),
+        );
+
+        // Still the injector last, and still after the collapsed line.
+        let last_non_leave = plan
+            .operations
+            .iter()
+            .rev()
+            .find(|op| op.kind != ToggleOpKind::LeaveInPlace)
+            .expect("some operation");
+        assert_eq!(last_non_leave.file_name, "dxgi.dll");
+    }
+
+    /// The collapse still has to read as English for the one-file case a
+    /// hand-installed shader produces.
+    #[test]
+    fn one_shader_file_collapses_to_a_singular_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        real_install(tmp.path());
+        let stack = inspect_stack(tmp.path());
+
+        let mut managed = managed_stack();
+        managed.push(managed_file(
+            "reshade-shaders/Shaders/lumenite_Kernel.fx",
+            ManagedKind::Shader,
+            None,
+            false,
+        ));
+
+        let plan = plan_toggle(&stack, &managed, &stack.client_dir);
+        let collapsed = plan
+            .operations
+            .iter()
+            .find(|op| op.file_name == "reshade-shaders")
+            .expect("the collapsed shader line");
+        assert_eq!(collapsed.summary, "Leave 1 shader file in place");
     }
 
     #[test]

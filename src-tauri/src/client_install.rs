@@ -81,8 +81,13 @@ fn find_client_exe(dir: &Path) -> Option<PathBuf> {
 #[allow(dead_code)]
 fn location_for_dir(dir: &Path, source: ClientSource) -> Option<EsoClientLocation> {
     let exe_path = find_client_exe(dir)?;
+    // Publish the same canonical form `validate_client_dir` does: the frontend
+    // compares this `client_dir` against the one `inspect_client_stack` returns,
+    // and a raw path there makes every stack write look stale and silently no-op.
+    let client_dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let exe_path = dunce::canonicalize(&exe_path).unwrap_or(exe_path);
     Some(EsoClientLocation {
-        client_dir: dir.to_path_buf(),
+        client_dir,
         exe_path,
         source,
     })

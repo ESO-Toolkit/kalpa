@@ -774,7 +774,12 @@ function App() {
       const stack = await invokeResult<ClientStack>("inspect_client_stack", {
         clientDir: first.client_dir,
       });
-      if (stack.ok) {
+      // Same guard, same reason as the one seven lines up — this one was
+      // missed. `stack.data` is typed non-nullable, so TypeScript says nothing,
+      // and a null resolution would throw inside this un-`catch`ed async
+      // `.then`: an unhandled rejection whose only visible symptom is a toolbar
+      // slot that silently never appears.
+      if (stack.ok && stack.data) {
         setGraphicsStackDetected(!stack.data.is_empty);
       }
     });
