@@ -256,7 +256,12 @@ export function alsoConsidered(
     .filter((hit) => !hit.semantic)
     .slice(0, ALSO_CONSIDERED_LIMIT - semantic.length);
 
-  return [...keyword, ...semantic].map((hit) => toRecommendation(hit, ""));
+  // Semantic FIRST. These are the finds keyword search could not make at all —
+  // "shows when I am in combat" cannot lexically reach "Fighting Display", which
+  // is precisely why the embedding index exists. Ordering them behind keyword
+  // hits the user could have found by typing buried the distinctive result at
+  // position 7 of a collapsed list.
+  return [...semantic, ...keyword].map((hit) => toRecommendation(hit, ""));
 }
 
 /**
@@ -465,9 +470,25 @@ export async function retrieveCandidates(
 
 export type AskFailure = "no-index" | "empty-question" | "question-too-long";
 
+/**
+ * Options for a single ask.
+ *
+ * `bypassCache` is admin-only at the route layer. It exists for the eval
+ * harness: `/ask` caches for seven days, so a second eval run would score last
+ * week's answers and measure nothing. It is deliberately NOT a public flag —
+ * bypassing the cache forces a model call, which is exactly how the daily
+ * neuron budget gets burned by a loop of near-identical questions.
+ */
+export interface AskOptions {
+  /** Skip the cache READ, and skip the cache WRITE. Both halves matter: an
+   *  eval run must not populate the cache that real users are served from. */
+  bypassCache?: boolean;
+}
+
 export async function answerQuestion(
   env: Env,
   question: string,
+  options: AskOptions = {},
 ): Promise<{ ok: true; response: AskResponse } | { ok: false; reason: AskFailure }> {
   const db = env.ADDON_INDEX;
   if (!db) return { ok: false, reason: "no-index" };
@@ -477,11 +498,13 @@ export async function answerQuestion(
   if (trimmed.length > MAX_QUESTION_LENGTH) return { ok: false, reason: "question-too-long" };
 
   const cacheKey = cacheKeyFor(trimmed);
-  try {
-    const cached = await env.ESO_PACKS.get(cacheKey, "json");
-    if (cached) return { ok: true, response: { ...(cached as AskResponse), cached: true } };
-  } catch {
-    // Cache read failures are not answer failures.
+  if (!options.bypassCache) {
+    try {
+      const cached = await env.ESO_PACKS.get(cacheKey, "json");
+      if (cached) return { ok: true, response: { ...(cached as AskResponse), cached: true } };
+    } catch {
+      // Cache read failures are not answer failures.
+    }
   }
 
   const hits = await retrieveCandidates(env, db, trimmed);
@@ -536,7 +559,12 @@ export async function answerQuestion(
 
   // Only cache a real answer. Caching a degraded one would pin a temporary
   // outage in place for a week.
-  if (!response.degraded) {
+  //
+  // A bypassed answer is not written back either. The eval asks every fixture
+  // question in a burst; writing those would let a measurement run seed the
+  // cache that real users read from for the next seven days, so a harness bug
+  // (or a bad model day) would become everyone's answer.
+  if (!response.degraded && !options.bypassCache) {
     try {
       await env.ESO_PACKS.put(cacheKey, JSON.stringify(response), {
         expirationTtl: CACHE_TTL_SECONDS,

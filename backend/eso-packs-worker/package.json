@@ -9,7 +9,8 @@
     "check:version-policy": "node scripts/check-version-policy.mjs",
     "test": "vitest run",
     "index:build": "node scripts/build-addon-index.mjs",
-    "eval:search": "node scripts/eval-search.mjs"
+    "eval:search": "node scripts/eval-search.mjs",
+    "eval:ask": "node scripts/eval-ask.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

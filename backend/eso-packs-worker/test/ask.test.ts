@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   alsoConsidered,
@@ -16,7 +17,8 @@ import {
   quantise,
   resetVectorCache,
 } from "../src/embeddings";
-import type { AddonSearchHit, Env } from "../src/types";
+import worker from "../src/index";
+import type { AddonSearchHit, AskResponse, Env } from "../src/types";
 
 const testEnv = env as unknown as Env;
 
@@ -71,6 +73,13 @@ function envWithAi(payload: unknown, overrides: Partial<Env> = {}): Env {
     ...overrides,
   };
 }
+
+/** A well-formed model reply picking the first candidate. */
+const MODEL_ANSWER = {
+  answer: "Yes.",
+  no_good_match: false,
+  recommendations: [{ candidate: "C1", reason: "fits" }],
+};
 
 beforeEach(async () => {
   await ensureSchema(db());
@@ -584,11 +593,13 @@ describe("alsoConsidered", () => {
     expect(out.map((r) => r.esoui_id)).toContain(999);
   });
 
-  it("still fills the remaining slots with keyword hits, in order", () => {
+  it("puts semantic finds first, then fills with keyword hits in order", () => {
     const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
     expect(out).toHaveLength(8);
-    // 7 keyword (2..8) + the single semantic extra.
-    expect(out.slice(0, 7).map((r) => r.esoui_id)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    // The semantic-only match leads: it is the one keyword search could not
+    // find, so burying it behind hits the user could have typed is backwards.
+    expect(out[0].esoui_id).toBe(999);
+    expect(out.slice(1).map((r) => r.esoui_id)).toEqual([2, 3, 4, 5, 6, 7, 8]);
   });
 
   it("gives every slot to keyword hits when there are no semantic extras", () => {
@@ -601,5 +612,118 @@ describe("alsoConsidered", () => {
   it("omits anything the model already picked", () => {
     const out = alsoConsidered(fused, [{ esoui_id: 999 }]);
     expect(out.map((r) => r.esoui_id)).not.toContain(999);
+  });
+});
+
+describe("admin cache bypass", () => {
+  it("skips the cache read so an eval re-run measures fresh answers", async () => {
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi(MODEL_ANSWER);
+
+    await answerQuestion(e, "in combat indicator");
+    const second = await answerQuestion(e, "in combat indicator", { bypassCache: true });
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.response.cached).toBe(false);
+    // The whole point: the model ran again rather than replaying last week.
+    expect(e.AI!.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not write a bypassed answer back into the cache", async () => {
+    // An eval run must not populate the cache real users are served from.
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi(MODEL_ANSWER);
+
+    await answerQuestion(e, "in combat indicator", { bypassCache: true });
+    expect(await testEnv.ESO_PACKS.get(cacheKeyFor("in combat indicator"))).toBeNull();
+
+    // And a subsequent normal ask is therefore still a miss, not a hit.
+    const normal = await answerQuestion(e, "in combat indicator");
+    expect(normal.ok).toBe(true);
+    if (!normal.ok) return;
+    expect(normal.response.cached).toBe(false);
+  });
+
+  it("still respects the daily budget when bypassing", async () => {
+    // A bypass that ignored the budget could exhaust the free allocation in
+    // one eval run.
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi(MODEL_ANSWER, { ASK_DAILY_BUDGET: "1" });
+
+    await answerQuestion(e, "in combat indicator", { bypassCache: true });
+    const second = await answerQuestion(e, "show me a combat flag please", {
+      bypassCache: true,
+    });
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.response.degraded).toBe(true);
+    expect(e.AI!.run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST /ask no_cache gating", () => {
+  const BASE = "https://kalpa-pack-hub.eso-toolkit.workers.dev";
+
+  function askRequest(question: string, opts: { noCache?: boolean; key?: string } = {}) {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (opts.key) headers["X-API-Key"] = opts.key;
+    return new Request(`${BASE}/ask`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(
+        opts.noCache ? { question, no_cache: true } : { question },
+      ),
+    });
+  }
+
+  async function ask(
+    e: Env,
+    question: string,
+    opts: { noCache?: boolean; key?: string } = {},
+  ): Promise<AskResponse> {
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(askRequest(question, opts), e, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(200);
+    return (await res.json()) as AskResponse;
+  }
+
+  it("ignores no_cache from an unauthenticated caller", async () => {
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi(MODEL_ANSWER);
+
+    await ask(e, "in combat indicator");
+    // Anonymous no_cache must not buy a model call — that is the budget hole.
+    const second = await ask(e, "in combat indicator", { noCache: true });
+    expect(second.cached).toBe(true);
+    expect(e.AI!.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("honours no_cache from an admin caller", async () => {
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi(MODEL_ANSWER);
+
+    await ask(e, "in combat indicator");
+    const second = await ask(e, "in combat indicator", {
+      noCache: true,
+      key: "test-api-key",
+    });
+    expect(second.cached).toBe(false);
+    expect(e.AI!.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores no_cache carrying the wrong key", async () => {
+    await seed(1543, "CombatIndicator", "Shows when you are in combat.");
+    const e = envWithAi(MODEL_ANSWER);
+
+    await ask(e, "in combat indicator");
+    const second = await ask(e, "in combat indicator", {
+      noCache: true,
+      key: "not-the-key",
+    });
+    expect(second.cached).toBe(true);
+    expect(e.AI!.run).toHaveBeenCalledTimes(1);
   });
 });

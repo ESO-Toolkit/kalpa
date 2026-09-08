@@ -1926,7 +1926,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   if (method === "POST" && pathname === "/ask") {
-    return handleAsk(request, env);
+    // The only privileged thing about /ask is the `no_cache` bypass, and the
+    // decision is made here with the same guard the /admin/index/* routes use.
+    // The handler stays credential-free.
+    return handleAsk(request, env, requireAuth(request, env));
   }
 
   // Index maintenance is admin-only: a crawl page makes dozens of outbound
