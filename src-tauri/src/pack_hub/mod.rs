@@ -19,5 +19,9 @@
 //!
 //! Module layout:
 //! * [`commands`] — Tauri command handlers, HTTP clients, and IPC types.
+//! * [`addon_search`] — client for the worker's ESOUI full-text addon index,
+//!   which backs Discover search and falls back to `crate::esoui` when the
+//!   index cannot answer.
 
+pub mod addon_search;
 pub mod commands;

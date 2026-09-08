@@ -158,6 +158,116 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed s
 - **Backup**: Daily cron at midnight UTC snapshots pack index to `backup:YYYY-MM-DD` keys (90-day TTL)
 - **CI**: `.github/workflows/deploy-worker.yml` — auto-deploys on push to main, with typecheck + name guard + health check
 
+### Addon index (`/addons/*`)
+
+The worker also owns a full-text index of the ESOUI catalogue, in a **separate**
+D1 database (binding `ADDON_INDEX`, database `kalpa-addon-index`). It backs
+Discover's search box, which previously matched addon _titles_ only because the
+bulk filelist API carries no descriptions.
+
+- `src/addon-index.ts` — D1 schema, FTS5 table, BM25 search. `expandIdentifier`
+  splits CamelCase titles ("CombatIndicator" -> "Combat Indicator") because
+  FTS5 tokenises the glued form as one token and would otherwise never match a
+  spaced query against a title.
+- `src/crawl.ts` — the ESOUI sync. `syncFilelist` is one bulk request;
+  `crawlDetails` fetches `filedetails/{id}` only for entries whose `lastUpdate`
+  moved.
+- `src/addon-routes.ts` — `GET /addons/search`, `GET /addons/stats`, and the
+  admin-only `POST /admin/index/sync`, `POST /admin/index/backfill` and
+  `POST /admin/index/reprocess`.
+
+`stripMarkup` is pure over its input, but what gets **stored** is its output —
+so adding a rule leaves every existing row contaminated. `reprocess` re-applies
+the current pipeline to stored text in place, with no upstream traffic. Reach
+for it after any text-pipeline change rather than re-crawling ESOUI to work
+around our own parser. Run the crawl with `npm run index:build` (needs
+`ADMIN_API_KEY`), and **drive it against the deployed worker, not
+`wrangler dev --remote`** — the remote preview session dies after ~20 minutes
+and returns Cloudflare HTML error pages mid-run.
+
+Two upstream quirks the crawl exists to absorb: `categorylist.json` returns
+`id` as a **string** while `filelist.json` sends a number (a `typeof` check
+here silently blanked every category), and ESOUI descriptions carry BBCode
+whose attribute is often a full URL, so the tag pattern cannot be
+length-capped tightly.
+
+**Category 157, "Discontinued & Outdated", is excluded by default** — it is
+~980 of ~4170 addons. Offering a retired addon as the answer to "is there an
+addon that…" reads as a live recommendation, which is worse than no answer.
+Pass `?discontinued=true` to include them.
+
+D1's limits shape the write path and are easy to reintroduce: **100 bound
+parameters per query** and **1000 queries per Worker invocation**. Metadata is
+therefore written in multi-row statements via `upsertMetaBatch`, and the sync
+tombstones with `sweepUnseen` (an `indexed_at < runStart` comparison) rather
+than an id list. One statement per addon means ~4000 queries and fails.
+
+`detail_stale` is the FTS rebuild trigger, and only `applyDetail` ever writes
+an `addons_fts` row. Anything that invalidates the indexed text — a moved
+`last_update`, a changed `category_name`, or **un-tombstoning** — has to
+re-arm it, or the addons table and the search index quietly disagree.
+
+**The nightly crawl is fail-closed.** It runs only when `ADDON_INDEX_SYNC` is
+exactly `"enabled"` AND the `ADDON_INDEX` binding exists. Provision the database
+and finish the backfill _before_ flipping the var — and note that this is the
+one sanctioned exception to "no background spam": one bulk request plus a
+bounded page of changed descriptions per day. Do not widen it to hourly, and do
+not add other scheduled outbound fetches without the same kind of bound.
+
+This does not violate "keep all scraping in `esoui.rs`". That rule governs the
+desktop client, and the crawl is not scraping — it uses the same public
+`api.mmoui.com` JSON API `esoui.rs` already calls, once on the server for all
+users rather than once per user. Net ESOUI load falls, because search stops
+hitting `esoui.com/downloads/search.php`.
+
+### Ask (`POST /ask`)
+
+`src/ask.ts` is a natural-language addon assistant built on the same index, and
+its design is deliberately lopsided: **retrieval finds the addons, the model
+only picks among them and writes one sentence.** The model never sees a URL and
+never emits one.
+
+Three layers keep answers honest, and the third is the one that holds:
+
+1. Candidates are shown to the model as opaque keys (`C1`, `C2`, …), not IDs.
+2. The prompt states the closed set of valid keys. This is only a prompt-level
+   constraint: `@cf/meta/llama-3.1-8b-instruct-fp8` **rejects `json_schema`
+   outright** (`AiError 5025: This model doesn't support JSON Schema`), which
+   failed every call and silently degraded every answer until it was caught.
+   The route uses `json_object`, which guarantees parseable JSON and nothing
+   more. Verify any model change against `wrangler ai models` first.
+3. `groundOutput()` re-checks every pick against the retrieved set and rebuilds
+   `file_info_uri` from the index row. **This is the real boundary** — layer 2
+   cannot be relied on at all, so never weaken layer 3.
+
+Addon descriptions are third-party text and are treated as untrusted, and
+`scrubProse()` additionally strips link-shaped text out of the model's `answer`
+and `reason`, which the closed candidate set does not cover: a hostile
+description can talk the model into writing a URL, and a non-degraded answer is
+cached for seven days.
+
+Runs on Workers AI (binding `AI`) — free allocation is 10k neurons/day and one
+ask costs ~25, so ~400/day is free. `ASK_DAILY_BUDGET` (default 350) caps model
+calls per UTC day. Past the cap, or when the model errors or returns
+ungroundable output, the route **degrades** rather than failing: it returns the
+ranked candidates with `degraded: true` and the UI says the assistant is
+unavailable. Degraded answers are never cached, so an outage cannot be pinned
+in KV for a week.
+
+**Tests must run without Cloudflare credentials.** The `[ai]` binding is remote,
+and by default `@cloudflare/vitest-pool-workers` opens a proxy session to the
+real API before any test runs — which fails with no credentials and takes the
+whole worker suite down in CI. `vitest.config.ts` sets `remoteBindings: false`
+to prevent that. Do not remove it; `ask.test.ts` injects its own `AI` stub.
+
+### Rust client
+
+The Rust client is `src-tauri/src/pack_hub/addon_search.rs`. It treats the index
+as an enhancement, never a dependency: on a 503, a network error, or zero hits
+it falls back to `crate::esoui::search_esoui`, so search is never worse than it
+was and still works offline-ish. `AddonSearchPage.source` reports which backend
+answered so the UI can say when it is showing title-only results.
+
 ### Rust integration:
 
 - `pack_hub/commands.rs` calls `kalpa-pack-hub.eso-toolkit.workers.dev` (see `pack_hub_url()` and `share_worker_url()`)

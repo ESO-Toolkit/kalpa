@@ -2,6 +2,10 @@ import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { toast } from "sonner";
 import type {
+  AddonSearchPage,
+  AddonSearchSource,
+  AskResponse,
+  AskRecommendation,
   BrowsePopularPage,
   DiscoverTab,
   EsouiSearchResult,
@@ -12,6 +16,7 @@ import type {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { ProgressBar } from "@/components/ui/progress-bar";
 import {
   Select,
@@ -36,12 +41,14 @@ import {
   Flame,
   Check,
   WifiOff,
+  Sparkles,
+  ChevronRight,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 import { useInstallProgress } from "@/hooks/use-install-progress";
 import { formatInstallProgress, type InstallProgress } from "@/lib/install-progress";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
-import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
+import { AskAnswerSkeleton, DiscoverResultListSkeleton } from "@/components/ui/skeletons";
 import { motion, AnimatePresence } from "motion/react";
 
 const PAGE_SIZE = 25;
@@ -343,6 +350,7 @@ function VirtualResultRows({
 
 const DISCOVER_TABS: [DiscoverTab, string, React.FC<{ className?: string }>][] = [
   ["search", "Search", Search],
+  ["ask", "Ask", Sparkles],
   ["popular", "Popular", Flame],
   ["categories", "Categories", FolderOpen],
   ["url", "URL / ID", Link],
@@ -369,17 +377,19 @@ export function DiscoverPanel({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {/* Sub-tab selector (disabled) */}
-        <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+        <div className="@container flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
           {DISCOVER_TABS.map(([tab, label, Icon]) => (
             <button
               key={tab}
               role="tab"
               aria-selected={false}
               disabled
-              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
+              title={label}
+              aria-label={label}
+              className="flex-1 min-w-0 rounded-lg px-2 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
             >
               <Icon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className="truncate hidden @md:inline">{label}</span>
             </button>
           ))}
         </div>
@@ -395,14 +405,24 @@ export function DiscoverPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Sub-tab selector */}
-      <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+      {/* Five tabs never fit their labels in a 300-380px panel — the labels
+          alone need ~450px, so every one truncated to an ellipsis. Only the
+          ACTIVE tab shows its label; the rest are icons with tooltips, which
+          fits comfortably and still names where you are. A wide enough
+          container (a future resizable panel) shows every label again. */}
+      <div className="@container flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
         {DISCOVER_TABS.map(([tab, label, Icon]) => (
           <button
             key={tab}
             role="tab"
             aria-selected={activeTab === tab}
+            title={label}
+            aria-label={label}
             className={cn(
-              "relative flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
+              "relative min-w-0 rounded-lg px-2 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
+              // The active tab earns the room for its label; the others stay
+              // icon-sized so nothing has to truncate.
+              activeTab === tab ? "flex-1" : "flex-none @md:flex-1",
               activeTab === tab
                 ? "text-primary"
                 : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-transparent"
@@ -416,9 +436,11 @@ export function DiscoverPanel({
                 transition={{ type: "spring", stiffness: 400, damping: 30 }}
               />
             )}
-            <span className="relative z-10 flex items-center justify-center gap-1">
+            <span className="relative z-10 flex min-w-0 items-center justify-center gap-1">
               <Icon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className={cn("truncate", activeTab === tab ? "inline" : "hidden @md:inline")}>
+                {label}
+              </span>
             </span>
           </button>
         ))}
@@ -442,6 +464,18 @@ export function DiscoverPanel({
               onSelectResult={onSelectResult}
               selectedResultId={selectedResultId}
             />
+          </motion.div>
+        )}
+        {activeTab === "ask" && (
+          <motion.div
+            key="ask"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.08 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <AskContent onSelectResult={onSelectResult} selectedResultId={selectedResultId} />
           </motion.div>
         )}
         {activeTab === "popular" && (
@@ -522,6 +556,7 @@ function SearchContent({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
+  const [searchSource, setSearchSource] = useState<AddonSearchSource | null>(null);
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchIdRef = useRef(0);
@@ -546,15 +581,23 @@ function SearchContent({
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) {
       setResults([]);
+      setSearchSource(null);
       return;
     }
     setSearching(true);
     const id = ++searchIdRef.current;
     try {
-      const r = await invokeOrThrow<EsouiSearchResult[]>("search_esoui_addons", {
+      // Full-text search over titles AND descriptions, served by the Pack Hub
+      // worker's addon index. The command falls back to the ESOUI scraper on
+      // its own when the index cannot answer, so this never regresses to a
+      // dead search — `source` just reports which backend replied.
+      const page = await invokeOrThrow<AddonSearchPage>("search_addon_index", {
         query: searchQuery.trim(),
       });
-      if (searchIdRef.current === id) setResults(r);
+      if (searchIdRef.current === id) {
+        setResults(page.results);
+        setSearchSource(page.source);
+      }
     } catch (e) {
       if (searchIdRef.current === id) toast.error(getTauriErrorMessage(e));
     } finally {
@@ -617,6 +660,16 @@ function SearchContent({
         </div>
       )}
 
+      {/* The index searches descriptions; the scraper only matches titles. Say
+          so when we fall back, otherwise a thinner result set looks like a bug. */}
+      {results.length > 0 && searchSource === "esoui" && (
+        <div className="px-3 pb-1.5">
+          <span className="text-xs text-muted-foreground">
+            Matching addon names only &mdash; description search is unavailable right now.
+          </span>
+        </div>
+      )}
+
       <div ref={listRef} className="flex-1 overflow-y-auto">
         {searching ? (
           <DiscoverResultListSkeleton />
@@ -630,7 +683,7 @@ function SearchContent({
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/20" />}
             title="Search ESOUI"
-            subtitle="Type to find addons by name, author, or keyword"
+            subtitle="Describe what you want — searches names and descriptions"
           />
         ) : (
           <VirtualResultRows
@@ -643,6 +696,214 @@ function SearchContent({
             onSelectResult={onSelectResult}
             onInstall={onInstall}
           />
+        )}
+      </div>
+    </>
+  );
+}
+
+/* ── Ask Tab ─────────────────────────────────────────── */
+
+/**
+ * Shown in the empty state rather than the placeholder.
+ *
+ * The panel is ~380px, so any placeholder long enough to carry a real example
+ * gets truncated mid-word — and the example is exactly the half that gets cut.
+ * Here they wrap, stay fully readable, and are clickable, so discovering what
+ * the feature accepts costs no typing.
+ */
+const ASK_EXAMPLES = [
+  "an addon that shows when I'm in combat",
+  "something to manage my inventory and bank",
+  "how do I track my dps",
+];
+
+/**
+ * Natural-language addon assistant.
+ *
+ * The worker does the retrieval and the grounding; every recommendation here
+ * corresponds to a real indexed addon, and clicking one opens the same
+ * DiscoverDetail pane (and Install button) the other tabs use.
+ */
+function AskContent({
+  onSelectResult,
+  selectedResultId,
+}: {
+  onSelectResult: (result: EsouiSearchResult | null) => void;
+  selectedResultId: number | null;
+}) {
+  const [question, setQuestion] = useState("");
+  const [response, setResponse] = useState<AskResponse | null>(null);
+  const [asking, setAsking] = useState(false);
+  const askIdRef = useRef(0);
+
+  const handleAsk = useCallback(async (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    setAsking(true);
+    const id = ++askIdRef.current;
+    try {
+      const result = await invokeOrThrow<AskResponse>("ask_addon_assistant", {
+        question: trimmed,
+      });
+      if (askIdRef.current === id) setResponse(result);
+    } catch (e) {
+      if (askIdRef.current === id) toast.error(getTauriErrorMessage(e));
+    } finally {
+      if (askIdRef.current === id) setAsking(false);
+    }
+  }, []);
+
+  // Only the ESOUI id is load-bearing: DiscoverDetail fetches everything else
+  // itself, so a recommendation can open the full detail pane directly.
+  const selectRecommendation = (rec: AskRecommendation) => {
+    onSelectResult({
+      id: rec.esoui_id,
+      title: rec.title,
+      author: rec.author,
+      category: rec.category,
+      downloads: "",
+      updated: "",
+    });
+  };
+
+  return (
+    <>
+      <div className="px-3 pb-2">
+        <Input
+          placeholder="Ask about addons…"
+          aria-label="Ask about addons"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleAsk(question);
+          }}
+          autoFocus
+        />
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-3 pb-3">
+        {asking ? (
+          /* A centred spinner sat in the middle of an empty column and then
+             the answer appeared at the top — the whole panel jumped. The
+             skeleton occupies the same shape the cards will. */
+          <AskAnswerSkeleton />
+        ) : !response ? (
+          <EmptyState
+            icon={<Sparkles className="size-8 text-muted-foreground/20" />}
+            title="Ask about addons"
+            subtitleClassName="mt-2 w-full max-w-[260px]"
+            subtitle={
+              <span className="flex flex-col items-center gap-2">
+                <span>Describe what you want in your own words. Try:</span>
+                <span className="flex w-full flex-col items-stretch gap-1.5">
+                  {ASK_EXAMPLES.map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      onClick={() => {
+                        setQuestion(example);
+                        handleAsk(example);
+                      }}
+                      className="rounded-lg border border-structure-06 px-2.5 py-1.5 text-left text-xs leading-snug text-foreground transition-colors duration-150 hover:border-primary/25 hover:bg-primary/[0.06]"
+                    >
+                      &ldquo;{example}&rdquo;
+                    </button>
+                  ))}
+                </span>
+              </span>
+            }
+          />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {/* The per-addon reasons carry the useful information. A summary
+                paragraph on top of them just restated the question back at the
+                user, so it is shown only when there is nothing to recommend
+                and the sentence has to do the whole job. */}
+            {response.answer && response.no_good_match && (
+              <GlassPanel variant="subtle" className="p-3">
+                <p className="text-sm leading-relaxed text-foreground">{response.answer}</p>
+              </GlassPanel>
+            )}
+
+            {/* Say plainly when the assistant itself did not run, rather than
+                passing off raw search hits as an answer. */}
+            {response.degraded && response.recommendations.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                The assistant is unavailable right now &mdash; showing the closest matches instead.
+              </p>
+            )}
+
+            {response.no_good_match && response.recommendations.length === 0 && (
+              <EmptyState
+                icon={<Sparkles className="size-8 text-muted-foreground/20" />}
+                title="Nothing matched"
+                subtitle="No indexed addon looks like a good fit. Try describing it differently."
+              />
+            )}
+
+            {response.recommendations.map((rec) => (
+              <button
+                key={rec.esoui_id}
+                onClick={() => selectRecommendation(rec)}
+                className={cn(
+                  "w-full rounded-lg border p-2.5 text-left transition-colors duration-150",
+                  selectedResultId === rec.esoui_id
+                    ? "border-primary/25 bg-primary/[0.06]"
+                    : "border-structure-06 hover:bg-structure-05"
+                )}
+              >
+                {/* The pill used to share a row with the title and would wrap
+                    to two lines ("Graphic UI / Mods") whenever the title was
+                    long. The title now owns the row and truncates; the category
+                    sits with the reason, where it never competes for width. */}
+                <div className="min-w-0">
+                  <span className="block truncate font-heading text-sm font-medium text-foreground">
+                    {rec.title}
+                  </span>
+                </div>
+                {rec.reason && (
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{rec.reason}</p>
+                )}
+                {rec.category && (
+                  <InfoPill color="muted" className="mt-1.5 max-w-full whitespace-nowrap">
+                    <span className="truncate">{rec.category}</span>
+                  </InfoPill>
+                )}
+              </button>
+            ))}
+
+            {/* The assistant answers with a few picks, but retrieval found more.
+                Showing the rest collapsed means a short answer never looks like
+                it missed something — and it costs no extra model call. */}
+            {response.also_considered.length > 0 && (
+              <details className="group mt-1">
+                <summary className="cursor-pointer list-none rounded-lg px-1 py-1 text-xs text-muted-foreground transition-colors duration-150 hover:text-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <ChevronRight className="size-3 shrink-0 transition-transform duration-150 group-open:rotate-90" />
+                    {response.also_considered.length} more{" "}
+                    {response.also_considered.length === 1 ? "match" : "matches"}
+                  </span>
+                </summary>
+                <div className="mt-1.5 flex flex-col gap-1">
+                  {response.also_considered.map((rec) => (
+                    <button
+                      key={rec.esoui_id}
+                      onClick={() => selectRecommendation(rec)}
+                      className={cn(
+                        "w-full rounded-lg border px-2.5 py-1.5 text-left transition-colors duration-150",
+                        selectedResultId === rec.esoui_id
+                          ? "border-primary/25 bg-primary/[0.06]"
+                          : "border-structure-06 hover:bg-structure-05"
+                      )}
+                    >
+                      <span className="block truncate text-xs text-foreground">{rec.title}</span>
+                    </button>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
         )}
       </div>
     </>
@@ -1204,10 +1465,14 @@ function EmptyState({
   icon,
   title,
   subtitle,
+  subtitleClassName,
 }: {
   icon: React.ReactNode;
   title: string;
   subtitle: React.ReactNode;
+  /** Overrides the default narrow measure. The 200px cap suits a sentence but
+   *  squashes richer content such as the Ask tab's example buttons. */
+  subtitleClassName?: string;
 }) {
   return (
     <Fade transition={{ type: "spring", stiffness: 200, damping: 25 }}>
@@ -1217,7 +1482,14 @@ function EmptyState({
         </div>
         <div className="text-center">
           <p className="font-heading text-sm font-medium text-foreground">{title}</p>
-          <p className="mt-1 text-xs text-muted-foreground max-w-[200px]">{subtitle}</p>
+          <div
+            className={cn(
+              "mt-1 text-xs text-muted-foreground",
+              subtitleClassName ?? "max-w-[200px]"
+            )}
+          >
+            {subtitle}
+          </div>
         </div>
       </div>
     </Fade>

@@ -87,6 +87,76 @@ export interface ShareCodeResponse {
   deepLink: string;
 }
 
+// ── Addon index (ESOUI catalogue full-text search) ────────────────────
+/** One search hit. snake_case to match the Rust AddonSearchHit struct. */
+export interface AddonSearchHit {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  downloads: number;
+  favorites: number;
+  /** Epoch millis, straight from the ESOUI filelist. */
+  last_update: number;
+  file_info_uri: string;
+  is_library: boolean;
+  snippet: string;
+  /** Higher is better. Sign-flipped bm25 — comparable within one result set
+   *  only, never across queries. */
+  score: number;
+}
+
+export interface AddonSearchResult {
+  hits: AddonSearchHit[];
+  matched: number;
+  /** Which pass produced the hits: the strict pass only, the permissive pass
+   *  only, both merged, or nothing matched. */
+  mode: "and" | "or" | "union" | "none";
+}
+
+export interface AddonIndexStats {
+  version: number;
+  total: number;
+  live: number;
+  described: number;
+  indexed_at: number;
+  last_sync: string | null;
+}
+
+// ── Ask (natural-language addon assistant) ───────────────────────────
+/** One recommended addon. Links are always rebuilt from the index, never
+ *  taken from model output. */
+export interface AskRecommendation {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  file_info_uri: string;
+  reason: string;
+}
+
+export interface AskResponse {
+  /** Prose answer. Empty when the model was skipped — see `degraded`. */
+  answer: string;
+  recommendations: AskRecommendation[];
+  /** Ranked candidates the model did not pick. Free (no extra model call) and
+   *  shown collapsed, so a short answer does not look like it missed things. */
+  also_considered: AskRecommendation[];
+  no_good_match: boolean;
+  /** True when the ranked candidates are shown without model prose (model
+   *  unavailable, over budget, or output failed grounding). */
+  degraded: boolean;
+  cached: boolean;
+}
+
+export interface CrawlOutcome {
+  fetched: number;
+  removed: number;
+  failed: number;
+  remaining: number;
+  complete: boolean;
+}
+
 // ── Env bindings ──────────────────────────────────────────────────────
 export interface Env {
   ESO_PACKS: KVNamespace;
@@ -102,4 +172,34 @@ export interface Env {
   VOTE_LIMITER: RateLimit;
   /** Durable Object for atomic pack index mutations */
   PACK_INDEX: DurableObjectNamespace<import("./pack-index-do").PackIndexDO>;
+  /**
+   * Dedicated D1 for the ESOUI addon full-text index.
+   *
+   * Deliberately NOT roster-hub-db: that database is shared with the ESO
+   * Toolkit website and CLAUDE.md requires coordinating every schema change
+   * there. Optional so the worker keeps serving Pack Hub if the binding is
+   * absent — the addon routes 503 instead of the whole worker failing.
+   */
+  ADDON_INDEX?: D1Database;
+  /**
+   * Gate on the nightly ESOUI crawl. Exact value "enabled" turns it on;
+   * anything else (including unset) leaves it off.
+   *
+   * Fail-closed on purpose. The cron reaches out to a third party, and it must
+   * not start doing that the moment the D1 binding is added — the initial
+   * backfill has to be run and checked first. It also keeps the scheduled
+   * tests off the network.
+   */
+  ADDON_INDEX_SYNC?: string;
+  /** Bounds the addon search route independently of pack reads. */
+  ADDON_SEARCH_LIMITER?: RateLimit;
+  /** Workers AI binding for the Ask assistant. Optional: without it /ask still
+   *  answers, returning ranked candidates with no prose. */
+  AI?: Ai;
+  /** Tighter budget than search — an Ask costs a model call, not just a query. */
+  ASK_LIMITER?: RateLimit;
+  /** Workers AI model id. Overridable so swapping models is config, not code. */
+  ASK_MODEL?: string;
+  /** Max model calls per UTC day before /ask degrades to candidates-only. */
+  ASK_DAILY_BUDGET?: string;
 }

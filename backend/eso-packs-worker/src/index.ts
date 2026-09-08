@@ -15,6 +15,15 @@ import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 import { reconcileD1, recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
 import type { RestoreJobState } from "./pack-index-do";
+import {
+  handleAddonSearch,
+  handleAddonStats,
+  handleAsk,
+  handleIndexBackfill,
+  handleIndexReprocess,
+  handleIndexSync,
+} from "./addon-routes";
+import { runDailySync } from "./crawl";
 export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
@@ -1785,6 +1794,14 @@ export default {
     } catch (err) {
       console.error("D1 reconciliation failed unexpectedly:", err);
     }
+    // Addon index delta. One bulk request plus a bounded page of descriptions;
+    // a normal day queues far fewer than a full page. Isolated in its own try
+    // so an ESOUI outage cannot take down the pack backup above.
+    try {
+      await runDailySync(env);
+    } catch (err) {
+      console.error("Addon index sync failed:", err);
+    }
   },
 } satisfies ExportedHandler<Env>;
 
@@ -1816,7 +1833,22 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (ip && !isAuthedAdmin) {
     const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
     const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
-    const limiter = isVote ? env.VOTE_LIMITER : isWrite ? env.WRITE_LIMITER : env.READ_LIMITER;
+    // An FTS query costs more than a KV read, so addon search gets its own
+    // budget when the binding exists. Falling back to READ_LIMITER keeps the
+    // route usable on a deployment that has not added the binding yet.
+    const isAddonRead = !isWrite && pathname.startsWith("/addons/");
+    // /ask is a POST but is a read in spirit; WRITE_LIMITER's 10/min is meant
+    // for pack mutations and would be an odd ceiling on asking questions.
+    const isAsk = pathname === "/ask";
+    const limiter = isAsk
+      ? (env.ASK_LIMITER ?? env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
+      : isAddonRead
+      ? (env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
+      : isVote
+        ? env.VOTE_LIMITER
+        : isWrite
+          ? env.WRITE_LIMITER
+          : env.READ_LIMITER;
     const { success } = await limiter.limit({ key: ip });
     if (!success) {
       return new Response(JSON.stringify({ error: "Too many requests" }), {
@@ -1868,6 +1900,37 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const shareMatch = pathname.match(/^\/shares\/([23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6})$/);
   if (shareMatch && method === "GET") {
     return handleResolveShare(request, env, shareMatch[1]);
+  }
+
+  // ── Addon index routes ─────────────────────────────────────────
+  if (method === "GET" && pathname === "/addons/search") {
+    return handleAddonSearch(request, env, url);
+  }
+
+  if (method === "GET" && pathname === "/addons/stats") {
+    return handleAddonStats(request, env);
+  }
+
+  if (method === "POST" && pathname === "/ask") {
+    return handleAsk(request, env);
+  }
+
+  // Index maintenance is admin-only: a crawl page makes dozens of outbound
+  // requests to ESOUI, so an open route would let anyone spend our egress and
+  // our upstream goodwill.
+  if (method === "POST" && pathname === "/admin/index/sync") {
+    if (!requireAuth(request, env)) return unauthorized(request);
+    return handleIndexSync(request, env);
+  }
+
+  if (method === "POST" && pathname === "/admin/index/backfill") {
+    if (!requireAuth(request, env)) return unauthorized(request);
+    return handleIndexBackfill(request, env, url);
+  }
+
+  if (method === "POST" && pathname === "/admin/index/reprocess") {
+    if (!requireAuth(request, env)) return unauthorized(request);
+    return handleIndexReprocess(request, env, url);
   }
 
   // Migration control routes are admin-only inside their handlers.

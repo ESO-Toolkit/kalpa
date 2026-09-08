@@ -397,7 +397,7 @@ fn format_number(n: u64) -> String {
 }
 
 /// Format an epoch-millisecond timestamp as "MM/DD/YY HH:MM AM/PM".
-fn format_epoch_millis(millis: u64) -> String {
+pub(crate) fn format_epoch_millis(millis: u64) -> String {
     if millis == 0 {
         return String::new();
     }
@@ -1100,7 +1100,7 @@ pub struct BrowsePopularPage {
 
 const POPULAR_PAGE_SIZE: usize = 25;
 
-fn format_download_count(n: u64) -> String {
+pub(crate) fn format_download_count(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {

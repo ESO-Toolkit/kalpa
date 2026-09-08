@@ -1,3 +1,6 @@
 node_modules/
 .wrangler/
 .dev.vars
+
+# Local-only copy of the admin key used by the index crawl scripts.
+.admin-key.tmp

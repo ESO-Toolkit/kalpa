@@ -1025,6 +1025,8 @@ pub fn run() {
             commands::set_addon_tags,
             commands::resolve_esoui_addon,
             commands::search_esoui_addons,
+            pack_hub::addon_search::search_addon_index,
+            pack_hub::addon_search::ask_addon_assistant,
             commands::fetch_esoui_detail,
             commands::install_addon,
             commands::remove_addon,
