@@ -111,7 +111,7 @@ jobs:
       # detection, embed limits, and mention safety correct before a workflow
       # can post externally.
       - name: Release and Discord message tests
-        run: node --test .github/scripts/discord-release.test.cjs .github/scripts/release-body.test.cjs
+        run: node --test .github/scripts/discord-release.test.cjs .github/scripts/release-body.test.cjs .github/scripts/updater-manifest.test.cjs
 
       # `npm run test:packaged` as a whole is local-only (see the e2e note
       # below), but its CDP-port preflight is not: that part needs no build, no

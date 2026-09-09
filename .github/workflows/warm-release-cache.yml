@@ -1,0 +1,191 @@
+# Warm the release-profile Rust caches on main so tag builds can hit them.
+#
+# This is NOT redundant with ci.yml or slint-ci.yml. GitHub Actions caches are
+# only readable from the ref that saved them and from the default branch, and
+# release.yml runs on `refs/tags/v*` -- so the cache a release saves lands on
+# its own tag ref (`gh cache list` shows them under refs/heads/refs/tags/...)
+# where no later tag can ever read it, and every release cold-compiles ~850
+# crates. The CI caches on main do not help either: they are debug-profile
+# and keyed by job id (`v0-rust-check-*`), while release.yml keys on
+# `shared-key: release` / `release-sidecar`. This workflow builds with the
+# release profile, on main, under those exact shared keys; release.yml sets
+# `save-if: false` and only ever reads what is produced here.
+#
+# The key rust-cache computes is
+#   v0-rust-<shared-key>-<os.type()>-<os.arch()>-<env hash>-<lockfile hash>
+# with restore fallback on everything before the lockfile hash. The env hash
+# covers `rustc -vV`, `rustup toolchain list`, and every env var whose name
+# starts with CARGO/CC/CFLAGS/CXX/CMAKE/RUST, so the Rust setup step below
+# must stay byte-identical to release.yml (same action SHA, same toolchain,
+# same targets, same step ORDER relative to the cache step -- the hash is
+# taken when rust-cache runs). The lockfile hash covers each listed
+# workspace's Cargo.toml (versions zeroed) and Cargo.lock, so `workspaces:`
+# must list exactly what release.yml lists. Neither `cache-targets` nor the
+# job id enters the key.
+name: Warm release cache
+
+on:
+  push:
+    branches: [main]
+    # Only what can change the cache key or its contents. Anything else on
+    # main (app source, frontend, docs) leaves the dependency graph and the
+    # key alone, so a rebuild would just re-save identical bytes.
+    paths:
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "prototypes/slint-kalpa/Cargo.toml"
+      - "prototypes/slint-kalpa/Cargo.lock"
+      - "rust-toolchain*"
+      - "**/rust-toolchain*"
+      - ".cargo/config.toml"
+      - "**/.cargo/config.toml"
+      - ".github/workflows/warm-release-cache.yml"
+      - ".github/workflows/release.yml"
+  # Run by hand to warm the cache before a release, or after a period of no
+  # merges to main.
+  workflow_dispatch:
+  # Safety net: GitHub evicts any cache not accessed for 7 days. A quiet week
+  # on main would otherwise hand the next tag a cold build again. On an exact
+  # key hit this run is just a restore (which counts as an access) and no
+  # build. Mondays at 06:00 UTC, well clear of the daily worker backup cron. Note GitHub also
+  # disables scheduled workflows after 60 days without repository activity.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+# Two warms racing produce the same bytes under the same key; the second
+# save fails as a duplicate. Keep only the newest run.
+concurrency:
+  group: warm-release-cache
+  cancel-in-progress: true
+
+jobs:
+  # Mirrors the three app-build legs of release.yml: same runners, same
+  # toolchain, same cache block (except save-if).
+  warm-app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+          - platform: macos-latest
+          - platform: ubuntu-22.04
+    runs-on: ${{ matrix.platform }}
+    # A cold release-profile build (lto = true, codegen-units = 1) is ~15 min
+    # on Windows and macOS runs cargo twice for the universal binary.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Needed on every platform: `tauri::generate_context!()` in lib.rs
+      # embeds `frontendDist: ../dist`, so src-tauri does not compile until
+      # the frontend has been built at least once.
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      # Identical to release.yml, including the targets expression: the
+      # toolchain list and every CARGO_* variable this action exports are
+      # part of the cache key's env hash.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.94.0"
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # Same shared-key and workspaces as release.yml's app-build jobs.
+      # save-if guards on main rather than `true` because workflow_dispatch
+      # can be pointed at any branch: a cache saved from a feature branch is
+      # invisible to tags and only burns the 10 GB repository cache cap.
+      #
+      # `cache-hit` is true only on an EXACT key match. Version bumps touch
+      # src-tauri/Cargo.toml and so trigger this workflow, but rust-cache
+      # zeroes package versions before hashing manifests and ignores the
+      # path-only `kalpa` lockfile entry, so the key does not move; the
+      # build steps below are skipped and the post-step save is a no-op.
+      # The restore itself is what keeps the entry alive: GitHub evicts
+      # caches not accessed for 7 days, and the weekly schedule exists to
+      # produce exactly this restore during a quiet week.
+      - name: Rust cache
+        id: cache
+        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: release
+          workspaces: src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux system dependencies
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev \
+            libxdo-dev build-essential curl wget file
+
+      # --legacy-peer-deps: typescript-eslint 8.x doesn't yet support TypeScript 6
+      - name: Install frontend dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npm ci --legacy-peer-deps
+
+      - name: Build frontend
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npm run build
+
+      # tauri.windows.conf.json declares the Slint sidecar as an externalBin,
+      # which makes tauri-build require the file to exist for every Windows
+      # compile of src-tauri. The zero-byte placeholder is enough here; the
+      # real sidecar is built by warm-sidecar below and by the release itself.
+      - name: Prepare native Slint sidecar placeholder
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.platform == 'windows-latest'
+        run: node scripts/ensure-slint-sidecar-placeholder.mjs
+
+      # What tauri-cli runs underneath `tauri build`: it always adds
+      # `--bins --no-default-features --features tauri/custom-protocol`
+      # (crates/tauri-cli/src/interface/rust.rs). Cargo fingerprints by
+      # feature set, so a plain `cargo build --release` would leave the
+      # whole tauri subtree (tauri, tauri-runtime-wry, every plugin, the
+      # app crate) to recompile on the tag. No bundling, no signing: the
+      # cache only needs target/ populated with release-profile deps.
+      - name: Build (release profile)
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.platform != 'macos-latest'
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --bins --no-default-features --features tauri/custom-protocol
+
+      # `tauri build --target universal-apple-darwin` runs cargo once per
+      # half, each into target/<triple>/release. Populate both.
+      - name: Build (release profile, both macOS targets)
+        if: steps.cache.outputs.cache-hit != 'true' && matrix.platform == 'macos-latest'
+        run: |
+          cargo build --release --manifest-path src-tauri/Cargo.toml --bins --no-default-features --features tauri/custom-protocol --target aarch64-apple-darwin
+          cargo build --release --manifest-path src-tauri/Cargo.toml --bins --no-default-features --features tauri/custom-protocol --target x86_64-apple-darwin
+
+  # Mirrors release.yml's Windows-only sidecar job, which runs
+  # scripts/build-native-slint-sidecar.mjs: a plain release build of the
+  # prototypes/slint-kalpa workspace with no --target (CARGO_BUILD_TARGET is
+  # unset on the runner, so the script omits it too).
+  warm-sidecar:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.94.0"
+
+      # See warm-app's cache step for the cache-hit gating.
+      - name: Rust cache
+        id: cache
+        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: release-sidecar
+          workspaces: prototypes/slint-kalpa
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build sidecar (release profile)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --release --manifest-path prototypes/slint-kalpa/Cargo.toml

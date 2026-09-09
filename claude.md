@@ -532,8 +532,13 @@ When preparing a new release:
    It is deliberately local-only because it needs WebView2, launches the debug
    packaged binary itself, and fails if it connects to the Vite dev server instead
    of `http://tauri.localhost/`.
-5. Push a tag `v*` (for example `v0.3.0`).
-6. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
+5. Check the release-profile Rust cache is warm. `warm-release-cache.yml`
+   saves it on main (on lockfile changes, weekly, or via `workflow_dispatch`);
+   GitHub evicts caches unused for 7 days, and a tag can only read caches
+   saved on main, never those saved by an earlier tag. If main has been quiet
+   for a week, run it by hand first: `gh workflow run warm-release-cache.yml`.
+6. Push a tag `v*` (for example `v0.3.0`).
+7. `.github/workflows/release.yml` builds the Slint sidecar and the three platform installers (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) in parallel, then the `publish` job assembles `latest.json` from the updater `.sig` files, attaches everything to one draft GitHub Release, verifies it, and publishes.
 
 ### Cross-Platform Notes
 
