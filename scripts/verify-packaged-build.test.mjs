@@ -84,20 +84,30 @@ test(
       );
 
       // Name the owner. This test process is the one holding the port, so the
-      // message has to point straight at it -- PID, image, and full path. The
-      // path is the part that tells two worktrees apart.
+      // message has to point straight at it. The PID is always available and
+      // is what makes the message actionable, so it is asserted unconditionally.
       assert.ok(
         stderr.includes(`PID ${process.pid} `),
         `message should name PID ${process.pid}; got: ${stderr}`
       );
-      assert.ok(
-        stderr.includes(path.basename(process.execPath)),
-        `message should name the image ${path.basename(process.execPath)}; got: ${stderr}`
-      );
-      assert.ok(
-        stderr.includes(process.execPath),
-        `message should name the executable path ${process.execPath}; got: ${stderr}`
-      );
+
+      // The image and path come from a Windows process lookup that is not
+      // always permitted -- a hosted runner can refuse it, and the gate then
+      // says "(image and path unavailable)" rather than guessing. That is
+      // deliberate behaviour, so accept it here; asserting otherwise makes
+      // this test fail for a reason that has nothing to do with the gate.
+      // When the lookup DOES work, hold it to naming both: the full path is
+      // the part that tells two worktrees apart.
+      if (!stderr.includes("(image and path unavailable)")) {
+        assert.ok(
+          stderr.includes(path.basename(process.execPath)),
+          `message should name the image ${path.basename(process.execPath)}; got: ${stderr}`
+        );
+        assert.ok(
+          stderr.includes(process.execPath),
+          `message should name the executable path ${process.execPath}; got: ${stderr}`
+        );
+      }
 
       // Say plainly what has to be closed.
       assert.match(stderr, /tauri dev/, `message should name tauri dev; got: ${stderr}`);
