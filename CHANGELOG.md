@@ -6,6 +6,69 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.25] — 2026-09-09
+
+This one is mostly about the window not freezing. Fourteen things Kalpa does
+on disk — enabling an addon, opening Profiles, choosing your AddOns folder —
+were running on the thread that draws the interface, so each of them stopped
+the app dead until it finished. Two of them waited on a lock first, which is
+why toggling an addon during an install could hang and then fail.
+
+It also closes the last of the safety work from the audit behind beta.23, and
+fixes an addon search index that had quietly stopped refreshing.
+
+### Bug Fixes
+
+- **Kalpa no longer freezes while it works on disk.** Enabling or disabling an
+  addon, opening Profiles, renaming or deleting one, picking your AddOns
+  folder, and the startup scans all ran on the thread that draws the window.
+  Enabling an addon while an install or a profile switch was running was the
+  worst of them: it waited on that operation for up to two seconds with the
+  app frozen, then failed anyway. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **New addons became searchable again.** The weekly job that refreshes the
+  search index was computing the flag that turns the refresh on and then
+  dropping it before it reached the script, so the part of search that finds
+  addons by description rather than by name had been going stale since it was
+  added. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **The graphics stack stops calling a working setup broken.** Shaders kept
+  anywhere other than the default folder — which ReShade allows, and searches
+  recursively by default — were reported missing. A `ReShade.ini` that exists
+  but cannot be read, because permissions deny it or the game is holding it
+  open, is now treated as unknown rather than as an unconfigured install.
+  [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **An interrupted install can no longer be undone after it succeeded.** If the
+  cleanup that follows a completed install was itself interrupted, the next
+  launch could mistake the leftovers for an install that never finished and
+  roll back an update you already had. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **Deleting your account can finish.** Erasure runs in passes for anyone with
+  a lot of votes, but every pass counted against the same limit as publishing,
+  so a large account was refused partway through deleting its own data.
+  Restoring a backup also no longer blocks every other Pack Hub action while
+  it runs. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **Write errors name the file you can actually fix**, instead of a temporary
+  path inside Kalpa, and no longer lead with Controlled Folder Access advice
+  for what may be an ordinary read-only file. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **Records Kalpa keeps for your graphics stack hold their link to your
+  original files** in every path that rewrites them, not only the one that was
+  audited. Nothing could reach the unfixed paths yet; the guarantee now holds
+  wherever it is claimed. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+
+### Maintenance
+
+- **The release workflows are linted now.** Nothing checked them before, which
+  is how a workflow could paste a command’s output straight into a shell line
+  and how the search-index flag above went missing. The check caught that bug
+  on its first run. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **The packaged-build check says what is blocking it** — it needs a debug port
+  no other copy of Kalpa is using, and now names the process holding it.
+  [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- **Corrected the native performance UI memory figure in the README** to about
+  125 MB with the window open, re-measured on the shipped sidecar. The old 85
+  MB was read before the renderer had finished allocating. The minimized
+  figure, about 11 MB, was confirmed. [#459](https://github.com/ESO-Toolkit/kalpa/pull/459)
+- Dependency updates across the app, the Rust crates and the worker.
+  ([#451](https://github.com/ESO-Toolkit/kalpa/pull/451), [#452](https://github.com/ESO-Toolkit/kalpa/pull/452), [#453](https://github.com/ESO-Toolkit/kalpa/pull/453))
+
 ## [0.1.0-beta.24] — 2026-09-09
 
 This release is about the Discover search box — the one that answers both "find
@@ -1108,7 +1171,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.24...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...HEAD
+[0.1.0-beta.25]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.24...v0.1.0-beta.25
 [0.1.0-beta.24]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...v0.1.0-beta.24
 [0.1.0-beta.23]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...v0.1.0-beta.23
 [0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
