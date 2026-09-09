@@ -62,12 +62,6 @@ const MAX_RECOMMENDATIONS = 5;
  */
 const MAX_OUTPUT_TOKENS = 256;
 
-/** Extra ranked candidates surfaced beneath the answer, at no model cost. */
-const ALSO_CONSIDERED_LIMIT = 8;
-
-/** Of those slots, how many are held for semantic-only matches. */
-const ALSO_CONSIDERED_SEMANTIC = 3;
-
 /**
  * Semantic-only candidates appended after the keyword hits.
  *
@@ -76,6 +70,15 @@ const ALSO_CONSIDERED_SEMANTIC = 3;
  * below the cosine floor appends nothing.
  */
 const SEMANTIC_EXTRA = 6;
+
+/** Extra ranked candidates surfaced beneath the answer, at no model cost.
+ *  Declared after SEMANTIC_EXTRA because it is derived from it — a const
+ *  referencing a later const is a temporal-dead-zone throw at module load. */
+const ALSO_CONSIDERED_LIMIT = CANDIDATE_COUNT + SEMANTIC_EXTRA;
+
+/** How many semantic-only matches are pulled to the FRONT of that list.
+ *  Not a quota carved out of the budget — nothing is dropped to make room. */
+const ALSO_CONSIDERED_SEMANTIC = 3;
 
 const MAX_QUESTION_LENGTH = 500;
 const MIN_QUESTION_LENGTH = 3;
@@ -162,10 +165,18 @@ function renderCandidates(hits: AddonSearchHit[]): string {
  * this corpus a reordering is essentially always the same question, and the
  * answer is built from a BM25 retrieval that is itself order-independent.
  */
-/** Bumped whenever retrieval, candidate count, or the prompt changes.
- *  Without it, a week of cached answers from the previous behaviour keeps being
- *  served and the improvement looks like it did not land. */
-const ASK_VERSION = 3;
+/** Bumped whenever retrieval, candidate count, the prompt, or the SHAPE OF THE
+ *  CACHED RESPONSE changes. Without it, a week of cached answers from the
+ *  previous behaviour keeps being served and the improvement looks like it did
+ *  not land.
+ *
+ *  "Response shape" is in that list because it was missed once: widening
+ *  `also_considered` changed only the stored body, not retrieval or the prompt,
+ *  so the narrower rule did not require a bump — and the eval measured it with
+ *  `bypassCache`, so nothing caught that live users would keep getting the old
+ *  truncated tail for seven days. If a change alters what is written to KV,
+ *  bump this. */
+const ASK_VERSION = 4;
 
 export function cacheKeyFor(question: string): string {
   const tokens = [
@@ -246,22 +257,33 @@ export function alsoConsidered(
   const chosen = new Set(picked.map((p) => p.esoui_id));
   const rest = hits.filter((hit) => !chosen.has(hit.esoui_id));
 
-  // Semantic extras are appended AFTER up to 20 keyword hits, so a plain
-  // slice(0, 8) could never reach them — the whole embedding feature was
-  // invisible unless the model happened to pick one from the tail. Reserve
-  // slots so a user sees the semantically-related matches that keyword search
-  // could not have found at all.
-  const semantic = rest.filter((hit) => hit.semantic).slice(0, ALSO_CONSIDERED_SEMANTIC);
-  const keyword = rest
-    .filter((hit) => !hit.semantic)
-    .slice(0, ALSO_CONSIDERED_LIMIT - semantic.length);
-
   // Semantic FIRST. These are the finds keyword search could not make at all —
   // "shows when I am in combat" cannot lexically reach "Fighting Display", which
   // is precisely why the embedding index exists. Ordering them behind keyword
   // hits the user could have found by typing buried the distinctive result at
   // position 7 of a collapsed list.
-  return [...semantic, ...keyword].map((hit) => toRecommendation(hit, ""));
+  //
+  // This only FRONT-LOADS; nothing is dropped for being semantic or keyword.
+  // The earlier form reserved these slots out of a list capped at 8, which
+  // discarded keyword hits to make room. On "an addon that shows if you're
+  // flagged in combat", that cap dropped "Combat Indicator" — BM25 rank 8, the
+  // 8th unpicked hit — off the end of a disclosure whose entire purpose is that
+  // "a short answer never looks like it missed something".
+  const front = new Set(
+    rest.filter((hit) => hit.semantic).slice(0, ALSO_CONSIDERED_SEMANTIC).map((hit) => hit.esoui_id),
+  );
+
+  // The cap is now the size of the retrieved set, not a display budget, so the
+  // list is bounded but never truncating: every candidate the model was offered
+  // and did not pick is reachable. It is collapsed behind a disclosure, so the
+  // cost of the extra rows is a scroll, and the cost of omitting one is the
+  // user concluding the assistant does not know about an addon that it ranked.
+  return [
+    ...rest.filter((hit) => front.has(hit.esoui_id)),
+    ...rest.filter((hit) => !front.has(hit.esoui_id)),
+  ]
+    .slice(0, ALSO_CONSIDERED_LIMIT)
+    .map((hit) => toRecommendation(hit, ""));
 }
 
 /**
@@ -384,16 +406,6 @@ async function overBudget(env: Env): Promise<boolean> {
 /** How many semantic neighbours to consider. */
 const SEMANTIC_LIMIT = 20;
 
-/**
- * Reciprocal Rank Fusion constant.
- *
- * RRF scores by RANK, not by score, which is what makes it safe here: BM25
- * scores and cosines are not on a shared scale and never will be. k dampens the
- * head of each list, so one list cannot dominate on its first entry alone. At
- * k = 20 against 20-item lists the last entry still carries about half the
- * weight of the first.
- */
-export 
 /**
  * Guard (a): how far below the best cosine a neighbour may sit, and the
  * absolute floor beneath which nothing counts.

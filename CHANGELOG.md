@@ -6,6 +6,55 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.24] — 2026-09-09
+
+This release is about the Discover search box — the one that answers both "find
+this addon by name" and "is there an addon that…". It was withholding results.
+The list of other matches under an answer stopped at eight entries and set three
+of those aside for a different kind of match, so addons Kalpa had already found
+were dropped before you saw them, which is the exact failure that list exists to
+prevent. Asking whether there is an addon that shows when you are flagged in
+combat found Combat Indicator and then never displayed it.
+
+That is fixed. The same box now also understands questions phrased in words an
+addon's own page does not use, and every row in the list says what kind of addon
+it is, so an off-topic suggestion is obvious without opening it.
+
+### Features
+
+- **Questions now find addons that describe themselves in different words than
+  you used.** Asking for an addon that shows when you are flagged in combat
+  reaches one whose page says it turns your compass outline red — no shared
+  wording required. These matches are added to what a name search already
+  finds, never in place of it, so nothing that used to turn up stops turning
+  up. ([#456](https://github.com/ESO-Toolkit/kalpa/pull/456),
+  [#457](https://github.com/ESO-Toolkit/kalpa/pull/457))
+- **The "more matches" list shows each addon's category beside its name.** The
+  list is no longer trimmed for relevance, so a vague question can trail a weak
+  match; the category makes that plain at a glance. Rows stay one line tall, so
+  expanding the list no longer pushes the answer and its recommendations off
+  screen. ([#461](https://github.com/ESO-Toolkit/kalpa/pull/461),
+  [#462](https://github.com/ESO-Toolkit/kalpa/pull/462))
+
+### Bug Fixes
+
+- **"More matches" no longer drops addons Kalpa had already found.** The list
+  was capped at eight entries with three held back for a separate kind of
+  match, so relevant results further down were discarded to make room.
+  Everything found and not already recommended is now listed. Measured over a
+  fixed set of 60 questions, the addon being looked for reaches you in 93% of
+  cases rather than 87% — and 86% rather than 71% when the question describes
+  what you want instead of naming it.
+  ([#460](https://github.com/ESO-Toolkit/kalpa/pull/460))
+- **A question you had asked before kept returning the old, shortened list.**
+  Answers are remembered for a week, so without this the fix above would not
+  have reached a repeated question for up to seven days.
+  ([#460](https://github.com/ESO-Toolkit/kalpa/pull/460))
+- **Searching by name no longer ranks a patch above the addon it patches.** "KR
+  Patch for Bandits User Interface" outranked Bandits User Interface itself. An
+  exact title match is now separated from one that merely contains what you
+  typed. ([#456](https://github.com/ESO-Toolkit/kalpa/pull/456))
+
 ## [0.1.0-beta.23] — 2026-09-06
 
 This release introduces the **graphics stack** panel — new, optional tooling
@@ -1059,7 +1108,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.24...HEAD
+[0.1.0-beta.24]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...v0.1.0-beta.24
 [0.1.0-beta.23]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...v0.1.0-beta.23
 [0.1.0-beta.22]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.21...v0.1.0-beta.22
 [0.1.0-beta.21]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.20...v0.1.0-beta.21

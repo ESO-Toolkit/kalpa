@@ -593,19 +593,52 @@ describe("alsoConsidered", () => {
     expect(out.map((r) => r.esoui_id)).toContain(999);
   });
 
-  it("puts semantic finds first, then fills with keyword hits in order", () => {
+  it("puts semantic finds first, then keyword hits in rank order", () => {
     const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
-    expect(out).toHaveLength(8);
     // The semantic-only match leads: it is the one keyword search could not
     // find, so burying it behind hits the user could have typed is backwards.
     expect(out[0].esoui_id).toBe(999);
-    expect(out.slice(1).map((r) => r.esoui_id)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(out.slice(1).map((r) => r.esoui_id)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    ]);
+  });
+
+  it("keeps semantic extras beyond the front-loaded three, in place", () => {
+    // The 20+1 fixture cannot tell ALSO_CONSIDERED_LIMIT (26) apart from the
+    // CANDIDATE_COUNT (20) it replaced, and never exercises more semantic
+    // extras than the 3 that get front-loaded. This pins both: the full
+    // retrieved set survives, and extras 4-6 stay where retrieval put them
+    // rather than being dropped for missing the front-load quota.
+    const full = [
+      ...Array.from({ length: 20 }, (_, i) => hit(i + 1, `Keyword Addon ${i + 1}`)),
+      ...Array.from({ length: 6 }, (_, i) => ({
+        ...hit(900 + i, `Semantic Only ${i + 1}`),
+        semantic: true,
+      })),
+    ];
+
+    const out = alsoConsidered(full, []).map((r) => r.esoui_id);
+
+    expect(out).toHaveLength(26);
+    expect(out.slice(0, 3)).toEqual([900, 901, 902]);
+    expect(out.slice(3, 23)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+    expect(out.slice(23)).toEqual([903, 904, 905]);
+  });
+
+  it("drops nothing that retrieval found and the model did not pick", () => {
+    // The list is collapsed behind a disclosure whose promise is that a short
+    // answer never looks like it missed something. A display cap broke that
+    // promise silently: on a real question "Combat Indicator" was BM25 rank 8,
+    // the 8th unpicked hit, and fell off the end of an 8-slot list that had
+    // already committed 3 slots to semantic extras.
+    const out = alsoConsidered(fused, [{ esoui_id: 1 }]);
+    expect(out).toHaveLength(fused.length - 1);
   });
 
   it("gives every slot to keyword hits when there are no semantic extras", () => {
     const keywordOnly = fused.filter((h) => !h.semantic);
     const out = alsoConsidered(keywordOnly, []);
-    expect(out).toHaveLength(8);
+    expect(out).toHaveLength(keywordOnly.length);
     expect(out.every((r) => r.esoui_id <= 20)).toBe(true);
   });
 
