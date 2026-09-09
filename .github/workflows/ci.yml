@@ -15,6 +15,74 @@ permissions:
   contents: read
 
 jobs:
+  # Nothing had ever linted these workflow files. `npx eslint src/` and
+  # `npm run format:check` both stop at the repo's own source, so the only
+  # thing that has ever read a workflow is a human -- which is how the beta.23
+  # audit found the shell-injection in deploy-worker.yml, by hand, on release
+  # eve. actionlint parses every workflow, resolves the expression contexts,
+  # and pipes each `run:` block through shellcheck.
+  #
+  # What it does NOT catch, stated plainly so nobody assumes otherwise: it
+  # would not have found the beta.23 injection. actionlint's script-injection
+  # rule fires on a fixed list of attacker-controlled `github.*` values
+  # (`github.event.*`, `github.head_ref`, ...); a `${{ steps.<id>.outputs.* }}`
+  # splice into a `run:` line is not on that list. Reconstructed and rerun
+  # against the pre-fix deploy-worker.yml with shellcheck enabled: exit 0.
+  # Reviewing command output spliced into `run:` is still a human job.
+  #
+  # What it does buy: the `github.event.*` injection class, unknown runner
+  # labels, undefined step ids and contexts, malformed `if:` expressions, bad
+  # cron syntax, and shellcheck over every `run:` block.
+  #
+  # Its own job, and first, for the same reason the version check leads the
+  # `check` job: this reports in well under a minute instead of behind the
+  # 20-minute Rust build.
+  lint-workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned by the release artifact's own SHA-256 rather than by a
+      # third-party wrapper action: pulling in someone else's action to run the
+      # supply-chain linter would widen the exact surface this job exists to
+      # narrow. `sha256sum --check` makes the download fail closed, so a
+      # swapped asset stops the job instead of silently linting with an
+      # unknown binary.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 2 \
+            -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict -
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint --version
+
+      # No file arguments: actionlint finds the repo root itself and lints
+      # every workflow under .github/workflows, so a workflow added later is
+      # covered without touching this job. It exits 1 on any finding, which is
+      # what fails the step.
+      #
+      # shellcheck ships preinstalled on ubuntu-latest and actionlint picks it
+      # up off PATH; that is where the `run:` block coverage comes from, so do
+      # not move this job to a runner without it.
+      #
+      # -ignore SC1083 is a targeted suppression, not a blanket one.
+      # release.yml's authorize job runs `git rev-parse HEAD^{commit}`, where
+      # the braces are git's peel syntax and are meant to reach git literally;
+      # shellcheck reads them as a malformed brace expansion and warns four
+      # times. Quoting those two rev-specs in release.yml is the real fix --
+      # delete this flag when that lands. Suppressed rather than left red
+      # because a gate that fails on arrival gets waved through, which is the
+      # habit that let these files go unlinted in the first place.
+      - name: actionlint
+        run: ./actionlint -ignore 'SC1083'
+
   check:
     runs-on: windows-latest
     timeout-minutes: 30
@@ -44,6 +112,20 @@ jobs:
       # can post externally.
       - name: Release and Discord message tests
         run: node --test .github/scripts/discord-release.test.cjs .github/scripts/release-body.test.cjs
+
+      # `npm run test:packaged` as a whole is local-only (see the e2e note
+      # below), but its CDP-port preflight is not: that part needs no build, no
+      # WebView2 and no debug port -- only a socket on 9222 that it has to
+      # refuse to attach to. Runs here, before npm ci, because the gate and its
+      # harness import nothing but Node builtins.
+      #
+      # Worth a runner step even though the gate is not: the "which process is
+      # holding the port" diagnostic only ever surfaces mid-release, so nothing
+      # else would notice it rotting until the next time it is needed in a
+      # hurry. Safe on windows-latest for the same reason the e2e jobs are not
+      # -- nothing binds 9222 there, per the evidence below.
+      - name: Packaged-gate CDP preflight tests
+        run: node --test scripts/verify-packaged-build.test.mjs
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable

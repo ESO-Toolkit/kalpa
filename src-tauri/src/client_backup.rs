@@ -602,6 +602,7 @@ fn roll_back_with(
 /// inside a section that already holds it.
 fn record_incomplete_rollback_locked(
     manifest_path: &Path,
+    backup_root: &Path,
     client_root: &Path,
     placed: &[PlacedRecord],
     failed: &[usize],
@@ -649,9 +650,18 @@ fn record_incomplete_rollback_locked(
             .installs
             .entry(install_key(client_root))
             .or_default();
+        // The same attribution the success path applies, for the same reason.
+        // These entries replace whatever this install already recorded for
+        // these paths, so a re-placement whose rollback failed would otherwise
+        // swap the reference to the user's true original for a backup of
+        // Kalpa's own previous copy — and drop the original into exactly the
+        // unreferenced-and-prunable state this function exists to prevent.
+        let previous = bucket.clone();
         for entry in &entries {
+            let mut entry = entry.clone();
+            carry_displaced_backup_forward(backup_root, &previous, &mut entry);
             bucket.retain(|existing| existing.relative_path != entry.relative_path);
-            bucket.push(entry.clone());
+            bucket.push(entry);
         }
         bucket.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
         save_manifest_at(manifest_path, &manifest)
@@ -804,6 +814,7 @@ fn apply_placements_in_with_locked(
                 }
                 return Err(record_incomplete_rollback_locked(
                     manifest_path,
+                    backup_root,
                     client_root,
                     &placed,
                     &failed,
@@ -833,6 +844,7 @@ fn apply_placements_in_with_locked(
         }
         return Err(record_incomplete_rollback_locked(
             manifest_path,
+            backup_root,
             client_root,
             &placed,
             &failed,
@@ -986,6 +998,20 @@ fn record_adopted_locked(
             .find(|existing| existing.relative_path == entry.relative_path)
         {
             entry.parked = previous.parked;
+            // And for the same reason, adoption never *displaces* anything
+            // either, so it has no standing to release a backup folder an
+            // earlier entry claimed. Dropping that reference here would leave
+            // the user's displaced original unreferenced, and
+            // `prune_unreferenced_backups` deletes those — the placement path
+            // keeps the identical invariant in
+            // `carry_displaced_backup_forward`. The one id this call really
+            // does supersede is an earlier adoption's kept copy, replaced by a
+            // fresh copy of the same live file.
+            let refreshes_a_kept_copy =
+                entry.displaced_backup.is_some() && previous.origin == FileOrigin::Adopted;
+            if !refreshes_a_kept_copy {
+                entry.displaced_backup = previous.displaced_backup.clone();
+            }
         }
         bucket.retain(|existing| existing.relative_path != entry.relative_path);
         bucket.push(entry);
@@ -2924,6 +2950,138 @@ mod tests {
             error.contains("dxgi.dll"),
             "error must name the file: {error}"
         );
+    }
+
+    #[test]
+    fn a_failed_rollback_of_a_re_placement_still_points_at_the_users_original() {
+        let h = Harness::new();
+        // The user's own copy of a shader helper, there before Kalpa.
+        fs::write(h.client.join("ReShade.fxh"), "the-users-own").expect("seed original");
+        h.apply(vec![h.placement("ReShade.fxh", "pack-one")])
+            .expect("first pack");
+        let original = h.entries()[0]
+            .displaced_backup
+            .clone()
+            .expect("the user's file must have been backed up");
+
+        // A second pack ships the same helper, so what this batch displaces is
+        // Kalpa's own copy — and this time the batch fails and cannot roll the
+        // re-placement back, so the mixed-state entry is what the manifest ends
+        // up holding.
+        let error = h
+            .apply_with_restore(
+                vec![
+                    h.placement("ReShade.fxh", "pack-two"),
+                    h.placement("../evil.dll", "pwned"),
+                ],
+                restore_always_fails,
+            )
+            .expect_err("the batch must fail");
+        assert!(error.contains("mixed state"), "unexpected error: {error}");
+
+        let entries = h.entries();
+        assert_eq!(entries.len(), 1, "no duplicate rows: {entries:?}");
+        assert_eq!(
+            entries[0].displaced_backup.as_deref(),
+            Some(original.as_str()),
+            "the mixed-state entry must still reference the user's original, not this \
+             batch's backup of pack one's file: {entries:?}"
+        );
+
+        // Which is the whole point of writing the entry at all: the original
+        // stays referenced, so pruning cannot reach it.
+        for index in 0..MAX_UNREFERENCED_BACKUPS + 5 {
+            let dir = h.backups.join(format!("2020-01-01T00-00-00Z-{index:06}-0"));
+            fs::create_dir_all(&dir).expect("mkdir");
+            fs::write(dir.join("stale.bin"), "stale").expect("write");
+        }
+        prune_unreferenced_backups(&h.backups, &h.manifest());
+        let backup = backup_file_path(&h.backups, &original, "ReShade.fxh").expect("backup path");
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read backup after prune"),
+            "the-users-own",
+            "the user's original must still be recoverable byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn recording_an_adopted_entry_never_releases_an_earlier_displaced_original() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-original-dll").expect("seed");
+        h.apply(vec![h.placement("dxgi.dll", "kalpa-proxy")])
+            .expect("placement");
+        let original = h.entries()[0]
+            .displaced_backup
+            .clone()
+            .expect("the user's file must have been backed up");
+
+        // Adoption moves no bytes, so recording over this path displaces
+        // nothing and must not release the folder holding the user's original.
+        record_adopted(
+            &h.manifest,
+            &h.client,
+            vec![ManagedFile {
+                relative_path: "dxgi.dll".to_string(),
+                kind: ManagedKind::ReShadeCore,
+                sha256: sha256_of("kalpa-proxy"),
+                placed_at: rfc3339_now(),
+                displaced_backup: None,
+                origin: FileOrigin::Adopted,
+                displaced_in_place: None,
+                parked: false,
+            }],
+        )
+        .expect("record adopted");
+
+        let entries = h.entries();
+        assert_eq!(entries.len(), 1, "no duplicate rows: {entries:?}");
+        assert_eq!(
+            entries[0].displaced_backup.as_deref(),
+            Some(original.as_str()),
+            "the adopted entry must inherit the reference to the user's original: {entries:?}"
+        );
+
+        for index in 0..MAX_UNREFERENCED_BACKUPS + 5 {
+            let dir = h.backups.join(format!("2020-01-01T00-00-00Z-{index:06}-0"));
+            fs::create_dir_all(&dir).expect("mkdir");
+            fs::write(dir.join("stale.bin"), "stale").expect("write");
+        }
+        prune_unreferenced_backups(&h.backups, &h.manifest());
+        let backup = backup_file_path(&h.backups, &original, "dxgi.dll").expect("backup path");
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read backup after prune"),
+            "the-users-original-dll",
+            "the user's original must still be recoverable byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn re_adopting_with_a_fresh_kept_copy_supersedes_the_earlier_one() {
+        let h = Harness::new();
+        fs::write(h.client.join("dxgi.dll"), "the-users-own-dll").expect("seed");
+        let adopted = |copy_id: Option<&str>| ManagedFile {
+            relative_path: "dxgi.dll".to_string(),
+            kind: ManagedKind::ReShadeCore,
+            sha256: sha256_of("the-users-own-dll"),
+            placed_at: rfc3339_now(),
+            displaced_backup: copy_id.map(str::to_string),
+            origin: FileOrigin::Adopted,
+            displaced_in_place: None,
+            parked: false,
+        };
+
+        record_adopted(&h.manifest, &h.client, vec![adopted(Some("copy-one"))]).expect("adopt");
+        record_adopted(&h.manifest, &h.client, vec![adopted(Some("copy-two"))]).expect("re-adopt");
+
+        // Both ids name a copy of the same live file, so the fresh one replaces
+        // the stale one rather than being suppressed by the carry-forward that
+        // protects a *displaced* original.
+        assert_eq!(h.entries()[0].displaced_backup.as_deref(), Some("copy-two"));
+
+        // And declining copies on a later pass keeps the last one there was,
+        // because dropping it would destroy bytes this call did not replace.
+        record_adopted(&h.manifest, &h.client, vec![adopted(None)]).expect("adopt without copies");
+        assert_eq!(h.entries()[0].displaced_backup.as_deref(), Some("copy-two"));
     }
 
     #[test]

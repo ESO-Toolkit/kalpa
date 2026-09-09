@@ -1032,11 +1032,11 @@ async function handleScheduled(env: Env): Promise<void> {
  * record; the slack absorbs cost growth without retuning.
  *
  * The ceiling this protects is now the DURABLE OBJECT's, not this route's:
- * PackIndexDO.writeRestorePage performs those writes so they land inside the
- * same serialization boundary as account deletion, and a Durable Object gets
- * its own 1000-subrequest budget. The route itself now spends a couple of
- * dozen. Do not read that slack as room to raise the page cap — the writes did
- * not get cheaper, they moved, and the DO is what would throw.
+ * PackIndexDO.writeRestorePage performs those writes so its staging journal can
+ * order them against account deletion, and a Durable Object gets its own
+ * 1000-subrequest budget. The route itself now spends a couple of dozen. Do not
+ * read that slack as room to raise the page cap — the writes did not get
+ * cheaper, they moved, and the DO is what would throw.
  *
  * Derive the caps from this rather than picking a round number: a page cap of
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
@@ -1847,15 +1847,24 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     // /ask is a POST but is a read in spirit; WRITE_LIMITER's 10/min is meant
     // for pack mutations and would be an odd ceiling on asking questions.
     const isAsk = pathname === "/ask";
+    // GDPR erasure is paged: one request clears ~450 votes and returns
+    // `complete: false` for the caller to repeat, so an account with a few
+    // thousand votes needs a dozen or more rounds. Sharing WRITE_LIMITER's
+    // 10/min meant the user was 429'd partway through deleting their own data
+    // and could not finish. It gets its own budget rather than relaxing the
+    // write limit for pack mutations too.
+    const isErasure = method === "DELETE" && pathname === "/account";
     const limiter = isAsk
       ? (env.ASK_LIMITER ?? env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
       : isAddonRead
-      ? (env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
-      : isVote
-        ? env.VOTE_LIMITER
-        : isWrite
-          ? env.WRITE_LIMITER
-          : env.READ_LIMITER;
+        ? (env.ADDON_SEARCH_LIMITER ?? env.READ_LIMITER)
+        : isErasure
+          ? (env.ERASURE_LIMITER ?? env.WRITE_LIMITER)
+          : isVote
+            ? env.VOTE_LIMITER
+            : isWrite
+              ? env.WRITE_LIMITER
+              : env.READ_LIMITER;
     const { success } = await limiter.limit({ key: ip });
     if (!success) {
       return new Response(JSON.stringify({ error: "Too many requests" }), {

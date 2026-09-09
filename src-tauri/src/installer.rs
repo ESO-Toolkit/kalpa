@@ -1,33 +1,91 @@
 use crate::install_txn::InstallTransaction;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
 
 /// Maximum total extracted size (500 MB) to guard against ZIP bombs.
 const MAX_EXTRACT_SIZE: u64 = 500 * 1024 * 1024;
 
-/// Turn a filesystem write error into a user-facing message. When the OS
-/// reports permission denied (Windows `os error 5` / Unix `PermissionDenied`),
-/// the most common cause on Windows is the AddOns folder living under
-/// `Documents`, which Windows Defender's **Controlled Folder Access**
-/// (ransomware protection) blocks apps from writing to. Surface that
-/// explanation with concrete steps instead of a raw "Access is denied".
-fn describe_write_error(path: &Path, e: &io::Error) -> String {
-    if e.kind() == io::ErrorKind::PermissionDenied {
-        format!(
-            "Windows blocked Kalpa from writing to your AddOns folder ({path:?}). \
-             This is most often Controlled Folder Access (ransomware protection), \
-             but can also be a read-only file, restrictive permissions, or antivirus. \
-             To fix the common case: open Windows Security → Virus & threat protection → \
-             Ransomware protection → Allow an app through Controlled folder access, \
-             then add Kalpa. (Underlying error: {e})"
-        )
-    } else {
-        format!("Failed to write {path:?}: {e}")
+/// Rewrite a path inside the install transaction's staging tree to the live
+/// AddOns path it publishes to: `AddOns/.kalpa-staging/<txn>/stage/<Folder>/…`
+/// becomes `AddOns/<Folder>/…`.
+///
+/// Every write an install performs lands in staging, so an unrewritten error
+/// names a directory that only exists while the transaction is running and is
+/// deleted before the user reads the message — telling them to fix a file they
+/// cannot find. The live path is the one they can act on. Paths that are not
+/// staged writes are returned unchanged.
+fn live_addons_path(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let mut live = PathBuf::new();
+    while let Some(component) = components.next() {
+        if component.as_os_str() != crate::install_txn::STAGING_DIR {
+            live.push(component);
+            continue;
+        }
+        // `<transaction root>` then `stage`. Anything else under the staging
+        // directory is transaction bookkeeping with no live counterpart.
+        let mut staged = components.clone();
+        let has_root = staged.next().is_some();
+        let in_stage = staged.next().map(|next| next.as_os_str()) == Some(OsStr::new("stage"));
+        if has_root && in_stage {
+            live.extend(staged);
+            return live;
+        }
+        break;
     }
+    path.to_path_buf()
+}
+
+/// True when `path` is an existing file carrying the read-only attribute (or,
+/// on Unix, no write permission) — the one permission denial we can attribute
+/// without guessing.
+fn is_read_only_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().readonly())
+        .unwrap_or(false)
+}
+
+/// Turn a filesystem write error into a user-facing message naming the live
+/// AddOns file, not the staging copy the write actually targeted.
+///
+/// A permission denial (Windows `os error 5` / Unix `PermissionDenied`) has two
+/// common causes that need opposite fixes. A read-only file is provable — check
+/// the attribute and lead with clearing it, because sending that user through
+/// the Controlled Folder Access flow costs them the whole detour and still
+/// leaves the file unwritable. Only when nothing on disk explains the denial do
+/// we lead with **Controlled Folder Access** (Windows Defender's ransomware
+/// protection, which blocks writes under `Documents` — where the AddOns folder
+/// lives). Both branches keep the phrase "Controlled Folder Access" so
+/// `getTauriErrorMessage` passes the message through verbatim instead of
+/// collapsing it into the generic "os error 5" hint.
+fn describe_write_error(path: &Path, e: &io::Error) -> String {
+    let live = live_addons_path(path);
+    if e.kind() != io::ErrorKind::PermissionDenied {
+        return format!("Failed to write {live:?}: {e}");
+    }
+    if is_read_only_file(&live) || is_read_only_file(path) {
+        return format!(
+            "Kalpa could not write {live:?} because that file is marked read-only. \
+             In File Explorer, right-click it → Properties, clear the Read-only box, \
+             then try again. If it is already clear, the block is antivirus or \
+             Controlled Folder Access instead: Windows Security → Virus & threat \
+             protection → Ransomware protection → Allow an app through Controlled \
+             folder access, then add Kalpa. (Underlying error: {e})"
+        );
+    }
+    format!(
+        "Windows blocked Kalpa from writing to your AddOns folder ({live:?}). \
+         This is most often Controlled Folder Access (ransomware protection), \
+         but can also be a read-only file, restrictive permissions, or antivirus. \
+         To fix the common case: open Windows Security → Virus & threat protection → \
+         Ransomware protection → Allow an app through Controlled folder access, \
+         then add Kalpa. (Underlying error: {e})"
+    )
 }
 
 /// Describe an error from streaming a ZIP entry to disk (`io::copy`). A
@@ -39,7 +97,8 @@ fn describe_extract_error(path: &Path, e: &io::Error) -> String {
     if e.kind() == io::ErrorKind::PermissionDenied {
         describe_write_error(path, e)
     } else {
-        format!("Failed to extract {path:?} (the archive may be corrupt): {e}")
+        let live = live_addons_path(path);
+        format!("Failed to extract {live:?} (the archive may be corrupt): {e}")
     }
 }
 
@@ -976,6 +1035,91 @@ mod tests {
         let msg = describe_write_error(Path::new("C:/Users/x/Documents/AddOns/Foo"), &err);
         assert!(msg.contains("Controlled Folder Access"));
         assert!(msg.contains("Allow an app"));
+    }
+
+    /// Every write in an install goes to
+    /// `AddOns/.kalpa-staging/<txn>/stage/<Folder>/…`, a directory that is
+    /// deleted before the user reads the error. Naming it sends them looking
+    /// for a file that no longer exists; the live path is the one they can fix.
+    #[test]
+    fn write_errors_name_the_live_file_not_the_staging_copy() {
+        let staged = Path::new("C:/Users/x/Documents/Elder Scrolls Online/live/AddOns")
+            .join(".kalpa-staging")
+            .join("4812-0-1f2e3d4c5b6a7988")
+            .join("stage")
+            .join("LibGPS")
+            .join("LibGPS.lua");
+
+        let denied =
+            describe_write_error(&staged, &io::Error::from(io::ErrorKind::PermissionDenied));
+        let generic = describe_write_error(&staged, &io::Error::from(io::ErrorKind::NotFound));
+
+        for msg in [&denied, &generic] {
+            assert!(
+                !msg.contains(".kalpa-staging"),
+                "leaked the staging path: {msg}"
+            );
+            assert!(msg.contains("AddOns"), "dropped the AddOns path: {msg}");
+            assert!(msg.contains("LibGPS"), "dropped the addon folder: {msg}");
+            assert!(msg.contains("LibGPS.lua"), "dropped the file name: {msg}");
+        }
+    }
+
+    /// A path that is not a staged write must survive untouched, including one
+    /// that mentions the staging directory without the `<txn>/stage` shape.
+    #[test]
+    fn live_paths_are_left_alone() {
+        for path in [
+            "C:/Users/x/Documents/AddOns/LibGPS/LibGPS.lua",
+            "/tmp/x",
+            "C:/Users/x/Documents/AddOns/.kalpa-staging",
+            "C:/Users/x/Documents/AddOns/.kalpa-staging/4812-0-abc/hashes/LibGPS.json",
+        ] {
+            assert_eq!(live_addons_path(Path::new(path)), PathBuf::from(path));
+        }
+    }
+
+    /// Controlled Folder Access and a read-only file both surface as
+    /// `os error 5`, but they need opposite fixes. When the attribute proves it
+    /// is the file, lead with clearing it — the CFA detour cannot fix a
+    /// read-only file, so leading with CFA costs the user the whole trip. The
+    /// phrase still has to appear so `getTauriErrorMessage` passes the message
+    /// through instead of collapsing it into the generic "os error 5" hint.
+    #[test]
+    fn a_read_only_file_does_not_lead_with_controlled_folder_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let addons_dir = temp.path().join("AddOns");
+        let live = addons_dir.join("LibGPS").join("LibGPS.lua");
+        fs::create_dir_all(live.parent().unwrap()).unwrap();
+        fs::write(&live, b"user copy").unwrap();
+        let mut permissions = fs::metadata(&live).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&live, permissions).unwrap();
+        let staged = addons_dir
+            .join(".kalpa-staging")
+            .join("4812-0-1f2e3d4c5b6a7988")
+            .join("stage")
+            .join("LibGPS")
+            .join("LibGPS.lua");
+
+        let msg = describe_write_error(&staged, &io::Error::from(io::ErrorKind::PermissionDenied));
+
+        assert!(
+            msg.contains("read-only"),
+            "did not name the real cause: {msg}"
+        );
+        assert!(
+            msg.contains("LibGPS.lua"),
+            "did not name the file to fix: {msg}"
+        );
+        assert!(
+            !msg.starts_with("Windows blocked Kalpa"),
+            "still led with Controlled Folder Access: {msg}"
+        );
+        assert!(
+            msg.contains("Controlled Folder Access"),
+            "dropped the phrase getTauriErrorMessage passes through on: {msg}"
+        );
     }
 
     #[test]

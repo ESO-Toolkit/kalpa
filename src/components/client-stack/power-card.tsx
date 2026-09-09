@@ -68,12 +68,30 @@ function PlannedOpRow({ op }: { op: PlannedOp }) {
 }
 
 /**
+ * How many planned operations are drawn before the rest becomes a count.
+ *
+ * The confirm button sits directly under this list, so an unbounded plan puts
+ * the only control that acts on it below however many rows the backend chose to
+ * emit — a control a user has to scroll to find is one they may not find. Eight
+ * clears every plan the backend produces today: beta.23 collapsed a shader pack
+ * into a single row in `plan_client_toggle`, so the cap is insurance against a
+ * future plan being long, not a reaction to one that already is.
+ */
+const MAX_PLANNED_ROWS = 8;
+
+/**
  * Switch the whole stack off, or back on.
  *
  * The confirmation is the plan: one line per operation, in the order they run,
  * computed by the backend from what is actually on disk. The confirm button
  * stays disabled until that plan has loaded — a user cannot approve a list they
  * have not been shown.
+ *
+ * Past `MAX_PLANNED_ROWS` the remaining rows are stated as a count instead of
+ * being drawn, and the plan's own total stays on screen beside it. What is
+ * capped is the drawing, not the plan: every step still runs, and the line says
+ * so, because a list that quietly stops at eight is a smaller plan than the one
+ * the button applies.
  */
 export function StackPowerCard({ clientDir, stack, mutation }: StackPanelProps) {
   const [plan, setPlan] = useState<TogglePlan | null>(null);
@@ -147,6 +165,9 @@ export function StackPowerCard({ clientDir, stack, mutation }: StackPanelProps) 
   const state: "on" | "partly" | "off" =
     parkedCount === 0 ? "on" : stack.is_disabled ? "off" : "partly";
   const disabled = state !== "on";
+
+  const opCount = plan?.operations.length ?? 0;
+  const hiddenOps = Math.max(0, opCount - MAX_PLANNED_ROWS);
 
   return (
     <GlassPanel variant="default" className="space-y-3 p-4">
@@ -223,9 +244,15 @@ export function StackPowerCard({ clientDir, stack, mutation }: StackPanelProps) 
           )}
 
           <ul className="space-y-1">
-            {plan.operations.map((op, i) => (
+            {plan.operations.slice(0, MAX_PLANNED_ROWS).map((op, i) => (
               <PlannedOpRow key={`${op.kind}-${op.file_name}-${i}`} op={op} />
             ))}
+            {hiddenOps > 0 && (
+              <li className="px-2 pt-1 text-[11px] leading-relaxed text-muted-foreground">
+                and {hiddenOps} more step{hiddenOps === 1 ? "" : "s"} not shown — {opCount} steps in
+                this plan, and every one of them runs.
+              </li>
+            )}
           </ul>
 
           <div className="flex items-center gap-2 pt-1">

@@ -65,6 +65,17 @@ jobs:
       # `inputs` is empty on the scheduled run, so the defaults live here too.
       BASE_URL: ${{ inputs.base_url || 'https://kalpa-pack-hub.eso-toolkit.workers.dev' }}
       MAX_PAGES: ${{ inputs.max_pages || '60' }}
+      # Rebuild the embedding index weekly (Sundays) or on demand. Nothing
+      # else does it, so without this the vectors drift stale against D1 and
+      # every newly published addon is invisible to semantic retrieval -
+      # exactly the case it exists for. ~4.5k neurons for a full corpus, so
+      # it is kept off the daily path to stay clear of the free allocation.
+      #
+      # Job level, not step level. The step that reads it is "Sync filelist"
+      # below; declared on any other step it is simply empty there, which is
+      # how --embed was computed correctly and then dropped from every run it
+      # was meant to be on.
+      EMBED_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.embed == 'true') || github.event.schedule == '10 5 * * 0' && '--embed' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,12 +88,6 @@ jobs:
       - name: Verify the admin key is configured
         env:
           ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
-          # Rebuild the embedding index weekly (Sundays) or on demand. Nothing
-          # else does it, so without this the vectors drift stale against D1 and
-          # every newly published addon is invisible to semantic retrieval —
-          # exactly the case it exists for. ~4.5k neurons for a full corpus, so
-          # it is kept off the daily path to stay clear of the free allocation.
-          EMBED_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.embed == 'true') || github.event.schedule == '10 5 * * 0' && '--embed' || '' }}
         run: |
           if [ -z "$ADMIN_API_KEY" ]; then
             echo "::error::ADMIN_API_KEY secret is not set; the crawl cannot authenticate."
@@ -97,7 +102,16 @@ jobs:
       - name: Sync filelist and backfill descriptions
         env:
           ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
-        run: node scripts/build-addon-index.mjs --base "$BASE_URL" --max "$MAX_PAGES" $EMBED_FLAG
+        run: |
+          # EMBED_FLAG is either "--embed" or empty, so it cannot simply be
+          # quoted: an empty expansion would reach the script as a real blank
+          # argument. Building the list keeps both cases correct and leaves
+          # nothing for shellcheck to warn about.
+          args=(--base "$BASE_URL" --max "$MAX_PAGES")
+          if [ -n "$EMBED_FLAG" ]; then
+            args+=("$EMBED_FLAG")
+          fi
+          node scripts/build-addon-index.mjs "${args[@]}"
 
       # Health snapshot in the run log: pending_details is how far behind the
       # crawl still is, stale_hours how long since the last successful sync.

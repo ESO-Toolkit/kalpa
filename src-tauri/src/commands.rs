@@ -1552,7 +1552,14 @@ pub struct AddonsDetectionResult {
     pub warnings: Vec<String>,
 }
 
-#[tauri::command]
+/// `(async)`: a non-async `#[tauri::command]` runs on the main thread, and
+/// this is not a cheap body. `candidate_addons_dirs` stats three region folders
+/// under every `documents_candidates` root — a OneDrive-redirected Documents
+/// makes that network I/O — and `score_addons_dir` plus `count_addon_manifests`
+/// then read every AddOns directory found and probe a manifest per subfolder.
+/// Sync, a cold-disk machine freezes with the setup wizard on screen and nothing
+/// to explain the stall.
+#[tauri::command(async)]
 pub fn detect_addons_folders() -> AddonsDetectionResult {
     let candidates = candidate_addons_dirs();
 
@@ -1596,7 +1603,11 @@ pub fn detect_addons_folders() -> AddonsDetectionResult {
 }
 
 /// Legacy detection command — thin wrapper for backwards compatibility.
-#[tauri::command]
+///
+/// `(async)` for the same reason as [`detect_addons_folders`]: this is that
+/// entire scan plus an unwrap, so a sync wrapper puts it back on the main
+/// thread.
+#[tauri::command(async)]
 pub fn detect_addons_folder() -> Result<String, String> {
     let result = detect_addons_folders();
     result
@@ -2100,7 +2111,17 @@ pub async fn remove_addon(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-#[tauri::command]
+/// `(async)`: `lock_and_recover` waits up to `transaction_lock::DEFAULT_TIMEOUT`
+/// for the AddOns transaction lock, and `activate_profile`, `install_addon` and
+/// `batch_update_addons` all hold that lock for seconds at a time. Sync, toggling
+/// an addon while any of those ran froze the window for the whole wait and then
+/// failed anyway; off the main thread the wait is invisible and usually wins.
+///
+/// Nothing is lost by dropping main-thread serialization here: the transaction
+/// lock, not IPC dispatch, is what orders this against every other write to the
+/// same AddOns folder — `batch_set_enabled` has always raced it from the
+/// blocking pool.
+#[tauri::command(async)]
 pub fn disable_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -2120,7 +2141,8 @@ pub fn disable_addon(
     fs::rename(&src, &dst).map_err(|e| format!("Failed to disable {folder_name}: {e}"))
 }
 
-#[tauri::command]
+/// `(async)` for the same reason as [`disable_addon`], on the same lock.
+#[tauri::command(async)]
 pub fn enable_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -7075,7 +7097,13 @@ pub async fn restore_backup_safe(
 }
 
 /// Return the absolute path to the kalpa-backups folder so the UI can reveal it.
-#[tauri::command]
+///
+/// `(async)` because it canonicalizes the AddOns path and `create_dir_all`s the
+/// backups folder. That is a write to a folder that may sit on a slow or
+/// OneDrive-backed volume, and the Reveal button calling it is in a dialog the
+/// user is looking at. `backups.tsx` awaits this before `reveal_allowed_path`,
+/// so the two stay ordered without the main thread enforcing it.
+#[tauri::command(async)]
 pub fn get_backups_folder_path(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -7329,7 +7357,19 @@ fn save_profiles(addons_dir: &std::path::Path, store: &ProfileStore) -> Result<(
     )
 }
 
-#[tauri::command]
+/// `(async)`: both guards can block for a long time. `profile_store_guard` is
+/// an untimed mutex held by whichever profile write is in flight, and
+/// `acquire_read` then waits up to `transaction_lock::DEFAULT_TIMEOUT` for the
+/// profiles lock — which another Kalpa window can hold. Sync, opening Profiles
+/// while a rename was still finishing froze the window for that whole wait.
+///
+/// Ordering survives where it matters: `profiles.tsx` awaits each mutation
+/// before it re-lists, and the store mutex still serializes this read against
+/// every write, so no list is ever built from a half-applied rename. What the
+/// move does give up is that two overlapping lists can now finish out of order,
+/// because `loadProfiles()` is called without `await` — the loser repaints a
+/// list at most one mutation stale, which the next dialog action corrects.
+#[tauri::command(async)]
 pub fn list_profiles(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -7872,7 +7912,12 @@ pub async fn update_profile(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-#[tauri::command]
+/// `(async)`: `profile_transaction_guard` waits up to
+/// `transaction_lock::DEFAULT_TIMEOUT` for the profiles lock, and the save then
+/// rewrites `profiles.json` and its mirror. Sync, that wait was a main-thread
+/// freeze. Exclusion comes from the store mutex and the transaction lock, not
+/// from IPC dispatch, so both survive the move.
+#[tauri::command(async)]
 pub fn rename_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -7906,7 +7951,9 @@ pub fn rename_profile(
     save_profiles(&addons_dir, &store)
 }
 
-#[tauri::command]
+/// `(async)` for the same reason as [`rename_profile`]: same guards, same
+/// rewrite of `profiles.json` and its mirror.
+#[tauri::command(async)]
 pub fn delete_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -8925,7 +8972,12 @@ fn decode_minion_addons_path(value: &str) -> Option<PathBuf> {
         .or_else(|| Some(PathBuf::from(value)))
 }
 
-#[tauri::command]
+/// `(async)` because `find_minion_xml` stats a path under the home directory,
+/// and a roaming or redirected profile turns that into a network round-trip.
+/// `initializeApp` fires it at startup, so a stall lands while the window is
+/// still empty. The call site is fire-and-forget but the command reads nothing
+/// it also writes, so there is no ordering to preserve.
+#[tauri::command(async)]
 pub fn detect_minion() -> Result<bool, String> {
     Ok(find_minion_xml().is_some())
 }
@@ -9005,7 +9057,9 @@ pub async fn migration_check_integrity(
         .map_err(|e| format!("Task failed: {e}"))
 }
 
-#[tauri::command]
+/// `(async)`: reads the snapshot directory and parses a manifest per snapshot,
+/// and that list grows with every migration and bulk operation the user runs.
+#[tauri::command(async)]
 pub fn list_snapshots(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -9031,7 +9085,11 @@ pub async fn restore_snapshot(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-#[tauri::command]
+/// `(async)`: this removes a snapshot's whole directory tree, and a snapshot
+/// taken with `include_addons` is thousands of files. Safety Center's
+/// `anyOpInFlight` guard — not main-thread dispatch — is what keeps this from
+/// racing a restore, and it is unaffected by the move.
+#[tauri::command(async)]
 pub fn delete_snapshot(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -9057,7 +9115,8 @@ pub async fn create_pre_operation_snapshot(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-#[tauri::command]
+/// `(async)`: reads and parses the operations log off disk.
+#[tauri::command(async)]
 pub fn read_ops_log(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -10035,7 +10094,13 @@ pub const SANDBOX_MARKER: &str = ".kalpa-e2e-sandbox";
 /// one would drop the app into the setup wizard instead) and returned in
 /// canonical drive-letter form so it compares equal to what `set_addons_path`
 /// stores. Note `validate_addons_path` requires the leaf to be named `AddOns`.
-#[tauri::command]
+///
+/// `(async)` for the debug arm below: it `create_dir_all`s and canonicalizes a
+/// path taken from the environment, on the first line of `initializeApp`, before
+/// anything is painted. The release arm is a constant, so shipped builds pay
+/// nothing for the attribute. Direct Rust callers such as `set_addons_path` are
+/// unaffected — the attribute wraps the IPC handler, not this function.
+#[tauri::command(async)]
 pub fn debug_addons_dir_override() -> Result<Option<String>, String> {
     #[cfg(not(debug_assertions))]
     {
@@ -11469,7 +11534,11 @@ pub async fn check_addons_write_access(
 /// Open the Windows Security "Ransomware protection" page, where the user can
 /// allow Kalpa through Controlled Folder Access. Windows-only; the deep link
 /// is a fixed constant (no interpolation).
-#[tauri::command]
+///
+/// `(async)` because `Command::spawn` is a `CreateProcess` call and starting
+/// `cmd` under an anti-malware filter driver takes hundreds of milliseconds. The
+/// CFA guidance dialog this button lives in would sit frozen for all of it.
+#[tauri::command(async)]
 pub fn open_ransomware_protection_settings() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -11583,6 +11652,120 @@ mod tests {
                 .ends_with("#[tauri::command(async)]"),
             "set_addons_path must be #[tauri::command(async)]"
         );
+    }
+
+    /// The rule the two tests above enforce one command at a time, applied to
+    /// the rest of the file. Every signature listed here reaches the disk, the
+    /// transaction locks, or `CreateProcess`, so as a plain `#[tauri::command]`
+    /// it runs that work on the main thread and freezes the window for its whole
+    /// duration — the same defect that shipped as a 5-10 second hang once
+    /// already. The reason travels with the assertion so a later "this one looks
+    /// cheap, make it sync again" has to argue with the specific stall it caused.
+    /// Source-level because an attribute has no runtime seam to assert on.
+    #[test]
+    fn disk_bound_commands_stay_off_the_main_thread() {
+        const SOURCE: &str = include_str!("commands.rs");
+        const DISK_BOUND: &[(&str, &str)] = &[
+            (
+                "pub fn detect_addons_folders(",
+                "reads every AddOns directory under every documents root",
+            ),
+            (
+                "pub fn detect_addons_folder(",
+                "is `detect_addons_folders` plus an unwrap, so it is that whole scan",
+            ),
+            (
+                "pub fn disable_addon(",
+                "waits on the AddOns transaction lock that installs hold for seconds",
+            ),
+            (
+                "pub fn enable_addon(",
+                "waits on the same AddOns transaction lock as `disable_addon`",
+            ),
+            (
+                "pub fn get_backups_folder_path(",
+                "canonicalizes the AddOns path and `create_dir_all`s the backups folder",
+            ),
+            (
+                "pub fn list_profiles(",
+                "waits on the profile store mutex and then on the profiles read lock",
+            ),
+            (
+                "pub fn rename_profile(",
+                "waits on the profiles write lock and rewrites profiles.json and its mirror",
+            ),
+            (
+                "pub fn delete_profile(",
+                "takes the same guards and rewrites the same files as `rename_profile`",
+            ),
+            (
+                "pub fn detect_minion(",
+                "stats a home-directory path, which a roaming profile makes a network hop",
+            ),
+            (
+                "pub fn list_snapshots(",
+                "reads the snapshot directory and parses a manifest per snapshot",
+            ),
+            (
+                "pub fn delete_snapshot(",
+                "removes a snapshot tree, which for a full-AddOns snapshot is thousands of files",
+            ),
+            (
+                "pub fn read_ops_log(",
+                "reads and parses the operations log off disk",
+            ),
+            (
+                "pub fn debug_addons_dir_override(",
+                "`create_dir_all`s and canonicalizes an env-supplied path in debug builds",
+            ),
+            (
+                "pub fn open_ransomware_protection_settings(",
+                "spawns `cmd`, and CreateProcess under an anti-malware filter is not fast",
+            ),
+        ];
+        for (signature, why) in DISK_BOUND {
+            let at = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is still defined here"));
+            // `trim_end` because this file is CRLF and `include_str!` preserves it.
+            assert!(
+                SOURCE[..at]
+                    .trim_end()
+                    .ends_with("#[tauri::command(async)]"),
+                "{signature} must be #[tauri::command(async)]: it {why}"
+            );
+        }
+    }
+
+    /// The other half of that rule: these two must NOT become `(async)`, so the
+    /// sweep above cannot be "finished" by converting the last plain commands.
+    ///
+    /// `update_tray_tooltip` reaches `Shell_NotifyIcon` through the tray handle,
+    /// which is bound to the thread that created the icon. Off the main thread
+    /// the update badge silently stops changing.
+    ///
+    /// `native_boot_failure_pending` is a read-and-clear one-shot: it answers
+    /// from `is_file()` and then unlinks, so two callers that interleave both
+    /// see the note and the "native UI couldn't start" toast fires twice. Only
+    /// main-thread dispatch makes that interleaving impossible today, and the
+    /// body is two metadata operations in app-data — there is no freeze worth
+    /// trading the guarantee for.
+    #[test]
+    fn tray_and_read_and_clear_commands_stay_on_the_main_thread() {
+        const SOURCE: &str = include_str!("commands.rs");
+        for signature in [
+            "pub fn update_tray_tooltip(",
+            "pub fn native_boot_failure_pending(",
+        ] {
+            let at = SOURCE
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is still defined here"));
+            // `trim_end` because this file is CRLF and `include_str!` preserves it.
+            assert!(
+                SOURCE[..at].trim_end().ends_with("#[tauri::command]"),
+                "{signature} must stay a plain #[tauri::command]"
+            );
+        }
     }
 
     /// `dialog:allow-save` is the webview's grant for `plugin:dialog|save`,

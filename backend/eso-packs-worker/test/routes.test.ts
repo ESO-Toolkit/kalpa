@@ -1904,6 +1904,48 @@ describe("DELETE /account", () => {
     expect(res.status).toBe(401);
   });
 
+  it("does not cap a paged erasure at the pack-write limit", async () => {
+    // Erasure is paged: ACCOUNT_DELETE_VOTE_BUDGET clears ~450 votes per
+    // request and returns complete:false for the caller to repeat, so a few
+    // thousand votes need well over ten rounds. Sharing WRITE_LIMITER's 10/min
+    // meant the user was 429'd partway through deleting their own data with no
+    // way to finish it.
+    const erasingUser = { id: 515_151, name: "erasure-limiter-user" };
+    fetchSpy.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("esologs.com")) return Promise.resolve(esoLogsResponse(erasingUser));
+      return originalFetch(input);
+    });
+    const ip = "198.51.100.21";
+
+    const rounds: number[] = [];
+    for (let i = 0; i < 14; i++) {
+      const res = await call(
+        authedRequest(`${BASE}/account`, {
+          method: "DELETE",
+          headers: { "CF-Connecting-IP": ip },
+        })
+      );
+      rounds.push(res.status);
+    }
+    expect(rounds, `a continuing erasure was rate-limited: ${rounds.join(",")}`).not.toContain(429);
+
+    // ...and pack mutations from the same IP keep the old 10/min ceiling.
+    // Raising WRITE_LIMITER instead would satisfy the assertion above and lose
+    // this one, which is the regression this half exists to catch.
+    const writes: number[] = [];
+    for (let i = 0; i < 14; i++) {
+      const res = await call(
+        authedRequest(`${BASE}/packs/erasure-limiter-probe`, {
+          method: "DELETE",
+          headers: { "CF-Connecting-IP": ip },
+        })
+      );
+      writes.push(res.status);
+    }
+    expect(writes, `pack writes lost their limit: ${writes.join(",")}`).toContain(429);
+  });
+
   it("publishes the backup tombstone before deleting canonical packs", async () => {
     const mine = makePack("account-ordering");
     await putPackIndex(e, { packs: [mine] });
