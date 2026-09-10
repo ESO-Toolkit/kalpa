@@ -65,13 +65,21 @@ impl log::Log for FileLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        self.append(&format!(
+        let line = format!(
             "{} {:5} [{}] {}\n",
             chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
             record.level(),
             record.target(),
             record.args()
-        ));
+        );
+        // A release Windows build is `windows_subsystem = "windows"` and has no
+        // console, so this is a no-op there. Everywhere else - a debug run, or a
+        // Linux user who launched from a terminal - the same line on stderr is
+        // what they will actually see without being told about a log file.
+        if cfg!(debug_assertions) || !cfg!(windows) {
+            eprint!("{line}");
+        }
+        self.append(&line);
     }
 
     fn flush(&self) {}

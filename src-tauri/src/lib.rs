@@ -495,6 +495,43 @@ fn schedule_initial_main_window_watchdog(app: &tauri::AppHandle) {
     });
 }
 
+/// Whether `main` is registered *and* the windowing runtime actually has it.
+///
+/// Main thread only, for the reason given on `main_window_is_phantom`.
+fn main_window_is_live(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|window| !main_window_is_phantom(&window))
+}
+
+/// Whether an exit should be vetoed to preserve an in-flight activation.
+///
+/// Split out as a pure function because it decides this process's lifetime and
+/// nothing else covers it: neither e2e flavour nor the packaged gate runs in
+/// CI, so the truth table here is the only thing standing between a future edit
+/// and either "the app vanishes instead of staying up for an activation" or
+/// "the app stays up as a windowless zombie".
+///
+/// * `preserve` — the handoff-cancellation result. It has side effects, so the
+///   caller must compute it exactly once per event whatever this returns.
+/// * `code` — `None` means the runtime is exiting because the last window was
+///   destroyed. There is nothing left to preserve an activation *for*, and
+///   vetoing it is what made a lost window permanent.
+/// * `live_window` — a *live* window. A merely registered one proves nothing.
+fn should_preserve_exit(preserve: bool, code: Option<i32>, live_window: bool) -> bool {
+    preserve && code.is_some() && live_window
+}
+
+/// Admission to the one-shot window-recovery attempt. `true` means this caller
+/// owns it and must eventually call [`finish_recovery`].
+fn begin_recovery(latch: &AtomicBool) -> bool {
+    !latch.swap(true, Ordering::SeqCst)
+}
+
+/// Re-arm recovery after an attempt that did not end the process.
+fn finish_recovery(latch: &AtomicBool) {
+    latch.store(false, Ordering::SeqCst);
+}
+
 /// Set once this process has decided its main window is unrecoverable. Exit is
 /// asynchronous, so without this latch a second activation arriving before the
 /// event loop drains would report and exit a second time.
@@ -564,12 +601,15 @@ fn exit_if_main_window_was_never_created(app: &tauri::AppHandle) {
 ///     window has to be recovered from or reported, never ignored.
 fn activate_main_window(app: &tauri::AppHandle, reason: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        // Resume before showing, so the restore is flash-free. Then unminimize
-        // before show, because a window hidden to tray while minimized needs
-        // both and `show()` on its own would leave it minimized.
+        // Resume before showing, so the restore is flash-free. Then show
+        // before unminimize: `ShowWindow(SW_HIDE)` does not clear `WS_MINIMIZE`,
+        // so a window minimized *before* being hidden to tray is still iconic.
+        // Unminimizing first would restore it, immediately re-hide it (the
+        // window is still flagged invisible) and then show it again - three
+        // visible transitions and a spurious activation where one will do.
         webview_power::on_shown(app);
-        let _ = window.unminimize();
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
         return;
     }
@@ -579,7 +619,7 @@ fn activate_main_window(app: &tauri::AppHandle, reason: &str) {
 /// Handle an activation that found no main window: rebuild it, and if even that
 /// fails, say so and exit rather than staying resident and unreachable.
 fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
-    if MAIN_WINDOW_LOST.swap(true, Ordering::SeqCst) {
+    if !begin_recovery(&MAIN_WINDOW_LOST) {
         return;
     }
     log::error!("main window is missing on activation ({reason}); rebuilding it");
@@ -592,7 +632,7 @@ fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
     if let Err(error) = app.run_on_main_thread(move || match rebuild_main_window(&handle) {
         Ok(()) => {
             log::info!("rebuilt the main window after it was lost ({reason})");
-            MAIN_WINDOW_LOST.store(false, Ordering::SeqCst);
+            finish_recovery(&MAIN_WINDOW_LOST);
         }
         Err(error) => {
             log::error!("could not rebuild the main window ({reason}): {error}");
@@ -607,7 +647,7 @@ fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
         }
     }) {
         log::error!("could not dispatch main window recovery ({dispatch_reason}): {error}");
-        MAIN_WINDOW_LOST.store(false, Ordering::SeqCst);
+        finish_recovery(&MAIN_WINDOW_LOST);
     }
 }
 
@@ -621,11 +661,18 @@ fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
         .find(|window| window.label == "main")
         .cloned()
         .ok_or_else(|| "the app config has no `main` window".to_string())?;
-    // Both latches describe the window that just died. The config entry carries
-    // `visible: false`, so leaving them set would build the replacement hidden
-    // with nothing left to reveal it.
+    // The reveal latch describes the window that just died. The config entry
+    // carries `visible: false`, so leaving it set would build the replacement
+    // hidden with nothing left to reveal it.
+    //
+    // `MAIN_PAGE_LOADED` is deliberately NOT cleared. Nothing in the reveal path
+    // reads it - `reveal_initial_main_window` keys only off the latch above -
+    // but the single-instance callback treats it as "is there a page that can
+    // receive an activation yet", and buffers into a single slot while it is
+    // false. Clearing it here would make every relaunch between the rebuild and
+    // the new page's load land in that buffer instead of raising the window,
+    // which is the same dead click this whole path exists to remove.
     INITIAL_MAIN_WINDOW_REVEALED.store(false, Ordering::SeqCst);
-    MAIN_PAGE_LOADED.store(false, Ordering::SeqCst);
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)
         .map_err(|error| format!("could not configure a replacement: {error}"))?
         .build()
@@ -641,24 +688,45 @@ fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Tell the user why Kalpa is about to vanish.
+/// Tell the user why Kalpa is about to vanish — after making sure this process
+/// can no longer pretend to be the app.
 ///
-/// The notification plugin is fire-and-forget on a tokio worker, and every
-/// caller here exits the process on the very next line - which kills that
-/// worker, lazily created at that instant, before it can deliver anything. So
-/// on Windows this also raises a modal the user cannot miss. `MessageBoxW`
-/// pumps its own messages and is safe on the main thread, unlike the dialog
-/// plugin's `blocking_show`, which is documented not to be.
+/// The order is the whole point. `MessageBoxW` blocks until it is dismissed, so
+/// while it is up this process would otherwise still hold the tray icon and the
+/// single-instance identity: the relaunch the message asks for would be routed
+/// straight back here over `WM_COPYDATA`, answered by a window the runtime
+/// never created, and dropped. That is precisely the husk this path exists to
+/// eliminate, merely bounded by how long the box stays up. So give up every
+/// way of answering first, then block.
+///
+/// The modal is also what gives the toast time to land: the notification plugin
+/// spawns onto a tokio worker and every caller exits on the very next line,
+/// which would otherwise kill that worker before it delivered anything.
 fn notify_unrecoverable_main_window(app: &tauri::AppHandle) {
     const TITLE: &str = "Kalpa could not open its window";
     const BODY: &str = "Kalpa is closing so it can start cleanly. Please open it again.";
+
+    // Dropping the `TrayIcon` removes it from the notification area, so there is
+    // no icon left to click while the message is up.
+    if let Ok(mut tray) = app.state::<TrayState>().0.lock() {
+        tray.take();
+    }
+    // Releases the `-sim` mutex and destroys the `-siw` guard window, so the
+    // next launch's `CreateMutexW`/`FindWindowW` sees a clean slate and starts a
+    // real instance. `ReleaseMutex` is thread-affine and the mutex was taken on
+    // the main thread; both callers of this function are already there.
+    tauri_plugin_single_instance::destroy(app);
+    launch_gate::release();
 
     use tauri_plugin_notification::NotificationExt;
     if let Err(error) = app.notification().builder().title(TITLE).body(BODY).show() {
         log::error!("could not report the lost main window to the user: {error}");
     }
 
-    #[cfg(windows)]
+    // Release builds only: `test:packaged` and `test:e2e:sandbox` drive a debug
+    // binary headless over CDP, where nothing can dismiss a modal and it would
+    // hang the runner instead of failing with the log line above.
+    #[cfg(all(windows, not(debug_assertions)))]
     {
         use windows::core::PCWSTR;
         use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
@@ -760,14 +828,11 @@ pub fn run() {
         "--enable-features=msWebView2CodeCache",
     );
 
-    // Only the launch that owns the app may touch the shared WebView2 profile.
-    // A second instance racing in here would `remove_dir_all` the cache
-    // directories out from under the first instance's WebView2 as it
-    // initialises — a failure the runtime then swallows, which is how this
-    // process ends up alive with a tray icon and no window.
-    if launch_gate::acquire() == launch_gate::Outcome::First {
-        clear_webview_cache_on_upgrade();
-        cleanup_orphaned_pending_zips();
+    // Must be here: `tauri-plugin-single-instance` decides whether this process
+    // is a duplicate during `Builder::build()`, so anything later cannot
+    // influence that decision.
+    if launch_gate::acquire() == launch_gate::Outcome::Secondary {
+        log::info!("another instance owns the app; this launch will be forwarded to it");
     }
 
     let context = tauri::generate_context!();
@@ -778,7 +843,7 @@ pub fn run() {
         context
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
         .manage(PendingAddonsPathApproval(Mutex::new(None)))
         .manage(client_write::AllowedGameInstallPath::new())
@@ -810,7 +875,7 @@ pub fn run() {
                     return;
                 }
                 if let Err(error) = commands::complete_webview_handoff(webview.app_handle()) {
-                    eprintln!("Failed to complete WebView handoff: {error}");
+                    log::error!("failed to complete the WebView handoff: {error}");
                     webview.app_handle().exit(1);
                     return;
                 }
@@ -1348,58 +1413,128 @@ pub fn run() {
             commands::debug_install_fixture_zip,
         ])
         .build(context)
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            // On a real app exit, detach settings.json from the plugin registry so
-            // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
-            // it. ExitRequested fires before Exit (and before the plugin's exit
-            // save), so detaching here neutralises that non-atomic write. Settings
-            // are already persisted atomically on every write, so nothing is
-            // flushed here. (Window close hides to tray and never reaches this.)
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
-                // `code: None` is the runtime asking to exit because the last
-                // window is gone. Vetoing *that* is what turns a lost window
-                // into a resident process with a tray icon and nothing to show:
-                // it keeps answering activations, the single-instance plugin
-                // keeps routing new launches into it, and the only way out is
-                // Task Manager. Only a programmatic exit that still has a
-                // window is worth preserving an activation for.
-                // A *registered* window proves nothing - that is this whole
-                // change's premise - so the guard asks for a live one. Safe and
-                // synchronous: this closure runs on the main thread, where the
-                // probe is handled inline.
-                let preserve = commands::finish_native_handoff_exit();
-                if preserve
-                    && code.is_some()
-                    && app
-                        .get_webview_window("main")
-                        .is_some_and(|window| !main_window_is_phantom(&window))
-                {
-                    eprintln!("[native-shell] preventing exit for preserved activation");
-                    api.prevent_exit();
-                    return;
-                }
-                if preserve {
-                    log::warn!("not preserving an exit with no window to preserve it for");
-                }
-                settings_store::detach_on_exit(app);
+        .expect("error while building tauri application");
+
+    // Purge the WebView2 profile in the one gap that is both late enough and
+    // early enough.
+    //
+    // Late enough: `build()` has returned, so `tauri-plugin-single-instance`
+    // has already exited a duplicate and published its guard window — the clear
+    // no longer sits on the latency the launch gate's deadline is sized against,
+    // and a second instance can no longer be here at all.
+    //
+    // Early enough: no window exists yet. Tauri creates the windows declared in
+    // tauri.conf.json from `RunEvent::Ready`, inside the `run` below, and that
+    // is what opens this profile. Clearing any later — from `setup`, say —
+    // would delete cache directories out from under a live WebView2 that has
+    // already issued its first navigation, which is the same shape of failure
+    // the launch gate exists to prevent one instance inflicting on another.
+    clear_webview_cache_on_upgrade();
+    cleanup_orphaned_pending_zips();
+
+    app.run(|app, event| {
+        // On a real app exit, detach settings.json from the plugin registry so
+        // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
+        // it. ExitRequested fires before Exit (and before the plugin's exit
+        // save), so detaching here neutralises that non-atomic write. Settings
+        // are already persisted atomically on every write, so nothing is
+        // flushed here. (Window close hides to tray and never reaches this.)
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+            // `code: None` is the runtime asking to exit because the last
+            // window is gone. Vetoing *that* is what turns a lost window
+            // into a resident process with a tray icon and nothing to show:
+            // it keeps answering activations, the single-instance plugin
+            // keeps routing new launches into it, and the only way out is
+            // Task Manager. Only a programmatic exit that still has a
+            // window is worth preserving an activation for.
+            // A *registered* window proves nothing - that is this whole
+            // change's premise - so the guard asks for a live one. Safe and
+            // synchronous: this closure runs on the main thread, where the
+            // probe is handled inline.
+            let preserve = commands::finish_native_handoff_exit();
+            // `&&` short-circuits, so the probe — a round trip through this
+            // thread's message loop — only runs when its answer can change
+            // the outcome. It is therefore `false` both when the window is
+            // dead and when nobody asked, which is what the decision below
+            // wants either way.
+            let live_window = preserve && code.is_some() && main_window_is_live(app);
+            if should_preserve_exit(preserve, *code, live_window) {
+                eprintln!("[native-shell] preventing exit for preserved activation");
+                api.prevent_exit();
+                return;
             }
-            // On any real process exit, signal every native live session to stop so
-            // its terminate-report + abandoned POSTs settle promptly (the OS reaps
-            // the driver threads; we don't join here, to avoid blocking exit on a
-            // wedged network). A hard exit's correctness is covered by the L2 orphan
-            // breadcrumb + next-launch recovery — this just closes reports faster.
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = &event {
-                if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
-                    state.signal_all_live_stop();
-                }
+            if preserve {
+                log::warn!("not preserving an exit with no window to preserve it for");
             }
-        });
+            settings_store::detach_on_exit(app);
+        }
+        // On any real process exit, signal every native live session to stop so
+        // its terminate-report + abandoned POSTs settle promptly (the OS reaps
+        // the driver threads; we don't join here, to avoid blocking exit on a
+        // wedged network). A hard exit's correctness is covered by the L2 orphan
+        // breadcrumb + next-launch recovery — this just closes reports faster.
+        if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = &event {
+            if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
+                state.signal_all_live_stop();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit veto decides this process's lifetime, and getting it wrong in
+    /// either direction reproduces a shipped bug: vetoing too eagerly is what
+    /// left a live process with a tray icon and no window, and vetoing too
+    /// rarely makes the app vanish instead of staying up for an activation.
+    #[test]
+    fn an_exit_is_preserved_only_for_an_activation_that_has_somewhere_to_go() {
+        // The only case worth vetoing: a handoff was cancelled by an incoming
+        // activation, the exit was asked for programmatically, and there is a
+        // live window to hand that activation to.
+        assert!(should_preserve_exit(true, Some(0), true));
+
+        // `code: None` is the runtime exiting because the last window was
+        // destroyed. Vetoing that is what makes a lost window permanent.
+        assert!(!should_preserve_exit(true, None, true));
+
+        // No live window means nothing to preserve the activation for - and a
+        // *registered* window does not count, which is why the caller probes.
+        assert!(!should_preserve_exit(true, Some(0), false));
+        assert!(!should_preserve_exit(true, None, false));
+
+        // No handoff to cancel: an ordinary exit must never be vetoed.
+        assert!(!should_preserve_exit(false, Some(0), true));
+        assert!(!should_preserve_exit(false, None, true));
+        assert!(!should_preserve_exit(false, Some(0), false));
+        assert!(!should_preserve_exit(false, None, false));
+    }
+
+    /// A non-zero exit code is still a programmatic exit, so it is still worth
+    /// preserving. Only the runtime's `None` is special.
+    #[test]
+    fn a_failing_exit_code_is_still_a_deliberate_exit() {
+        assert!(should_preserve_exit(true, Some(1), true));
+    }
+
+    #[test]
+    fn only_one_caller_at_a_time_owns_window_recovery() {
+        let latch = AtomicBool::new(false);
+
+        // First activation through the door owns the attempt.
+        assert!(begin_recovery(&latch));
+        // Anything arriving while it is in flight must fall through silently
+        // rather than start a second rebuild or report a second failure.
+        assert!(!begin_recovery(&latch));
+        assert!(!begin_recovery(&latch));
+
+        // An attempt that does not end the process re-arms recovery, so a
+        // later activation can try again.
+        finish_recovery(&latch);
+        assert!(begin_recovery(&latch));
+    }
 
     #[cfg(all(windows, debug_assertions))]
     #[test]

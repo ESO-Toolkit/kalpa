@@ -141,6 +141,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 - **Pack Hub worker** rate-limits requests and serializes pack-index mutations through a Durable Object.
 - **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies and `cargo audit` over the main Rust lockfile. The Slint sidecar also rejects any resolved `quick-xml` version below the patched 0.41.0 release. Advisories without an upstream fix are assessed individually and recorded beside their CI gate.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
+- **`kalpa.log`** sits beside your settings (`%APPDATA%\com.kalpa.desktop` on Windows, `~/Library/Application Support/com.kalpa.desktop` on macOS, `~/.local/share/com.kalpa.desktop` on Linux). It records startup and window-lifecycle events, plus warnings and errors from Kalpa's dependencies — which can include the URLs those dependencies were fetching. It is capped at 512 KB, never leaves your machine on its own, and nothing writes it anywhere else. Skim it before pasting it into a bug report.
 
 When you export account-wide settings in a `.esopack` v2, Kalpa strips personal data before writing the file: account handles, character names and IDs, chat logs, mail, friends and roster lists, trade history. Placeholders are mapped back to your own identity on import. [What's scrubbed in `.esopack` v2](docs/settings-export.md) has the full list, including what is deliberately kept.
 
@@ -331,6 +332,7 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 | **Linux: sign-in doesn't persist**                              | Install or enable a Secret Service keyring (GNOME Keyring or KWallet)                                                                               |
 | **Linux: ESO install not detected**                             | Kalpa scans Steam Proton prefixes, including Flatpak and Snap. Launch ESO once so the prefix exists, or set the AddOns path manually in Settings    |
 | **White screen on launch**                                      | Check WebView2 is installed and current; reinstalling it usually fixes this                                                                         |
+| **Kalpa is in the tray but the window won't open**              | Fixed in beta.26 — it now recovers or closes so the next launch works. If it recurs, quit from the tray menu and check `kalpa.log` (see below)      |
 
 ---
 

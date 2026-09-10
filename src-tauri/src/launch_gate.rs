@@ -44,7 +44,8 @@ mod imp {
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE, WAIT_TIMEOUT,
+        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE,
+        WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
     use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
@@ -60,9 +61,13 @@ mod imp {
     const SINGLE_INSTANCE_CLASS: &str = "com.kalpa.desktop-sic";
     const SINGLE_INSTANCE_WINDOW: &str = "com.kalpa.desktop-siw";
 
-    /// Held for the life of the process. Never closed and never released: the
-    /// gate is only meaningful while this instance is running, and dropping it
-    /// would silently reopen the race for every later launch.
+    /// Where `release` can find the gate handle.
+    ///
+    /// Note this is not what keeps the handle alive: `HANDLE` is `Copy` with no
+    /// `Drop` impl (closing is opt-in through `windows_core::Free`, which only
+    /// `Owned<T>` invokes), so the local in `acquire` going out of scope neither
+    /// closes it nor releases the mutex. Ownership simply lasts until the
+    /// process does — which is the intent everywhere except `release`.
     static GATE: OnceLock<usize> = OnceLock::new();
 
     /// Wait for the running instance to publish its single-instance window.
@@ -96,10 +101,12 @@ mod imp {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// `CreateMutexW` only *sets* `ERROR_ALREADY_EXISTS`; it never clears a
-    /// stale one. The plugin reads `GetLastError()` immediately after its own
-    /// call on this same thread, so leaving 183 behind would make a legitimate
-    /// first instance mistake itself for a duplicate.
+    /// Belt-and-braces, not the mechanism: what actually keeps the plugin's
+    /// detection working is that `GATE_MUTEX` is a different name from its own.
+    /// This only avoids leaving a stale `ERROR_ALREADY_EXISTS` in the thread's
+    /// last-error slot, since `CreateMutexW` is documented to *set* 183 but not
+    /// to clear it, and the plugin reads `GetLastError()` right after its own
+    /// call on this same thread.
     fn clear_last_error() {
         unsafe { SetLastError(ERROR_SUCCESS) };
     }
@@ -110,11 +117,33 @@ mod imp {
         unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR(window.as_ptr())) }.is_ok()
     }
 
+    /// What a short wait on the gate says about the launch that owns it.
+    enum OwnerState {
+        /// Still holding the mutex: that launch is alive and starting.
+        Running,
+        /// Ownership just passed to us, so this launch is the real first one.
+        /// `abandoned` means the owner died without releasing — the crash this
+        /// module exists to notice, and worth a line in the log.
+        TookOver { abandoned: bool },
+        /// The wait itself failed. We cannot tell, so fail open.
+        Unknown,
+    }
+
     /// The gate mutex is created with `bInitialOwner`, so the owning instance
     /// holds it until it exits. A short wait that times out proves the owner is
-    /// still alive; anything else means ownership just passed to us.
-    fn owner_still_running(gate: HANDLE) -> bool {
-        unsafe { WaitForSingleObject(gate, 25) == WAIT_TIMEOUT }
+    /// still alive; every other outcome hands us the mutex.
+    fn gate_owner_state(gate: HANDLE) -> OwnerState {
+        // `WAIT_EVENT` is a newtype, so these cannot be `match` patterns.
+        let wait = unsafe { WaitForSingleObject(gate, 25) };
+        if wait == WAIT_TIMEOUT {
+            OwnerState::Running
+        } else if wait == WAIT_OBJECT_0 {
+            OwnerState::TookOver { abandoned: false }
+        } else if wait == WAIT_ABANDONED {
+            OwnerState::TookOver { abandoned: true }
+        } else {
+            OwnerState::Unknown
+        }
     }
 
     pub fn acquire() -> Outcome {
@@ -134,7 +163,19 @@ mod imp {
 
         let published = wait_for_owner_window(
             single_instance_window_exists,
-            || owner_still_running(gate),
+            || match gate_owner_state(gate) {
+                OwnerState::Running => true,
+                OwnerState::TookOver { abandoned } => {
+                    if abandoned {
+                        log::warn!("the previous launch died holding the launch gate; taking over");
+                    }
+                    false
+                }
+                OwnerState::Unknown => {
+                    log::warn!("could not read the launch gate; continuing as a full instance");
+                    false
+                }
+            },
             OWNER_PUBLISH_TIMEOUT,
         );
         clear_last_error();
@@ -149,9 +190,46 @@ mod imp {
         }
     }
 
+    /// Give up the gate early, so a launch arriving while this process winds
+    /// down starts cleanly instead of being told to wait for a corpse.
+    ///
+    /// Only for the unrecoverable-window path, which raises a modal and then
+    /// exits: for as long as that modal is up this process would otherwise
+    /// still look like a live owner. Normal shutdown must NOT call this — the
+    /// gate is meant to outlive everything except the process itself.
+    pub fn release() {
+        if let Some(handle) = GATE.get() {
+            // SAFETY: the handle came from `CreateMutexW` in `acquire` and is
+            // closed exactly once, on a path that exits immediately after.
+            unsafe {
+                let _ = CloseHandle(HANDLE(*handle as *mut core::ffi::c_void));
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The plugin derives its class and window names from the bundle
+        /// identifier, so a rename in `tauri.conf.json` would leave these
+        /// constants naming a window that never appears — silently reverting the
+        /// gate to the race it exists to close, with no other symptom.
+        ///
+        /// Keep `tauri-plugin-single-instance`'s `semver` feature OFF: it
+        /// appends a version to those names and would break this pairing too.
+        #[test]
+        fn the_gate_targets_this_bundle_identifier() {
+            let config = include_str!("../tauri.conf.json");
+            let identifier = config
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("\"identifier\": \""))
+                .and_then(|rest| rest.split('"').next())
+                .expect("tauri.conf.json declares an identifier");
+            assert_eq!(SINGLE_INSTANCE_CLASS, format!("{identifier}-sic"));
+            assert_eq!(SINGLE_INSTANCE_WINDOW, format!("{identifier}-siw"));
+            assert_eq!(GATE_MUTEX, format!("{identifier}-launch-gate"));
+        }
 
         #[test]
         fn a_published_window_marks_this_launch_secondary() {
@@ -194,6 +272,8 @@ mod imp {
     pub fn acquire() -> Outcome {
         Outcome::First
     }
+
+    pub fn release() {}
 }
 
 /// Decide whether this launch owns the app.
@@ -203,4 +283,10 @@ mod imp {
 /// own `setup` closure runs.
 pub fn acquire() -> Outcome {
     imp::acquire()
+}
+
+/// Release the gate ahead of process exit. See `imp::release` — this is for the
+/// unrecoverable-window path only, never for a normal shutdown.
+pub fn release() {
+    imp::release()
 }
