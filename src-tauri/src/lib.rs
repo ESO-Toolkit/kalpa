@@ -597,9 +597,13 @@ fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
         Err(error) => {
             log::error!("could not rebuild the main window ({reason}): {error}");
             notify_unrecoverable_main_window(&handle);
-            // Exiting is the kinder failure: the next launch then starts a
-            // working process instead of being routed into this one and lost.
-            handle.exit(1);
+            // `std::process::exit`, not `handle.exit`, for exactly the reason
+            // given in `exit_if_main_window_was_never_created`: a rebuild that
+            // fails the phantom re-probe has still left a `main` registered, and
+            // an exit routed through `ExitRequested` could be vetoed on the
+            // strength of that registration - resurrecting the resident,
+            // windowless process this path exists to eliminate.
+            std::process::exit(1);
         }
     }) {
         log::error!("could not dispatch main window recovery ({dispatch_reason}): {error}");
@@ -637,16 +641,39 @@ fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Tell the user why Kalpa is about to vanish.
+///
+/// The notification plugin is fire-and-forget on a tokio worker, and every
+/// caller here exits the process on the very next line - which kills that
+/// worker, lazily created at that instant, before it can deliver anything. So
+/// on Windows this also raises a modal the user cannot miss. `MessageBoxW`
+/// pumps its own messages and is safe on the main thread, unlike the dialog
+/// plugin's `blocking_show`, which is documented not to be.
 fn notify_unrecoverable_main_window(app: &tauri::AppHandle) {
+    const TITLE: &str = "Kalpa could not open its window";
+    const BODY: &str = "Kalpa is closing so it can start cleanly. Please open it again.";
+
     use tauri_plugin_notification::NotificationExt;
-    if let Err(error) = app
-        .notification()
-        .builder()
-        .title("Kalpa could not open its window")
-        .body("Kalpa is closing so it can start cleanly. Please open it again.")
-        .show()
-    {
+    if let Err(error) = app.notification().builder().title(TITLE).body(BODY).show() {
         log::error!("could not report the lost main window to the user: {error}");
+    }
+
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+        let title: Vec<u16> = TITLE.encode_utf16().chain(std::iter::once(0)).collect();
+        let body: Vec<u16> = BODY.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
+        }
     }
 }
 
@@ -1337,8 +1364,17 @@ pub fn run() {
                 // keeps routing new launches into it, and the only way out is
                 // Task Manager. Only a programmatic exit that still has a
                 // window is worth preserving an activation for.
+                // A *registered* window proves nothing - that is this whole
+                // change's premise - so the guard asks for a live one. Safe and
+                // synchronous: this closure runs on the main thread, where the
+                // probe is handled inline.
                 let preserve = commands::finish_native_handoff_exit();
-                if preserve && code.is_some() && app.get_webview_window("main").is_some() {
+                if preserve
+                    && code.is_some()
+                    && app
+                        .get_webview_window("main")
+                        .is_some_and(|window| !main_window_is_phantom(&window))
+                {
                     eprintln!("[native-shell] preventing exit for preserved activation");
                     api.prevent_exit();
                     return;

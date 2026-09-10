@@ -12,7 +12,8 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
   invisible process claimed every later launch, so starting Kalpa again also
   did nothing and the only way out was Task Manager. Kalpa now checks that its
   window really exists, rebuilds it if it goes missing, and closes with an
-  explanation rather than sitting there unreachable.
+  explanation rather than sitting there unreachable. The reason is written to
+  `kalpa.log`.
   [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
 - **Restoring from the tray works on a minimized window.** Clicking the tray
   icon, or "Show Window", did nothing at all if Kalpa had been minimized before
