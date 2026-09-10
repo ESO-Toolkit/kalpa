@@ -24,6 +24,17 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# A `log` sink is the only way a dependency's diagnostics can reach disk: this
+# app is `windows_subsystem = "windows"` in release, so stderr goes nowhere, and
+# tauri-runtime-wry reports a failed window creation through `log::error!` while
+# still returning `Ok(..)` to its caller. See `diag_log`.
+log = { version = "0.4", features = ["std"] }
+# Timestamps for that sink. Already in the tree transitively, so this adds no
+# build cost — only a direct name to call it by.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# For `tauri_runtime::Error::FailedToReceiveMessage`, the one signal that
+# distinguishes a real window from one Tauri registered but the runtime refused.
+tauri-runtime = "2"
 dirs = "6"
 reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
@@ -87,6 +98,11 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = [
     "Win32_Security_WinTrust",
     "Win32_Security_Cryptography",
+    # `launch_gate`: a named mutex plus a lookup of the single-instance plugin's
+    # hidden window, to close the gap where two launches both become full
+    # instances.
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

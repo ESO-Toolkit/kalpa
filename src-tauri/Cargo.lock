@@ -2457,10 +2457,12 @@ name = "kalpa"
 version = "0.1.0-beta.25"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "dirs",
  "dunce",
  "fs4",
  "keyring",
+ "log",
  "md-5",
  "notify",
  "rayon",
@@ -2484,6 +2486,7 @@ dependencies = [
  "tauri-plugin-store",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tauri-runtime",
  "tempfile",
  "tokio",
  "typed-path",

@@ -4,7 +4,28 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-_Nothing yet._
+### Bug Fixes
+
+- **Kalpa can no longer end up in the tray with no window.** If the window
+  failed to be created at startup, Kalpa kept running anyway: the tray icon
+  answered, the icon looked normal, and clicking it did nothing. Worse, that
+  invisible process claimed every later launch, so starting Kalpa again also
+  did nothing and the only way out was Task Manager. Kalpa now checks that its
+  window really exists, rebuilds it if it goes missing, and closes with an
+  explanation rather than sitting there unreachable. The reason is written to
+  `kalpa.log`.
+  [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
+- **Restoring from the tray works on a minimized window.** Clicking the tray
+  icon, or "Show Window", did nothing at all if Kalpa had been minimized before
+  it was closed to the tray. [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
+- **Opening Kalpa twice in quick succession no longer starts two copies.** The
+  check for an already-running Kalpa had a brief gap during startup, and two
+  copies then fought over the same browser data — which is one way the missing
+  window above happened in the first place.
+  [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
+- **Kalpa keeps a log.** Startup problems are now written to `kalpa.log` beside
+  your settings, so a report of "it will not open" comes with evidence instead
+  of a guess. [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
 
 ## [0.1.0-beta.25] — 2026-09-09
 
