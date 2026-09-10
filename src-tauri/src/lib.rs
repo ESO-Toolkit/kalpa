@@ -188,6 +188,23 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
     }
 }
 
+/// Arm the pending-reload latch. Paired with [`take_pending_page_reload`].
+fn arm_pending_page_reload(latch: &AtomicBool) {
+    latch.store(true, Ordering::SeqCst);
+}
+
+/// Clear the pending reload, reporting whether it had been armed.
+///
+/// `on_page_load` deliberately ignores the return value and flushes the
+/// activation buffer unconditionally, and that is load-bearing rather than
+/// sloppy: on an ordinary launch nothing ever arms this latch, and the
+/// reverse-handoff and second-launch buffers have no other flusher. Do not
+/// "tighten" that call site into `if take_pending_page_reload(..) { flush }` —
+/// it would silently stop delivering every deep link that no rebuild created.
+fn take_pending_page_reload(latch: &AtomicBool) -> bool {
+    latch.swap(false, Ordering::SeqCst)
+}
+
 /// Whether an `app.emit` would actually reach the main page's listeners.
 ///
 /// Tauri only evaluates an emit into a webview that has registered a JS listener
@@ -199,7 +216,14 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
 /// run yet); a rebuild that has run but whose replacement page has not loaded;
 /// and a startup that has not reached its first page load.
 fn main_page_can_receive(app: &tauri::AppHandle) -> bool {
-    page_can_receive(
+    let (registered, ever_loaded, reload_settled) = main_page_receive_terms(app);
+    page_can_receive(registered, ever_loaded, reload_settled)
+}
+
+/// The three inputs to [`page_can_receive`], derived in one place so a decision
+/// and any log line explaining it cannot drift apart.
+fn main_page_receive_terms(app: &tauri::AppHandle) -> (bool, bool, bool) {
+    (
         app.get_webview_window("main").is_some(),
         MAIN_PAGE_LOADED.load(Ordering::SeqCst),
         !MAIN_PAGE_AWAITING_RELOAD.load(Ordering::SeqCst),
@@ -243,16 +267,24 @@ fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
     let mut buffered = reverse_handoff_activation()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if main_page_can_receive(app) {
+    let (registered, ever_loaded, reload_settled) = main_page_receive_terms(app);
+    if page_can_receive(registered, ever_loaded, reload_settled) {
         // Never emit while holding this lock: `emit_buffered_activation` sits on
         // the far side of it and `Mutex` is not reentrant.
         drop(buffered);
         emit_deep_link_now(app, action);
         return;
     }
+    // Name the failing term. `page_can_receive` is silent in both directions, so
+    // this is the only signal `kalpa.log` would carry if the latch ever stuck —
+    // note the delivery branch above leaves no trace, so an absent "parking"
+    // line does not prove a link was delivered.
+    log::info!(
+        "parking a deep link until the main page can receive it \
+         (registered={registered}, ever_loaded={ever_loaded}, reload_settled={reload_settled})"
+    );
     // Last-writer-wins, matching every other writer of this slot. The page load
-    // that follows the rebuild flushes it.
-    log::info!("parking a deep link until the main page can receive it");
+    // that follows the rebuild flushes it, or the reveal watchdog does.
     *buffered = Some(action.clone());
 }
 
@@ -721,7 +753,14 @@ fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
             finish_recovery(&MAIN_WINDOW_LOST);
         }
         Err(error) => {
-            log::error!("could not rebuild the main window ({reason}): {error}");
+            // A phantom lands here every time, and deterministically: `build()`
+            // rejects the label because the phantom is still registered, and
+            // Tauri exposes no way to unregister one. So this arm is the
+            // designed terminus for a phantom, not a surprising windowing
+            // failure - word it so the next reader does not go hunting a wry bug.
+            log::error!(
+                "cannot restore the main window ({reason}); closing so the next launch starts clean: {error}"
+            );
             notify_unrecoverable_main_window(app);
             // `std::process::exit`, not `app.exit`, for exactly the reason given
             // in `exit_if_main_window_was_never_created`: a rebuild that fails
@@ -759,7 +798,7 @@ fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     // Before `build()`, never after: that ordering is what makes
     // `main_page_can_receive` sound, because anyone who can see the replacement
     // registered has necessarily already seen this store.
-    MAIN_PAGE_AWAITING_RELOAD.store(true, Ordering::SeqCst);
+    arm_pending_page_reload(&MAIN_PAGE_AWAITING_RELOAD);
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)
         .map_err(|error| format!("could not configure a replacement: {error}"))?
         .build()
@@ -980,7 +1019,7 @@ pub fn run() {
                 MAIN_PAGE_LOADED.store(true, Ordering::SeqCst);
                 // The page really has loaded either way; only the flush below is
                 // deferred by the native-startup gate.
-                MAIN_PAGE_AWAITING_RELOAD.store(false, Ordering::SeqCst);
+                take_pending_page_reload(&MAIN_PAGE_AWAITING_RELOAD);
                 if STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst) {
                     return;
                 }
@@ -1646,6 +1685,27 @@ mod tests {
         // leaves that latch set.
         assert!(!page_can_receive(true, true, false));
         assert!(!page_can_receive(false, false, false));
+    }
+
+    /// A rebuild arms this latch and the rebuilt page's load clears it. The
+    /// clear must be a claim rather than a plain store, so that if a second
+    /// clearer is ever added it cannot double-flush the parked activation.
+    #[test]
+    fn a_pending_page_reload_is_claimed_exactly_once() {
+        let latch = AtomicBool::new(false);
+
+        // Nothing armed: an ordinary launch never arms this, so a clear must
+        // report that there was nothing to claim.
+        assert!(!take_pending_page_reload(&latch));
+
+        // A rebuild arms it, and exactly one clearer wins.
+        arm_pending_page_reload(&latch);
+        assert!(take_pending_page_reload(&latch));
+        assert!(!take_pending_page_reload(&latch));
+
+        // Re-armable, because a window can be rebuilt more than once in a run.
+        arm_pending_page_reload(&latch);
+        assert!(take_pending_page_reload(&latch));
     }
 
     #[test]
