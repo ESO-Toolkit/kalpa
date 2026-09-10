@@ -19,12 +19,14 @@ pub mod client_tuning;
 pub mod client_uninstall;
 pub mod client_write;
 mod commands;
+mod diag_log;
 mod edit_backups;
 mod esoui;
 mod file_hashes;
 pub mod game_instances;
 mod install_txn;
 mod installer;
+mod launch_gate;
 mod manifest;
 mod manifest_cache;
 mod metadata;
@@ -188,11 +190,7 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
 
 /// Focus the main window and emit the appropriate deep-link event.
 fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
-    if let Some(window) = app.get_webview_window("main") {
-        webview_power::on_shown(app); // resume before showing (flash-free)
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    activate_main_window(app, "deep link");
     match action {
         DeepLinkAction::Pack(id) => {
             let _ = app.emit("deep-link-pack", id.as_str());
@@ -497,6 +495,161 @@ fn schedule_initial_main_window_watchdog(app: &tauri::AppHandle) {
     });
 }
 
+/// Set once this process has decided its main window is unrecoverable. Exit is
+/// asynchronous, so without this latch a second activation arriving before the
+/// event loop drains would report and exit a second time.
+static MAIN_WINDOW_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Whether Tauri has a `main` window registered that the windowing runtime does
+/// not actually have.
+///
+/// `tauri-runtime-wry` reports a failed window creation with a `log::error!`
+/// and still returns `Ok(DetachedWindow { .. })`, so Tauri registers a window
+/// that was never created. Every *setter* against it (`show()`, `set_focus()`)
+/// is a one-way message that returns `Ok(())`, which is exactly why such a
+/// process can sit in the tray looking healthy with nothing to show. Only a
+/// *getter* round-trips and notices: its reply channel is dropped unanswered,
+/// which surfaces as `FailedToReceiveMessage`.
+///
+/// MUST be called on the main thread. There the message is handled inline, so
+/// this is synchronous and cannot block. From any other thread the same call
+/// waits on the main thread's message pump with no timeout, which would be a
+/// worse bug than the one it detects.
+fn main_window_is_phantom(window: &tauri::WebviewWindow) -> bool {
+    // `is_visible` is the cheapest getter whose only failure mode is this one.
+    // `outer_position` can fail on a healthy window and `hwnd` collapses the
+    // distinction into a generic handle error, so neither can be used here.
+    matches!(
+        window.is_visible(),
+        Err(tauri::Error::Runtime(
+            tauri_runtime::Error::FailedToReceiveMessage
+        ))
+    )
+}
+
+/// Refuse to run on without the window the whole app is built around.
+///
+/// Continuing produces the worst outcome available: a live process holding the
+/// tray icon and the single-instance lock, so every future launch is routed
+/// into it and silently discarded, and the user's only escape is Task Manager.
+fn exit_if_main_window_was_never_created(app: &tauri::AppHandle) {
+    let missing = match app.get_webview_window("main") {
+        None => "the main window was never registered",
+        Some(window) if main_window_is_phantom(&window) => {
+            "the windowing runtime refused to create the main window"
+        }
+        Some(_) => return,
+    };
+    log::error!("{missing}; exiting instead of running without a window");
+    notify_unrecoverable_main_window(app);
+    // Not `app.exit()`: that routes through the event loop this closure runs
+    // inside, and anything that vetoed it would leave precisely the resident,
+    // windowless process this check exists to prevent. The next launch is the
+    // recovery - and the launch gate makes the race that causes this rarer.
+    std::process::exit(1);
+}
+
+/// Bring the main window back for a user activation: a tray click, the tray's
+/// "Show Window" item, a second launch routed here by the single-instance
+/// plugin, or a `kalpa://` deep link.
+///
+/// Each of those sites used to be a bare `if let Some(window)` with no `else`,
+/// which fails silently in two separate ways:
+///   * `show()` does not restore a *minimized* window on Windows. A window
+///     minimized before being hidden to tray therefore never came back -
+///     `unminimize()` first is what actually restores it.
+///   * If the window is gone the whole app is unreachable, because the tray
+///     icon and the single-instance listener keep answering: a relaunch is
+///     routed here and dropped, so the only way out is Task Manager. Losing the
+///     window has to be recovered from or reported, never ignored.
+fn activate_main_window(app: &tauri::AppHandle, reason: &str) {
+    if let Some(window) = app.get_webview_window("main") {
+        // Resume before showing, so the restore is flash-free. Then unminimize
+        // before show, because a window hidden to tray while minimized needs
+        // both and `show()` on its own would leave it minimized.
+        webview_power::on_shown(app);
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    recover_lost_main_window(app, reason);
+}
+
+/// Handle an activation that found no main window: rebuild it, and if even that
+/// fails, say so and exit rather than staying resident and unreachable.
+fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
+    if MAIN_WINDOW_LOST.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log::error!("main window is missing on activation ({reason}); rebuilding it");
+    let handle = app.clone();
+    let dispatch_reason = reason.to_string();
+    let reason = reason.to_string();
+    // Creating a window and probing one are only safe on the main thread, where
+    // the runtime handles both inline. Activations reach this from several
+    // threads, so hop once rather than reason about each caller.
+    if let Err(error) = app.run_on_main_thread(move || match rebuild_main_window(&handle) {
+        Ok(()) => {
+            log::info!("rebuilt the main window after it was lost ({reason})");
+            MAIN_WINDOW_LOST.store(false, Ordering::SeqCst);
+        }
+        Err(error) => {
+            log::error!("could not rebuild the main window ({reason}): {error}");
+            notify_unrecoverable_main_window(&handle);
+            // Exiting is the kinder failure: the next launch then starts a
+            // working process instead of being routed into this one and lost.
+            handle.exit(1);
+        }
+    }) {
+        log::error!("could not dispatch main window recovery ({dispatch_reason}): {error}");
+        MAIN_WINDOW_LOST.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Rebuild the main window from its `tauri.conf.json` entry. Main thread only.
+fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .ok_or_else(|| "the app config has no `main` window".to_string())?;
+    // Both latches describe the window that just died. The config entry carries
+    // `visible: false`, so leaving them set would build the replacement hidden
+    // with nothing left to reveal it.
+    INITIAL_MAIN_WINDOW_REVEALED.store(false, Ordering::SeqCst);
+    MAIN_PAGE_LOADED.store(false, Ordering::SeqCst);
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| format!("could not configure a replacement: {error}"))?
+        .build()
+        .map_err(|error| format!("could not build a replacement: {error}"))?;
+    // `build()` reports success even when the runtime refused the window, so
+    // that `Ok` proves nothing on its own - ask a getter.
+    if main_window_is_phantom(&window) {
+        return Err("the windowing runtime refused the replacement window".to_string());
+    }
+    // Reveal through the same two paths startup uses: `on_page_load`, plus this
+    // watchdog for a page that never finishes loading.
+    schedule_initial_main_window_watchdog(app);
+    Ok(())
+}
+
+fn notify_unrecoverable_main_window(app: &tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(error) = app
+        .notification()
+        .builder()
+        .title("Kalpa could not open its window")
+        .body("Kalpa is closing so it can start cleanly. Please open it again.")
+        .show()
+    {
+        log::error!("could not report the lost main window to the user: {error}");
+    }
+}
+
 fn emit_buffered_activation(app: &tauri::AppHandle) {
     if let Ok(mut buffered) = reverse_handoff_activation().lock() {
         if let Some(action) = buffered.take() {
@@ -554,6 +707,12 @@ fn configure_e2e_webview_profile(context: &mut tauri::Context<tauri::Wry>) {
 }
 
 pub fn run() {
+    // First statement in the process: a sink installed any later misses window
+    // creation, which is the one event most worth capturing. Release builds are
+    // `windows_subsystem = "windows"`, so without this every diagnostic - ours
+    // and our dependencies' - is discarded.
+    diag_log::install();
+
     // msWebView2CodeCache: V8 bytecode caching for the app bundle. wry serves
     // the frontend through WebView2's WebResourceRequested interception, which
     // bypasses the HTTP-cache-backed code cache — without this feature the JS
@@ -574,8 +733,15 @@ pub fn run() {
         "--enable-features=msWebView2CodeCache",
     );
 
-    clear_webview_cache_on_upgrade();
-    cleanup_orphaned_pending_zips();
+    // Only the launch that owns the app may touch the shared WebView2 profile.
+    // A second instance racing in here would `remove_dir_all` the cache
+    // directories out from under the first instance's WebView2 as it
+    // initialises — a failure the runtime then swallows, which is how this
+    // process ends up alive with a tray icon and no window.
+    if launch_gate::acquire() == launch_gate::Outcome::First {
+        clear_webview_cache_on_upgrade();
+        cleanup_orphaned_pending_zips();
+    }
 
     let context = tauri::generate_context!();
     #[cfg(all(windows, debug_assertions))]
@@ -701,11 +867,7 @@ pub fn run() {
                 }
             }
             // Focus the existing window when a duplicate instance is launched
-            if let Some(window) = app.get_webview_window("main") {
-                webview_power::on_shown(app); // resume before showing (flash-free)
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            activate_main_window(app, "second launch");
             // Check argv for deep link URLs (Windows/Linux pass them as CLI args)
             for arg in &argv {
                 if let Some(action) = parse_deep_link(arg) {
@@ -733,6 +895,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
         .setup(|app| {
+            // Tauri creates the windows declared in tauri.conf.json immediately
+            // before this closure, on this thread, and swallows a failure. This
+            // is the first moment the result can be observed — and the last one
+            // at which refusing to continue is still cheap.
+            exit_if_main_window_was_never_created(app.handle());
+
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -873,11 +1041,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            webview_power::on_shown(app); // resume before showing
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        activate_main_window(app, "tray menu");
                     }
                     "quit" => {
                         app.exit(0);
@@ -891,12 +1055,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            webview_power::on_shown(app); // resume before showing
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        activate_main_window(tray.app_handle(), "tray click");
                     }
                 })
                 .build(app)?;
@@ -1170,11 +1329,22 @@ pub fn run() {
             // save), so detaching here neutralises that non-atomic write. Settings
             // are already persisted atomically on every write, so nothing is
             // flushed here. (Window close hides to tray and never reaches this.)
-            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
-                if commands::finish_native_handoff_exit() {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                // `code: None` is the runtime asking to exit because the last
+                // window is gone. Vetoing *that* is what turns a lost window
+                // into a resident process with a tray icon and nothing to show:
+                // it keeps answering activations, the single-instance plugin
+                // keeps routing new launches into it, and the only way out is
+                // Task Manager. Only a programmatic exit that still has a
+                // window is worth preserving an activation for.
+                let preserve = commands::finish_native_handoff_exit();
+                if preserve && code.is_some() && app.get_webview_window("main").is_some() {
                     eprintln!("[native-shell] preventing exit for preserved activation");
                     api.prevent_exit();
                     return;
+                }
+                if preserve {
+                    log::warn!("not preserving an exit with no window to preserve it for");
                 }
                 settings_store::detach_on_exit(app);
             }
