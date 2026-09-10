@@ -44,8 +44,8 @@ mod imp {
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE,
-        WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
     use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
@@ -101,16 +101,6 @@ mod imp {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Belt-and-braces, not the mechanism: what actually keeps the plugin's
-    /// detection working is that `GATE_MUTEX` is a different name from its own.
-    /// This only avoids leaving a stale `ERROR_ALREADY_EXISTS` in the thread's
-    /// last-error slot, since `CreateMutexW` is documented to *set* 183 but not
-    /// to clear it, and the plugin reads `GetLastError()` right after its own
-    /// call on this same thread.
-    fn clear_last_error() {
-        unsafe { SetLastError(ERROR_SUCCESS) };
-    }
-
     fn single_instance_window_exists() -> bool {
         let class = wide(SINGLE_INSTANCE_CLASS);
         let window = wide(SINGLE_INSTANCE_WINDOW);
@@ -150,14 +140,15 @@ mod imp {
         let name = wide(GATE_MUTEX);
         let Ok(gate) = (unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }) else {
             // Without the gate we are exactly where we were before it existed.
-            clear_last_error();
             return Outcome::First;
         };
+        // Must be read on the very next line: any intervening Win32 call would
+        // overwrite it. See `create_mutex_leaves_a_usable_last_error` for why
+        // nothing has to be done to protect the plugin's own later read.
         let contended = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         let _ = GATE.set(gate.0 as usize);
 
         if !contended {
-            clear_last_error();
             return Outcome::First;
         }
 
@@ -178,7 +169,6 @@ mod imp {
             },
             OWNER_PUBLISH_TIMEOUT,
         );
-        clear_last_error();
         if published {
             Outcome::Secondary
         } else {
@@ -210,6 +200,65 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+        // Only the self-test needs to poison and read back the last-error slot.
+        use windows::Win32::Foundation::{SetLastError, ERROR_SUCCESS};
+
+        /// Pins the kernel32 behaviour this module depends on, because the
+        /// alternative is a guess about undocumented semantics.
+        ///
+        /// `CreateMutexW` *clears* the thread's last error on a fresh create and
+        /// sets `ERROR_ALREADY_EXISTS` on a contended one. That is what makes it
+        /// safe for this gate to take its own mutex long before
+        /// `tauri-plugin-single-instance` takes its: the plugin's own call
+        /// overwrites whatever we left behind, so it can never inherit our 183
+        /// and mistake a fresh create for a duplicate. An earlier version of
+        /// this file carried a `SetLastError(ERROR_SUCCESS)` guard for a hazard
+        /// that measurably does not exist.
+        ///
+        /// If this ever fails, no guard on our side can help: the plugin's own
+        /// `CreateMutexW` is the last writer to the slot before its own read, and
+        /// `Builder::build()` constructs the entire runtime and the tray before
+        /// `initialize_plugins` reaches that code — so a `SetLastError` placed
+        /// anywhere upstream, including immediately before `build()`, is
+        /// overwritten thousands of Win32 calls before it could matter. The only
+        /// remedy would be to patch the plugin. That same reasoning is why the
+        /// deleted guard was inert rather than merely unnecessary.
+        #[test]
+        fn create_mutex_leaves_a_usable_last_error() {
+            // Process-scoped: the name lands in this logon session's namespace,
+            // so a fixed one could be held by a concurrent `cargo test` (this
+            // repo runs parallel worktree sessions) and make the "fresh create"
+            // assertion fail for a reason that has nothing to do with kernel32.
+            let name = wide(&format!(
+                "com.kalpa.desktop-launch-gate-selftest-{}",
+                std::process::id()
+            ));
+
+            // Poison the slot with the exact code a contended create would set.
+            // `bInitialOwner: true` to match both real callers - this gate and
+            // the plugin - even though ownership does not feed the last-error
+            // branch.
+            unsafe { SetLastError(ERROR_ALREADY_EXISTS) };
+            let first = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }
+                .expect("creating a fresh mutex");
+            let after_fresh = unsafe { GetLastError() };
+
+            unsafe { SetLastError(ERROR_SUCCESS) };
+            let second = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }
+                .expect("creating the same mutex again");
+            let after_contended = unsafe { GetLastError() };
+
+            unsafe {
+                let _ = CloseHandle(first);
+                let _ = CloseHandle(second);
+            }
+
+            assert_eq!(after_fresh, ERROR_SUCCESS, "a fresh create must clear 183");
+            assert_eq!(
+                after_contended, ERROR_ALREADY_EXISTS,
+                "a contended create must report 183"
+            );
+        }
 
         /// The plugin derives its class and window names from the bundle
         /// identifier, so a rename in `tauri.conf.json` would leave these

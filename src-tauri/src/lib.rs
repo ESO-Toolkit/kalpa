@@ -188,9 +188,35 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
     }
 }
 
-/// Focus the main window and emit the appropriate deep-link event.
-fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
-    activate_main_window(app, "deep link");
+/// Whether an `app.emit` would actually reach the main page's listeners.
+///
+/// Tauri only evaluates an emit into a webview that has registered a JS listener
+/// id for that event, so emitting into a page that has not loaded is not a
+/// failure the caller can observe - it is a silently dropped deep link.
+///
+/// Three terms, each covering a different way the window can be unready: nothing
+/// registered at all (a rebuild was dispatched from another thread and has not
+/// run yet); a rebuild that has run but whose replacement page has not loaded;
+/// and a startup that has not reached its first page load.
+fn main_page_can_receive(app: &tauri::AppHandle) -> bool {
+    page_can_receive(
+        app.get_webview_window("main").is_some(),
+        MAIN_PAGE_LOADED.load(Ordering::SeqCst),
+        !MAIN_PAGE_AWAITING_RELOAD.load(Ordering::SeqCst),
+    )
+}
+
+/// The deliverability rule itself, separated from the state it reads so the
+/// truth table can be pinned. Getting it wrong in either direction is silent: a
+/// false positive drops the deep link, a false negative parks one that could
+/// have been delivered and waits for a page load that has already happened.
+fn page_can_receive(registered: bool, ever_loaded: bool, reload_settled: bool) -> bool {
+    registered && ever_loaded && reload_settled
+}
+
+/// Emit the event for `action`. Callers must have established that the page can
+/// receive it - see `main_page_can_receive`.
+fn emit_deep_link_now(app: &tauri::AppHandle, action: &DeepLinkAction) {
     match action {
         DeepLinkAction::Pack(id) => {
             let _ = app.emit("deep-link-pack", id.as_str());
@@ -202,6 +228,32 @@ fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
             let _ = app.emit("roster-pack-install", id.as_str());
         }
     }
+}
+
+/// Focus the main window and deliver the deep link - or park it for the page
+/// that is about to load.
+///
+/// Deliverability is read *after* activation and never before: activation is
+/// what rebuilds a lost window, so this depends on the state activation just
+/// produced. The single-instance callback's own buffering gate cannot stand in
+/// for this one; it is answering a different question, namely whether to raise
+/// the window at all.
+fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
+    activate_main_window(app, "deep link");
+    let mut buffered = reverse_handoff_activation()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if main_page_can_receive(app) {
+        // Never emit while holding this lock: `emit_buffered_activation` sits on
+        // the far side of it and `Mutex` is not reentrant.
+        drop(buffered);
+        emit_deep_link_now(app, action);
+        return;
+    }
+    // Last-writer-wins, matching every other writer of this slot. The page load
+    // that follows the rebuild flushes it.
+    log::info!("parking a deep link until the main page can receive it");
+    *buffered = Some(action.clone());
 }
 
 fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload {
@@ -270,6 +322,12 @@ fn clear_webview_cache_on_upgrade() {
         }
     }
 
+    // Recorded here, not once a page has loaded. Deferring it was tried and
+    // reverted: a native-performance-mode launch exits as soon as the Slint
+    // sidecar reports ready, before the hidden WebView has finished navigating,
+    // so the marker would never be written and the purge would repeat on every
+    // launch of a shipped Windows mode. The deferral only pays off after a
+    // *partial* purge, which is not a failure anyone has observed.
     let _ = std::fs::create_dir_all(&data_dir);
     let _ = std::fs::write(&marker, current);
 }
@@ -455,6 +513,16 @@ static INITIAL_MAIN_WINDOW_REVEALED: AtomicBool = AtomicBool::new(false);
 static MAIN_PAGE_LOADED: AtomicBool = AtomicBool::new(false);
 static STARTUP_NATIVE_DECISION_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Set when a replacement `main` window has been built and cleared when a page
+/// finishes loading in it.
+///
+/// Deliberately separate from `MAIN_PAGE_LOADED`, which means "has this process
+/// ever had a page" and which `rebuild_main_window` leaves set on purpose so a
+/// relaunch during a rebuild still raises the window instead of being parked.
+/// Delivering an *event* needs the narrower fact: a rebuilt window has no
+/// listeners at all until its own page load installs them.
+static MAIN_PAGE_AWAITING_RELOAD: AtomicBool = AtomicBool::new(false);
+
 fn reveal_initial_main_window(app: &tauri::AppHandle, reason: &str) {
     if INITIAL_MAIN_WINDOW_REVEALED.swap(true, Ordering::SeqCst) {
         return;
@@ -600,54 +668,69 @@ fn exit_if_main_window_was_never_created(app: &tauri::AppHandle) {
 ///     routed here and dropped, so the only way out is Task Manager. Losing the
 ///     window has to be recovered from or reported, never ignored.
 fn activate_main_window(app: &tauri::AppHandle, reason: &str) {
-    if let Some(window) = app.get_webview_window("main") {
-        // Resume before showing, so the restore is flash-free. Then show
-        // before unminimize: `ShowWindow(SW_HIDE)` does not clear `WS_MINIMIZE`,
-        // so a window minimized *before* being hidden to tray is still iconic.
-        // Unminimizing first would restore it, immediately re-hide it (the
-        // window is still flagged invisible) and then show it again - three
-        // visible transitions and a spurious activation where one will do.
-        webview_power::on_shown(app);
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-        return;
+    let handle = app.clone();
+    let dispatch_reason = reason.to_string();
+    let reason = reason.to_string();
+    // Hop to the main thread. Both the phantom probe and window creation are
+    // only safe there, and this is reached from the deep-link plugin on
+    // arbitrary threads. `run_on_main_thread` executes the closure inline when
+    // it is already on that thread, so the tray and single-instance paths keep
+    // exactly the synchronous behaviour they had.
+    if let Err(error) = app.run_on_main_thread(move || {
+        match handle.get_webview_window("main") {
+            Some(window) if !main_window_is_phantom(&window) => {
+                // Resume before showing, so the restore is flash-free. Then show
+                // before unminimize: `ShowWindow(SW_HIDE)` does not clear
+                // `WS_MINIMIZE`, so a window minimized *before* being hidden to
+                // tray is still iconic. Unminimizing first would restore it,
+                // immediately re-hide it (the window is still flagged invisible)
+                // and then show it again - three visible transitions and a
+                // spurious activation where one will do.
+                webview_power::on_shown(&handle);
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            // Either nothing is registered, or what is registered is a window
+            // the runtime never created. A registered window proves nothing:
+            // `show()` and `set_focus()` are one-way messages that return
+            // `Ok(())` against a phantom, so treating one as usable is how a
+            // tray click silently does nothing forever.
+            _ => recover_lost_main_window(&handle, &reason),
+        }
+    }) {
+        log::error!("could not dispatch activation ({dispatch_reason}): {error}");
     }
-    recover_lost_main_window(app, reason);
 }
 
-/// Handle an activation that found no main window: rebuild it, and if even that
-/// fails, say so and exit rather than staying resident and unreachable.
+/// Handle an activation that found no usable main window: rebuild it, and if
+/// even that fails, say so and exit rather than staying resident and
+/// unreachable.
+///
+/// Main thread only - `activate_main_window` is the sole caller and guarantees
+/// it, which is what makes the phantom re-probe inside `rebuild_main_window`
+/// safe.
 fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
     if !begin_recovery(&MAIN_WINDOW_LOST) {
         return;
     }
-    log::error!("main window is missing on activation ({reason}); rebuilding it");
-    let handle = app.clone();
-    let dispatch_reason = reason.to_string();
-    let reason = reason.to_string();
-    // Creating a window and probing one are only safe on the main thread, where
-    // the runtime handles both inline. Activations reach this from several
-    // threads, so hop once rather than reason about each caller.
-    if let Err(error) = app.run_on_main_thread(move || match rebuild_main_window(&handle) {
+    log::error!("main window is unusable on activation ({reason}); rebuilding it");
+    match rebuild_main_window(app) {
         Ok(()) => {
             log::info!("rebuilt the main window after it was lost ({reason})");
             finish_recovery(&MAIN_WINDOW_LOST);
         }
         Err(error) => {
             log::error!("could not rebuild the main window ({reason}): {error}");
-            notify_unrecoverable_main_window(&handle);
-            // `std::process::exit`, not `handle.exit`, for exactly the reason
-            // given in `exit_if_main_window_was_never_created`: a rebuild that
-            // fails the phantom re-probe has still left a `main` registered, and
-            // an exit routed through `ExitRequested` could be vetoed on the
+            notify_unrecoverable_main_window(app);
+            // `std::process::exit`, not `app.exit`, for exactly the reason given
+            // in `exit_if_main_window_was_never_created`: a rebuild that fails
+            // the phantom re-probe has still left a `main` registered, and an
+            // exit routed through `ExitRequested` could be vetoed on the
             // strength of that registration - resurrecting the resident,
             // windowless process this path exists to eliminate.
             std::process::exit(1);
         }
-    }) {
-        log::error!("could not dispatch main window recovery ({dispatch_reason}): {error}");
-        finish_recovery(&MAIN_WINDOW_LOST);
     }
 }
 
@@ -673,6 +756,10 @@ fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
     // the new page's load land in that buffer instead of raising the window,
     // which is the same dead click this whole path exists to remove.
     INITIAL_MAIN_WINDOW_REVEALED.store(false, Ordering::SeqCst);
+    // Before `build()`, never after: that ordering is what makes
+    // `main_page_can_receive` sound, because anyone who can see the replacement
+    // registered has necessarily already seen this store.
+    MAIN_PAGE_AWAITING_RELOAD.store(true, Ordering::SeqCst);
     let window = tauri::WebviewWindowBuilder::from_config(app, &config)
         .map_err(|error| format!("could not configure a replacement: {error}"))?
         .build()
@@ -746,10 +833,30 @@ fn notify_unrecoverable_main_window(app: &tauri::AppHandle) {
 }
 
 fn emit_buffered_activation(app: &tauri::AppHandle) {
-    if let Ok(mut buffered) = reverse_handoff_activation().lock() {
-        if let Some(action) = buffered.take() {
-            emit_deep_link(app, &action);
-        }
+    // Peek before activating, so a page load with nothing parked does not raise
+    // and focus the window. Activation used to happen inside `emit_deep_link`,
+    // i.e. only when there was actually an action, and still should.
+    let parked = reverse_handoff_activation()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some();
+    if !parked {
+        return;
+    }
+    activate_main_window(app, "buffered deep link");
+    // Take only when it can be delivered. There is nowhere to put an action back
+    // that does not race a newer one for the single slot, and the loser of that
+    // race would be dropped - so this path never puts one back, and never calls
+    // `emit_deep_link`, which would re-enter the buffer.
+    if !main_page_can_receive(app) {
+        return;
+    }
+    let action = reverse_handoff_activation()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(action) = action {
+        emit_deep_link_now(app, &action);
     }
 }
 
@@ -871,6 +978,9 @@ pub fn run() {
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             {
                 MAIN_PAGE_LOADED.store(true, Ordering::SeqCst);
+                // The page really has loaded either way; only the flush below is
+                // deferred by the native-startup gate.
+                MAIN_PAGE_AWAITING_RELOAD.store(false, Ordering::SeqCst);
                 if STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst) {
                     return;
                 }
@@ -1517,6 +1627,25 @@ mod tests {
     #[test]
     fn a_failing_exit_code_is_still_a_deliberate_exit() {
         assert!(should_preserve_exit(true, Some(1), true));
+    }
+
+    /// A deep link is only deliverable into a page that exists, has loaded at
+    /// least once, and is not mid-rebuild. Each term rules out a different way
+    /// the window can be unready.
+    #[test]
+    fn a_deep_link_is_delivered_only_into_a_page_that_can_hear_it() {
+        assert!(page_can_receive(true, true, true));
+
+        // Nothing registered: a rebuild was dispatched and has not run yet.
+        assert!(!page_can_receive(false, true, true));
+        // Registered, but this process has never had a page.
+        assert!(!page_can_receive(true, false, true));
+        // Registered and previously loaded, but a rebuild's replacement page has
+        // not loaded - it has no listeners at all yet. This is the case that
+        // `MAIN_PAGE_LOADED` alone cannot see, because a rebuild deliberately
+        // leaves that latch set.
+        assert!(!page_can_receive(true, true, false));
+        assert!(!page_can_receive(false, false, false));
     }
 
     #[test]
