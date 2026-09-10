@@ -319,6 +319,13 @@ jobs:
           done
           echo "--- release-assets ---"
           ls -l release-assets
+          # Fail here rather than three steps later in upload-artifact: this
+          # step knows WHICH paths it rejected, the uploader only knows the
+          # directory came out empty.
+          if [ -z "$(ls -A release-assets)" ]; then
+            echo "::error::No bundles were staged from the paths tauri-action reported. See the skip lines above."
+            exit 1
+          fi
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
@@ -430,16 +437,35 @@ jobs:
             echo "__KALPA_PATHS_EOF__"
           } >> "$GITHUB_OUTPUT"
 
+          # tauri-action reports NATIVE Windows paths here (D:\a\kalpa\...).
+          # Git Bash's `test -f` does not resolve those, so without cygpath every
+          # bundle is skipped, release-assets/ comes out empty, and the upload
+          # fails with "No files were found" - which is exactly what happened to
+          # the first v0.1.0-beta.26 tag, the first tag to use this job. The
+          # macOS/Linux collector is unaffected because those paths are already
+          # POSIX, and attestation is unaffected because it is a Node action
+          # reading the raw paths natively.
           mkdir -p release-assets
           printf '%s' "$ARTIFACT_PATHS" | jq -r '.[]' | while IFS= read -r bundle; do
-            if [ -f "$bundle" ]; then
-              cp -- "$bundle" release-assets/
+            resolved="$bundle"
+            if command -v cygpath >/dev/null 2>&1; then
+              resolved="$(cygpath -u "$bundle")"
+            fi
+            if [ -f "$resolved" ]; then
+              cp -- "$resolved" release-assets/
             else
-              echo "Skipping non-file artifact path: ${bundle}"
+              echo "Skipping non-file artifact path: ${bundle} (resolved: ${resolved})"
             fi
           done
           echo "--- release-assets ---"
           ls -l release-assets
+          # Fail here rather than three steps later in upload-artifact: this
+          # step knows WHICH paths it rejected, the uploader only knows the
+          # directory came out empty.
+          if [ -z "$(ls -A release-assets)" ]; then
+            echo "::error::No bundles were staged from the paths tauri-action reported. See the skip lines above."
+            exit 1
+          fi
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
