@@ -4,6 +4,19 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0-beta.26] — 2026-09-10
+
+This one is about Kalpa opening when you ask it to.
+
+If Kalpa's window failed to be created at startup, it kept running anyway with
+nothing but a tray icon — and because that invisible copy answered every later
+launch, starting Kalpa again did nothing too. The only way out was Task Manager,
+and nothing anywhere said why. Kalpa now checks that its window really exists,
+recovers or closes cleanly instead of sitting there unreachable, and writes down
+what happened.
+
 ### Bug Fixes
 
 - **Kalpa can no longer end up in the tray with no window.** If the window
@@ -14,7 +27,8 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
   window really exists, rebuilds it if it goes missing, and closes with an
   explanation rather than sitting there unreachable. The reason is written to
   `kalpa.log`.
-  [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
+  [#469](https://github.com/ESO-Toolkit/kalpa/pull/469),
+  [#473](https://github.com/ESO-Toolkit/kalpa/pull/473)
 - **Restoring from the tray works on a minimized window.** Clicking the tray
   icon, or "Show Window", did nothing at all if Kalpa had been minimized before
   it was closed to the tray. [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
@@ -23,9 +37,17 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
   copies then fought over the same browser data — which is one way the missing
   window above happened in the first place.
   [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
+- **A deep link opened while Kalpa is recovering is no longer lost.** A
+  `kalpa://` link that arrived while the window was being rebuilt was delivered
+  to a page that had not finished loading, so nothing happened. It is now held
+  until the page can receive it.
+  [#473](https://github.com/ESO-Toolkit/kalpa/pull/473)
 - **Kalpa keeps a log.** Startup problems are now written to `kalpa.log` beside
   your settings, so a report of "it will not open" comes with evidence instead
-  of a guess. [#469](https://github.com/ESO-Toolkit/kalpa/pull/469)
+  of a guess. It is capped at 512 KB and never leaves your machine on its own;
+  see the README for what it contains.
+  [#469](https://github.com/ESO-Toolkit/kalpa/pull/469),
+  [#472](https://github.com/ESO-Toolkit/kalpa/pull/472)
 
 ## [0.1.0-beta.25] — 2026-09-09
 
@@ -1192,7 +1214,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...HEAD
+[0.1.0-beta.26]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...v0.1.0-beta.26
 [0.1.0-beta.25]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.24...v0.1.0-beta.25
 [0.1.0-beta.24]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...v0.1.0-beta.24
 [0.1.0-beta.23]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.22...v0.1.0-beta.23
