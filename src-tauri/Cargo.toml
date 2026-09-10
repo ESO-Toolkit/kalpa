@@ -35,7 +35,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # For `tauri_runtime::Error::FailedToReceiveMessage`, the one signal that
 # distinguishes a real window from one Tauri registered but the runtime refused.
 tauri-runtime = "2"
-dirs = "6"
+dirs = "7"
 reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
 scraper = "0.27"
