@@ -10476,7 +10476,7 @@ fn reclaim_webview_authority(state_dir: &Path) -> Result<(), String> {
             // UI now, not this one — or the lock itself is unusable. Continuing
             // to render and write either way is the two-writer bug.
             WEBVIEW_AUTHORITY_LOST.store(true, Ordering::SeqCst);
-            eprintln!(
+            log::error!(
                 "[native-shell] fatal: released UI authority and could not reclaim it: {error}"
             );
             return Err(error);
