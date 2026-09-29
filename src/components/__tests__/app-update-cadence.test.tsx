@@ -6,12 +6,14 @@ const mocks = vi.hoisted(() => ({
   check: vi.fn(),
   relaunch: vi.fn(),
   invoke: vi.fn(),
+  openUrl: vi.fn(),
   toast: Object.assign(vi.fn(), { error: vi.fn(), info: vi.fn(), success: vi.fn() }),
 }));
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: mocks.check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: mocks.openUrl }));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
@@ -111,5 +113,53 @@ describe("useAppUpdate check cadence", () => {
     });
 
     expect(mocks.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the platform probe before choosing the download path", async () => {
+    let finishProbe: (supported: boolean) => void = () => {};
+    mocks.invoke.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finishProbe = resolve;
+      })
+    );
+    const downloadAndInstall = vi.fn();
+    mocks.check.mockResolvedValue({ version: "2.0", downloadAndInstall });
+    const { result } = renderHook(() => useAppUpdate());
+
+    await act(async () => {
+      await result.current.checkForAppUpdate(false);
+    });
+    let download: Promise<void> = Promise.resolve();
+    act(() => {
+      download = result.current.downloadAndInstall();
+    });
+    expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishProbe(false);
+      await download;
+    });
+    expect(mocks.openUrl).toHaveBeenCalledWith(
+      "https://github.com/ESO-Toolkit/kalpa/releases/latest"
+    );
+    expect(downloadAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("opens releases when the platform probe fails", async () => {
+    mocks.invoke.mockRejectedValue(new Error("probe failed"));
+    const downloadAndInstall = vi.fn();
+    mocks.check.mockResolvedValue({ version: "2.0", downloadAndInstall });
+    const { result } = renderHook(() => useAppUpdate());
+
+    await act(async () => {
+      await result.current.checkForAppUpdate(false);
+    });
+    await act(async () => {
+      await result.current.downloadAndInstall();
+    });
+
+    expect(mocks.openUrl).toHaveBeenCalledTimes(1);
+    expect(downloadAndInstall).not.toHaveBeenCalled();
   });
 });

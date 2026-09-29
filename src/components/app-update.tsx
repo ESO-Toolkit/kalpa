@@ -16,8 +16,17 @@ const RELEASES_URL = "https://github.com/ESO-Toolkit/kalpa/releases/latest";
 
 export function useAppUpdate() {
   const [state, setState] = useState<AppUpdateState>({ status: "idle" });
-  // deb/rpm installs can't self-update; they get pointed at the release page.
-  const [selfUpdatable, setSelfUpdatable] = useState(true);
+  // Share the platform probe between mount and a quick click on Update Now.
+  // A failed probe must never fall through to an unsupported in-place update.
+  const selfUpdatableRef = useRef<Promise<boolean> | null>(null);
+  const isSelfUpdatable = useCallback(() => {
+    if (!selfUpdatableRef.current) {
+      selfUpdatableRef.current = import("@tauri-apps/api/core")
+        .then(({ invoke }) => invoke<boolean>("is_portable_update_supported"))
+        .catch(() => false);
+    }
+    return selfUpdatableRef.current;
+  }, []);
   // Synchronous mirror of the current status. `checkForAppUpdate` must keep a
   // stable identity (App holds it in a ref for the deep-link handler), so it
   // cannot read `state` — and a render-lagging mirror would leave the guard
@@ -29,15 +38,8 @@ export function useAppUpdate() {
   }, []);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        setSelfUpdatable(await invoke<boolean>("is_portable_update_supported"));
-      } catch {
-        // keep the self-update default if the probe fails
-      }
-    })();
-  }, []);
+    void isSelfUpdatable();
+  }, [isSelfUpdatable]);
 
   // Guards against overlapping `check()` calls. Now that a check can be
   // triggered from three places (mount, interval, focus) rather than just
@@ -92,7 +94,7 @@ export function useAppUpdate() {
     if (state.status !== "available") return;
     const { update } = state;
 
-    if (!selfUpdatable) {
+    if (!(await isSelfUpdatable())) {
       // Package-manager install (deb/rpm): open the release page instead of
       // attempting an in-place update the updater can't perform.
       try {
@@ -141,7 +143,7 @@ export function useAppUpdate() {
       applyState({ status: "available", update });
       toast.error(`Update failed: ${e}`);
     }
-  }, [state, selfUpdatable, applyState]);
+  }, [state, isSelfUpdatable, applyState]);
 
   const restartApp = useCallback(async () => {
     await relaunch();
