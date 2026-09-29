@@ -20,7 +20,11 @@ on:
       # its real build whenever any shared Rust source changes, so a desktop
       # refactor cannot silently break packaged sidecar compilation.
       - "src-tauri/src/**"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/tauri.windows.conf.json"
+      - "package.json"
       - "scripts/build-native-slint-sidecar.mjs"
+      - "scripts/ensure-slint-sidecar-placeholder.mjs"
       - ".github/workflows/slint-ci.yml"
   # Also run on main pushes so the debug-profile check cache lives on main,
   # where every PR can read it. This does NOT warm the release build: this
@@ -32,7 +36,11 @@ on:
     paths:
       - "prototypes/slint-kalpa/**"
       - "src-tauri/src/**"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/tauri.windows.conf.json"
+      - "package.json"
       - "scripts/build-native-slint-sidecar.mjs"
+      - "scripts/ensure-slint-sidecar-placeholder.mjs"
       - ".github/workflows/slint-ci.yml"
 
 permissions:
