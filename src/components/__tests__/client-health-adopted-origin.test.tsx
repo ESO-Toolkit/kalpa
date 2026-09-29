@@ -221,7 +221,7 @@ describe("Kalpa's records: placed versus adopted", () => {
     render(<ClientHealthPanel open onClose={vi.fn()} />);
     await openRecords();
 
-    expect(await screen.findByText("Adopted")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("Adopted")).toBeVisible());
 
     const adoptedBox = screen.getByRole("checkbox", {
       name: /nvngx_dlss\.dll is your own file and cannot be removed by Kalpa/,
