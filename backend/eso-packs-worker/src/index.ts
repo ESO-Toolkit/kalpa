@@ -285,12 +285,16 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
 
-  return json(
+  const response = json(
     request,
     { packs: visible, page, sort },
     200,
     isDefaultView && !hasAuthorization ? 30 : 0,
   );
+  if (hasAuthorization) {
+    response.headers.set("Cache-Control", "private, no-store");
+  }
+  return response;
 }
 
 // ── GET /packs/:id ─────────────────────────────────────────────────

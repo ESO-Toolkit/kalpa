@@ -283,7 +283,7 @@ describe("GET /packs", () => {
     }>();
     expect(body.packs.find((p) => p.id === "list-voted")!.user_voted).toBe(true);
     expect(body.packs.find((p) => p.id === "list-unvoted")!.user_voted).toBe(false);
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
@@ -303,7 +303,7 @@ describe("GET /packs", () => {
     const res = await call(authedRequest(`${BASE}/packs`));
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });
 
