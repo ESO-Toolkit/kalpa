@@ -375,6 +375,19 @@ describe("POST /packs", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns validation errors for a null addon entry", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(validPackBody({ addons: [null] })),
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      details: [expect.objectContaining({ field: "addons[0]" })],
+    });
+  });
+
   it("generates id from title slug", async () => {
     const res = await call(
       authedRequest(`${BASE}/packs`, {

@@ -159,7 +159,14 @@ export function validatePack(pack: unknown): ValidationError[] {
     });
   } else {
     for (let i = 0; i < p.addons.length; i++) {
-      const addon = p.addons[i] as Record<string, unknown>;
+      const addon = p.addons[i];
+      if (!addon || typeof addon !== "object" || Array.isArray(addon)) {
+        errors.push({
+          field: `addons[${i}]`,
+          message: "each addon must be a JSON object",
+        });
+        continue;
+      }
       if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({
           field: `addons[${i}].esouiId`,

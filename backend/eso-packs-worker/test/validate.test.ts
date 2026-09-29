@@ -207,6 +207,12 @@ describe("validatePack", () => {
       );
     });
 
+    it.each([null, 42, "addon", []])("rejects a non-object addon entry (%j)", (entry) => {
+      expect(validatePack(validPack({ addons: [entry] }))).toContainEqual(
+        expect.objectContaining({ field: "addons[0]" }),
+      );
+    });
+
     it("rejects more than 200 addons", () => {
       const addons = Array.from({ length: 201 }, (_, i) => ({
         esouiId: i + 1,
