@@ -582,6 +582,24 @@ pub fn scan_file(path: &str) -> Result<ScanResult, String> {
     scan_file_with_fight_limit(path, None)
 }
 
+// A corrupt or truncated log can contain no newline for the rest of the file.
+// Bound the allocation made by read_until before attempting to parse that line.
+const MAX_LOG_LINE_BYTES: usize = 1 << 20;
+
+fn read_log_line<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> Result<usize, String> {
+    let n = reader
+        .take(MAX_LOG_LINE_BYTES as u64 + 1)
+        .read_until(b'\n', buf)
+        .map_err(|e| format!("Failed to read log: {e}"))?;
+    if n > MAX_LOG_LINE_BYTES {
+        return Err(format!(
+            "Log line exceeds the {} byte limit",
+            MAX_LOG_LINE_BYTES
+        ));
+    }
+    Ok(n)
+}
+
 /// Scan an entire log file while optionally capping the retained fight summaries.
 /// `total_fights` and each session's `fight_count` still count every completed
 /// fight, so callers can omit a large IPC payload without losing counts.
@@ -604,9 +622,7 @@ pub fn scan_file_with_fight_limit(
         // `read_until(b'\n')` makes offsets account for `\r\n` vs `\n`: the byte
         // count `n` always includes the terminator, so `next_offset` is the
         // start of the following line.
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .map_err(|e| format!("Failed to read log: {e}"))?;
+        let n = read_log_line(&mut reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -670,9 +686,7 @@ pub fn scan_range_with_fight_limit(
 
     while offset < end {
         buf.clear();
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .map_err(|e| format!("Failed to read log: {e}"))?;
+        let n = read_log_line(&mut reader, &mut buf)?;
         if n == 0 {
             break;
         }
@@ -1002,6 +1016,25 @@ mod tests {
         let count_only = scan_file_with_fight_limit(path.to_str().unwrap(), Some(0)).unwrap();
         assert_eq!(count_only.total_fights, 3);
         assert!(count_only.fights.is_empty());
+    }
+
+    #[test]
+    fn file_and_range_scans_reject_oversized_unterminated_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let header = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n";
+        let mut log = header.to_vec();
+        log.extend(std::iter::repeat_n(b'x', MAX_LOG_LINE_BYTES + 1));
+        std::fs::write(&path, &log).unwrap();
+        let path = path.to_str().unwrap();
+
+        let full_error = scan_file(path).err().expect("full scan should reject line");
+        assert!(full_error.contains("Log line exceeds"), "{full_error}");
+
+        let range_error = scan_range(path, header.len() as u64, log.len() as u64)
+            .err()
+            .expect("range scan should reject line");
+        assert!(range_error.contains("Log line exceeds"), "{range_error}");
     }
 
     #[test]
