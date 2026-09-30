@@ -146,6 +146,36 @@ describe("useAppUpdate check cadence", () => {
     expect(downloadAndInstall).not.toHaveBeenCalled();
   });
 
+  it("starts only one install when Update Now is clicked twice during the platform probe", async () => {
+    let finishProbe: (supported: boolean) => void = () => {};
+    mocks.invoke.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finishProbe = resolve;
+      })
+    );
+    const downloadAndInstall = vi.fn().mockResolvedValue(undefined);
+    mocks.check.mockResolvedValue({ version: "2.0", downloadAndInstall });
+    const { result } = renderHook(() => useAppUpdate());
+
+    await act(async () => {
+      await result.current.checkForAppUpdate(false);
+    });
+    let first: Promise<void> = Promise.resolve();
+    let second: Promise<void> = Promise.resolve();
+    act(() => {
+      first = result.current.downloadAndInstall();
+      second = result.current.downloadAndInstall();
+    });
+
+    await act(async () => {
+      finishProbe(true);
+      await Promise.all([first, second]);
+    });
+
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(result.current.state.status).toBe("ready");
+  });
+
   it("opens releases when the platform probe fails", async () => {
     mocks.invoke.mockRejectedValue(new Error("probe failed"));
     const downloadAndInstall = vi.fn();

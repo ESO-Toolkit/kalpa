@@ -137,8 +137,9 @@ describe("Discover search results", () => {
     fireEvent.change(input, { target: { value: "sky" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
-    const status = await screen.findByRole("button", { name: "Installed" });
-    expect(status).toBeDisabled();
+    const status = await screen.findByText("Installed");
+    expect(status).toHaveTextContent("Installed");
+    expect(screen.queryByRole("button", { name: "Install" })).not.toBeInTheDocument();
     fireEvent.click(status);
     expect(invokeOrThrow).toHaveBeenCalledTimes(1);
   });

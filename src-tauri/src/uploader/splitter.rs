@@ -202,7 +202,7 @@ fn fight_start_at(reader: &mut File, fight: &FightSummary) -> bool {
     };
     let mut fields = line.split(',');
     matches!(fields.next(), Some(ms) if ms.trim().parse::<u64>().unwrap_or(0) == fight.start_ms)
-        && matches!(fields.next(), Some(event) if event.eq_ignore_ascii_case("BEGIN_COMBAT"))
+        && matches!(fields.next(), Some(event) if event.trim().eq_ignore_ascii_case("BEGIN_COMBAT"))
 }
 
 /// The offset of the first byte of the line containing `at` — i.e. one past the
@@ -1285,6 +1285,38 @@ mod tests {
         assert!(has(b"BBB"), "the selected fight's events must be present");
         assert!(!has(b"AAA"), "an earlier fight's events must be dropped");
         assert!(!has(b"CCC"), "a later fight's events must be dropped");
+    }
+
+    #[test]
+    fn split_fights_accepts_crlf_preflight_offsets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(
+            &log,
+            b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\r\n10,BEGIN_COMBAT\r\n11,COMBAT_EVENT,AAA\r\n20,END_COMBAT\r\n30,END_LOG\r\n",
+        );
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+        assert_eq!(scan.fights.len(), 1);
+
+        let written = split_selected_fights(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(scan.sessions),
+            Some(scan.fights.clone()),
+            vec![FightSelection {
+                index: 0,
+                name: None,
+                start_offset: Some(scan.fights[0].start_offset),
+                start_ms: Some(scan.fights[0].start_ms),
+            }],
+        )
+        .unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(std::fs::read(&written[0])
+            .unwrap()
+            .windows(3)
+            .any(|w| w == b"AAA"));
     }
 
     // Extracting the FIRST fight (index 0) keeps the header/preamble and only that

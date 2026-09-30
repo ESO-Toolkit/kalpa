@@ -46,6 +46,16 @@ export function useAppUpdate() {
   // one, a slow network response to one must not let a second fire on top of
   // it — e.g. a focus event landing mid-request from the interval.
   const isCheckingRef = useRef(false);
+  // Claim the action before the asynchronous platform probe. React state alone
+  // cannot stop a second click while that probe is still pending.
+  const isInstallingRef = useRef(false);
+  const updateInProgress = useCallback(
+    () =>
+      isInstallingRef.current ||
+      statusRef.current === "downloading" ||
+      statusRef.current === "ready",
+    []
+  );
 
   const checkForAppUpdate = useCallback(
     async (silent = true) => {
@@ -53,11 +63,11 @@ export function useAppUpdate() {
       // machine. Overwriting it with a fresh "available" would offer a second
       // concurrent downloadAndInstall on a different Update object, or drop the
       // Restart affordance for an update that is already installed.
-      if (statusRef.current === "downloading" || statusRef.current === "ready") {
+      if (updateInProgress()) {
         if (!silent) {
           toast.info(
-            statusRef.current === "downloading"
-              ? "An update is already downloading."
+            isInstallingRef.current || statusRef.current === "downloading"
+              ? "An update is already in progress."
               : "An update is ready — restart to apply it."
           );
         }
@@ -74,6 +84,9 @@ export function useAppUpdate() {
 
       try {
         const update = await check();
+        // A check started before the user clicked Update Now can finish after
+        // installation began. It must not replace the download or ready state.
+        if (updateInProgress()) return;
         if (update) {
           applyState({ status: "available", update });
         } else if (!silent) {
@@ -87,61 +100,66 @@ export function useAppUpdate() {
         isCheckingRef.current = false;
       }
     },
-    [applyState]
+    [applyState, updateInProgress]
   );
 
   const downloadAndInstall = useCallback(async () => {
-    if (state.status !== "available") return;
+    if (state.status !== "available" || isInstallingRef.current) return;
+    isInstallingRef.current = true;
     const { update } = state;
 
-    if (!(await isSelfUpdatable())) {
-      // Package-manager install (deb/rpm): open the release page instead of
-      // attempting an in-place update the updater can't perform.
-      try {
-        const { openUrl } = await import("@tauri-apps/plugin-opener");
-        await openUrl(RELEASES_URL);
-      } catch (e) {
-        toast.error(`Could not open the releases page: ${e}`);
-      }
-      return;
-    }
-
-    applyState({ status: "downloading", progress: 0 });
-
     try {
-      let downloaded = 0;
-      let contentLength = 0;
-
-      await update.downloadAndInstall((event) => {
-        switch (event.event) {
-          case "Started":
-            contentLength = event.data.contentLength ?? 0;
-            break;
-          case "Progress":
-            downloaded += event.data.chunkLength;
-            if (contentLength > 0) {
-              applyState({
-                status: "downloading",
-                progress: Math.round((downloaded / contentLength) * 100),
-              });
-            }
-            break;
-          case "Finished":
-            break;
+      if (!(await isSelfUpdatable())) {
+        // Package-manager install (deb/rpm): open the release page instead of
+        // attempting an in-place update the updater can't perform.
+        try {
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(RELEASES_URL);
+        } catch (e) {
+          toast.error(`Could not open the releases page: ${e}`);
         }
-      });
+        return;
+      }
 
-      applyState({ status: "ready" });
-      toast.success("Update installed. Restart to apply.", {
-        action: {
-          label: "Restart Now",
-          onClick: () => relaunch(),
-        },
-        duration: Infinity,
-      });
-    } catch (e) {
-      applyState({ status: "available", update });
-      toast.error(`Update failed: ${e}`);
+      applyState({ status: "downloading", progress: 0 });
+
+      try {
+        let downloaded = 0;
+        let contentLength = 0;
+
+        await update.downloadAndInstall((event) => {
+          switch (event.event) {
+            case "Started":
+              contentLength = event.data.contentLength ?? 0;
+              break;
+            case "Progress":
+              downloaded += event.data.chunkLength;
+              if (contentLength > 0) {
+                applyState({
+                  status: "downloading",
+                  progress: Math.round((downloaded / contentLength) * 100),
+                });
+              }
+              break;
+            case "Finished":
+              break;
+          }
+        });
+
+        applyState({ status: "ready" });
+        toast.success("Update installed. Restart to apply.", {
+          action: {
+            label: "Restart Now",
+            onClick: () => relaunch(),
+          },
+          duration: Infinity,
+        });
+      } catch (e) {
+        applyState({ status: "available", update });
+        toast.error(`Update failed: ${e}`);
+      }
+    } finally {
+      isInstallingRef.current = false;
     }
   }, [state, isSelfUpdatable, applyState]);
 

@@ -224,35 +224,37 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
           )}
           <span className="min-w-0 flex-1 truncate text-sm font-medium">{result.title}</span>
         </button>
-        <Button
-          size="xs"
-          variant={isInstalled ? "ghost" : "default"}
-          onClick={(e) => {
-            e.stopPropagation();
-            onInstall(result.id);
-          }}
-          disabled={anyInstalling || isInstalled}
-          className={cn(
-            "shrink-0 transition-all",
-            isInstalling || isInstalled
-              ? "opacity-100"
-              : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-          )}
-        >
-          {isInstalling ? (
-            <span className="flex items-center gap-1">
-              <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
-              Installing
-            </span>
-          ) : isInstalled ? (
-            <span className="flex items-center gap-1 text-status-success">
-              <Check className="size-3" />
-              Installed
-            </span>
-          ) : (
-            "Install"
-          )}
-        </Button>
+        {isInstalled ? (
+          <InfoPill color="emerald" className="shrink-0" role="status">
+            <Check className="size-3" />
+            Installed
+          </InfoPill>
+        ) : (
+          <Button
+            size="xs"
+            variant="default"
+            onClick={(e) => {
+              e.stopPropagation();
+              onInstall(result.id);
+            }}
+            disabled={anyInstalling}
+            className={cn(
+              "shrink-0 transition-all",
+              isInstalling
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+            )}
+          >
+            {isInstalling ? (
+              <span className="flex items-center gap-1">
+                <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
+                Installing
+              </span>
+            ) : (
+              "Install"
+            )}
+          </Button>
+        )}
       </div>
       {isInstalling && (
         <div className="mt-2 space-y-1">

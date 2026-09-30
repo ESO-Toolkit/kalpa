@@ -537,7 +537,9 @@ When preparing a new release:
    GitHub evicts caches unused for 7 days, and a tag can only read caches
    saved on main, never those saved by an earlier tag. If main has been quiet
    for a week, run it by hand first: `gh workflow run warm-release-cache.yml`.
-6. Push a tag `v*` (for example `v0.3.0`).
+6. Wait for `ci.yml` on `main` to pass after the merge, then push a tag `v*`
+   (for example `v0.3.0`). The release gate checks the `main` commit's CI result
+   and times out if it is still running.
 7. `.github/workflows/release.yml` builds the Slint sidecar and the three platform installers (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) in parallel, then the `publish` job assembles `latest.json` from the updater `.sig` files, attaches everything to one draft GitHub Release, verifies it, and publishes.
 
 ### Cross-Platform Notes
