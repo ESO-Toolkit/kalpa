@@ -13448,7 +13448,7 @@ mod tests {
         assert!(result.skipped_bundled.is_empty());
         let reloaded = metadata::load_metadata(addons_dir);
         assert_eq!(reloaded.addons["LibFoo"].esoui_id, 7);
-        assert_eq!(reloaded.addons["LibFoo"].download_url, "standalone");
+        assert_eq!(reloaded.addons["LibFoo"].download_url, "parent");
         assert_eq!(
             reloaded.addons["LibFoo"].installed_at,
             store.addons["LibFoo"].installed_at
