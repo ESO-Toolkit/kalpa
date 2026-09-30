@@ -5412,6 +5412,7 @@ pub struct ImportResult {
 pub struct AutoLinkResult {
     pub linked: Vec<String>,
     pub not_found: Vec<String>,
+    pub skipped_bundled: Vec<String>,
 }
 
 /// Try to auto-link untracked addons to their ESOUI IDs by searching ESOUI.
@@ -5446,6 +5447,7 @@ fn auto_link_addons_blocking(
 
     let mut linked: Vec<String> = Vec::new();
     let mut not_found: Vec<String> = Vec::new();
+    let mut skipped_bundled: Vec<String> = Vec::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -5462,53 +5464,50 @@ fn auto_link_addons_blocking(
             continue;
         }
 
-        // Look up this folder name in the API data
-        if let Some(api_entry) = api_lookup.get(&folder_name) {
-            let already_tracked = store.addons.get(&folder_name);
+        let api_entry = api_lookup.get(&folder_name);
+        let already_tracked = store.addons.get(&folder_name);
 
-            // Skip bundled secondary folders: a folder another addon ships is
-            // not auto-linked to its own ESOUI entry, because the bundled
-            // version generally differs from the standalone one and linking
-            // would report a permanent phantom update.
-            //
-            // Provenance decides this now. Entries recorded since
-            // `bundled_by` exists say outright who shipped them. Older entries
-            // predate it and are still matched the legacy way, by ID 0 plus a
-            // shared download URL - but that heuristic is exactly what made a
-            // demoted library permanent: once demoted it shared the parent URL,
-            // so this guard refused to ever restore it.
-            //
-            // For those legacy entries the version on disk breaks the tie. If
-            // it equals what ESOUI publishes, the folder is byte-identical to
-            // the standalone release and can be relinked with no mismatch risk.
-            // Anything else is left alone rather than guessed at, and surfaces
-            // in the unlinked list for the user to decide.
-            let is_bundled_secondary = already_tracked.is_some_and(|m| {
-                if !m.bundled_by.is_empty() {
-                    return m.esoui_id == 0;
-                }
-                let legacy_shape = m.esoui_id == 0
-                    && store
-                        .addons
-                        .values()
-                        .any(|other| other.esoui_id != 0 && other.download_url == m.download_url);
-                if !legacy_shape {
-                    return false;
-                }
-                let on_disk = read_local_version(addons_dir, &folder_name);
-                let heals = !on_disk.is_empty()
-                    && !api_entry.version.is_empty()
-                    && on_disk == api_entry.version;
-                !heals
-            });
-            if is_bundled_secondary {
-                // Keep the mismatch visible to the caller. It is already
-                // tracked metadata, so it cannot reach the ordinary
-                // `!store.addons.contains_key` not-found branch below.
-                not_found.push(folder_name);
-                continue;
+        // Skip bundled secondary folders: a folder another addon ships is
+        // not auto-linked to its own ESOUI entry, because the bundled
+        // version generally differs from the standalone one and linking
+        // would report a permanent phantom update.
+        //
+        // Provenance decides this now. Entries recorded since
+        // `bundled_by` exists say outright who shipped them. Older entries
+        // predate it and are still matched the legacy way, by ID 0 plus a
+        // shared download URL - but that heuristic is exactly what made a
+        // demoted library permanent: once demoted it shared the parent URL,
+        // so this guard refused to ever restore it.
+        //
+        // For those legacy entries the version on disk breaks the tie. If
+        // it equals what ESOUI publishes, retain the existing repair path
+        // that relinks the folder to the matching standalone release.
+        // Anything else is a deliberate skip, not a failed lookup. Classify
+        // it even when the catalogue has no standalone entry for the folder.
+        let is_bundled_secondary = already_tracked.is_some_and(|m| {
+            if !m.bundled_by.is_empty() {
+                return m.esoui_id == 0;
             }
+            let legacy_shape = m.esoui_id == 0
+                && store
+                    .addons
+                    .values()
+                    .any(|other| other.esoui_id != 0 && other.download_url == m.download_url);
+            if !legacy_shape {
+                return false;
+            }
+            let on_disk = read_local_version(addons_dir, &folder_name);
+            let heals = api_entry.is_some_and(|api| {
+                !on_disk.is_empty() && !api.version.is_empty() && on_disk == api.version
+            });
+            !heals
+        });
+        if is_bundled_secondary {
+            skipped_bundled.push(folder_name);
+            continue;
+        }
 
+        if let Some(api_entry) = api_entry {
             let needs_update = match already_tracked {
                 Some(meta) => {
                     // Update existing entries: fill in missing esoui_id or a
@@ -5562,7 +5561,11 @@ fn auto_link_addons_blocking(
 
     metadata::save_metadata(addons_dir, &store)?;
 
-    Ok(AutoLinkResult { linked, not_found })
+    Ok(AutoLinkResult {
+        linked,
+        not_found,
+        skipped_bundled,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -13365,39 +13368,90 @@ mod tests {
     }
 
     #[test]
-    fn auto_link_surfaces_legacy_version_mismatch_as_not_found() {
+    fn auto_link_classifies_bundled_folders_without_changing_metadata() {
+        for (provenance, api_version) in [
+            (false, Some("2.0")),
+            (false, Some("")),
+            (false, None),
+            (true, Some("1.0")),
+            (true, Some("2.0")),
+            (true, None),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let addons_dir = tmp.path();
+            write_versioned_addon(addons_dir, "AddonA", "2.0");
+            write_versioned_addon(addons_dir, "LibFoo", "1.0");
+            write_versioned_addon(addons_dir, "CustomAddon", "1.0");
+            fs::create_dir(addons_dir.join("NotAnAddon")).unwrap();
+
+            // This is the pre-provenance shape: LibFoo was demoted to ID zero but
+            // still shares the parent archive URL. Its standalone disk version is
+            // different from ESOUI, so auto-linking would create a phantom update.
+            let mut store = metadata::MetadataStore::default();
+            metadata::record_install_ext(&mut store, "AddonA", 3, "2.0", "parent", 1);
+            metadata::record_install_ext(&mut store, "LibFoo", 0, "1.0", "parent", 0);
+            if provenance {
+                store.addons.get_mut("LibFoo").unwrap().bundled_by = vec![3];
+            }
+            metadata::save_metadata(addons_dir, &store).unwrap();
+
+            let mut api_lookup = HashMap::new();
+            if let Some(version) = api_version {
+                api_lookup.insert(
+                    "LibFoo".to_string(),
+                    Arc::new(esoui::ApiAddonLookup {
+                        esoui_id: 7,
+                        title: "LibFoo".to_string(),
+                        version: version.to_string(),
+                        author: "Test".to_string(),
+                        last_update: 2,
+                        file_info_uri: "standalone".to_string(),
+                    }),
+                );
+            }
+
+            let result = auto_link_addons_blocking(addons_dir, &api_lookup).unwrap();
+            assert!(result.linked.is_empty());
+            assert_eq!(result.not_found, vec!["CustomAddon"]);
+            assert_eq!(result.skipped_bundled, vec!["LibFoo"]);
+            assert_eq!(metadata::load_metadata(addons_dir).addons, store.addons);
+            let json = serde_json::to_value(result).unwrap();
+            assert_eq!(json["skippedBundled"], serde_json::json!(["LibFoo"]));
+            assert_eq!(json["notFound"], serde_json::json!(["CustomAddon"]));
+        }
+    }
+
+    #[test]
+    fn auto_link_heals_legacy_bundle_when_disk_matches_standalone() {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path();
-        write_versioned_addon(addons_dir, "AddonA", "2.0");
         write_versioned_addon(addons_dir, "LibFoo", "1.0");
-
-        // This is the pre-provenance shape: LibFoo was demoted to ID zero but
-        // still shares the parent archive URL. Its standalone disk version is
-        // different from ESOUI, so auto-linking would create a phantom update.
         let mut store = metadata::MetadataStore::default();
         metadata::record_install_ext(&mut store, "AddonA", 3, "2.0", "parent", 1);
         metadata::record_install_ext(&mut store, "LibFoo", 0, "1.0", "parent", 0);
         metadata::save_metadata(addons_dir, &store).unwrap();
-
-        let mut api_lookup = HashMap::new();
-        api_lookup.insert(
+        let lookup = HashMap::from([(
             "LibFoo".to_string(),
             Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 7,
                 title: "LibFoo".to_string(),
-                version: "2.0".to_string(),
+                version: "1.0".to_string(),
                 author: "Test".to_string(),
                 last_update: 2,
                 file_info_uri: "standalone".to_string(),
             }),
-        );
+        )]);
 
-        let result = auto_link_addons_blocking(addons_dir, &api_lookup).unwrap();
-        assert!(result.linked.is_empty());
-        assert_eq!(result.not_found, vec!["LibFoo"]);
+        let result = auto_link_addons_blocking(addons_dir, &lookup).unwrap();
+        assert_eq!(result.linked, vec!["LibFoo"]);
+        assert!(result.not_found.is_empty());
+        assert!(result.skipped_bundled.is_empty());
+        let reloaded = metadata::load_metadata(addons_dir);
+        assert_eq!(reloaded.addons["LibFoo"].esoui_id, 7);
+        assert_eq!(reloaded.addons["LibFoo"].download_url, "parent");
         assert_eq!(
-            metadata::load_metadata(addons_dir).addons["LibFoo"].esoui_id,
-            0
+            reloaded.addons["LibFoo"].installed_at,
+            store.addons["LibFoo"].installed_at
         );
     }
 

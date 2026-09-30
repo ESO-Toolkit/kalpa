@@ -26,6 +26,7 @@ import { UploaderIntroCard } from "./components/uploader-intro-card";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { DependencyPickerDialog } from "./components/dependency-picker-dialog";
 import { getSetting, setSetting } from "@/lib/store";
+import { notifyUnmatchedAddons } from "@/lib/auto-link";
 import {
   addSkippedDependencies,
   getAskRequiredDependenciesOnly,
@@ -76,6 +77,7 @@ import {
 } from "@/lib/protected-edits";
 import type {
   AddonManifest,
+  AutoLinkResult,
   AuthUser,
   BatchConflictAddon,
   BatchEnableResult,
@@ -647,12 +649,9 @@ function App() {
       if (autoLinkRan.current) return;
       autoLinkRan.current = true;
 
-      const result = await invokeResult<{ linked: string[]; notFound: string[] }>(
-        "auto_link_addons",
-        {
-          addonsPath: path,
-        }
-      );
+      const result = await invokeResult<AutoLinkResult>("auto_link_addons", {
+        addonsPath: path,
+      });
 
       if (!result.ok) {
         toast.error(`Auto-link failed: ${result.error}`);
@@ -666,11 +665,7 @@ function App() {
         await scanAddons(path);
       }
 
-      if (result.data.notFound.length > 0) {
-        toast.warning(
-          `Could not auto-link ${result.data.notFound.length} addon${result.data.notFound.length > 1 ? "s" : ""}; review them manually.`
-        );
-      }
+      await notifyUnmatchedAddons(path, result.data.notFound);
     },
     [scanAddons]
   );

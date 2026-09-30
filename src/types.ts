@@ -3,6 +3,13 @@ interface Dependency {
   min_version: number | null;
 }
 
+export interface AutoLinkResult {
+  linked: string[];
+  notFound: string[];
+  /** Secondary folders managed through the addon that bundled them. */
+  skippedBundled: string[];
+}
+
 export interface AddonManifest {
   folderName: string;
   title: string;
