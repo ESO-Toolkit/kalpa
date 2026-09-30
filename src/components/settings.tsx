@@ -553,6 +553,7 @@ export function Settings({
                     <SectionHeader>AddOns Folder</SectionHeader>
                     <Input
                       id="addons-path"
+                      aria-label="AddOns folder path"
                       value={path}
                       onChange={(e) => setPath(e.target.value)}
                       placeholder={exampleAddonsPath()}

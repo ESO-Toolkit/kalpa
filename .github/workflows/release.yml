@@ -42,6 +42,7 @@ jobs:
     environment: release
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -64,6 +65,25 @@ jobs:
               diagnosis="this commit is not on main at all — the tag was pushed from an unmerged branch."
             fi
             echo "::error::Release tag ${GITHUB_REF_NAME} targets ${tagged_commit}, but origin/main is ${main_commit}. Diagnosis: ${diagnosis} This gate deliberately requires the tag to sit exactly on the tip of origin/main, not merely to be an ancestor of it: exact equality is what stops a tag pushed from an unmerged branch from producing a signed, auto-updating release. To fix: merge to main first, then re-tag the merged commit — git tag -d ${GITHUB_REF_NAME} && git push origin :refs/tags/${GITHUB_REF_NAME}, then re-tag at origin/main and push." >&2
+            exit 1
+          fi
+
+      - name: Verify CI passed on the tagged commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tagged_commit=$(git rev-parse HEAD^{commit})
+          # A successful PR run may have checked a synthetic merge commit, not
+          # this exact main commit. Require the full CI workflow's main push run.
+          runs=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f head_sha="$tagged_commit" -f event=push -f status=success \
+            -f per_page=100)
+          if ! jq -e --arg sha "$tagged_commit" \
+            '[.workflow_runs[] | select(.head_sha == $sha and .event == "push" and .head_branch == "main" and .conclusion == "success")] | length > 0' \
+            <<< "$runs" > /dev/null; then
+            echo "::error::No successful CI main-push run exists for ${tagged_commit}. Wait for CI to pass on main before tagging the release." >&2
             exit 1
           fi
 

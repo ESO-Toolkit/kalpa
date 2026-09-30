@@ -414,10 +414,14 @@ export function PackCreateView({
 
           {/* Title */}
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block">
+            <label
+              htmlFor="pack-name"
+              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block"
+            >
               Pack Name <span className="text-status-danger">*</span>
             </label>
             <Input
+              id="pack-name"
               placeholder="e.g. Trial Essentials, PvP Toolkit"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -625,6 +629,7 @@ export function PackCreateView({
             <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/40" />
             {addonSource === "search" ? (
               <Input
+                aria-label="Search ESOUI addons"
                 placeholder="Search ESOUI addons..."
                 value={searchQuery}
                 onChange={(e) => handleSearchChange(e.target.value)}
@@ -633,6 +638,7 @@ export function PackCreateView({
               />
             ) : (
               <Input
+                aria-label="Filter installed addons"
                 placeholder="Filter installed addons..."
                 value={installedFilter}
                 onChange={(e) => setInstalledFilter(e.target.value)}

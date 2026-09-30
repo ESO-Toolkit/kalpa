@@ -194,53 +194,67 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   return (
     <div
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-structure-04 group",
+        "group cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-structure-04",
         selected &&
           "bg-primary/[0.06] border-l-primary! shadow-[inset_4px_0_16px_-4px_color-mix(in_oklab,var(--primary)_15%,transparent),inset_0_0_0_1px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
       )}
       onClick={() => onSelect(result)}
     >
       <div className="flex items-center gap-2.5">
-        {rank != null && (
-          <span
-            className={cn(
-              "shrink-0 size-6 flex items-center justify-center rounded-md text-[11px] font-bold font-heading tabular-nums",
-              rank <= 3
-                ? "bg-primary/12 text-primary border border-primary/20"
-                : "bg-structure-03 text-muted-foreground border border-structure-06"
-            )}
-          >
-            {rank}
-          </span>
-        )}
-        <span className="flex-1 truncate text-sm font-medium">{result.title}</span>
-        <Button
-          size="xs"
-          variant={isInstalled ? "ghost" : "default"}
+        <button
+          type="button"
           onClick={(e) => {
             e.stopPropagation();
-            onInstall(result.id);
+            onSelect(result);
           }}
-          disabled={anyInstalling}
-          className={cn(
-            "shrink-0 transition-all",
-            isInstalling || isInstalled ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-          )}
+          aria-current={selected ? "true" : undefined}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-sky"
         >
-          {isInstalling ? (
-            <span className="flex items-center gap-1">
-              <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
-              Installing
+          {rank != null && (
+            <span
+              className={cn(
+                "shrink-0 size-6 flex items-center justify-center rounded-md text-[11px] font-bold font-heading tabular-nums",
+                rank <= 3
+                  ? "bg-primary/12 text-primary border border-primary/20"
+                  : "bg-structure-03 text-muted-foreground border border-structure-06"
+              )}
+            >
+              {rank}
             </span>
-          ) : isInstalled ? (
-            <span className="flex items-center gap-1 text-status-success">
-              <Check className="size-3" />
-              Installed
-            </span>
-          ) : (
-            "Install"
           )}
-        </Button>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{result.title}</span>
+        </button>
+        {isInstalled ? (
+          <InfoPill color="emerald" className="shrink-0" role="status">
+            <Check className="size-3" />
+            Installed
+          </InfoPill>
+        ) : (
+          <Button
+            size="xs"
+            variant="default"
+            onClick={(e) => {
+              e.stopPropagation();
+              onInstall(result.id);
+            }}
+            disabled={anyInstalling}
+            className={cn(
+              "shrink-0 transition-all",
+              isInstalling
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+            )}
+          >
+            {isInstalling ? (
+              <span className="flex items-center gap-1">
+                <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
+                Installing
+              </span>
+            ) : (
+              "Install"
+            )}
+          </Button>
+        )}
       </div>
       {isInstalling && (
         <div className="mt-2 space-y-1">
@@ -599,8 +613,10 @@ function SearchContent({
 
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) {
+      searchIdRef.current++;
       setResults([]);
       setSearchSource(null);
+      setSearching(false);
       return;
     }
     setSearching(true);
@@ -657,6 +673,13 @@ function SearchContent({
     // box drops it rather than leaving it stranded above fresh results.
     if (askResponse || asking) dismissAsk();
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    // Retire an in-flight response as soon as the wording changes, rather than
+    // waiting for the next debounced request (or allowing a cleared box to refill).
+    searchIdRef.current++;
+    setResults([]);
+    setSearchSource(null);
+    setSearching(Boolean(value.trim()));
+    if (!value.trim()) return;
     debounceRef.current = setTimeout(() => handleSearch(value), 500);
   };
 

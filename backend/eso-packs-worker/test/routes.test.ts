@@ -283,7 +283,7 @@ describe("GET /packs", () => {
     }>();
     expect(body.packs.find((p) => p.id === "list-voted")!.user_voted).toBe(true);
     expect(body.packs.find((p) => p.id === "list-unvoted")!.user_voted).toBe(false);
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
@@ -303,7 +303,7 @@ describe("GET /packs", () => {
     const res = await call(authedRequest(`${BASE}/packs`));
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });
 
@@ -373,6 +373,19 @@ describe("POST /packs", () => {
       })
     );
     expect(res.status).toBe(400);
+  });
+
+  it("returns validation errors for a null addon entry", async () => {
+    const res = await call(
+      authedRequest(`${BASE}/packs`, {
+        method: "POST",
+        body: JSON.stringify(validPackBody({ addons: [null] })),
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      details: [expect.objectContaining({ field: "addons[0]" })],
+    });
   });
 
   it("generates id from title slug", async () => {

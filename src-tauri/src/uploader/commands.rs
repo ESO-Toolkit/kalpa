@@ -1309,7 +1309,14 @@ pub async fn uploader_upload_log(
             transport::assess_native_routing_scanned(&scan_path, native_opt_in, has_session)
         })
         .await
-        .map_err(|e| format!("Routing scan task failed: {e}"))?
+        .map_err(|e| format!("Routing scan task failed: {e}"))
+    };
+    let routing = match routing {
+        Ok(routing) => routing,
+        Err(error) => {
+            let _ = super::history::settle_failed(&app, &record_id, &error);
+            return Err(error);
+        }
     };
     let use_native = matches!(routing.routing, transport::NativeRouting::Native);
     // The EOF the verdict was computed at: the native encoder is held to exactly these
@@ -1391,13 +1398,22 @@ pub async fn uploader_upload_log(
             )
         })
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(|e| format!("Task failed: {e}"))
     } else {
         tokio::task::spawn_blocking(move || {
             transport::select_transport(prefer_cli).upload_file(&dispatch_path, &opts)
         })
         .await
-        .map_err(|e| format!("Task failed: {e}"))?
+        .map_err(|e| format!("Task failed: {e}"))
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // The task can panic after native report creation. Preserve the orphan
+            // breadcrumb while settling the history record for the user.
+            let _ = super::history::settle_failed(&app, &record_id, &error);
+            return Err(error);
+        }
     };
 
     match outcome {

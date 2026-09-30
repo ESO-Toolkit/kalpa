@@ -353,6 +353,7 @@ export function Profiles({
           <>
             <div className="flex gap-2">
               <Input
+                aria-label="New profile name"
                 placeholder="New profile name..."
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
@@ -395,6 +396,7 @@ export function Profiles({
                             {renaming === p.name ? (
                               <div className="flex items-center gap-1">
                                 <Input
+                                  aria-label={`Rename ${p.name}`}
                                   value={renameValue}
                                   onChange={(e) => setRenameValue(e.target.value)}
                                   onKeyDown={(e) => {
