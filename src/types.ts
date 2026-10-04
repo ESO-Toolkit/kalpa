@@ -279,6 +279,7 @@ export interface SavedVariableFile {
 
 export interface SvTreeNode {
   key: string;
+  keyType?: "string" | "number";
   valueType: "string" | "number" | "boolean" | "nil" | "table";
   value?: string | number | boolean | null;
   children?: SvTreeNode[];
