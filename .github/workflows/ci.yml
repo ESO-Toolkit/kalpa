@@ -89,19 +89,17 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      # RUSTSEC-2026-0194 / -0195 (quick-xml quadratic-runtime DoS on duplicate
-      # attribute names, fixed in quick-xml >=0.41.0) are transitive advisories
-      # with no available non-breaking fix: quick-xml <0.41 is pinned by plist
-      # (via tauri-utils / tauri 2.11) and by tauri-winrt-notification (via
-      # tauri-plugin-notification -> notify-rust), neither of which yet accepts
-      # quick-xml 0.41. The desktop client never parses untrusted XML through
-      # these paths (build-time plist + Windows toast notifications), so ignore
-      # until the upstream tauri crates bump quick-xml. Mirrors the npm audit
-      # dev-only suppressions above.
+      # Audit both shipped Rust dependency graphs without advisory ignores.
+      # cargo-audit reports informational warnings without failing this gate:
+      # unmaintained transitive crates and glib 0.18's VariantStrIter unsoundness
+      # (RUSTSEC-2024-0429) remain visible. glib's fix requires >=0.20, which is
+      # incompatible with the current GTK/Tauri dependency graph.
       - name: Rust dependency audit
         run: |
           cargo install cargo-audit@0.22.1 --quiet --locked
-          cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+          cargo audit --file src-tauri/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo audit --file prototypes/slint-kalpa/Cargo.lock
 
       - name: Install worker dependencies
         run: npm ci
