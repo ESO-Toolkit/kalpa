@@ -44,6 +44,31 @@ function valueTypeOf(value: string | number | boolean | null): SvTreeNode["value
   return "string";
 }
 
+// Paths remain strings for persisted schema compatibility. A reserved prefix
+// distinguishes numeric Lua keys; literal keys with that prefix are escaped.
+export function treePathSegment(node: SvTreeNode): string {
+  if (node.keyType === "number") return "\0number:" + node.key;
+  return node.key.startsWith("\0") ? "\0string:" + node.key : node.key;
+}
+
+export function treePathKey(segment: string): string {
+  if (segment.startsWith("\0number:")) return segment.slice(8);
+  if (segment.startsWith("\0string:")) return segment.slice(8);
+  return segment;
+}
+
+export function treePathId(path: string[]): string {
+  // Preserve existing overlay IDs for ordinary paths. JSON encoding avoids
+  // collisions between reserved segments and literal backslash/NUL keys.
+  return path.some((segment) => segment === "" || /[\\\0]/.test(segment))
+    ? "\0path:" + JSON.stringify(path)
+    : path.join("\0");
+}
+
+export function findTreeChild(node: SvTreeNode | null, segment: string): SvTreeNode | null {
+  return node?.children?.find((child) => treePathSegment(child) === segment) ?? null;
+}
+
 export function updateTreeNode(
   tree: SvTreeNode,
   path: string[],
@@ -52,13 +77,14 @@ export function updateTreeNode(
 ): SvTreeNode {
   if (depth >= path.length || !tree.children) return tree;
 
-  const targetKey = path[depth];
+  const targetIndex = tree.children.findIndex((child) => treePathSegment(child) === path[depth]);
+  if (targetIndex < 0) return tree;
   const isLeaf = depth === path.length - 1;
 
   return {
     ...tree,
-    children: tree.children.map((child) => {
-      if (child.key !== targetKey) return child;
+    children: tree.children.map((child, index) => {
+      if (index !== targetIndex) return child;
       if (isLeaf) {
         // The user replaced the value, so re-derive the leaf's valueType from
         // the new value and drop any rawLuaValue (which would otherwise take

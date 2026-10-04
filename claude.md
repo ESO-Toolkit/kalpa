@@ -22,7 +22,7 @@ Your job is to improve this app without breaking existing functionality or the b
 ## Tech Stack Snapshot
 
 - **Desktop client**: Tauri v2 + React 19 + TypeScript + Tailwind v4 + shadcn-ui
-- **Backend**: Cloudflare Workers + KV, mirrored into the website's shared D1 (Pack Hub)
+- **Backend**: Cloudflare Workers + Durable Object storage, with KV and shared D1 mirrors (Pack Hub; rollout status below)
 - **CI/CD**: GitHub Actions with tag-triggered release builds (Windows NSIS, macOS universal dmg, Linux AppImage/deb/rpm)
 
 When in doubt, prefer solutions that fit naturally into this stack.
@@ -97,7 +97,7 @@ src-tauri/src/              # Rust backend
 backend/eso-packs-worker/   # Pack Hub Cloudflare Worker
   src/index.ts              # Router, handlers, scheduled backup
   src/kv.ts                 # KV read/write helpers
-  src/pack-index-do.ts      # Durable Object for atomic index mutations
+  src/pack-index-do.ts      # Canonical pack/vote storage and mirror repair
   src/types.ts              # Pack types (snake_case, matches Rust HubPack)
   src/validate.ts           # Input validation
   src/shares.ts             # Share code create/resolve, bearer-token validation
@@ -151,13 +151,16 @@ The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`), deployed s
 ### Architecture:
 
 - **Worker URL**: `https://kalpa-pack-hub.eso-toolkit.workers.dev`
-- **Primary store**: Cloudflare KV (`ESO_PACKS` namespace)
-- **Shared D1 mirror**: every pack mutation is dual-written inline into the `packs`/`pack_tags` tables of `roster-hub-db` (binding `ROSTER_HUB_DB`) so esotk.com reflects the latest pack data. **These tables are shared with `roster-hub-api` — any schema or SQL change has to be coordinated with the website.**
-- **Index serialization**: `PackIndexDO` (Durable Object binding `PACK_INDEX`) owns mutations of the `index:packs` value
+- **Deployment status**: the canonical storage and mirror-retry changes described here await deployment. Merging Worker-path changes to main triggers the deployment workflow; no successful production deployment or live acceptance is recorded here. The later authority flip remains an explicit operator step.
+- **Canonical mutations**: `PackIndexDO` (binding `PACK_INDEX`) persists and serializes pack lifecycles, counters, and vote membership. Canonical changes and their mirror-repair intent commit together in Durable Object storage.
+- **KV migration and mirrors**: `ESO_PACKS` retains legacy pack data, mirrored pack details/index/vote keys, and backups. Migration starts in `kv` shadow mode: unowned legacy records are merged into the DO, while DO-owned records and tombstones win. Full-index mirroring starts only after the explicit parity-gated switch to `do`.
+- **Shared D1 mirror**: public pack data is mirrored into the `packs`/`pack_tags` tables of `roster-hub-db` (binding `ROSTER_HUB_DB`); anonymous authors are redacted, and drafts/deletions remove website rows. KV/D1 writes are serialized with canonical mutations but are not an atomic cross-store transaction: failed effects persist for retry by DO alarm, so the website can temporarily lag. **These tables are shared with `roster-hub-api` — any schema or SQL change has to be coordinated with the website.**
+- **Recovery**: pending lifecycle operations and dirty mirrors resume from durable state on retry or alarm. Follow the migration/rollback guidance in `docs/audits/2026-08-remediation.md`; changing the authority flag or overwriting KV alone does not restore canonical DO state. Recovery must also preserve the deletion cutoffs described below.
 - **Rate limiting**: three built-in limiter bindings — `READ_LIMITER` (60/min), `WRITE_LIMITER` (10/min), `VOTE_LIMITER` (20/min)
 - **API format**: snake_case JSON matching the Rust `HubPack` struct in `pack_hub/commands.rs`
 - **Auth**: ESO Logs Bearer token via `validateBearerToken()` in `shares.ts`
-- **Backup**: Daily cron at midnight UTC snapshots pack index to `backup:YYYY-MM-DD` keys (90-day TTL)
+- **Backup**: daily cron at midnight UTC snapshots the DO's merged live pack/vote view into `ESO_PACKS` at `backup:YYYY-MM-DD` (90-day TTL) and `backup:latest` (no TTL). Dated snapshots are not rewritten after account deletion.
+- **Backup privacy (pending, undeployed fix)**: DO storage permanently retains each deleted user's ID and deletion timestamp. Backup writes, latest-snapshot scrubs, and restore finalization share the DO serialization boundary and filter records at or before that cutoff; new records from a returning user remain eligible. A failed latest-snapshot scrub remains pending for alarm retry, so deletion does not guarantee immediate physical removal from that snapshot. `PRIVACY.md` documents marker retention and retry behavior with an explicit pending-rollout notice.
 - **CI**: `.github/workflows/deploy-worker.yml` — auto-deploys on push to main, with typecheck + name guard + health check
 
 ### Addon index (`/addons/*`)

@@ -52,6 +52,7 @@ pub struct AuthUser {
 pub struct AuthState {
     pub tokens: Mutex<Option<AuthTokens>>,
     refresh_lock: Mutex<()>,
+    generation: AtomicU64,
 }
 
 impl AuthState {
@@ -59,14 +60,54 @@ impl AuthState {
         Self {
             tokens: Mutex::new(tokens),
             refresh_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         }
     }
 
-    /// Get the current access token, refreshing if expired, without persisting a
-    /// refreshed pair. Callers that own a credential store should use
-    /// [`AuthState::get_valid_token_persisting`] instead.
-    pub fn get_valid_token(&self) -> Result<Option<String>, String> {
-        self.get_valid_token_persisting(|_| {})
+    /// Invalidate pending logins and refreshes while clearing credentials under
+    /// the same mutex used to publish a refreshed pair.
+    pub fn clear(&self, clear_credentials: impl FnOnce()) -> Result<u64, String> {
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *guard = None;
+        clear_credentials();
+        Ok(generation)
+    }
+
+    pub fn cancel_pending_login(&self) -> Result<(), String> {
+        let _guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn finish_login(
+        &self,
+        generation: u64,
+        tokens: AuthTokens,
+        persist: impl FnOnce(&AuthTokens) -> bool,
+    ) -> Result<bool, String> {
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err("Sign-in was cancelled because the account changed.".into());
+        }
+        let persisted = persist(&tokens);
+        *guard = Some(tokens);
+        Ok(persisted)
+    }
+
+    pub fn clear_if_current(
+        &self,
+        expected: &AuthTokens,
+        clear_credentials: impl FnOnce(),
+    ) -> Result<bool, String> {
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        if guard.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *guard = None;
+        clear_credentials();
+        Ok(true)
     }
 
     /// Get the current access token, refreshing if expired.
@@ -83,31 +124,36 @@ impl AuthState {
         &self,
         persist: impl FnOnce(&AuthTokens),
     ) -> Result<Option<String>, String> {
-        let _refresh_guard = self
-            .refresh_lock
-            .lock()
-            .map_err(|_| "Internal error.".to_string())?;
+        self.refresh_with(ensure_valid_token, persist)
+    }
 
-        let tokens = {
-            let guard = self
-                .tokens
-                .lock()
-                .map_err(|_| "Internal error.".to_string())?;
-            guard.clone()
+    fn refresh_with(
+        &self,
+        refresh: impl FnOnce(&AuthTokens) -> Result<Option<AuthTokens>, String>,
+        persist: impl FnOnce(&AuthTokens),
+    ) -> Result<Option<String>, String> {
+        let _refresh_guard = self.refresh_lock.lock().map_err(|_| "Auth lock poisoned")?;
+        let (tokens, generation) = {
+            let guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+            (guard.clone(), self.generation.load(Ordering::SeqCst))
         };
-
         let Some(tokens) = tokens else {
             return Ok(None);
         };
-
-        match ensure_valid_token(&tokens)? {
+        let refreshed = refresh(&tokens);
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        // A logout or another login supersedes both successful and failed work.
+        if self.generation.load(Ordering::SeqCst) != generation || guard.as_ref() != Some(&tokens) {
+            return Ok(None);
+        }
+        match refreshed? {
             Some(new_tokens) => {
+                if new_tokens.user_id != tokens.user_id {
+                    return Err("Token validation failed".into());
+                }
                 let token = new_tokens.access_token.clone();
                 persist(&new_tokens);
-                *self
-                    .tokens
-                    .lock()
-                    .map_err(|_| "Internal error.".to_string())? = Some(new_tokens);
+                *guard = Some(new_tokens);
                 Ok(Some(token))
             }
             None => Ok(Some(tokens.access_token)),
@@ -121,8 +167,7 @@ pub(crate) struct CallbackTokens {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
-    /// Echo of the `state` nonce this attempt put in the auth URL. Absent while
-    /// esotk.com has not been updated to echo it — see [`state_matches`].
+    /// Echo of the nonce sent in the auth URL, required in the body or query.
     #[serde(default)]
     state: Option<String>,
 }
@@ -439,17 +484,12 @@ fn generate_state_nonce() -> String {
 
 /// Whether a callback's `state` echo belongs to this attempt.
 ///
-/// A supplied state MUST match. An ABSENT state is still accepted, because
-/// esotk.com does not echo the parameter yet and rejecting it would break every
-/// sign-in until the site ships that change. Meanwhile the browser vector stays
-/// closed by the `Content-Type: application/json` requirement below: it forces a
-/// CORS preflight, and the preflight only permits `https://esotk.com`. Once the
-/// site echoes `state`, make an absent value a rejection here.
-fn state_matches(supplied: Option<&str>, expected: &str) -> bool {
-    match supplied {
-        Some(s) => s == expected,
-        None => true,
-    }
+/// At least one echo is required; every supplied echo must match. This also
+/// rejects an empty or conflicting echo instead of falling back to another one.
+fn state_matches(body: Option<&str>, query: Option<&str>, expected: &str) -> bool {
+    !expected.is_empty()
+        && (body.is_some() || query.is_some())
+        && body.into_iter().chain(query).all(|state| state == expected)
 }
 
 /// Whether a request head declares a JSON body.
@@ -479,10 +519,12 @@ fn extract_tokens_from_request(
     let first_line = request.lines().next()?;
     let mut parts = first_line.split_whitespace();
     let method = parts.next()?;
-    let path = parts.next()?;
-    if !path.starts_with("/callback") {
+    let target = parts.next()?;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path != "/callback" {
         return None;
     }
+    let echoed = query_state(query).ok()?;
 
     if method.eq_ignore_ascii_case("POST") {
         if !is_json_content_type(request) {
@@ -490,35 +532,39 @@ fn extract_tokens_from_request(
         }
         let tokens: CallbackTokens = serde_json::from_slice(body).ok()?;
         // The query string is the other place esotk.com could echo the nonce.
-        let echoed = path.split('?').nth(1).and_then(query_state);
-        let supplied = tokens.state.as_deref().or(echoed.as_deref());
-        return state_matches(supplied, expected_state).then_some(tokens);
+        return state_matches(tokens.state.as_deref(), echoed.as_deref(), expected_state)
+            .then_some(tokens);
     }
 
     if !method.eq_ignore_ascii_case("GET") {
         return None;
     }
 
-    let query = path.split('?').nth(1)?;
-    let echoed = query_state(query);
     for param in query.split('&') {
         if let Some(value) = param.strip_prefix("tokens=") {
             let decoded_param = urlencoding::decode(value).ok()?;
             let json_bytes = STANDARD.decode(decoded_param.as_bytes()).ok()?;
             let tokens: CallbackTokens = serde_json::from_slice(&json_bytes).ok()?;
-            let supplied = tokens.state.as_deref().or(echoed.as_deref());
-            return state_matches(supplied, expected_state).then_some(tokens);
+            return state_matches(tokens.state.as_deref(), echoed.as_deref(), expected_state)
+                .then_some(tokens);
         }
     }
     None
 }
 
-/// The decoded `state` query parameter, if present.
-fn query_state(query: &str) -> Option<String> {
-    query
-        .split('&')
-        .find_map(|param| param.strip_prefix("state="))
-        .and_then(|v| urlencoding::decode(v).ok())
+/// The decoded `state` query parameter, rejecting ambiguous or invalid echoes.
+fn query_state(query: &str) -> Result<Option<String>, ()> {
+    let mut echoed = None;
+    for param in query.split('&') {
+        let (key, value) = param.split_once('=').unwrap_or((param, ""));
+        if urlencoding::decode(key).map_err(|_| ())? == "state" {
+            if echoed.is_some() {
+                return Err(());
+            }
+            echoed = Some(urlencoding::decode(value).map_err(|_| ())?);
+        }
+    }
+    Ok(echoed)
 }
 
 // ── User Validation ──────────────────────────────────────────────────────
@@ -658,6 +704,84 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
 mod tests {
     use super::*;
 
+    fn test_tokens(access: &str) -> AuthTokens {
+        AuthTokens {
+            access_token: access.into(),
+            refresh_token: "refresh".into(),
+            expires_at: 0,
+            user_id: "1".into(),
+            user_name: "User".into(),
+        }
+    }
+
+    #[test]
+    fn refresh_persists_rotated_pair_and_reuses_it() {
+        let state = AuthState::new(Some(test_tokens("old")));
+        let mut rotated = test_tokens("new");
+        rotated.refresh_token = "rotated".into();
+        let persisted = Mutex::new(None);
+        assert_eq!(
+            state
+                .refresh_with(
+                    |_| Ok(Some(rotated.clone())),
+                    |t| *persisted.lock().unwrap() = Some(t.clone())
+                )
+                .unwrap(),
+            Some("new".into())
+        );
+        assert_eq!(*persisted.lock().unwrap(), Some(rotated.clone()));
+        assert_eq!(
+            state
+                .refresh_with(
+                    |t| {
+                        assert_eq!(t, &rotated);
+                        Ok(None)
+                    },
+                    |_| panic!("no refresh to persist")
+                )
+                .unwrap(),
+            Some("new".into())
+        );
+    }
+
+    #[test]
+    fn logout_during_refresh_cannot_restore_credentials() {
+        let state = AuthState::new(Some(test_tokens("old")));
+        assert_eq!(
+            state
+                .refresh_with(
+                    |_| {
+                        state.clear(|| {}).unwrap();
+                        Ok(Some(test_tokens("new")))
+                    },
+                    |_| panic!("stale refresh persisted")
+                )
+                .unwrap(),
+            None
+        );
+        assert!(state.tokens.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_login_and_rejection_cannot_overwrite_a_new_session() {
+        let state = AuthState::new(None);
+        let old = state.clear(|| {}).unwrap();
+        let current = state.clear(|| {}).unwrap();
+        state
+            .finish_login(current, test_tokens("new"), |_| true)
+            .unwrap();
+        assert!(state
+            .finish_login(old, test_tokens("old"), |_| panic!("stale login persisted"))
+            .is_err());
+        assert!(!state
+            .clear_if_current(&test_tokens("old"), || panic!("cleared new credentials"))
+            .unwrap());
+        assert_eq!(
+            state.tokens.lock().unwrap().as_ref().unwrap().access_token,
+            "new"
+        );
+    }
+
     const POST_HEAD: &str = concat!(
         "POST /callback HTTP/1.1\r\n",
         "Host: localhost:12345\r\n",
@@ -668,7 +792,7 @@ mod tests {
 
     #[test]
     fn extracts_tokens_from_post_json_callback() {
-        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
+        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600,"state":"nonce"}"#;
 
         let tokens = extract_tokens_from_request(POST_HEAD, body, "nonce").expect("tokens");
 
@@ -681,7 +805,7 @@ mod tests {
     fn extracts_tokens_from_legacy_get_callback() {
         let encoded = STANDARD
             .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
-        let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
+        let request = format!("GET /callback?tokens={encoded}&state=nonce HTTP/1.1\r\n\r\n");
 
         let tokens = extract_tokens_from_request(&request, &[], "nonce").expect("tokens");
 
@@ -709,6 +833,72 @@ mod tests {
         let encoded = STANDARD.encode(br#"{"access_token":"access"}"#);
         let request = format!("GET /callback?tokens={encoded}&state=nonce HTTP/1.1\r\n\r\n");
         assert!(extract_tokens_from_request(&request, &[], "nonce").is_some());
+    }
+
+    #[test]
+    fn callbacks_require_current_state_without_conflicting_echoes() {
+        for method in ["POST", "GET"] {
+            for (body_state, query_state, accepted) in [
+                (None, None, false),
+                (Some(""), None, false),
+                (None, Some(""), false),
+                (Some("wrong"), None, false),
+                (None, Some("previous-attempt"), false),
+                (Some("nonce"), Some("wrong"), false),
+                (Some("wrong"), Some("nonce"), false),
+                (Some(""), Some("nonce"), false),
+                (Some("nonce"), Some(""), false),
+                (Some("nonce"), None, true),
+                (None, Some("nonce"), true),
+                (Some("nonce"), Some("nonce"), true),
+            ] {
+                let mut payload = serde_json::json!({ "access_token": "access" });
+                if let Some(state) = body_state {
+                    payload["state"] = serde_json::json!(state);
+                }
+                let body = serde_json::to_vec(&payload).unwrap();
+                let mut target = "/callback?".to_string();
+                if method == "GET" {
+                    target.push_str(&format!("tokens={}&", STANDARD.encode(&body)));
+                }
+                if let Some(state) = query_state {
+                    target.push_str(&format!("state={state}"));
+                }
+                let request =
+                    format!("{method} {target} HTTP/1.1\r\nContent-Type: application/json\r\n\r\n");
+                assert_eq!(
+                    extract_tokens_from_request(&request, &body, "nonce").is_some(),
+                    accepted,
+                    "{method}, body state {body_state:?}, query state {query_state:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn callbacks_reject_wrong_paths_and_ambiguous_query_states() {
+        let body = br#"{"access_token":"access","state":"nonce"}"#;
+        let encoded = STANDARD.encode(body);
+        for method in ["POST", "GET"] {
+            for target in [
+                "/callback-extra?state=nonce",
+                "/callback/child?state=nonce",
+                "/callback/?state=nonce",
+                "/callback?state=nonce&state=nonce",
+                "/callback?state=wrong&state=nonce",
+                "/callback?state=nonce&%73tate=wrong",
+                "/callback?state=%FF",
+                "/callback?state",
+            ] {
+                let request = format!(
+                    "{method} {target}&tokens={encoded} HTTP/1.1\r\nContent-Type: application/json\r\n\r\n"
+                );
+                assert!(
+                    extract_tokens_from_request(&request, body, "nonce").is_none(),
+                    "{method} {target}"
+                );
+            }
+        }
     }
 
     /// A cross-origin page can POST `text/plain` with no preflight; demanding

@@ -28,6 +28,20 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H5 | pr-open | `fix/audit-h5-branch-pruning-proposal` | [#385](https://github.com/ESO-Toolkit/kalpa/pull/385) | - | D-H5-1 | APPROVE after one follow-up; refreshed 2026-08-28 | `npm run check`; `git diff --check`; freshness guard | Point-in-time proposal; PR now targets `main` directly; no branches deleted. |
 | H6 | pr-open | `fix/audit-h6-quick-xml-advisory` | [#387](https://github.com/ESO-Toolkit/kalpa/pull/387) (draft, stacked on W1) | - | D-H6-1 | Initial REVISE resolved; follow-up no findings | Main audit clean; main/Slint clippy, test, fmt, native build green | Compatible upstream lock updates remove quick-xml advisories; CI ignores removed. |
 
+## Current committed Worker behavior (2026-10-03)
+
+The canonical storage and mirror-retry changes await deployment. Merging Worker-path changes to main triggers the deployment workflow, so deployment is not a separate manual step after merge. No successful production deployment or live acceptance is recorded here. The August session log below is historical evidence, not a statement of the live Worker state.
+
+`PackIndexDO` now commits vote membership, pack counters, and durable repair intent together. KV vote keys are mirrors rather than the authority for an already-owned vote. Pack updates and D1/KV repair run under the same serialized DO gate, using current canonical lifecycle state; failed mirror effects remain queued for alarm retry. D1 is an eventually consistent public website mirror, not an atomic participant in the DO transaction.
+
+The D-W1-2 shadow/backfill and parity checks still govern rollout. Do not infer a completed authority flip from these code changes. Recovery must preserve canonical DO records and tombstones; a KV-only restore or authority-flag change is not a rollback strategy.
+
+### Pending backup privacy follow-up (not deployed)
+
+The current backup fix permanently retains per-user deletion cutoffs (user ID and deletion timestamp) in DO storage. Backup writes, latest-snapshot scrubs, and restore finalization are serialized through the DO and exclude records at or before the cutoff while preserving later records from a returning user. Failed latest-snapshot cleanup remains pending for alarm retry. Recovery must preserve these cutoffs alongside canonical data so an older snapshot cannot reintroduce deleted records.
+
+Dated daily snapshots still expire after 90 days and are not rewritten on deletion; `backup:latest` still has no TTL. `PRIVACY.md` now discloses permanent user-ID/deletion-time retention, retryable latest-snapshot and mirror cleanup, and removal of votes on deleted pack lifecycles. Its rollout notice explicitly distinguishes the prepared implementation from the live service; no production deployment or acceptance is recorded here.
+
 ## Decisions
 
 ### D-P0-A2 — Shared `fs4` transaction locks with canonical target identity
@@ -667,7 +681,6 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 - P0-A3: the fatal-authority-loss decision (D-P0-A3-FATAL) means an unrecoverable reclaim failure now drops the user's window. Fable and I both judge the path effectively unreachable on Windows (it needs `TerminateProcess` on our own already-reaped child to fail), and the cost is a lost view rather than lost data since every write is atomic. Flagging it because it is a user-visible behaviour change.
 
 - W2: maintainer approval is required before merging any reconciliation path that can delete rows from shared D1.
-- W1: decide whether moving vote-record authority from KV/in-memory memo into DO storage belongs in W1 or W3. The current W1 code prevents resurrection but retains the pre-existing eviction/double-toggle limitation for later hardening.
 - W1: owner sign-off is required before the later manual `kv` → `do` authority flip and must accept backup restore as the post-flip rollback path.
 - P0-A2: D-P0-1 establishes the lock invariants; a fresh Fable consultation must choose the concrete cross-platform dependency/API and user-visible timeout behavior before implementation.
 - R4/R5: ownership/conflict behavior that changes install outcomes requires explicit design review before implementation.

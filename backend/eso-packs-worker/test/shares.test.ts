@@ -55,6 +55,23 @@ function sharePayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe("POST /shares", () => {
+  it.each([null, [], "addon", 1, true])("rejects non-object addon %j with 400", async (addon) => {
+    const response = await call(authedRequest(`${BASE}/shares`, {
+      method: "POST",
+      body: JSON.stringify(sharePayload({ addons: [addon] })),
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ details: [{ field: "addons[0]" }] });
+  });
+
+  it("rejects UTF-8 payloads over the byte limit", async () => {
+    const response = await call(authedRequest(`${BASE}/shares`, {
+      method: "POST",
+      body: JSON.stringify(sharePayload({ junk: "界".repeat(90_000) })),
+    }));
+    expect(response.status).toBe(413);
+  });
+
   it("creates a share code", async () => {
     const res = await call(
       authedRequest(`${BASE}/shares`, {

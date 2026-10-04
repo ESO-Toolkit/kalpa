@@ -2115,11 +2115,11 @@ function App() {
   const handleBatchDisable = useCallback(async () => {
     if (selectedFolders.size === 0) return;
 
-    // Each selected addon toggles to the opposite of its current state.
+    // Disable is idempotent: leave already disabled addons alone.
     const entries = Array.from(selectedFolders)
       .map((folderName) => {
         const addon = addons.find((a) => a.folderName === folderName);
-        return addon ? { folderName, enable: addon.disabled } : null;
+        return addon && !addon.disabled ? { folderName, enable: false } : null;
       })
       .filter((e): e is { folderName: string; enable: boolean } => e !== null);
 

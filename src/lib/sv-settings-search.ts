@@ -1,4 +1,5 @@
 import type { SvTreeNode } from "../types";
+import { treePathSegment } from "./sv-helpers";
 import { humanizeKey } from "./sv-nodes";
 
 /**
@@ -79,7 +80,7 @@ export function searchSvSettings(
 
       // Other table nodes are never emitted themselves, always descend.
       for (const child of node.children ?? []) {
-        walk(child, [...path, child.key]);
+        walk(child, [...path, treePathSegment(child)]);
       }
       return;
     }
@@ -94,7 +95,7 @@ export function searchSvSettings(
   };
 
   for (const child of tree.children ?? []) {
-    walk(child, [child.key]);
+    walk(child, [treePathSegment(child)]);
   }
 
   return { results, total };

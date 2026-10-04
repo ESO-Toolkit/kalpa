@@ -1,4 +1,4 @@
-use super::types::{SvTreeNode, SvValueType};
+use super::types::{SvKeyType, SvTreeNode, SvValueType};
 
 const MAX_DEPTH: usize = 512;
 
@@ -32,6 +32,7 @@ fn parse_lua_value_depth(
                 value_type: SvValueType::Boolean,
                 value: Some(serde_json::Value::Bool(true)),
                 children: None,
+                key_type: None,
                 raw_lua_value: None,
             })
         }
@@ -42,6 +43,7 @@ fn parse_lua_value_depth(
                 value_type: SvValueType::Boolean,
                 value: Some(serde_json::Value::Bool(false)),
                 children: None,
+                key_type: None,
                 raw_lua_value: None,
             })
         }
@@ -52,6 +54,7 @@ fn parse_lua_value_depth(
                 value_type: SvValueType::Nil,
                 value: Some(serde_json::Value::Null),
                 children: None,
+                key_type: None,
                 raw_lua_value: None,
             })
         }
@@ -150,7 +153,16 @@ fn decode_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<Vec<u8>, St
                 b'\\' => out.push(b'\\'),
                 b'\'' => out.push(b'\''),
                 b'"' => out.push(b'"'),
-                b'\n' | b'\r' => out.push(b'\n'), // escaped newline
+                b'\n' | b'\r' => {
+                    out.push(b'\n');
+                    let first = chars[*pos];
+                    if chars
+                        .get(*pos + 1)
+                        .is_some_and(|next| matches!(next, b'\n' | b'\r') && *next != first)
+                    {
+                        *pos += 1;
+                    }
+                }
                 d @ b'0'..=b'9' => {
                     // \ddd decimal escape (up to 3 digits)
                     let mut val: u16 = (d - b'0') as u16;
@@ -207,6 +219,7 @@ fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, 
         value_type: SvValueType::String,
         value: Some(serde_json::Value::String(s)),
         children: None,
+        key_type: None,
         raw_lua_value: raw_lua,
     })
 }
@@ -243,10 +256,10 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
     close_pattern.extend(std::iter::repeat_n(b'=', level));
     close_pattern.push(b']');
 
-    let content_start = *pos;
+    let mut decoded = Vec::new();
     while *pos + close_pattern.len() <= chars.len() {
         if &chars[*pos..*pos + close_pattern.len()] == close_pattern.as_slice() {
-            let raw_bytes = &chars[content_start..*pos];
+            let raw_bytes = decoded.as_slice();
             let (s, raw_lua) = match std::str::from_utf8(raw_bytes) {
                 Ok(valid) => (valid.to_string(), None),
                 Err(_) => {
@@ -261,8 +274,21 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
                 value_type: SvValueType::String,
                 value: Some(serde_json::Value::String(s)),
                 children: None,
+                key_type: None,
                 raw_lua_value: raw_lua,
             });
+        }
+        if matches!(chars[*pos], b'\n' | b'\r') {
+            decoded.push(b'\n');
+            let first = chars[*pos];
+            if chars
+                .get(*pos + 1)
+                .is_some_and(|next| matches!(next, b'\n' | b'\r') && *next != first)
+            {
+                *pos += 1;
+            }
+        } else {
+            decoded.push(chars[*pos]);
         }
         *pos += 1;
     }
@@ -344,6 +370,7 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
         value_type: SvValueType::Number,
         value: Some(value),
         children: None,
+        key_type: None,
         raw_lua_value: None,
     })
 }
@@ -370,11 +397,13 @@ fn parse_lua_table(chars: &[u8], pos: &mut usize, depth: usize) -> Result<SvTree
         let key = parse_table_key(chars, pos)?;
 
         let mut child = parse_lua_value_depth(chars, pos, depth + 1)?;
-        child.key = key.unwrap_or_else(|| {
+        let (key, key_type) = key.unwrap_or_else(|| {
             let k = index.to_string();
             index += 1;
-            k
+            (k, SvKeyType::Number)
         });
+        child.key = key;
+        child.key_type = Some(key_type);
 
         children.push(child);
 
@@ -390,13 +419,14 @@ fn parse_lua_table(chars: &[u8], pos: &mut usize, depth: usize) -> Result<SvTree
         value_type: SvValueType::Table,
         value: None,
         children: Some(children),
+        key_type: None,
         raw_lua_value: None,
     })
 }
 
 /// Parse table key: `["string"]` or `[number]` or `identifier` followed by `=`
 /// Returns None for array entries (no key).
-fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, String> {
+fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<(String, SvKeyType)>, String> {
     skip_whitespace_and_comments(chars, pos);
 
     if *pos >= chars.len() {
@@ -413,7 +443,12 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
             return Ok(None);
         }
 
-        let key = if chars[*pos] == b'"' {
+        let key_type = if matches!(chars[*pos], b'"' | b'\'') {
+            SvKeyType::String
+        } else {
+            SvKeyType::Number
+        };
+        let key = if matches!(chars[*pos], b'"' | b'\'') {
             // Decode escapes with the same routine string values use: the
             // serializer re-escapes keys on the way out, so copying the raw
             // source text here would mutate the key on every save.
@@ -449,7 +484,7 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
         skip_whitespace_and_comments(chars, pos);
         if *pos < chars.len() && chars[*pos] == b'=' {
             *pos += 1;
-            return Ok(Some(key));
+            return Ok(Some((key, key_type)));
         }
 
         *pos = saved;
@@ -466,7 +501,7 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
         skip_whitespace_and_comments(chars, pos);
         if *pos < chars.len() && chars[*pos] == b'=' {
             *pos += 1;
-            return Ok(Some(ident));
+            return Ok(Some((ident, SvKeyType::String)));
         }
         // Not a key=value, backtrack
         *pos = saved;
@@ -522,6 +557,7 @@ pub fn parse_sv_file(content: &str, file_name: &str) -> Result<SvTreeNode, Strin
         value_type: SvValueType::Table,
         value: None,
         children: Some(children),
+        key_type: None,
         raw_lua_value: None,
     })
 }
@@ -864,6 +900,36 @@ mod tests {
         assert_eq!(
             parse_value("[[\n\nfoo]]").unwrap().value,
             Some(serde_json::json!("\nfoo"))
+        );
+    }
+
+    #[test]
+    fn lua_newline_sequences_round_trip_after_edit() {
+        for newline in ["\r\n", "\n\r", "\r", "\n"] {
+            for value in [
+                format!("\"a\\{newline}b\""),
+                format!("[=[a{newline}b]=]"),
+                format!("[[{newline}a{newline}b]]"),
+            ] {
+                let input = format!("Var = {{ [\"text\"] = {value}, [\"setting\"] = false }}");
+                let mut tree = parse_sv_file(&input, "Test.lua").unwrap();
+                let children = tree.children.as_mut().unwrap()[0]
+                    .children
+                    .as_mut()
+                    .unwrap();
+                assert_eq!(
+                    children[0].value,
+                    Some(serde_json::json!("a\nb")),
+                    "{input:?}"
+                );
+                children[1].value = Some(serde_json::json!(true));
+                let out = super::super::serializer::serialize_to_lua(&tree);
+                assert_eq!(parse_sv_file(&out, "Test.lua").unwrap(), tree);
+            }
+        }
+        assert_eq!(
+            parse_value(r#""a\r\nb""#).unwrap().value,
+            Some(serde_json::json!("a\r\nb"))
         );
     }
 }

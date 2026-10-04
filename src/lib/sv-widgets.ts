@@ -8,6 +8,7 @@ import type {
   SvSchemaOverlay,
   LamHintMap,
 } from "../types";
+import { treePathId, treePathSegment } from "./sv-helpers";
 import { classifyContext, humanizeKey } from "./sv-nodes";
 
 /**
@@ -87,7 +88,7 @@ export function resolveEffectiveField(
   lamHints?: LamHintMap
 ): EffectiveField {
   // pathSegments already includes the addon name as the first element
-  const nodeId = pathSegments.map((s) => s.replace(/\0/g, "\\0")).join("\0");
+  const nodeId = treePathId(pathSegments);
   const inferred = inferWidget(node);
 
   // Start with inferred values
@@ -137,7 +138,7 @@ export function resolveEffectiveField(
   let children: EffectiveField[] | undefined;
   if (node.valueType === "table" && node.children && widget !== "color") {
     children = node.children.map((child) => {
-      const childPath = [...pathSegments, child.key];
+      const childPath = [...pathSegments, treePathSegment(child)];
       const childContext = classifyContext(child.key, pathSegments.length, knownCharacters);
       return resolveEffectiveField(
         child,

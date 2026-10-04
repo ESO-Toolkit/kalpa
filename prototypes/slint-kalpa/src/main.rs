@@ -7148,6 +7148,12 @@ fn apply_imported_pack_settings_blocking(
         }
 
         let destination = sv_dir.join(&file_name);
+        if destination.parent() != Some(sv_dir.as_path()) {
+            result.errors.push(format!(
+                "{folder}: settings destination escapes SavedVariables"
+            ));
+            continue;
+        }
         if destination.is_file() {
             let backup = destination.with_extension("lua.bak");
             if let Err(error) = fs::copy(&destination, &backup) {
@@ -8537,6 +8543,7 @@ fn run_uploader_sign_in(
     if in_flight.swap(true, Ordering::SeqCst) {
         return; // a sign-in window is already open
     }
+    let generation = session.generation();
     if let Some(ui) = ui.upgrade() {
         ui.set_uploader_status_title("Opening ESO Logs sign-in...".into());
         ui.set_uploader_status_detail(
@@ -8548,12 +8555,18 @@ fn run_uploader_sign_in(
         let outcome = run_login_subprocess_capture();
         let _ = slint::invoke_from_event_loop(move || {
             in_flight.store(false, Ordering::SeqCst);
+            // Sign-out invalidates results from an already-open login window.
+            if session.generation() != generation {
+                return;
+            }
             let Some(ui) = ui.upgrade() else {
                 return;
             };
             match outcome {
                 LoginResult::Success(cookie_header) => {
-                    let persisted = session.store(cookie_header);
+                    let Ok(persisted) = session.store_if_current(generation, cookie_header) else {
+                        return;
+                    };
                     apply_uploader_native_state(&ui, session.has_session());
                     ui.set_uploader_status_title("Signed in to ESO Logs".into());
                     ui.set_uploader_status_detail(
@@ -14299,7 +14312,10 @@ fn export_addon_list_json(addons_dir: &Path) -> Result<String, String> {
     let mut entries = store
         .addons
         .iter()
-        .filter(|(folder, _)| addons_dir.join(folder).is_dir())
+        .filter(|(folder, _)| {
+            validate_addon_folder_name(folder).is_ok()
+                && resolve_addon_disk_path(addons_dir, folder).is_some()
+        })
         .map(|(folder, meta)| ExportEntry {
             esoui_id: meta.esoui_id,
             folder_name: folder.clone(),
@@ -14339,7 +14355,11 @@ where
     let mut result = NativeImportResult::default();
 
     for entry in export.addons {
-        if addons_dir.join(&entry.folder_name).is_dir() {
+        if validate_addon_folder_name(&entry.folder_name).is_err() {
+            result.failed.push(entry.folder_name);
+            continue;
+        }
+        if resolve_addon_disk_path(addons_dir, &entry.folder_name).is_some() {
             result.skipped.push(entry.folder_name);
             continue;
         }
@@ -14518,10 +14538,22 @@ fn remove_master_addon(models: &AddonModels, folder_name: &str) {
 }
 
 fn validate_addon_folder_name(folder_name: &str) -> Result<(), String> {
+    // Match the production name validator's forbidden Windows characters,
+    // including ':' (drive-relative prefixes and alternate data streams).
     if folder_name.is_empty()
         || folder_name.contains("..")
         || folder_name.contains('/')
         || folder_name.contains('\\')
+        || folder_name.contains(['<', '>', ':', '"', '|', '?', '*'])
+        || folder_name.chars().any(char::is_control)
+        || folder_name.ends_with('.')
+        || folder_name.ends_with(' ')
+    {
+        return Err("Invalid addon folder name.".to_string());
+    }
+    let mut components = Path::new(folder_name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
     {
         return Err("Invalid addon folder name.".to_string());
     }
@@ -24770,6 +24802,49 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn pack_hub_esopack_settings_rejects_windows_path_prefixes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_root = temp.path().join("live").join("AddOns");
+        fs::create_dir_all(&addons_root).expect("addons root");
+        let pack_path = temp.path().join("unsafe.esopack");
+        let json = serde_json::json!({
+            "format": "esopack",
+            "version": 2,
+            "pack": {
+                "title": "Unsafe settings", "description": "",
+                "packType": "addon-pack", "tags": [], "addons": []
+            },
+            "sharedAt": "2026-10-03T00:00:00Z",
+            "sharedBy": "Regression test",
+            "settings": {
+                "C:KalpaAudit": { "encoding": "lua-text", "lua": "Example = {}" },
+                "C:\\KalpaAudit": { "encoding": "lua-text", "lua": "Example = {}" },
+                "Addon:stream": { "encoding": "lua-text", "lua": "Example = {}" },
+                ".": { "encoding": "lua-text", "lua": "Example = {}" }
+            }
+        });
+        fs::write(&pack_path, serde_json::to_vec(&json).unwrap()).expect("write pack");
+        let imported = import_esopack_file_blocking(&pack_path, &BTreeSet::new())
+            .expect("read settings-only pack");
+        let result = apply_imported_pack_settings_blocking(&addons_root, imported.settings);
+
+        assert_eq!(result.total, 4);
+        assert!(result.applied.is_empty());
+        assert!(result.skipped.is_empty());
+        assert_eq!(result.errors.len(), 4);
+        assert!(result
+            .errors
+            .iter()
+            .all(|error| error.contains("invalid folder name")));
+        assert_eq!(
+            fs::read_dir(settings_saved_variables_dir(&addons_root))
+                .expect("read SavedVariables")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn pack_hub_esopack_settings_apply_writes_saved_variables() {
         let temp = tempfile::tempdir().expect("tempdir");
         let addons_root = temp.path().join("live").join("AddOns");
@@ -25604,6 +25679,37 @@ CombatMetrics_SavedVariables = {
             std::env::remove_var("KALPA_ADDONS_PATH");
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_addon_list_round_trip_preserves_disabled_addons() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_root = temp.path().join("AddOns");
+        fs::create_dir_all(addons_root.join("DisabledAddon.disabled"))
+            .expect("create disabled addon");
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "DisabledAddon",
+            1360,
+            "1.7.7",
+            "https://cdn.esoui.com/downloads/file1360.zip",
+            0,
+        );
+        metadata::save_metadata(&addons_root, &store).expect("save metadata");
+
+        let json = export_addon_list_json(&addons_root).expect("export disabled addon");
+        let export = serde_json::from_str::<ExportData>(&json).expect("parse export");
+        assert_eq!(export.addons.len(), 1);
+        assert_eq!(export.addons[0].folder_name, "DisabledAddon");
+        let result = import_addon_list_json(&addons_root, &json).expect("import list");
+        assert_eq!(result.skipped, vec!["DisabledAddon"]);
+        assert!(result.installed.is_empty());
+        assert!(result.failed.is_empty());
+        assert!(addons_root.join("DisabledAddon.disabled").is_dir());
+        assert!(!addons_root.join("DisabledAddon").exists());
+        set_addon_disabled_on_disk(&addons_root, "DisabledAddon", false)
+            .expect("enable existing copy after import");
     }
 
     #[test]

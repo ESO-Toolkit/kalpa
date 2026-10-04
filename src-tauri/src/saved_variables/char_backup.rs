@@ -173,27 +173,31 @@ fn read_bracket_key(bytes: &[u8], pos: usize) -> Option<(Vec<u8>, usize)> {
     Some((bytes[start..i].to_vec(), i))
 }
 
-/// Skip a scalar value starting at `j` (number/keyword/string/long-string) up to
-/// and including the next top-level `,`, or to `end`. Used to step over non-table
-/// entries while enumerating a table's children.
+/// Skip exactly one scalar token, leaving separators and later assignments
+/// for the caller. Top-level assignments need not be comma-separated.
 fn skip_scalar_value(bytes: &[u8], mut i: usize, end: usize) -> usize {
-    while i < end {
-        match bytes[i] {
-            b'"' | b'\'' => i = skip_lua_string(bytes, i),
-            b'[' if i + 1 < bytes.len() && (bytes[i + 1] == b'[' || bytes[i + 1] == b'=') => {
-                i = skip_lua_string(bytes, i)
+    if i >= end {
+        return end;
+    }
+    match bytes[i] {
+        b'"' | b'\'' => skip_lua_string(bytes, i).min(end),
+        b'[' if bytes.get(i + 1).is_some_and(|b| matches!(b, b'[' | b'=')) => {
+            skip_lua_string(bytes, i).min(end)
+        }
+        _ => {
+            while i < end
+                && (bytes[i].is_ascii_alphanumeric()
+                    || matches!(bytes[i], b'_' | b'.' | b'+' | b'-'))
+            {
+                // A comment belongs to the scanner, not the scalar token.
+                if bytes[i] == b'-' && bytes.get(i + 1) == Some(&b'-') {
+                    break;
+                }
+                i += 1;
             }
-            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_lua_comment(bytes, i),
-            b',' => return i + 1,
-            b'}' => return i,
-            b'{' => match matching_brace(bytes, i) {
-                Some(e) => i = e + 1,
-                None => return end,
-            },
-            _ => i += 1,
+            i
         }
     }
-    i
 }
 
 /// Visit each direct child of the table whose braces span `[open..=close]` that
@@ -895,5 +899,41 @@ mod tests {
             s.contains("AddonB =\n{\n\t[\"keep\"] = { [\"untouched\"] = true },\n}"),
             "AddonB byte-identical"
         );
+    }
+
+    #[test]
+    fn scalar_globals_do_not_hide_character_tables() {
+        let file = na_eu_acct_file();
+        let expected = extract_character_blocks(&file, b"Bob", Some("NA Megaserver"));
+        for scalar in [
+            "true",
+            "false",
+            "nil",
+            "-1.2e+3",
+            "0xAB",
+            "\"text, { Fake = {} }\"",
+            "'quoted'",
+            "[=[text, { Fake = {} }]=]",
+        ] {
+            for separator in ["\n", "\r\n", "; ", " ", " -- comment\n"] {
+                let mut prefixed = format!("SomeFlag = {scalar}{separator}").into_bytes();
+                prefixed.extend_from_slice(&file);
+                let actual = extract_character_blocks(&prefixed, b"Bob", Some("NA Megaserver"));
+                assert_eq!(actual.len(), expected.len(), "{scalar:?} {separator:?}");
+                assert_eq!(actual[0].value, expected[0].value);
+                let backup = build_backup_file(&actual).unwrap();
+                assert_eq!(
+                    extract_character_blocks(&backup, b"Bob", Some("NA Megaserver"))[0].value,
+                    expected[0].value
+                );
+                let mut restored = actual[0].clone();
+                restored.value = b"{ [\"restored\"] = true }".to_vec();
+                let merged = merge_character_block(&prefixed, &restored).unwrap();
+                assert_eq!(
+                    extract_character_blocks(&merged, b"Bob", Some("NA Megaserver"))[0].value,
+                    restored.value
+                );
+            }
+        }
     }
 }

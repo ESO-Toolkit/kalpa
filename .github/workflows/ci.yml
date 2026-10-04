@@ -142,16 +142,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
 
-      # Audit production dependencies only. The high-severity advisories that
-      # otherwise fire here are all in dev/build tooling that never ships in the
-      # desktop client (undici←jsdom for Vitest's DOM, hono←shadcn CLI), with no
-      # upstream fix to bump to. --omit=dev still catches anything that would
-      # actually run in the shipped app. Mirrors the Worker audit step below.
+      # Audit runtime and development dependencies for high-severity regressions.
       - name: npm audit
-        # --omit=dev mirrors the worker audit step: high-severity advisories in
-        # dev-only tooling (jsdom→undici, shadcn→hono/js-yaml) don't ship in the
-        # app, so audit production deps only.
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --audit-level=high
 
       - name: TypeScript check
         run: npx tsc --noEmit
@@ -176,23 +169,25 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+      # Audit both shipped Rust dependency graphs without advisory ignores.
+      # cargo-audit reports informational warnings without failing this gate:
+      # unmaintained transitive crates and glib 0.18's VariantStrIter unsoundness
+      # (RUSTSEC-2024-0429) remain visible. glib's fix requires >=0.20, which is
+      # incompatible with the current GTK/Tauri dependency graph.
       - name: Rust dependency audit
         run: |
           cargo install cargo-audit@0.22.1 --quiet --locked
           cargo audit --file src-tauri/Cargo.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo audit --file prototypes/slint-kalpa/Cargo.lock
 
       - name: Install worker dependencies
         run: npm ci
         working-directory: backend/eso-packs-worker
 
-      # --omit=dev: the worker's only high-severity advisories are in dev/test
-      # tooling (esbuild, via @cloudflare/vitest-pool-workers and wrangler),
-      # which never ships to Cloudflare. Even the latest Cloudflare tooling
-      # still pins the flagged esbuild, so there is no upstream fix to bump to.
-      # Auditing production dependencies still catches anything that would
-      # actually run in the deployed worker.
+      # Include build and test tooling in the Worker dependency audit.
       - name: Worker npm audit
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --audit-level=high
         working-directory: backend/eso-packs-worker
 
       # `npm run check` rather than a bare tsc: it typechecks the test files too,

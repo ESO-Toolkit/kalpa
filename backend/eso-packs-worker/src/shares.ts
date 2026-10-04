@@ -1,14 +1,10 @@
-import type { Env, PackType, SharePackData, ShareRecord, ShareCodeResponse, ValidationError } from "./types";
+import type { Env, PackType, SharePackData, ShareCodeResponse, ValidationError } from "./types";
+import { MAX_SHARES_PER_USER } from "./share-store";
 import { corsHeaders } from "./cors";
 import { readJsonBody, sanitizeAddons } from "./validate";
 import { rememberBounded } from "./bounded-map";
 
-// Unambiguous alphabet: no 0/O, 1/I/L
-const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-const CODE_LENGTH = 6;
 const CODE_PATTERN = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/;
-const SHARE_TTL = 604800; // 7 days in seconds
-const MAX_SHARES_PER_USER = 10;
 const MAX_ADDONS = 200;
 const MAX_NAME_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 1000;
@@ -34,37 +30,11 @@ function json(
   };
   if (cacheMaxAge > 0) {
     headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
+  } else {
+    headers["Cache-Control"] = "private, no-store";
   }
   return new Response(JSON.stringify(data), { status, headers });
 }
-
-function generateCode(): string {
-  const code: string[] = [];
-  // Rejection sampling to avoid modulo bias (ALPHABET.length = 30)
-  // Largest multiple of 30 that fits in a byte: 240 (30 * 8)
-  const limit = 240;
-  while (code.length < CODE_LENGTH) {
-    const bytes = new Uint8Array(CODE_LENGTH * 2); // oversample to reduce iterations
-    crypto.getRandomValues(bytes);
-    for (const b of bytes) {
-      if (b < limit) {
-        code.push(ALPHABET[b % ALPHABET.length]);
-        if (code.length >= CODE_LENGTH) break;
-      }
-    }
-  }
-  return code.join("");
-}
-
-function shareKey(code: string): string {
-  return `share:${code}`;
-}
-
-function userShareKey(userId: string, code: string): string {
-  return `share-user:${userId}:${code}`;
-}
-
-// ── Auth ──────────────────────────────────────────────────────────
 
 export interface EsoLogsUser {
   id: number;
@@ -145,7 +115,7 @@ export async function validateBearerToken(request: Request): Promise<EsoLogsUser
 function validateSharePayload(data: unknown): ValidationError[] {
   const errors: ValidationError[] = [];
 
-  if (!data || typeof data !== "object") {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
     return [{ field: "body", message: "Body must be a JSON object" }];
   }
 
@@ -180,6 +150,10 @@ function validateSharePayload(data: unknown): ValidationError[] {
     errors.push({ field: "addons", message: `addons must be an array with 1-${MAX_ADDONS} entries` });
   } else {
     for (let i = 0; i < d.addons.length; i++) {
+      if (!d.addons[i] || typeof d.addons[i] !== "object" || Array.isArray(d.addons[i])) {
+        errors.push({ field: `addons[${i}]`, message: "each addon must be a JSON object" });
+        continue;
+      }
       const addon = d.addons[i] as Record<string, unknown>;
       if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({ field: `addons[${i}].esouiId`, message: "esouiId must be a positive number" });
@@ -211,18 +185,6 @@ export async function handleCreateShare(request: Request, env: Env): Promise<Res
     return json(request, { error: "Invalid or missing authorization token" }, 401);
   }
 
-  const userId = String(user.id);
-
-  // Rate limit: max active shares per user
-  const userKeys = await env.ESO_PACKS.list({ prefix: `share-user:${userId}:` });
-  if (userKeys.keys.length >= MAX_SHARES_PER_USER) {
-    return json(
-      request,
-      { error: `Maximum of ${MAX_SHARES_PER_USER} active share codes reached. Wait for existing codes to expire.` },
-      429,
-    );
-  }
-
   // Parse and validate body
   const parsed = await readJsonBody(request);
   if (!parsed.ok) {
@@ -249,42 +211,15 @@ export async function handleCreateShare(request: Request, env: Env): Promise<Res
     addons: sanitizeAddons(input.addons),
   };
 
-  // Generate unique code (retry on collision)
-  let code = "";
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const candidate = generateCode();
-    const existing = await env.ESO_PACKS.get(shareKey(candidate));
-    if (!existing) {
-      code = candidate;
-      break;
-    }
+  const index = env.PACK_INDEX.get(env.PACK_INDEX.idFromName("singleton"));
+  const result = await index.createShare(user, packData);
+  if (result.status === "limit") {
+    return json(request, { error: `Maximum of ${MAX_SHARES_PER_USER} active share codes reached. Wait for existing codes to expire.` }, 429);
   }
-
-  if (!code) {
+  if (result.status !== "ok") {
     return json(request, { error: "Failed to generate unique share code. Please try again." }, 500);
   }
-
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + SHARE_TTL * 1000).toISOString();
-
-  const record: ShareRecord = {
-    code,
-    pack: packData,
-    createdBy: userId,
-    createdByName: user.name,
-    createdAt: now.toISOString(),
-    expiresAt,
-  };
-
-  // Store share record with TTL
-  await env.ESO_PACKS.put(shareKey(code), JSON.stringify(record), {
-    expirationTtl: SHARE_TTL,
-  });
-
-  // Store user tracking key with same TTL
-  await env.ESO_PACKS.put(userShareKey(userId, code), "1", {
-    expirationTtl: SHARE_TTL,
-  });
+  const { code, expiresAt } = result.record;
 
   const response: ShareCodeResponse = {
     code,
@@ -301,19 +236,18 @@ export async function handleResolveShare(request: Request, env: Env, code: strin
     return json(request, { error: "Invalid share code format" }, 400);
   }
 
-  const record = await env.ESO_PACKS.get<ShareRecord>(shareKey(code), "json");
+  const index = env.PACK_INDEX.get(env.PACK_INDEX.idFromName("singleton"));
+  const record = await index.getShare(code);
   if (!record) {
     return json(request, { error: "Share code not found or expired" }, 404);
   }
 
-  // Share data is immutable and identical for every caller (the code is the
-  // only access control), so it is cacheable at the CDN edge for 5 minutes.
-  // json() defaults to "private" in this module, which would forbid exactly
-  // that — pass the scope explicitly.
+  // The code grants public read access. Limit freshness to the remaining
+  // lifetime; a cached response can outlive account deletion by up to 5 minutes.
   return json(request, {
     pack: record.pack,
     sharedBy: record.createdByName,
     sharedAt: record.createdAt,
     expiresAt: record.expiresAt,
-  }, 200, 300, "public");
+  }, 200, Math.max(0, Math.min(300, Math.floor((Date.parse(record.expiresAt) - Date.now()) / 1000))), "public");
 }

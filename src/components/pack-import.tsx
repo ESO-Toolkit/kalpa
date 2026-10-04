@@ -29,6 +29,8 @@ export function PackImportView({
   installProgress,
   installedEsouiIds,
   importedPackAddonsToInstall,
+  selectedImportedAddons,
+  onToggleImportedAddon,
   onResolveCode,
   onImportFile,
   onImportModeChange,
@@ -46,6 +48,8 @@ export function PackImportView({
   installProgress: { completed: number; failed: number; total: number } | null;
   installedEsouiIds: Set<number>;
   importedPackAddonsToInstall: PackAddonEntry[];
+  selectedImportedAddons: Set<number>;
+  onToggleImportedAddon: (id: number) => void;
   onResolveCode: (code: string) => void;
   onImportFile: () => void;
   onImportModeChange: (mode: ImportMode) => void;
@@ -59,7 +63,8 @@ export function PackImportView({
   if (importedPack) {
     const requiredAddons = importedPack.addons.filter((a) => a.required);
     const optionalAddons = importedPack.addons.filter((a) => !a.required);
-    const allInstalled = importedPackAddonsToInstall.length === 0;
+    const allInstalled = importedPack.addons.every((addon) => installedEsouiIds.has(addon.esouiId));
+    const noCandidates = importedPackAddonsToInstall.length === 0;
 
     return (
       <Fade>
@@ -166,15 +171,30 @@ export function PackImportView({
               <SectionHeader>Optional ({optionalAddons.length})</SectionHeader>
               <div className="mt-1.5 space-y-1">
                 {optionalAddons.map((addon) => (
-                  <div
+                  <label
                     key={addon.esouiId}
                     className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-structure-06 bg-structure-03 shadow-[inset_0_1px_0_var(--structure-03)]"
                   >
-                    <span className="text-sm text-muted-foreground">{addon.name}</span>
+                    <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        aria-label={`Install ${addon.name}`}
+                        checked={
+                          installedEsouiIds.has(addon.esouiId) ||
+                          selectedImportedAddons.has(addon.esouiId)
+                        }
+                        disabled={
+                          installedEsouiIds.has(addon.esouiId) || installing || applyingSettings
+                        }
+                        onChange={() => onToggleImportedAddon(addon.esouiId)}
+                        className="size-3.5 accent-primary"
+                      />
+                      {addon.name}
+                    </span>
                     {installedEsouiIds.has(addon.esouiId) && (
                       <span className="text-xs text-status-success font-medium">Installed</span>
                     )}
-                  </div>
+                  </label>
                 ))}
               </div>
             </div>
@@ -183,7 +203,7 @@ export function PackImportView({
           {hasSettings && (
             <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/[0.05] px-3 py-2">
               <span className="text-xs text-primary">
-                {allInstalled
+                {noCandidates
                   ? "Includes addon settings — ready to apply"
                   : "Includes addon settings — will be applied after install"}
               </span>
@@ -199,7 +219,7 @@ export function PackImportView({
 
           <Button
             onClick={onInstall}
-            disabled={installing || applyingSettings || (allInstalled && !hasSettings)}
+            disabled={installing || applyingSettings || (noCandidates && !hasSettings)}
             className="w-full"
           >
             {installing ? (
@@ -207,7 +227,7 @@ export function PackImportView({
                 <Loader2Icon className="size-4 animate-spin mr-1.5" />
                 Installing...
               </>
-            ) : allInstalled && hasSettings ? (
+            ) : noCandidates && hasSettings ? (
               <>
                 <DownloadIcon className="size-4 mr-1.5" />
                 Apply Settings
@@ -217,6 +237,8 @@ export function PackImportView({
                 <CheckIcon className="size-4 mr-1.5" />
                 All Installed
               </>
+            ) : noCandidates ? (
+              "Select addons to install"
             ) : (
               <>
                 <DownloadIcon className="size-4 mr-1.5" />

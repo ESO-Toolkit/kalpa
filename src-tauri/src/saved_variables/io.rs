@@ -1,7 +1,8 @@
 use super::parser;
 use super::serializer;
 use super::types::{
-    SavedVariableFile, SvChange, SvChangeType, SvFileStamp, SvReadResponse, SvTreeNode, SvValueType,
+    SavedVariableFile, SvChange, SvChangeType, SvFileStamp, SvKeyType, SvReadResponse, SvTreeNode,
+    SvValueType,
 };
 use crate::metadata;
 use regex::Regex;
@@ -435,56 +436,76 @@ fn format_sv_value(node: &SvTreeNode) -> String {
     }
 }
 
+// Legacy trees use the serializer's integer-key heuristic when metadata is absent.
+fn diff_key(node: &SvTreeNode) -> (bool, &str) {
+    let numeric = match node.key_type {
+        Some(SvKeyType::Number) => true,
+        Some(SvKeyType::String) => false,
+        None => {
+            let digits = node.key.strip_prefix('-').unwrap_or(&node.key);
+            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+        }
+    };
+    (numeric, node.key.as_str())
+}
+
 /// Recursively diff two trees and collect changes.
 fn diff_trees(
     old: &SvTreeNode,
     new: &SvTreeNode,
     path: &mut Vec<String>,
+    path_key_types: &mut Vec<Option<SvKeyType>>,
     changes: &mut Vec<SvChange>,
 ) {
     match (old.value_type, new.value_type) {
         (SvValueType::Table, SvValueType::Table) => {
-            // Build lookup maps by key for children
-            let old_children: std::collections::HashMap<&str, &SvTreeNode> = old
+            // Lua numeric and string keys with the same spelling are distinct.
+            let old_children: std::collections::HashMap<(bool, &str), &SvTreeNode> = old
                 .children
                 .as_ref()
-                .map(|c| c.iter().map(|n| (n.key.as_str(), n)).collect())
+                .map(|c| c.iter().map(|n| (diff_key(n), n)).collect())
                 .unwrap_or_default();
-            let new_children: std::collections::HashMap<&str, &SvTreeNode> = new
+            let new_children: std::collections::HashMap<(bool, &str), &SvTreeNode> = new
                 .children
                 .as_ref()
-                .map(|c| c.iter().map(|n| (n.key.as_str(), n)).collect())
+                .map(|c| c.iter().map(|n| (diff_key(n), n)).collect())
                 .unwrap_or_default();
 
             // Check removed and modified
             if let Some(old_c) = &old.children {
                 for child in old_c {
                     path.push(child.key.clone());
-                    if let Some(new_child) = new_children.get(child.key.as_str()) {
-                        diff_trees(child, new_child, path, changes);
+                    path_key_types.push(child.key_type);
+                    if let Some(new_child) = new_children.get(&diff_key(child)) {
+                        diff_trees(child, new_child, path, path_key_types, changes);
                     } else {
                         changes.push(SvChange {
                             path: path.clone(),
+                            path_key_types: path_key_types.clone(),
                             change_type: SvChangeType::Removed,
                             old_value: Some(format_sv_value(child)),
                             new_value: None,
                         });
                     }
                     path.pop();
+                    path_key_types.pop();
                 }
             }
             // Check added
             if let Some(new_c) = &new.children {
                 for child in new_c {
-                    if !old_children.contains_key(child.key.as_str()) {
+                    if !old_children.contains_key(&diff_key(child)) {
                         path.push(child.key.clone());
+                        path_key_types.push(child.key_type);
                         changes.push(SvChange {
                             path: path.clone(),
+                            path_key_types: path_key_types.clone(),
                             change_type: SvChangeType::Added,
                             old_value: None,
                             new_value: Some(format_sv_value(child)),
                         });
                         path.pop();
+                        path_key_types.pop();
                     }
                 }
             }
@@ -501,6 +522,7 @@ fn diff_trees(
             if old.value_type != new.value_type || !values_equal {
                 changes.push(SvChange {
                     path: path.clone(),
+                    path_key_types: path_key_types.clone(),
                     change_type: SvChangeType::Modified,
                     old_value: Some(format_sv_value(old)),
                     new_value: Some(format_sv_value(new)),
@@ -564,7 +586,13 @@ pub fn preview_save(
 
     let mut changes = Vec::new();
     let mut path = Vec::new();
-    diff_trees(original_tree, tree, &mut path, &mut changes);
+    diff_trees(
+        original_tree,
+        tree,
+        &mut path,
+        &mut Vec::new(),
+        &mut changes,
+    );
 
     Ok(changes)
 }
@@ -656,6 +684,104 @@ pub fn delete_saved_variables_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn preview_fixture(original: &str, edited: &str) -> Vec<SvChange> {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let sv_dir = tmp.path().join("SavedVariables");
+        fs::create_dir_all(&addons_dir).unwrap();
+        fs::create_dir_all(&sv_dir).unwrap();
+        fs::write(sv_dir.join("Test.lua"), original).unwrap();
+        let tree = parser::parse_sv_file(edited, "Test.lua").unwrap();
+        preview_save(&addons_dir, "Test.lua", &tree).unwrap()
+    }
+
+    #[test]
+    fn preview_typed_sibling_edits_are_independent() {
+        let original = r#"Addon = {[1]=10, ["1"]=20}"#;
+        for (edited, expected) in [
+            (
+                r#"Addon = {[1]=11, ["1"]=20}"#,
+                vec![(SvKeyType::Number, "10", "11")],
+            ),
+            (
+                r#"Addon = {[1]=10, ["1"]=21}"#,
+                vec![(SvKeyType::String, "20", "21")],
+            ),
+            (
+                r#"Addon = {[1]=11, ["1"]=21}"#,
+                vec![
+                    (SvKeyType::Number, "10", "11"),
+                    (SvKeyType::String, "20", "21"),
+                ],
+            ),
+        ] {
+            let changes = preview_fixture(original, edited);
+            assert_eq!(changes.len(), expected.len());
+            for (change, (key_type, before, after)) in changes.iter().zip(expected) {
+                assert_eq!(change.path, vec!["Addon", "1"]);
+                assert_eq!(change.path_key_types, vec![None, Some(key_type)]);
+                assert_eq!(change.change_type, SvChangeType::Modified);
+                assert_eq!(change.old_value.as_deref(), Some(before));
+                assert_eq!(change.new_value.as_deref(), Some(after));
+            }
+        }
+    }
+
+    #[test]
+    fn preview_typed_nested_keys_and_replacements_are_distinct() {
+        let changes = preview_fixture(
+            r#"Addon = {[1]={value=10}, ["1"]={value=20}}"#,
+            r#"Addon = {[1]={value=11}, ["1"]={value=21}}"#,
+        );
+        assert_eq!(changes.len(), 2);
+        assert_eq!(
+            changes[0].path_key_types,
+            vec![None, Some(SvKeyType::Number), Some(SvKeyType::String)]
+        );
+        assert_eq!(
+            changes[1].path_key_types,
+            vec![None, Some(SvKeyType::String), Some(SvKeyType::String)]
+        );
+        assert_eq!(changes[0].new_value.as_deref(), Some("11"));
+        assert_eq!(changes[1].new_value.as_deref(), Some("21"));
+
+        let changes = preview_fixture(r#"Addon = {[1]=10}"#, r#"Addon = {["1"]=10}"#);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].change_type, SvChangeType::Removed);
+        assert_eq!(
+            changes[0].path_key_types,
+            vec![None, Some(SvKeyType::Number)]
+        );
+        assert_eq!(changes[1].change_type, SvChangeType::Added);
+        assert_eq!(
+            changes[1].path_key_types,
+            vec![None, Some(SvKeyType::String)]
+        );
+    }
+
+    #[test]
+    fn preview_legacy_integer_keys_match_typed_numeric_keys() {
+        let original = parser::parse_sv_file("Addon = {[1]=10}", "Test.lua").unwrap();
+        let mut edited = original.clone();
+        let child = &mut edited.children.as_mut().unwrap()[0]
+            .children
+            .as_mut()
+            .unwrap()[0];
+        child.key_type = None;
+        child.value = Some(serde_json::json!(11));
+        let mut changes = Vec::new();
+        diff_trees(
+            &original,
+            &edited,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut changes,
+        );
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].change_type, SvChangeType::Modified);
+        assert_eq!(changes[0].new_value.as_deref(), Some("11"));
+    }
 
     #[test]
     fn write_raw_bytes_atomically_replaces_existing() {

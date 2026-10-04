@@ -116,7 +116,7 @@ The Pack Hub (`kalpa-pack-hub.eso-toolkit.workers.dev`) powers community addon c
 
 **When you install a pack (install count tracking):**
 
-- Your IP address is stored in a rate-limiting key for **1 hour** to prevent duplicate counting, then automatically deleted
+- The Worker uses your IP address to derive a keyed identifier for duplicate-count prevention. New install records store that identifier rather than the raw IP, are valid for **1 hour**, and are removed by expiry cleanup; failed cleanup can be retried. Older raw-IP keys can remain until their original one-hour expiry during rollout.
 
 **When you export a `.esopack` file with settings:**
 
@@ -146,7 +146,8 @@ the install-count rate-limit keys.
 
 **Drafts and deletions:** a pack that is a draft, or that you switch back to
 draft, is actively removed from the shared database rather than copied to it.
-Deleting a pack, or deleting your Pack Hub data, deletes the copied row too.
+Deleting a pack, or deleting your Pack Hub data, also triggers removal of the
+copied row; failed storage writes are retried.
 
 ### Data sent to ESO Logs
 
@@ -160,7 +161,7 @@ Kalpa includes an optional direct-upload feature for combat logs to ESO Logs. Wh
 
 - **Combat-log contents are uploaded only on explicit user action** — you must click "Upload" for each log or session. No background or automatic uploads occur.
 - **Report visibility is user-chosen** — you control whether a report is **Unlisted** (default, visible only via direct link), **Public** (listed on your profile), or **Private** (not visible to others). You choose the visibility in Kalpa before each upload; direct uploads apply it immediately, while the official-uploader handoff lets you confirm it there.
-- **Upload session authentication** — a session cookie (`wcl_session`) is captured from ESO Logs' login page inside Kalpa, stored in the Windows Credential Manager, and used only for upload authentication. This cookie is removed when you sign out.
+- **Upload session authentication** — a session cookie (`wcl_session`) is captured from ESO Logs' login page inside Kalpa, stored in your operating system's credential store, and used only for upload authentication. This cookie is removed when you sign out.
 - **Alternative: handoff to official uploader** — if you disable direct upload or are not signed in, Kalpa can launch ESO Logs' standalone desktop uploader instead, which handles the upload in a separate application.
 
 ### Data sent to the ESO Log Aggregator (build evidence)
@@ -202,17 +203,20 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 
 ## Data Retention
 
-| Data                                                         | Retention                                                              |
-| ------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| Published packs                                              | Indefinite (until you delete them)                                     |
-| Copies of published packs in the ESO Log Aggregator database | Deleted together with the pack                                         |
-| Votes                                                        | Indefinite (until you remove your vote)                                |
-| Share codes                                                  | 7 days (auto-deleted)                                                  |
-| Install rate-limit keys (IP)                                 | 1 hour (auto-deleted)                                                  |
-| Pack Hub dated daily backups                                 | 90 days (auto-deleted)                                                 |
-| Pack Hub "latest" backup snapshot                            | Overwritten daily, no expiry; scrubbed of your data when you delete it |
-| Build-evidence records (ESO Log Aggregator)                  | Indefinite — no automatic deletion yet (see _Your Rights_)             |
-| Local backups                                                | Until you delete them manually                                         |
+**Pack Hub rollout status:** the storage, deletion, and backup safeguards described here include audit changes awaiting deployment. Merging Worker changes to main triggers the deployment workflow; no successful production deployment is recorded here. These descriptions do not establish that the live service already provides the safeguards.
+
+| Data | Retention |
+|------|-----------|
+| Published packs | Indefinite (until you delete them) |
+| Copies of published packs in the ESO Log Aggregator database | Removal triggered by pack deletion; failed storage writes retried |
+| Votes | Until you remove your vote, delete your Pack Hub data, or the pack lifecycle is deleted |
+| Share codes | Expire after 7 days; storage cleanup may be retried |
+| Install duplicate-count identifiers | Valid for 1 hour; expiry cleanup may be retried. Legacy raw-IP keys expire after 1 hour |
+| Pack Hub dated daily backups | 90 days (auto-deleted) |
+| Pack Hub "latest" backup snapshot | Overwritten daily, no expiry; account deletion triggers cleanup, with failed storage writes retried |
+| Pack Hub deletion markers | User ID and deletion time retained indefinitely to prevent deleted records from reappearing |
+| Build-evidence records (ESO Log Aggregator) | Indefinite — no automatic deletion yet (see *Your Rights*) |
+| Local backups | Until you delete them manually |
 
 ---
 
@@ -227,23 +231,31 @@ You can delete all your data from the Pack Hub at any time:
 3. In the **Pack Hub Data** section, click **Delete My Pack Hub Data**
 4. Confirm the deletion
 
-This immediately removes your packs, your votes, and your share codes from the
-Pack Hub's live data, and deletes the copies of your published packs from the
-ESO Log Aggregator's database.
+Deletion removes your packs, your votes, and your share codes from the Pack Hub's
+canonical live data. Cleanup of storage mirrors, including copies of published
+packs in the ESO Log Aggregator's database, is retried if storage writes fail;
+those copies can temporarily lag the canonical deletion.
 
 **What happens to backups:** the Pack Hub takes a daily snapshot of its pack
-data for disaster recovery. Deleting your data also scrubs you from the
-non-expiring "latest" snapshot at the time of deletion, but the **dated daily
+data for disaster recovery. Deleting your data triggers cleanup of the
+non-expiring "latest" snapshot; failed storage writes remain queued for retry,
+so physical removal from that snapshot can be delayed. The **dated daily
 snapshots are not rewritten** — your packs and votes remain in those until they
 expire on their own, within **90 days**. Those snapshots are only ever read to
 restore the service after data loss.
 
-Two further limits worth stating plainly:
+The Pack Hub permanently retains a deletion marker containing your ESO Logs
+user ID and deletion time. It uses this marker to prevent older backups or stale
+KV records from restoring deleted data. If you return, records you create after
+that deletion time are allowed; the marker does not permanently block your account.
 
-- Votes **other people** cast on your packs are not deleted, since they are
-  other users' records. They are left behind as orphans once your packs are gone.
-- Pack vote totals shown elsewhere are denormalized counters and are not
-  recalculated when your votes are removed.
+Two further details:
+
+- Votes **other people** cast on a deleted pack lifecycle are also removed,
+  so a later pack using the same ID does not inherit those votes. Failed mirror
+  cleanup is retried.
+- Removing your votes updates the Pack Hub's canonical vote totals. Copies of
+  those totals in storage mirrors may temporarily lag; failed writes are retried.
 
 ### Remove build-evidence records
 

@@ -1903,6 +1903,112 @@ mod tests {
     }
 
     #[test]
+    fn failed_update_preserves_all_existing_bytes_and_no_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        fs::create_dir_all(addons.join("A")).unwrap();
+        fs::create_dir_all(addons.join("B")).unwrap();
+        fs::write(addons.join("A/old.lua"), b"old version").unwrap();
+        fs::write(addons.join("B/sub"), b"existing file").unwrap();
+        let path = tmp.path().join("update.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        // The final entry cannot be extracted because an earlier entry made
+        // its parent a file. This fails after staging replacements for A.
+        for name in ["A/old.lua", "A/new.lua", "B/sub", "B/sub/child.lua"] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"new version").unwrap();
+        }
+        zip.finish().unwrap();
+        assert!(extract_addon_zip(&path, &addons).is_err());
+        assert_eq!(fs::read(addons.join("A/old.lua")).unwrap(), b"old version");
+        assert!(!addons.join("A/new.lua").exists());
+        assert_eq!(fs::read(addons.join("B/sub")).unwrap(), b"existing file");
+    }
+
+    #[test]
+    fn update_breaks_hard_links_without_modifying_external_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        fs::create_dir_all(addons.join("MyAddon")).unwrap();
+        let outside = tmp.path().join("outside.lua");
+        fs::write(&outside, b"external").unwrap();
+        fs::hard_link(&outside, addons.join("MyAddon/file0.lua")).unwrap();
+        let archive = create_multi_file_zip(tmp.path(), "update.zip", "MyAddon", 1);
+        extract_addon_zip(&archive, &addons).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"external");
+        assert_eq!(
+            fs::read(addons.join("MyAddon/file0.lua")).unwrap(),
+            b"-- lua"
+        );
+    }
+
+    fn link_directory(source: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(source, target).unwrap();
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.to_string_lossy().replace('/', "\\"))
+                .arg(source.to_string_lossy().replace('/', "\\"))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn update_rejects_nested_linked_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(addons.join("MyAddon")).unwrap();
+        fs::write(outside.join("file0.lua"), b"external").unwrap();
+        link_directory(&outside, &addons.join("MyAddon/sub"));
+        let archive = create_multi_file_zip(tmp.path(), "update.zip", "MyAddon/sub", 1);
+        assert!(extract_addon_zip(&archive, &addons)
+            .unwrap_err()
+            .contains("symlink or junction"));
+        assert_eq!(fs::read(outside.join("file0.lua")).unwrap(), b"external");
+    }
+
+    #[test]
+    fn publication_failure_rolls_back_previous_addons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(addons.join("A")).unwrap();
+        fs::write(addons.join("A/file.lua"), b"old").unwrap();
+        let path = tmp.path().join("update.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["A/file.lua", "B/file.lua"] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"new").unwrap();
+        }
+        zip.finish().unwrap();
+        let cb = |done, total| {
+            if done == total {
+                link_directory(&outside, &addons.join("B"));
+            }
+        };
+        let hooks = ExtractHooks {
+            cancel: None,
+            progress: Some(&cb),
+        };
+        assert!(extract_addon_zip_with(&path, &addons, hooks).is_err());
+        assert_eq!(fs::read(addons.join("A/file.lua")).unwrap(), b"old");
+        assert!(!outside.join("file.lua").exists());
+    }
+
+    #[test]
     fn extracted_binary_signature_matches_zip_signature_end_to_end() {
         // The size-signature optimization relies on a ZIP entry's uncompressed
         // size (used as the ZIP-side signature) equalling the byte length written

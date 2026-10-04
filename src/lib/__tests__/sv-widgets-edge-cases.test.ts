@@ -150,7 +150,7 @@ describe("resolveEffectiveField — nodeId escaping", () => {
       { key: "key", valueType: "string", value: "val" },
       { path: ["TestAddon", "seg\0ment", "key"] }
     );
-    expect(field.nodeId).toBe("TestAddon\0seg\\0ment\0key");
+    expect(field.nodeId).toBe("\0path:" + JSON.stringify(["TestAddon", "seg\0ment", "key"]));
   });
 
   it("handles path with special characters", () => {

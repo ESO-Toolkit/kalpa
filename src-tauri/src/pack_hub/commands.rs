@@ -318,6 +318,11 @@ async fn authed_pack_hub_token(
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AuthState>();
+        let expected = state
+            .tokens
+            .lock()
+            .map_err(|_| "Auth lock poisoned")?
+            .clone();
         match state.get_valid_token_persisting(|tokens| {
             // Persistence failure is logged in the helper and keeps the
             // refreshed token working in-memory; don't fail the refresh.
@@ -326,7 +331,7 @@ async fn authed_pack_hub_token(
             Ok(Some(token)) => Ok(token),
             Ok(None) => Err(not_signed_in.to_string()),
             Err(e) => {
-                clear_session_if_rejected(&state, &e);
+                clear_session_if_rejected(&state, expected.as_ref(), &e, &app);
                 Err(e)
             }
         }
@@ -346,12 +351,13 @@ async fn pack_hub_read_token(app: &tauri::AppHandle) -> Option<String> {
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AuthState>();
+        let expected = state.tokens.lock().ok()?.clone();
         match state.get_valid_token_persisting(|tokens| {
             let _ = save_auth_tokens(&app, tokens);
         }) {
             Ok(token) => token,
             Err(e) => {
-                clear_session_if_rejected(&state, &e);
+                clear_session_if_rejected(&state, expected.as_ref(), &e, &app);
                 eprintln!("[auth] pack hub read continuing as anonymous: {e}");
                 None
             }
@@ -647,6 +653,13 @@ pub async fn delete_pack_hub_account(
 ) -> Result<DeleteAccountSummary, String> {
     let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
+    let expected = state
+        .tokens
+        .lock()
+        .map_err(|_| "Auth lock poisoned")?
+        .as_ref()
+        .filter(|tokens| tokens.access_token == access_token)
+        .cloned();
     let result = tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
@@ -725,12 +738,14 @@ pub async fn delete_pack_hub_account(
     .await
     .map_err(|e| format!("Task failed: {e}"))??;
 
-    // Sign the user out after successful deletion
-    *state
-        .tokens
-        .lock()
-        .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-    clear_auth_and_upload_sessions(&app, &upload_session);
+    // A delayed deletion response must not sign out a newer account session.
+    if let Some(expected) = expected {
+        if state.clear_if_current(&expected, || {
+            clear_auth_and_upload_sessions(&app, &upload_session)
+        })? {
+            crate::uploader::native::login::clear_login_webview_data(&app).await?;
+        }
+    }
 
     Ok(result)
 }

@@ -114,15 +114,23 @@ impl LockKey {
                 })?
                 .join(requested)
         };
-        // Preserve `..` until the nearest existing ancestor is canonicalized.
-        // Lexically collapsing it first is incorrect when a preceding component
-        // is a symlink (the filesystem resolves `link/..` from the link target).
-        let target = lexical_normalize(&canonicalize_with_missing_tail(&absolute).map_err(
-            |source| LockError::Io {
-                path: requested.to_path_buf(),
-                source,
-            },
-        )?);
+        // Lock the destination pathname, not the file currently occupying it.
+        // Canonicalizing that file can race atomic replacement: on Windows its
+        // open handle can resolve into NTFS's $Extend/$Deleted namespace. The
+        // parent stays stable while the destination is replaced. A leaf symlink
+        // likewise occupies its own slot (atomic publication replaces the link).
+        // Preserve `..` until the parent is canonicalized so `link/..` retains
+        // the filesystem's semantics rather than lexical symlink traversal.
+        let resolved = match (absolute.parent(), absolute.file_name()) {
+            (Some(parent), Some(name)) => {
+                canonicalize_with_missing_tail(parent).map(|parent| parent.join(name))
+            }
+            _ => canonicalize_with_missing_tail(&absolute),
+        };
+        let target = lexical_normalize(&resolved.map_err(|source| LockError::Io {
+            path: requested.to_path_buf(),
+            source,
+        })?);
         let parent = target.parent().ok_or_else(|| LockError::Io {
             path: target.clone(),
             source: io::Error::new(
@@ -515,7 +523,7 @@ mod tests {
                             // Test two complete 100-write processes under heavy
                             // Windows CI scheduling without mistaking starvation
                             // for an unbounded wait. Production remains 2s.
-                            timeout: Duration::from_secs(10),
+                            timeout: Duration::from_secs(60),
                             cancel: None,
                         },
                     )
@@ -635,6 +643,30 @@ mod tests {
             LockKey::for_path(absolute).unwrap(),
             LockKey::for_path(relative).unwrap()
         );
+    }
+
+    #[test]
+    fn destination_identity_survives_creation_and_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        let expected = LockKey::for_path(&target).unwrap();
+        for value in [b"first".as_slice(), b"replacement".as_slice()] {
+            crate::atomic_file::atomic_write(&target, value).unwrap();
+            assert_eq!(LockKey::for_path(&target).unwrap(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaf_symlink_locks_its_destination_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        let alias = dir.path().join("alias.json");
+        std::fs::write(&target, b"original").unwrap();
+        let expected = LockKey::for_path(&alias).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        assert_eq!(LockKey::for_path(&alias).unwrap(), expected);
+        assert_ne!(LockKey::for_path(&target).unwrap(), expected);
     }
 
     #[cfg(unix)]
@@ -813,8 +845,10 @@ mod tests {
         std::fs::write(&target, b"0").unwrap();
         let mut a = spawn_helper("increment", &target, None);
         let mut b = spawn_helper("increment", &target, None);
-        assert!(a.wait().unwrap().success());
-        assert!(b.wait().unwrap().success());
+        let a_status = a.wait().unwrap();
+        let b_status = b.wait().unwrap();
+        assert!(a_status.success());
+        assert!(b_status.success());
         assert_eq!(std::fs::read_to_string(target).unwrap(), "200");
     }
 

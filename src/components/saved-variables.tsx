@@ -51,7 +51,16 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getSetting, setSetting } from "@/lib/store";
 import { classifyContext, humanizeKey, getTableChildren, getLeafChildren } from "@/lib/sv-nodes";
 import { resolveEffectiveField } from "@/lib/sv-widgets";
-import { classifyFile, sizeCategory, updateTreeNode, type SizeCategory } from "@/lib/sv-helpers";
+import {
+  classifyFile,
+  sizeCategory,
+  updateTreeNode,
+  treePathSegment,
+  treePathKey,
+  treePathId,
+  findTreeChild,
+  type SizeCategory,
+} from "@/lib/sv-helpers";
 import { searchSvSettings } from "@/lib/sv-settings-search";
 import {
   ToggleControl,
@@ -606,8 +615,8 @@ const NavTreeItem = memo(function NavTreeItem({
   expandedPaths: Set<string>;
   toggleExpanded: (pathKey: string) => void;
 }) {
-  const currentPath = useMemo(() => [...parentPath, node.key], [parentPath, node.key]);
-  const pathKey = currentPath.map((s) => s.replace(/\0/g, "\\0")).join("\0");
+  const currentPath = useMemo(() => [...parentPath, treePathSegment(node)], [parentPath, node]);
+  const pathKey = treePathId(currentPath);
   const isExpanded = expandedPaths.has(pathKey);
   const tableChildren = getTableChildren(node);
   const entryCount = node.children?.length ?? 0;
@@ -669,7 +678,7 @@ const NavTreeItem = memo(function NavTreeItem({
         </div>
         {tableChildren.map((child) => (
           <NavTreeItem
-            key={child.key}
+            key={treePathSegment(child)}
             node={child}
             depth={depth}
             structuralDepth={structuralDepth + 1}
@@ -726,7 +735,7 @@ const NavTreeItem = memo(function NavTreeItem({
       {effectiveExpanded &&
         tableChildren.map((child) => (
           <NavTreeItem
-            key={child.key}
+            key={treePathSegment(child)}
             node={child}
             depth={depth + 1}
             structuralDepth={structuralDepth + 1}
@@ -1051,7 +1060,7 @@ function Breadcrumbs({
         Root
       </button>
       {path.map((segment, i) => {
-        const ctx = classifyContext(segment, i, knownCharacters);
+        const ctx = classifyContext(treePathKey(segment), i, knownCharacters);
         return (
           <span key={`${segment}-${i}`} className="flex items-center gap-1">
             <ChevronRightIcon className="size-3 text-muted-foreground/40" />
@@ -1063,7 +1072,7 @@ function Breadcrumbs({
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
-              {segment}
+              {treePathKey(segment)}
             </button>
             {ctx === "account-wide" && (
               <InfoPill color="sky" className="!text-[9px] !px-1 !py-0">
@@ -1107,7 +1116,7 @@ function DetailPanel({
   onOverlayChange: (overlay: SvSchemaOverlay) => void;
   onSelectPath: (path: string[], node: SvTreeNode) => void;
 }) {
-  const addonName = selectedPath[0] ?? "";
+  const addonName = treePathKey(selectedPath[0] ?? "");
   const leafChildren = useMemo(
     () => (selectedNode ? getLeafChildren(selectedNode) : []),
     [selectedNode]
@@ -1120,7 +1129,7 @@ function DetailPanel({
   // Build effective fields for leaf children
   const effectiveFields = useMemo(() => {
     return leafChildren.map((child) => {
-      const childPath = [...selectedPath, child.key];
+      const childPath = [...selectedPath, treePathSegment(child)];
       const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
       return resolveEffectiveField(
         child,
@@ -1143,7 +1152,7 @@ function DetailPanel({
         return keys.has("r") && keys.has("g") && keys.has("b");
       })
       .map((child) => {
-        const childPath = [...selectedPath, child.key];
+        const childPath = [...selectedPath, treePathSegment(child)];
         const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
         return {
           field: resolveEffectiveField(
@@ -1178,8 +1187,8 @@ function DetailPanel({
   });
 
   // Find original nodes for field rendering
-  const findOriginalNode = (key: string) =>
-    selectedNode.children?.find((c) => c.key === key) ?? null;
+  const findOriginalNode = (path: string[]) =>
+    findTreeChild(selectedNode, path[path.length - 1] ?? "");
 
   const visibleFields = effectiveFields.filter((f) => !f.hidden);
   const visibleColorFields = colorTableFields.filter((f) => !f.field.hidden);
@@ -1200,7 +1209,7 @@ function DetailPanel({
                 <FieldRow
                   key={field.nodeId}
                   field={field}
-                  originalNode={findOriginalNode(field.key)}
+                  originalNode={findOriginalNode(field.path)}
                   overlay={overlay}
                   addonName={addonName}
                   onEdit={onEdit}
@@ -1246,7 +1255,7 @@ function DetailPanel({
                 return (
                   <button
                     key={`${child.key}-${i}`}
-                    onClick={() => onSelectPath([...selectedPath, child.key], child)}
+                    onClick={() => onSelectPath([...selectedPath, treePathSegment(child)], child)}
                     className="flex items-center gap-2 rounded-xl border border-structure-06 bg-structure-03 p-2.5 text-left transition-all duration-200 hover:border-structure-12 hover:bg-structure-05 shadow-[inset_0_1px_0_var(--structure-03)] hover:shadow-[0_4px_12px_var(--scrim-15),inset_0_1px_0_var(--structure-05)]"
                   >
                     <BracesIcon className="size-3.5 shrink-0 text-status-library/70" />
@@ -1320,7 +1329,7 @@ function SettingsSearchResults({
   const resolved = useMemo(() => {
     return results
       .map((r) => {
-        const addonName = r.path[0] ?? "";
+        const addonName = treePathKey(r.path[0] ?? "");
         const ctx = classifyContext(r.node.key, r.path.length - 1, knownCharacters);
         const field = resolveEffectiveField(
           r.node,
@@ -1363,7 +1372,7 @@ function SettingsSearchResults({
       </div>
       <div className="flex-1 overflow-y-auto space-y-0.5">
         {resolved.map(({ r, field, addonName }) => {
-          const breadcrumb = r.path.slice(0, -1).join(" › ") || addonName;
+          const breadcrumb = r.path.slice(0, -1).map(treePathKey).join(" › ") || addonName;
           return (
             <div key={field.nodeId} className="pt-1 first:pt-0">
               <button
@@ -1395,7 +1404,7 @@ function SettingsSearchResults({
 // Persists across file switches within a session so we scan each addon once.
 const lamHintCache = new Map<string, LamHintMap | null>();
 
-function EditorTab({
+export function EditorTab({
   files,
   addonsPath,
   initialFile,
@@ -1445,9 +1454,9 @@ function EditorTab({
     const q = debouncedQuery.toLowerCase();
     if (!q) return null;
     const visible = new Set<string>();
-    const encode = (path: string[]) => path.map((s) => s.replace(/\0/g, "\\0")).join("\0");
+    const encode = treePathId;
     const walk = (node: SvTreeNode, parentPath: string[]): boolean => {
-      const currentPath = [...parentPath, node.key];
+      const currentPath = [...parentPath, treePathSegment(node)];
       let anyMatch = node.key.toLowerCase().includes(q);
       // Visit every child (no short-circuit) so all visible descendants are added.
       for (const child of node.children ?? []) {
@@ -1559,7 +1568,7 @@ function EditorTab({
     if (!tree || selectedPath.length === 0) return null;
     let current: SvTreeNode | null = tree;
     for (const segment of selectedPath) {
-      current = current?.children?.find((c) => c.key === segment) ?? null;
+      current = findTreeChild(current, segment);
       if (!current) break;
     }
     return current;
@@ -1636,7 +1645,7 @@ function EditorTab({
       }
       let current: SvTreeNode | null = tree;
       for (const segment of parentPath) {
-        current = current?.children?.find((c) => c.key === segment) ?? null;
+        current = findTreeChild(current, segment);
         if (!current) break;
       }
       if (current) {
@@ -1646,10 +1655,7 @@ function EditorTab({
         setExpandedPaths((prev) => {
           const next = new Set(prev);
           for (let i = 1; i <= parentPath.length; i++) {
-            const key = parentPath
-              .slice(0, i)
-              .map((s) => s.replace(/\0/g, "\\0"))
-              .join("\0");
+            const key = treePathId(parentPath.slice(0, i));
             next.add(key);
           }
           return next;
@@ -1670,7 +1676,7 @@ function EditorTab({
       const newPath = selectedPath.slice(0, depth);
       let current: SvTreeNode | null = tree;
       for (const segment of newPath) {
-        current = current?.children?.find((c) => c.key === segment) ?? null;
+        current = findTreeChild(current, segment);
         if (!current) break;
       }
       if (current) {
@@ -1694,8 +1700,8 @@ function EditorTab({
     if (!tree?.children) return;
     const paths = new Set<string>();
     const walk = (node: SvTreeNode, parentPath: string[]) => {
-      const currentPath = [...parentPath, node.key];
-      const key = currentPath.map((s) => s.replace(/\0/g, "\\0")).join("\0");
+      const currentPath = [...parentPath, treePathSegment(node)];
+      const key = treePathId(currentPath);
       if (node.valueType === "table" && node.children) {
         paths.add(key);
         node.children.forEach((c) => walk(c, currentPath));
@@ -2221,7 +2227,12 @@ function CopyProfileTab({
 
 /** Format a key path like ["Default", "@Account", "setting"] for display */
 function formatChangePath(change: SvChange): { setting: string; location: string } {
-  const path = change.path;
+  const path = change.path.map((key, index) => {
+    const keyType = change.pathKeyTypes?.[index];
+    if (keyType === "number") return `[${key}]`;
+    if (keyType === "string" && /^-?\d+$/.test(key)) return `[${JSON.stringify(key)}]`;
+    return key;
+  });
   const setting = path[path.length - 1] ?? "unknown";
   const location = path.length > 1 ? path.slice(0, -1).join(" > ") : "";
   return { setting, location };
@@ -2270,7 +2281,7 @@ function DiffPreviewDialog({
             const { setting, location } = formatChangePath(change);
             return (
               <div
-                key={change.path.join("\0")}
+                key={JSON.stringify([change.path, change.pathKeyTypes, change.changeType])}
                 className={`rounded-lg border px-3 py-2 text-xs ${
                   change.changeType === "added"
                     ? "border-status-success-strong/20 bg-status-success-strong/[0.06] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_4%,transparent)]"

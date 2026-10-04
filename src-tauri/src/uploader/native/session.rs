@@ -29,6 +29,7 @@ pub struct Session {
     /// Serialized cookie jar (e.g. the `Cookie` header value) for the esologs
     /// origin. Opaque to callers; never logged or surfaced.
     cookie_header: String,
+    generation: Option<u64>,
 }
 
 impl Session {
@@ -38,6 +39,7 @@ impl Session {
     pub fn from_cookie_header(cookie_header: impl Into<String>) -> Self {
         Self {
             cookie_header: cookie_header.into(),
+            generation: None,
         }
     }
 
@@ -112,53 +114,92 @@ pub trait SessionProvider: Send + Sync {
     /// Mark the current session invalid (e.g. the server returned `401`/`419`
     /// mid-upload) so the next [`SessionProvider::session`] re-establishes it.
     fn invalidate(&self);
+
+    /// Discard a rejected request's session without clearing a newer login.
+    fn invalidate_if_current(&self, _rejected: &Session) {
+        self.invalidate();
+    }
 }
 
 /// The shipping [`SessionProvider`]: serves the upload-session cookie persisted
 /// by the in-app ESO Logs login (encrypted in Credential Manager via
 /// [`crate::token_store`]). It cannot establish a session headlessly — the user
 /// completes the website login in the in-app webview, which calls
-/// [`StoredSessionProvider::store`] with the captured cookie. On a `401`/`419`,
+/// [`StoredSessionProvider::store_if_current`] with the captured cookie. On a `401`/`419`,
 /// [`SessionProvider::invalidate`] clears the stored cookie so the next upload
 /// prompts a fresh login rather than retrying a dead session.
 ///
 /// A `Mutex`-guarded in-memory copy avoids hitting the credential store on every
 /// request; it is the source of truth within a run and is kept in sync with the
 /// persisted copy on `store`/`invalidate`.
+struct CachedSession {
+    cookie: Option<String>,
+    generation: u64,
+}
+
 pub struct StoredSessionProvider {
-    cached: std::sync::Mutex<Option<String>>,
+    cached: std::sync::Mutex<CachedSession>,
 }
 
 impl StoredSessionProvider {
-    /// Build a provider, loading any previously-persisted session cookie so a
-    /// signed-in user does not have to re-login after a restart.
     pub fn new() -> Self {
         Self {
-            cached: std::sync::Mutex::new(crate::token_store::load_upload_session()),
+            cached: std::sync::Mutex::new(CachedSession {
+                cookie: crate::token_store::load_upload_session(),
+                generation: 0,
+            }),
         }
     }
 
-    /// Record a freshly-captured session cookie (called by the login webview
-    /// flow). Updates the in-memory copy (so the session is usable immediately)
-    /// and attempts to persist it encrypted.
-    ///
-    /// Returns `true` if the cookie was durably committed to the credential store
-    /// (survives restart), `false` if it is **memory-only** (a credential-store
-    /// failure) — the caller should surface that so the user knows they may need
-    /// to sign in again next launch, rather than silently appearing logged in.
-    pub fn store(&self, cookie_header: impl Into<String>) -> bool {
-        let cookie = cookie_header.into();
-        let persisted = crate::token_store::save_upload_session(&cookie);
-        *self.cached.lock().unwrap() = Some(cookie);
-        persisted
+    pub fn generation(&self) -> u64 {
+        self.cached.lock().unwrap().generation
     }
 
-    /// Whether a (non-empty) session is currently available without prompting a
-    /// login. Does not prove the server still accepts it.
+    /// Publish only if no logout/account change superseded this login. The
+    /// credential write shares the cache lock with invalidation.
+    pub fn store_if_current(&self, generation: u64, cookie: String) -> Result<bool, SessionError> {
+        self.store_with(generation, cookie, crate::token_store::save_upload_session)
+    }
+
+    fn store_with(
+        &self,
+        generation: u64,
+        cookie: String,
+        persist: impl FnOnce(&str) -> bool,
+    ) -> Result<bool, SessionError> {
+        let mut cached = self.cached.lock().unwrap();
+        if generation != cached.generation {
+            return Err(SessionError::NotAuthenticated);
+        }
+        let persisted = persist(&cookie);
+        cached.cookie = Some(cookie);
+        Ok(persisted)
+    }
+
+    fn invalidate_with(&self, clear: impl FnOnce()) {
+        let mut cached = self.cached.lock().unwrap();
+        cached.generation += 1;
+        cached.cookie = None;
+        clear();
+    }
+
+    fn reject_with(&self, rejected: &Session, clear: impl FnOnce()) {
+        let mut cached = self.cached.lock().unwrap();
+        if rejected.generation != Some(cached.generation)
+            || cached.cookie.as_deref() != Some(rejected.cookie_header())
+        {
+            return;
+        }
+        cached.generation += 1;
+        cached.cookie = None;
+        clear();
+    }
+
     pub fn has_session(&self) -> bool {
         self.cached
             .lock()
             .unwrap()
+            .cookie
             .as_deref()
             .is_some_and(|c| !c.trim().is_empty())
     }
@@ -178,22 +219,32 @@ impl StoredSessionProvider {
     /// keychain. (`store`/`invalidate` persistence is exercised by `token_store`.)
     fn with_cached(cookie: Option<String>) -> Self {
         Self {
-            cached: std::sync::Mutex::new(cookie),
+            cached: std::sync::Mutex::new(CachedSession {
+                cookie,
+                generation: 0,
+            }),
         }
     }
 }
 
 impl SessionProvider for StoredSessionProvider {
     fn session(&self) -> Result<Session, SessionError> {
-        match self.cached.lock().unwrap().as_deref() {
-            Some(c) if !c.trim().is_empty() => Ok(Session::from_cookie_header(c)),
+        let cached = self.cached.lock().unwrap();
+        match cached.cookie.as_deref() {
+            Some(c) if !c.trim().is_empty() => Ok(Session {
+                cookie_header: c.to_owned(),
+                generation: Some(cached.generation),
+            }),
             _ => Err(SessionError::NotAuthenticated),
         }
     }
 
     fn invalidate(&self) {
-        *self.cached.lock().unwrap() = None;
-        crate::token_store::clear_upload_session();
+        self.invalidate_with(crate::token_store::clear_upload_session);
+    }
+
+    fn invalidate_if_current(&self, rejected: &Session) {
+        self.reject_with(rejected, crate::token_store::clear_upload_session);
     }
 }
 
@@ -251,7 +302,7 @@ mod tests {
     fn invalidate_clears_in_memory_session() {
         let p = StoredSessionProvider::with_cached(Some("laravel_session=abc".into()));
         assert!(p.has_session());
-        p.invalidate();
+        p.invalidate_with(|| {});
         // In-memory copy is cleared immediately (persistence clear is a no-op
         // off-Windows / harmless if absent).
         assert!(!p.has_session());
@@ -260,16 +311,13 @@ mod tests {
 
     #[test]
     fn store_makes_session_immediately_usable_regardless_of_persistence() {
-        // `store` must update the in-memory copy so the session is usable right
-        // away (the upload should work in-session even if the credential write
-        // failed). Its bool return reports durability separately. Starting from a
-        // fresh in-memory provider avoids touching the real credential store on
-        // load; `store` itself attempts a persist whose success is platform- and
-        // environment-dependent, so we assert the in-memory contract, not the
-        // bool value.
+        // A persistence failure still leaves the current session usable in memory.
         let p = StoredSessionProvider::with_cached(None);
         assert!(!p.has_session());
-        let _persisted: bool = p.store("laravel_session=xyz");
+        let persisted = p
+            .store_with(p.generation(), "laravel_session=xyz".into(), |_| false)
+            .unwrap();
+        assert!(!persisted);
         assert!(
             p.has_session(),
             "session must be usable immediately after store"
@@ -278,8 +326,38 @@ mod tests {
             p.session().expect("session present").cookie_header(),
             "laravel_session=xyz"
         );
-        // Clean up any credential the store may have persisted so the test leaves
+        // Clear the in-memory fixture without accessing real credentials.
         // no durable side effect.
-        p.invalidate();
+        p.invalidate_with(|| {});
+    }
+    #[test]
+    fn logout_rejects_pending_cookie_capture_without_persisting() {
+        let p = StoredSessionProvider::with_cached(None);
+        let generation = p.generation();
+        p.invalidate_with(|| {});
+        assert_eq!(
+            p.store_with(generation, "old-cookie".into(), |_| panic!(
+                "stale cookie persisted"
+            )),
+            Err(SessionError::NotAuthenticated)
+        );
+        assert!(!p.has_session());
+        p.store_with(p.generation(), "new-cookie".into(), |_| true)
+            .unwrap();
+        assert_eq!(p.session().unwrap().cookie_header(), "new-cookie");
+    }
+
+    #[test]
+    fn rejection_of_old_request_preserves_new_login_even_with_same_cookie() {
+        let p = StoredSessionProvider::with_cached(Some("cookie".into()));
+        let old = p.session().unwrap();
+        p.invalidate_with(|| {});
+        p.store_with(p.generation(), "cookie".into(), |_| true)
+            .unwrap();
+        p.reject_with(&old, || panic!("new login cleared"));
+        assert!(p.has_session());
+        let current = p.session().unwrap();
+        p.reject_with(&current, || {});
+        assert!(!p.has_session());
     }
 }

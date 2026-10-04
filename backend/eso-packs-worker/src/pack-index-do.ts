@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env, Pack, PackIndex, VoteRecord } from "./types";
-import { deleteVote, deleteVotesForPack, getVote, putVote, restoreVote } from "./kv";
+import type { Env, Pack, PackIndex, VoteRecord, SharePackData } from "./types";
+import { deleteVote, deleteVotesForPack, getVote, restoreVote } from "./kv";
+
+import { ShareStore } from "./share-store";
 import { recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
-import { rememberBounded } from "./bounded-map";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -12,10 +13,16 @@ const OPERATION_PREFIX = "op:";
 const PENDING_PREFIX = "pending:";
 const DIRTY_MIRROR_PREFIX = "dirty:";
 const DELETED_AUTHOR_PREFIX = "deleted-author:";
+const BACKUP_DELETION_PREFIX = "backup-deletion:";
+const BACKUP_PURGE_PENDING = "meta:backup-purge-pending";
 const AUTHORITY_KEY = "meta:authority";
+const VOTE_STATE_PREFIX = "vote-state:";
+const VOTE_DIRTY_PREFIX = "vote-dirty:";
+const VOTE_AUTHORITY_PREFIX = "vote-authority:";
+const VOTE_RESET_PREFIX = "vote-reset:";
+const MIRROR_BATCH_SIZE = 10;
 const RECONCILIATION_LEASE_KEY = "meta:d1-reconciliation-lease";
 const RECONCILIATION_LEASE_MS = 48 * 60 * 60 * 1000;
-const VOTE_MEMO_LIMIT = 5000;
 const RETRY_DELAY_MS = 30_000;
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
 const DELETED_AUTHOR_TTL_MS = 97 * 86400 * 1000;
@@ -27,9 +34,9 @@ const RESTORE_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 const RESTORE_CLAIM_TTL_MS = 5 * 60 * 1000;
 /**
  * How many orphaned bodies one aborted restore may erase in a single call.
- * Each costs a KV delete plus a D1 batch, and the Durable Object shares the
- * Worker's 1000-subrequest ceiling — an abort that blew through it would throw
- * and erase nothing at all. The alarm path shares that budget with the pending
+ * Each costs a KV delete plus a D1 batch. We retain a conservative operational
+ * budget of 1000 subrequests per invocation, below Workers Paid's 10,000
+ * default. The alarm path shares that budget with the pending
  * create/delete journal it drains in the same invocation, hence the headroom.
  * Anything past the budget KEEPS its journal entry rather than losing it, so
  * removePacksByAuthor can still find and erase it on request; the warning in
@@ -42,6 +49,13 @@ interface BackupSnapshot {
   packs: Pack[];
   packBodies: Record<string, Pack>;
   votes: Record<string, VoteRecord>;
+}
+
+interface StoredVote {
+  packId: string;
+  userId: string;
+  lifecycle: string;
+  record: VoteRecord | null;
 }
 
 interface BackupMeta {
@@ -219,7 +233,18 @@ function randomBase64Url(length: number): string {
 
 /** Serializes mutations while migrating authority from KV to DO storage. */
 export class PackIndexDO extends DurableObject<Env> {
-  private readonly voteMemo = new Map<string, boolean>();
+
+  async createShare(user: { id: number; name: string }, pack: SharePackData) {
+    return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).create(user, pack));
+  }
+
+  async getShare(code: string) {
+    return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).get(code));
+  }
+
+  async deleteUserShares(userId: string): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).deleteUser(userId));
+  }
 
   async addPack(pack: Pack, maxPerAuthor?: number): Promise<AddResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
@@ -252,11 +277,17 @@ export class PackIndexDO extends DurableObject<Env> {
       // filtering is scoped to the deletion timestamp, so this new pack passes
       // while the author's pre-deletion corpus stays out of backups/restores.
       await this.ctx.storage.transaction(async (txn) => {
+        if (await txn.get(this.tombstoneKey(pack.id))) {
+          // A recycled slug starts with no members, even if an old KV read
+          // still exposes votes belonging to its deleted lifecycle.
+          await txn.put(`${VOTE_AUTHORITY_PREFIX}${pack.id}`, pack.created_at);
+        }
         await txn.delete(this.tombstoneKey(pack.id));
         await txn.put(this.packKey(pack.id), pack);
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(pack.id), operation.id);
+        await this.armRetry(txn);
       });
       return (await this.finishCreate(operation))
         ? { ok: true, pack }
@@ -281,10 +312,8 @@ export class PackIndexDO extends DurableObject<Env> {
         install_count: existing.install_count,
         created_at: existing.created_at,
       };
-      await this.ctx.storage.put(this.packKey(id), updated);
-      await this.ctx.storage.put(this.ownershipKey(id), updated.updated_at);
+      await this.stagePackMirror(updated);
       await this.mirrorChangedBestEffort(updated);
-      await this.mirrorD1Pack(updated);
       return { status: "ok", pack: updated };
     });
   }
@@ -591,9 +620,9 @@ export class PackIndexDO extends DurableObject<Env> {
     });
     if (!prepared.ok) return prepared;
 
-    // Unlatched, but still bounded: the Durable Object shares the Worker's
-    // 1000-subrequest ceiling, and a page is already capped by the route's
-    // budget.
+    // Unlatched, but still bounded: the route caps each page within our
+    // conservative 1000-subrequest operational budget for the Durable Object,
+    // below Workers Paid's 10,000 default.
     await this.runBounded(
       prepared.packs.map((pack) => async () => {
         await this.env.ESO_PACKS.put(`pack:${pack.id}`, JSON.stringify(pack));
@@ -647,11 +676,17 @@ export class PackIndexDO extends DurableObject<Env> {
       // a NEW pack published after the deletion — the same trap applyReplacement
       // guards. Erasing then would take the post-deletion data the timestamped
       // marker exists to let through, so only claim a body nothing holds.
-      if (await this.ctx.storage.get<Pack>(this.packKey(pack.id))) continue;
-      await this.env.ESO_PACKS.delete(`pack:${pack.id}`);
-      await this.deleteD1Pack(pack.id);
+      const current = await this.ctx.storage.get<Pack>(this.packKey(pack.id));
+      if (current) {
+        // The unlatched page may have overwritten a returning author's mirror.
+        // Durably queue the canonical body even if immediate repair fails.
+        await this.stagePackMirror(current);
+        await this.mirrorChangedBestEffort(current);
+      } else {
+        await this.env.ESO_PACKS.delete(`pack:${pack.id}`);
+        await this.deleteD1Pack(pack.id);
+      }
       await this.ctx.storage.delete(this.restoreStagedPackKey(jobId, pack.id));
-      this.forgetVotes(pack.id);
       erasedPacks++;
     }
 
@@ -663,7 +698,13 @@ export class PackIndexDO extends DurableObject<Env> {
       ) {
         continue;
       }
-      await deleteVote(this.env, vote.packId, vote.userId);
+      const current = await this.ctx.storage.get<StoredVote>(`${VOTE_STATE_PREFIX}${vote.packId}:${vote.userId}`);
+      const state = current ?? { packId: vote.packId, userId: vote.userId, lifecycle: pack.created_at, record: null };
+      await this.ctx.storage.transaction(async (txn) => {
+        await this.stageVote(txn, state);
+        await this.armRetry(txn);
+      });
+      await this.mirrorVote(state);
       erasedVotes++;
     }
     return { packs: erasedPacks, votes: erasedVotes };
@@ -673,7 +714,7 @@ export class PackIndexDO extends DurableObject<Env> {
     tokenHash: string;
     claimId: string;
     end: number;
-    finalReplacement?: { packs: Pack[]; restoredIds: string[] };
+    finalReplacement?: { packs: Pack[]; restoredIds: string[]; votes?: VoteRecord[] };
     now?: number;
   }): Promise<RestoreCompleteResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
@@ -707,7 +748,7 @@ export class PackIndexDO extends DurableObject<Env> {
         for (const pack of [...input.finalReplacement.packs, ...preserved]) {
           desired.set(pack.id, pack);
         }
-        await this.applyReplacement([...desired.values()], false);
+        await this.applyReplacement([...desired.values()], false, input.finalReplacement.votes, restored);
       }
 
       job.nextCursor = input.end;
@@ -843,15 +884,18 @@ export class PackIndexDO extends DurableObject<Env> {
         return { voted: false, pack: null };
       }
 
-      const memoKey = `${packId}:${userId}`;
-      const memo = this.voteMemo.get(memoKey);
-      const hadVote = memo ?? (await getVote(this.env, packId, userId)) !== null;
+      const hadVote = (await this.readVote(existing!, userId)) !== null;
       const voted = !hadVote;
-      if (voted) await putVote(this.env, packId, userId);
-      else await deleteVote(this.env, packId, userId);
-
-      rememberBounded(this.voteMemo, memoKey, voted, VOTE_MEMO_LIMIT);
-      const pack = await this.applyCounter(existing!, "vote_count", voted ? 1 : -1);
+      const state: StoredVote = {
+        packId, userId, lifecycle: existing!.created_at,
+        record: voted ? { packId, userId, votedAt: new Date().toISOString() } : null,
+      };
+      const pack = { ...existing!, vote_count: Math.max(0, existing!.vote_count + (voted ? 1 : -1)) };
+      // Membership, counter, and retry intent commit together. KV is only a
+      // mirror: a partial two-key write cannot turn a retry into an unvote.
+      await this.stagePackMirror(pack, [state]);
+      await this.mirrorVote(state);
+      await this.mirrorChangedBestEffort(pack);
       return { voted, pack };
     });
   }
@@ -888,14 +932,70 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.tombstoneKey(id), tombstone);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(id), operation.id);
+        await this.armRetry(txn);
       });
-      this.forgetVotes(id);
-      return (await this.finishDelete(operation)) ? "ok" : "retry";
+      return await this.finishDelete(operation) ? "ok" : "retry";
+    });
+  }
+
+  async getVotedPackIds(userId: string, packIds: string[]): Promise<Set<string>> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const voted = new Set<string>();
+      for (const id of packIds) {
+        const pack = await this.ctx.storage.get<Pack>(this.packKey(id));
+        if (pack && await this.readVote(pack, userId)) voted.add(id);
+      }
+      return voted;
+    });
+  }
+
+  async deleteUserVotes(userId: string): Promise<{ removed: number; complete: boolean }> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      // Bound external work per RPC, including legacy vote reads and both KV
+      // deletes. Canonical negative membership survives a failed mirror.
+      const limit = 100;
+      const states = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_STATE_PREFIX });
+      const dirty = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_DIRTY_PREFIX });
+      const candidates = [...states.values()].filter((state) =>
+        state.userId === userId && (state.record !== null || dirty.has(`${VOTE_DIRTY_PREFIX}${state.packId}:${userId}`)),
+      );
+      const ids = new Set(candidates.slice(0, limit).map((state) => state.packId));
+      const page = await this.env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, limit });
+      for (const key of page.keys) {
+        if (ids.size >= limit) break;
+        ids.add(key.name.slice(`user-votes:${userId}:`.length));
+      }
+      let removed = 0;
+      for (const packId of ids) {
+        const pack = await this.ctx.storage.get<Pack>(this.packKey(packId));
+        const hadVote = pack ? await this.readVote(pack, userId) : null;
+        const state: StoredVote = { packId, userId, lifecycle: pack?.created_at ?? "", record: null };
+        removed++;
+        if (pack) {
+          await this.stagePackMirror({ ...pack, vote_count: Math.max(0, pack.vote_count - (hadVote ? 1 : 0)) }, [state]);
+        } else {
+          await this.ctx.storage.transaction(async (txn) => {
+            await this.stageVote(txn, state);
+            await this.armRetry(txn);
+          });
+        }
+        await this.mirrorVote(state);
+      }
+      const pending = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_DIRTY_PREFIX });
+      return {
+        removed,
+        complete: candidates.every((state) => ids.has(state.packId)) && page.list_complete &&
+          page.keys.every((key) => ids.has(key.name.slice(`user-votes:${userId}:`.length))) &&
+          ![...pending.values()].some((state) => state.userId === userId),
+      };
     });
   }
 
   async removePacksByAuthor(authorId: string): Promise<string[]> {
     return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
       // This latch shares the same serialization boundary as backup writes.
       // Once present, no stale cron snapshot can publish this author's data.
       const now = Date.now();
@@ -906,13 +1006,19 @@ export class PackIndexDO extends DurableObject<Env> {
         deletedAt,
         expiresAt: now + DELETED_AUTHOR_TTL_MS,
       } satisfies DeletedAuthorMarker;
-      await this.ctx.storage.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, marker);
+      await this.ctx.storage.transaction(async (txn) => {
+        await txn.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, marker);
+        // Permanent history also filters old records after the live latch expires.
+        await txn.put(`${BACKUP_DELETION_PREFIX}${authorId}`, deletedAt);
+        await txn.put(BACKUP_PURGE_PENDING, true);
+        await this.armRetry(txn);
+      });
       await this.scheduleAlarmAt(marker.expiresAt);
-      await this.loadPacks();
       await this.hydrateDetailsByAuthor(authorId);
       const packs = await this.getStoredPacks();
       const removedPacks = packs.filter((pack) => pack.author_id === authorId);
       const removedIds = new Set(removedPacks.map(({ id }) => id));
+      const operations: PendingOperation[] = [];
       for (const pack of removedPacks) {
         const operation = this.createOperation("delete", pack, authorId);
         const tombstone: Tombstone = {
@@ -927,37 +1033,39 @@ export class PackIndexDO extends DurableObject<Env> {
           await txn.put(this.tombstoneKey(pack.id), tombstone);
           await txn.put(this.operationKey(operation.id), operation);
           await txn.put(this.pendingKey(pack.id), operation.id);
+          await this.armRetry(txn);
         });
-        this.forgetVotes(pack.id);
-        await this.finishDelete(operation);
+        operations.push(operation);
       }
 
       // A restore publishes bodies before its final canonical replacement.
       // Consume its pre-write journal so deletion also removes packs that were
       // published by a completed page but are not visible in storage yet.
       //
-      // Body and D1 row only, at an exact 2 subrequests each: deliberately NOT
-      // deleteVotesForPack, whose cost is 1 list plus 2 per live vote --
-      // unknowable in advance and unbounded for a vote-heavy pack. That is the
-      // same spend the restore route's exclusion pass refuses for the same
-      // orphaned bodies (see EXCLUSION_SUBREQUEST_BUDGET), and paying it here
-      // could push this call past the Durable Object's subrequest ceiling,
-      // where it throws and reports NO removed ids at all -- an erasure the
-      // user can never complete. The votes left behind hang off a body nothing
-      // serves: writeBackup keeps only votes on live packs, and the deleting
-      // user's OWN votes are cleared by the budgeted loop in
-      // handleDeleteAccount. The residual is a recycled slug making an earlier
-      // voter's first vote toggle off, which self-corrects on their second.
+      // Journal staged bodies as well. Bound external cleanup per event and
+      // let alarms drain the remainder without losing erasure progress.
       const staged = await this.getRestoreStagedPacksByAuthor(authorId);
       for (const [key, stagedPack] of staged) {
-        if (!removedIds.has(stagedPack.pack.id)) {
-          await this.env.ESO_PACKS.delete(`pack:${stagedPack.pack.id}`);
-          await this.deleteD1Pack(stagedPack.pack.id);
-          this.forgetVotes(stagedPack.pack.id);
+        if (!removedIds.has(stagedPack.pack.id) &&
+            !(await this.ctx.storage.get<Pack>(this.packKey(stagedPack.pack.id)))) {
+          const operation = this.createOperation("delete", stagedPack.pack, authorId);
+          await this.ctx.storage.transaction(async (txn) => {
+            await txn.put(this.tombstoneKey(stagedPack.pack.id), {
+              deletedAt,
+              authorId,
+              lifecycle: stagedPack.pack.created_at,
+              operationId: operation.id,
+            } satisfies Tombstone);
+            await txn.put(this.operationKey(operation.id), operation);
+            await txn.put(this.pendingKey(stagedPack.pack.id), operation.id);
+            await this.armRetry(txn);
+          });
+          operations.push(operation);
           removedIds.add(stagedPack.pack.id);
         }
         await this.ctx.storage.delete(key);
       }
+      for (const operation of operations.slice(0, MIRROR_BATCH_SIZE)) await this.finishDelete(operation);
       return [...removedIds];
     });
   }
@@ -979,16 +1087,30 @@ export class PackIndexDO extends DurableObject<Env> {
           return (Number.isFinite(stamp) ? stamp : 0) > deletedAt;
         }),
       );
-      const snapshot: BackupSnapshot = {
+      const ownedVotes = await this.ctx.storage.list<string>({ prefix: VOTE_AUTHORITY_PREFIX });
+      for (const [key, vote] of Object.entries(votes)) {
+        if (ownedVotes.has(`${VOTE_AUTHORITY_PREFIX}${vote.packId}`)) delete votes[key];
+      }
+      const states = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_STATE_PREFIX });
+      const lifecycles = new Map(packs.map((pack) => [pack.id, pack.created_at]));
+      for (const state of states.values()) {
+        const key = `${state.packId}:${state.userId}`;
+        delete votes[key];
+        if (state.record && lifecycles.get(state.packId) === state.lifecycle && !this.votePredatesDeletion(deletedAuthors, state.record)) {
+          votes[key] = state.record;
+        }
+      }
+      const snapshot = await this.filterDeletedBackupRecords({
         created_at: incoming.created_at,
         packs,
         packBodies: Object.fromEntries(packs.map((pack) => [pack.id, pack])),
         votes,
-      };
+      });
       const serialized = JSON.stringify(snapshot);
-      if (serialized.length > BACKUP_SIZE_WARN_BYTES) {
+      const bytes = new TextEncoder().encode(serialized).byteLength;
+      if (bytes > BACKUP_SIZE_WARN_BYTES) {
         console.warn(
-          `Backup snapshot for ${backupKey} is ${serialized.length} bytes, approaching KV's 25MB value limit`,
+          `Backup snapshot for ${backupKey} is ${bytes} bytes, approaching KV's 25MB value limit`,
         );
       }
       await this.env.ESO_PACKS.put(backupKey, serialized, { expirationTtl: 90 * 86400 });
@@ -996,13 +1118,69 @@ export class PackIndexDO extends DurableObject<Env> {
       const meta: BackupMeta = {
         last_success: Date.now(),
         last_backup_key: backupKey,
-        pack_count: packs.length,
-        pack_body_count: packs.length,
-        vote_count: Object.keys(votes).length,
+        pack_count: snapshot.packs.length,
+        pack_body_count: Object.keys(snapshot.packBodies).length,
+        vote_count: Object.keys(snapshot.votes).length,
       };
       await this.env.ESO_PACKS.put("backup:meta", JSON.stringify(meta));
       return meta;
     });
+  }
+
+  async purgeDeletedUsersFromLatestBackup(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(() => this.purgeLatestBackup());
+  }
+
+  async stageRestoredPack(pack: Pack): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      // Restore pages must not put erased records back into live detail keys,
+      // including pages resumed after an account deletion.
+      if (await this.isDeletedPack(pack)) return;
+      await this.env.ESO_PACKS.put(`pack:${pack.id}`, JSON.stringify(pack));
+    });
+  }
+
+  private async isDeletedPack(pack: Pack): Promise<boolean> {
+    return this.packPredatesDeletion(await this.getDeletedAuthorMarkers(), pack);
+  }
+
+  private async filterDeletedBackupRecords(snapshot: BackupSnapshot): Promise<BackupSnapshot> {
+    const cutoffs = await this.getDeletedAuthorMarkers();
+    const deleted = (userId: string, createdAt: string): boolean => {
+      const cutoff = cutoffs.get(String(userId));
+      return cutoff !== undefined && !(Date.parse(createdAt) > cutoff);
+    };
+    const removedIds = new Set((snapshot.packs ?? []).filter((pack) => deleted(pack.author_id, pack.created_at)).map(({ id }) => id));
+    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
+      if (deleted(pack.author_id, pack.created_at)) removedIds.add(id);
+    }
+    return {
+      created_at: snapshot.created_at,
+      packs: (snapshot.packs ?? []).filter(({ id }) => !removedIds.has(id)),
+      packBodies: Object.fromEntries(Object.entries(snapshot.packBodies ?? {}).filter(([id]) => !removedIds.has(id))),
+      votes: Object.fromEntries(Object.entries(snapshot.votes ?? {}).filter(([, vote]) =>
+        !removedIds.has(vote.packId) && !deleted(vote.userId, vote.votedAt),
+      )),
+    };
+  }
+
+  private async purgeLatestBackup(): Promise<void> {
+    if (!await this.ctx.storage.get(BACKUP_PURGE_PENDING)) return;
+    try {
+      const raw = await this.env.ESO_PACKS.get("backup:latest");
+      if (raw) {
+        const snapshot = JSON.parse(raw) as BackupSnapshot;
+        const scrubbed = await this.filterDeletedBackupRecords(snapshot);
+        // Preserve the original timestamp and exact bytes when nothing changes.
+        if (JSON.stringify(scrubbed) !== JSON.stringify(snapshot)) {
+          await this.env.ESO_PACKS.put("backup:latest", JSON.stringify(scrubbed));
+        }
+      }
+      await this.ctx.storage.delete(BACKUP_PURGE_PENDING);
+    } catch (error) {
+      console.error("Backup privacy cleanup failed; retained for retry", error);
+      await this.scheduleRetry();
+    }
   }
 
   async replaceIndex(index: PackIndex): Promise<void> {
@@ -1012,14 +1190,14 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
-  async replaceIndexPreserving(index: PackIndex, restoredIds: string[]): Promise<void> {
+  async replaceIndexPreserving(index: PackIndex, restoredIds: string[], votes?: VoteRecord[]): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.loadPacks();
       const restored = new Set(restoredIds);
       const preserved = current.filter(({ id }) => !restored.has(id));
       const desired = new Map<string, Pack>();
       for (const pack of [...index.packs, ...preserved]) desired.set(pack.id, pack);
-      await this.applyReplacement([...desired.values()], false);
+      await this.applyReplacement([...desired.values()], false, votes, restored);
     });
   }
 
@@ -1044,7 +1222,9 @@ export class PackIndexDO extends DurableObject<Env> {
     await this.cleanupDeletedAuthors();
     await this.cleanupRestoreJobs();
     await this.ctx.blockConcurrencyWhile(async () => {
-      const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX });
+      await new ShareStore(this.ctx.storage, this.env).retry();
+      await this.purgeLatestBackup();
+      const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX, limit: MIRROR_BATCH_SIZE });
       for (const operationId of pending.values()) {
         const operation = await this.ctx.storage.get<PendingOperation>(
           this.operationKey(operationId),
@@ -1053,7 +1233,11 @@ export class PackIndexDO extends DurableObject<Env> {
         if (operation.kind === "create") await this.finishCreate(operation);
         else await this.finishDelete(operation);
       }
-      const dirty = await this.ctx.storage.list<string>({ prefix: DIRTY_MIRROR_PREFIX });
+      const resets = await this.ctx.storage.list<string>({ prefix: VOTE_RESET_PREFIX, limit: MIRROR_BATCH_SIZE });
+      for (const key of resets.keys()) await this.resetVoteMirror(key.slice(VOTE_RESET_PREFIX.length));
+      const voteDirty = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_DIRTY_PREFIX, limit: MIRROR_BATCH_SIZE });
+      for (const state of voteDirty.values()) await this.mirrorVote(state);
+      const dirty = await this.ctx.storage.list<string>({ prefix: DIRTY_MIRROR_PREFIX, limit: MIRROR_BATCH_SIZE });
       for (const [key, lifecycle] of dirty) {
         const packId = key.slice(DIRTY_MIRROR_PREFIX.length);
         const pack = await this.ctx.storage.get<Pack>(this.packKey(packId));
@@ -1061,16 +1245,13 @@ export class PackIndexDO extends DurableObject<Env> {
           await this.ctx.storage.delete(key);
           continue;
         }
-        try {
-          await this.mirror(await this.getStoredPacks(), pack);
-          await this.ctx.storage.delete(key);
-        } catch (error) {
-          console.error(`KV dirty mirror retry failed [${packId}]:`, error);
-        }
+        await this.mirrorChangedBestEffort(pack);
       }
       if (
-        (await this.ctx.storage.list({ prefix: PENDING_PREFIX })).size > 0 ||
-        (await this.ctx.storage.list({ prefix: DIRTY_MIRROR_PREFIX })).size > 0
+        (await this.ctx.storage.list({ prefix: PENDING_PREFIX, limit: 1 })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: DIRTY_MIRROR_PREFIX, limit: 1 })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: VOTE_RESET_PREFIX, limit: 1 })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: VOTE_DIRTY_PREFIX, limit: 1 })).size > 0
       ) {
         await this.scheduleRetry();
       }
@@ -1181,6 +1362,10 @@ export class PackIndexDO extends DurableObject<Env> {
           result.unavailable.push(id);
           continue;
         }
+        if (await this.isDeletedPack(detail)) {
+          result.tombstoned.push(id);
+          continue;
+        }
         await this.ctx.storage.put(this.packKey(id), detail);
         result.adopted.push(id);
       }
@@ -1244,6 +1429,7 @@ export class PackIndexDO extends DurableObject<Env> {
         cacheTtl: 30,
       });
       const candidate = this.newerPack(pack, detail);
+      if (await this.isDeletedPack(candidate)) continue;
       const current = stored.get(this.packKey(pack.id));
       if (!current || this.isNewerOrDifferent(candidate, current)) {
         await this.ctx.storage.put(this.packKey(pack.id), candidate);
@@ -1281,20 +1467,89 @@ export class PackIndexDO extends DurableObject<Env> {
     delta: number,
   ): Promise<Pack> {
     pack[field] = Math.max(0, (pack[field] ?? 0) + delta);
-    await this.ctx.storage.put(this.packKey(pack.id), pack);
-    await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
+    await this.stagePackMirror(pack);
     await this.mirrorChangedBestEffort(pack);
-    if (field === "vote_count") await this.mirrorD1VoteCount(pack.id, pack.vote_count);
     return pack;
   }
 
+  private async stagePackMirror(pack: Pack, votes: StoredVote[] = [], resetVotes = false): Promise<void> {
+    // The retry intent must survive a reset immediately after the canonical
+    // write, before the first external mirror request can even start.
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.put(this.packKey(pack.id), pack);
+      await txn.put(this.ownershipKey(pack.id), pack.updated_at);
+      await txn.put(`${DIRTY_MIRROR_PREFIX}${pack.id}`, pack.created_at);
+      for (const vote of votes) await this.stageVote(txn, vote);
+      if (resetVotes) {
+        await txn.put(`${VOTE_AUTHORITY_PREFIX}${pack.id}`, pack.created_at);
+        await txn.put(`${VOTE_RESET_PREFIX}${pack.id}`, pack.created_at);
+      }
+      await this.armRetry(txn);
+    });
+  }
+
+  private async armRetry(txn: DurableObjectTransaction): Promise<void> {
+    const next = Date.now() + RETRY_DELAY_MS;
+    const current = await txn.getAlarm();
+    if (current === null || current > next) await txn.setAlarm(next);
+  }
+
+  private async stageVote(txn: DurableObjectTransaction, state: StoredVote): Promise<void> {
+    const suffix = `${state.packId}:${state.userId}`;
+    await txn.put(`${VOTE_STATE_PREFIX}${suffix}`, state);
+    await txn.put(`${VOTE_DIRTY_PREFIX}${suffix}`, state);
+  }
+
+  private async readVote(pack: Pack, userId: string): Promise<VoteRecord | null> {
+    const state = await this.ctx.storage.get<StoredVote>(`${VOTE_STATE_PREFIX}${pack.id}:${userId}`);
+    if (state) return state.lifecycle === pack.created_at ? state.record : null;
+    if (await this.ctx.storage.get(`${VOTE_AUTHORITY_PREFIX}${pack.id}`)) return null;
+    return getVote(this.env, pack.id, userId);
+  }
+
+  private async mirrorVote(state: StoredVote): Promise<void> {
+    if (await this.ctx.storage.get(`${VOTE_RESET_PREFIX}${state.packId}`)) return;
+    try {
+      const pack = await this.ctx.storage.get<Pack>(this.packKey(state.packId));
+      if (state.record && pack?.created_at === state.lifecycle) {
+        await restoreVote(this.env, state.packId, state.userId, state.record);
+      } else {
+        await deleteVote(this.env, state.packId, state.userId);
+      }
+      await this.ctx.storage.delete(`${VOTE_DIRTY_PREFIX}${state.packId}:${state.userId}`);
+    } catch (error) {
+      console.error(`Vote mirror deferred [${state.packId}]:`, error);
+      await this.scheduleRetry();
+    }
+  }
+
+  private async resetVoteMirror(packId: string): Promise<void> {
+    try {
+      // Snapshot restore owns the complete membership set. Clear old KV keys
+      // before replaying current durable states, including votes cast since restore.
+      const page = await deleteVotesForPack(this.env, packId);
+      if (page.complete) await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${packId}`);
+      else await this.scheduleRetry();
+    } catch (error) {
+      console.error(`Vote reset deferred [${packId}]:`, error);
+      await this.scheduleRetry();
+    }
+  }
+
   private async mirrorChangedBestEffort(pack: Pack): Promise<void> {
+    let kvDone = false;
     try {
       await this.mirror(await this.getStoredPacks(), pack);
-      await this.ctx.storage.delete(`${DIRTY_MIRROR_PREFIX}${pack.id}`);
+      kvDone = true;
     } catch (error) {
       console.error(`KV pack mirror deferred [${pack.id}]:`, error);
-      await this.ctx.storage.put(`${DIRTY_MIRROR_PREFIX}${pack.id}`, pack.created_at);
+    }
+    // A failed KV write must not prevent a draft's public D1 row from being
+    // removed. Both mirrors run under this object's serialization boundary.
+    const d1Done = await this.upsertD1Pack(pack);
+    if (kvDone && d1Done) {
+      await this.ctx.storage.delete(`${DIRTY_MIRROR_PREFIX}${pack.id}`);
+    } else {
       await this.scheduleRetry();
     }
   }
@@ -1399,6 +1654,13 @@ export class PackIndexDO extends DurableObject<Env> {
       if (entries.size < 1000) break;
       startAfter = [...entries.keys()].at(-1);
     }
+    const history = await this.ctx.storage.list<string>({ prefix: BACKUP_DELETION_PREFIX });
+    for (const [key, value] of history) {
+      const userId = key.slice(BACKUP_DELETION_PREFIX.length);
+      const parsed = Date.parse(value);
+      const cutoff = Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+      deleted.set(userId, Math.max(deleted.get(userId) ?? 0, cutoff));
+    }
     return deleted;
   }
 
@@ -1406,7 +1668,7 @@ export class PackIndexDO extends DurableObject<Env> {
   private packPredatesDeletion(markers: Map<string, number>, pack: Pack): boolean {
     const deletedAt = markers.get(String(pack.author_id));
     if (deletedAt === undefined) return false;
-    const stamp = Date.parse(pack.updated_at ?? pack.created_at ?? "");
+    const stamp = Date.parse(pack.created_at ?? "");
     return (Number.isFinite(stamp) ? stamp : 0) <= deletedAt;
   }
 
@@ -1535,11 +1797,12 @@ export class PackIndexDO extends DurableObject<Env> {
     if (current === null || current > timestamp) await this.ctx.storage.setAlarm(timestamp);
   }
 
-  private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
+  private async applyReplacement(packs: Pack[], forceIndex: boolean, votes?: VoteRecord[], restoredIds?: Set<string>): Promise<void> {
     const current = await this.getStoredPacks();
     const live = new Map(current.map((pack): [string, Pack] => [pack.id, pack]));
     const deletedAuthors = await this.getDeletedAuthorMarkers();
     const accepted: Pack[] = [];
+    const preservedLifecycles = new Set<string>();
     for (const pack of packs) {
       const pending = await this.getPending(pack.id);
       if (pending?.kind === "delete") continue;
@@ -1556,6 +1819,7 @@ export class PackIndexDO extends DurableObject<Env> {
       const existing = live.get(pack.id);
       if (existing && !this.packPredatesDeletion(deletedAuthors, existing)) {
         accepted.push(existing);
+        preservedLifecycles.add(existing.id);
       }
     }
     const desiredIds = new Set(accepted.map(({ id }) => id));
@@ -1575,18 +1839,38 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.tombstoneKey(pack.id), tombstone);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(pack.id), operation.id);
+        await this.armRetry(txn);
       });
-      this.forgetVotes(pack.id);
       deleteOperations.push(operation);
     }
     for (const pack of accepted) {
       await this.ctx.storage.delete(this.tombstoneKey(pack.id));
-      await this.ctx.storage.put(this.packKey(pack.id), pack);
-      await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
+      const restoreVotes = votes !== undefined && restoredIds?.has(pack.id) === true && !preservedLifecycles.has(pack.id);
+      const states = new Map<string, StoredVote>();
+      if (restoreVotes) {
+        const old = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_STATE_PREFIX}${pack.id}:` });
+        for (const state of old.values()) states.set(state.userId, { ...state, lifecycle: pack.created_at, record: null });
+        for (const vote of votes!) {
+          if (vote.packId === pack.id && !this.votePredatesDeletion(deletedAuthors, vote)) {
+            states.set(vote.userId, { packId: pack.id, userId: vote.userId, lifecycle: pack.created_at, record: vote });
+          }
+        }
+      }
+      const restoredPack = restoreVotes
+        ? { ...pack, vote_count: [...states.values()].filter(({ record }) => record !== null).length }
+        : pack;
+      await this.stagePackMirror(restoredPack, [...states.values()], restoreVotes);
     }
-    await this.mirror(accepted, undefined, undefined, [], forceIndex);
-    for (const operation of deleteOperations) await this.finishDelete(operation);
-    this.voteMemo.clear();
+    // Bound external mirror work per event; every remaining item is journaled.
+    for (const pack of accepted.slice(0, MIRROR_BATCH_SIZE)) {
+      if (await this.ctx.storage.get(`${VOTE_RESET_PREFIX}${pack.id}`)) await this.resetVoteMirror(pack.id);
+      const states = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_DIRTY_PREFIX}${pack.id}:`, limit: MIRROR_BATCH_SIZE });
+      for (const state of states.values()) await this.mirrorVote(state);
+      const stored = await this.ctx.storage.get<Pack>(this.packKey(pack.id));
+      if (stored) await this.mirrorChangedBestEffort(stored);
+    }
+    await this.mirror(await this.getStoredPacks(), undefined, undefined, [], forceIndex);
+    for (const operation of deleteOperations.slice(0, MIRROR_BATCH_SIZE)) await this.finishDelete(operation);
   }
 
   private async deleteD1Pack(id: string): Promise<boolean> {
@@ -1609,12 +1893,7 @@ export class PackIndexDO extends DurableObject<Env> {
     }
   }
 
-  private async deleteStoredPack(id: string): Promise<void> {
-    await this.deleteInstallClaims(id);
-    await this.ctx.storage.delete(this.packKey(id));
-    await this.ctx.storage.put(this.tombstoneKey(id), new Date().toISOString());
-    this.forgetVotes(id);
-  }
+
 
   private async mirrorD1Pack(pack: Pack): Promise<void> {
     if (!this.env.ROSTER_HUB_DB) return;
@@ -1639,17 +1918,7 @@ export class PackIndexDO extends DurableObject<Env> {
     }
   }
 
-  private async mirrorD1VoteCount(id: string, voteCount: number): Promise<void> {
-    if (!this.env.ROSTER_HUB_DB) return;
-    try {
-      await this.env.ROSTER_HUB_DB.prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
-        .bind(voteCount, id)
-        .run();
-    } catch (error) {
-      console.error(`D1 vote_count sync failed [${id}]:`, error);
-      await recordD1MirrorFailure(this.env, "vote-count", id, error);
-    }
-  }
+
 
   private async upsertD1PackRow(pack: Pack): Promise<void> {
     const row = toD1PackRow(pack);
@@ -1687,12 +1956,7 @@ export class PackIndexDO extends DurableObject<Env> {
     ]);
   }
 
-  private forgetVotes(packId: string): void {
-    const prefix = `${packId}:`;
-    for (const key of this.voteMemo.keys()) {
-      if (key.startsWith(prefix)) this.voteMemo.delete(key);
-    }
-  }
+
 
   private async deleteInstallClaims(packId: string): Promise<void> {
     let startAfter: string | undefined;
@@ -1856,8 +2120,19 @@ export class PackIndexDO extends DurableObject<Env> {
     operation.attempts++;
     if (!operation.votesDone) {
       try {
-        await deleteVotesForPack(this.env, operation.packId);
-        operation.votesDone = true;
+        const prefix = `${VOTE_STATE_PREFIX}${operation.packId}:`;
+        const states = await this.ctx.storage.list<StoredVote>({ prefix, limit: MIRROR_BATCH_SIZE });
+        for (const [key, state] of states) {
+          await deleteVote(this.env, state.packId, state.userId);
+          await this.ctx.storage.delete(`${VOTE_DIRTY_PREFIX}${state.packId}:${state.userId}`);
+          // A pending delete blocks slug reuse, so this state can be retired
+          // only after both external keys have been removed successfully.
+          await this.ctx.storage.delete(key);
+        }
+        const page = await deleteVotesForPack(this.env, operation.packId);
+        operation.votesDone = page.complete &&
+          (await this.ctx.storage.list({ prefix, limit: 1 })).size === 0;
+        if (operation.votesDone) await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${operation.packId}`);
         await this.saveOperation(operation);
       } catch (error) {
         console.error(`KV vote cleanup failed [${operation.packId}]:`, error);

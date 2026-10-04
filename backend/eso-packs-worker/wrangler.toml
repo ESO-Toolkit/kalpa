@@ -37,8 +37,8 @@ ASK_DAILY_BUDGET = "350"
 crons = ["0 0 * * *"]
 
 # Shared D1 binding — same database roster-hub-api uses.
-# Dual-write: every KV mutation is mirrored to D1 inline so
-# esotk.com always reflects the latest pack data.
+# Durable mutations queue KV/D1 mirror work for retry.
+# esotk.com converges after failed writes recover.
 [[d1_databases]]
 binding = "ROSTER_HUB_DB"
 database_name = "roster-hub-db"

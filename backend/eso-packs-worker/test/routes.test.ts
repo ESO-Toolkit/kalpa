@@ -130,6 +130,32 @@ describe("OPTIONS preflight", () => {
 // ── GET /packs ────────────────────────────────────────────────────
 
 describe("GET /packs", () => {
+  it.each(["", "?sort=votes&page=1", "?status=draft", "?status=all", "?author=42"])(
+    "prevents downstream caching of personalized lists %s",
+    async (query) => {
+      await putPackIndex(e, { packs: [makePack("private", { status: "draft", is_anonymous: true })] });
+      const response = await call(authedRequest(`${BASE}/packs${query}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    },
+  );
+  it.each(["?sort=votes", "?sort=votes&page=1"])(
+    "short-caches the anonymous votes landing view %s",
+    async (query) => {
+      const response = await call(new Request(`${BASE}/packs${query}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("public, max-age=30");
+      expect(await response.json<{ sort: string }>()).toMatchObject({ sort: "votes" });
+    },
+  );
+  it.each(["page=2", "type=addon", "tag=test", "q=test", "status=published", "author=42"])(
+    "bypasses public votes caching for %s",
+    async (query) => {
+      const response = await call(new Request(`${BASE}/packs?sort=votes&${query}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("public, max-age=0");
+    },
+  );
   it("does not populate an isolate-unsafe manual Cache API entry", async () => {
     const key = new Request(`${BASE}/packs?default=1`);
     await caches.default.delete(key);
@@ -310,6 +336,23 @@ describe("GET /packs", () => {
 // ── POST /packs ───────────────────────────────────────────────────
 
 describe("POST /packs", () => {
+  it.each([null, [], "addon", 1, true])("rejects non-object addon %j with 400", async (addon) => {
+    const response = await call(authedRequest(`${BASE}/packs`, {
+      method: "POST",
+      body: JSON.stringify(validPackBody({ addons: [addon] })),
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ details: [{ field: "addons[0]" }] });
+  });
+
+  it("rejects UTF-8 payloads over the byte limit", async () => {
+    const response = await call(authedRequest(`${BASE}/packs`, {
+      method: "POST",
+      body: JSON.stringify(validPackBody({ junk: "界".repeat(90_000) })),
+    }));
+    expect(response.status).toBe(413);
+  });
+
   it("returns retryable 503 and resumes the same create after a KV mirror failure", async () => {
     const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
     const put = vi
@@ -552,7 +595,7 @@ describe("GET /packs/:id", () => {
     const body = await res.json<{ pack: { user_voted: boolean } }>();
     expect(body.pack.user_voted).toBe(true);
     // Per-viewer state must never be cached.
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Vary")).toContain("Authorization");
   });
 
@@ -578,7 +621,7 @@ describe("GET /packs/:id", () => {
     const res = await call(authedRequest(`${BASE}/packs/detail-auth-outage`));
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });
 
@@ -659,7 +702,7 @@ describe("anonymous pack redaction", () => {
     }>();
     expect(body.pack.author_name).toBe(TEST_USER.name);
     expect(body.pack.author_id).toBe(String(TEST_USER.id));
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Vary")).toContain("Authorization");
   });
 });
@@ -667,6 +710,15 @@ describe("anonymous pack redaction", () => {
 // ── PUT /packs/:id ────────────────────────────────────────────────
 
 describe("PUT /packs/:id", () => {
+  it.each([null, []])("rejects non-object addon %j with 400", async (addon) => {
+    await putPackIndex(e, { packs: [makePack("invalid-addon-update")] });
+    const response = await call(authedRequest(`${BASE}/packs/invalid-addon-update`, {
+      method: "PUT",
+      body: JSON.stringify(validPackBody({ addons: [addon] })),
+    }));
+    expect(response.status).toBe(400);
+  });
+
   it("updates own pack", async () => {
     const pack = makePack("update-me");
     await putPack(e, pack);
@@ -1230,7 +1282,8 @@ describe("POST /admin/restore", () => {
     expect(body.restored_votes).toBe(1);
 
     const restoredPack = await e.ESO_PACKS.get(`pack:${pack.id}`, "json");
-    expect(restoredPack).toEqual(pack);
+    // Membership is authoritative even if an old snapshot's counter drifted.
+    expect(restoredPack).toEqual({ ...pack, vote_count: 1 });
 
     const restoredVote = await e.ESO_PACKS.get(`vote:${pack.id}:${TEST_USER.id}`);
     expect(restoredVote).toBeTruthy();
@@ -1656,8 +1709,9 @@ describe("POST /admin/restore", () => {
 
   it("keeps the page cap under the Worker subrequest ceiling", async () => {
     // Each published pack costs a KV put plus two D1 calls, and every binding
-    // call counts against the same 1000-subrequest ceiling. A cap of 400 was
-    // ~1200 — over the limit the paging exists to stay under.
+    // call consumes our conservative 1000-subrequest operational budget,
+    // below Workers Paid's 10,000 default. A cap of 400 was ~1200 — over that
+    // budget and the former platform ceiling that originally motivated paging.
     //
     // Seed a snapshot LARGER than the cap, out of vote records. An earlier
     // version of this test seeded an empty one, which proved nothing: with
@@ -2254,8 +2308,13 @@ describe("DELETE /account", () => {
         e.ESO_PACKS.put(`user-votes:${userId}:budget-pack-${i}`, "1")
       )
     );
-    await e.ESO_PACKS.put(`share-user:${userId}:SHARE1`, "1");
-    await e.ESO_PACKS.put("share:SHARE1", JSON.stringify({ userId }));
+    const share = await packIndexForTest().createShare(TEST_USER, {
+      title: "Account cleanup", description: "", packType: "addon-pack", tags: [],
+      addons: [{ esouiId: 1, name: "Addon", required: true }],
+    });
+    expect(share.status).toBe("ok");
+    if (share.status !== "ok") throw new Error("share creation failed");
+    const code = share.record.code;
 
     const first = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
     expect(first.status).toBe(200);
@@ -2270,8 +2329,8 @@ describe("DELETE /account", () => {
     expect(firstBody.deleted.votes).toBeLessThan(overBudget);
     // ...and the bounded tail must still have run despite the overrun.
     expect(firstBody.deleted.shares).toBe(1);
-    expect(await e.ESO_PACKS.get("share:SHARE1")).toBeNull();
-    expect(await e.ESO_PACKS.get(`share-user:${userId}:SHARE1`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`share:${code}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`share-user:${userId}:${code}`)).toBeNull();
 
     // Repeating converges, because a deleted key stops being listed.
     let complete = false;

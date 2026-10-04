@@ -3,9 +3,6 @@ import {
   getPackIndex,
   getPack,
   putPack,
-  getVotedPackIds,
-  getVote,
-  deleteVote,
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
@@ -27,85 +24,7 @@ import {
 import { runDailySync } from "./crawl";
 export { PackIndexDO } from "./pack-index-do";
 
-// ── D1 dual-write helpers ─────────────────────────────────────────
-// Both workers share the same Cloudflare account. kalpa-pack-hub binds
-// directly to roster-hub-db (D1), mirrors live mutations through the Pack
-// Index Durable Object, and runs a guarded scheduled reconciliation for drift.
-
-export async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  const isPublished = (pack.status ?? "published") === "published";
-  try {
-    if (isPublished) {
-      const row = toD1PackRow(pack);
-      await env.ROSTER_HUB_DB.prepare(
-        `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-           ON CONFLICT(id) DO UPDATE SET
-             author_id = excluded.author_id,
-             title = excluded.title,
-             description = excluded.description,
-             pack_type = excluded.pack_type,
-             addons = excluded.addons,
-             is_anonymous = excluded.is_anonymous,
-             author_name = excluded.author_name,
-             vote_count = excluded.vote_count,
-             updated_at = datetime('now')`,
-      )
-        .bind(
-          row.id,
-          row.author_id,
-          // The D1 mirror feeds the ESO Toolkit website; never hand it the
-          // real display name of an anonymous pack's author. author_id stays
-          // for ownership joins but is not rendered there.
-          row.author_name,
-          row.is_anonymous,
-          row.title,
-          row.description,
-          row.pack_type,
-          row.addons,
-          // Inserting a literal 0 here (and omitting vote_count from the
-          // upsert) froze the website's counters at zero and reset them on
-          // every author edit.
-          row.vote_count,
-        )
-        .run();
-
-      // Replace tags
-      const tagStmts = [
-        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-        ...pack.tags.map((tag) =>
-          env
-            .ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)")
-            .bind(pack.id, tag),
-        ),
-      ];
-      await env.ROSTER_HUB_DB.batch(tagStmts);
-    } else {
-      await env.ROSTER_HUB_DB.batch([
-        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-        env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id),
-      ]);
-    }
-  } catch (err) {
-    console.error(`D1 sync failed [${pack.id}]:`, err);
-    await recordD1MirrorFailure(env, isPublished ? "upsert" : "delete", pack.id, err);
-  }
-}
-
-async function d1DeletePack(env: Env, id: string): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  try {
-    await env.ROSTER_HUB_DB.batch([
-      env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
-      env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
-    ]);
-  } catch (err) {
-    console.error(`D1 delete failed [${id}]:`, err);
-    if (err instanceof Error && err.message.includes("no such table")) return;
-    await recordD1MirrorFailure(env, "delete", id, err);
-  }
-}
+// Canonical pack changes and external mirrors are serialized by PackIndexDO.
 
 const PACKS_PER_PAGE = 20;
 
@@ -122,6 +41,8 @@ function json(
   };
   if (cacheMaxAge !== undefined) {
     headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
+  } else if (cacheScope === "private") {
+    headers["Cache-Control"] = "private, no-store";
   }
   return new Response(JSON.stringify(data), { status, headers });
 }
@@ -184,14 +105,14 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     url.searchParams.has("status") ||
     url.searchParams.has("author");
 
-  // Only the default landing view receives a short public Cache-Control TTL.
+  // Unfiltered first-page updated and votes views receive a short public Cache-Control TTL.
   // Manual Cache API storage is avoided because cross-isolate invalidation is unsafe.
   const sortParam = url.searchParams.get("sort");
   const pageParam = url.searchParams.get("page");
   const isDefaultView =
     !hasFilters &&
     (pageParam === null || pageParam === "1") &&
-    (sortParam === null || sortParam === "votes");
+    (sortParam === null || sortParam === "updated" || sortParam === "votes");
 
   // Resolve the viewer up front: draft/all filtering, the author filter,
   // anonymity redaction and user_voted all key off it. Free when no Authorization header is
@@ -259,7 +180,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   } else if (sort === "newest") {
     packs.sort((a, b) => b.created_at.localeCompare(a.created_at));
   } else {
-    // "updated" (and default) — sort by updated_at descending
+    // "updated" (and unrecognized sorts) — sort by updated_at descending
     packs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
 
@@ -276,11 +197,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const votedIds =
     viewerId === undefined
       ? null
-      : await getVotedPackIds(
-          env,
-          viewerId,
-          paginated.map((p) => p.id),
-        );
+      : await getPackIndexDO(env).getVotedPackIds(viewerId, paginated.map((p) => p.id));
   const visible: PackView[] = votedIds
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
@@ -316,9 +233,9 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     // A viewer-specific response: it carries their user_voted, and for the
     // author it carries the real fields of their own anonymous pack. Never
     // cacheable.
-    const voted = (await getVote(env, id, viewerId)) !== null;
+    const voted = (await getPackIndexDO(env).getVotedPackIds(viewerId, [id])).has(id);
     const view: PackView = { ...redactAnonymousPack(pack, viewerId), user_voted: voted };
-    return json(request, { pack: view }, 200, 0);
+    return json(request, { pack: view }, 200, undefined, "private");
   }
 
   // Only a request that did not attempt authentication is safely anonymous.
@@ -328,8 +245,8 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     request,
     { pack: redactAnonymousPack(pack) },
     200,
-    hasAuthorization ? 0 : 300,
-    "public",
+    hasAuthorization ? undefined : 300,
+    hasAuthorization ? "private" : "public",
   );
 }
 
@@ -480,6 +397,7 @@ async function handleUpdatePack(
   const updated = result.pack;
 
   await invalidatePackListCache(url);
+
   return json(request, { pack: updated });
 }
 
@@ -838,7 +756,7 @@ type DeletedUserFilterSnapshot = {
  * Enumerate every deletion tombstone in one KV list pass — one subrequest per
  * 1000 tombstones, regardless of corpus size. The previous shape (one get per
  * DISTINCT corpus user) still scaled with the snapshot and could exceed the
- * per-invocation subrequest ceiling on the restore begin/final requests, which
+ * former per-invocation subrequest ceiling on restore begin/final requests, which
  * then failed deterministically on every retry.
  *
  * The map value is the deletion time in ms. Tombstones written before the
@@ -971,22 +889,10 @@ async function handleScheduled(env: Env): Promise<void> {
     Object.entries(await listAllVotes(env)).filter(([, vote]) => livePackIds.has(vote.packId)),
   );
 
-  // Drop anyone who asked to be deleted, at WRITE time.
-  //
-  // This read of the index and votes may predate an account deletion that
-  // completes before the put below. `purgeUserFromLatestBackup` scrubs
-  // `backup:latest` when the deletion runs, but nothing orders the two, so a
-  // cron holding a stale read could put those records straight back — into the
-  // one backup key with no TTL, where a later restore replays them.
-  //
-  // Filtering here rather than relying on having read after the delete is what
-  // makes the ordering irrelevant: the tombstone outlives the read, so a stale
-  // snapshot still cannot publish a deleted user.
-  const {
-    packs,
-    packBodies: keptBodies,
-    votes: keptVotes,
-  } = dropDeletedUsers(await loadDeletedUserTombstones(env), {
+  // Apply the legacy KV privacy markers, then let writeBackup revalidate
+  // against durable deletion history inside the same boundary as account
+  // deletion and backup cleanup. KV propagation alone cannot order these.
+  const { packs, packBodies: keptBodies, votes: keptVotes } = dropDeletedUsers(await loadDeletedUserTombstones(env), {
     packs: index.packs,
     packBodies,
     votes,
@@ -1015,7 +921,7 @@ async function handleScheduled(env: Env): Promise<void> {
  *
  * A restore used to walk the whole snapshot in one request, awaiting each write
  * on its own and strictly serialized. A corpus of any size therefore ran into
- * the per-request subrequest ceiling — and there was no way to resume, so the
+ * the former per-request subrequest ceiling — and there was no way to resume, so the
  * endpoint simply stopped working at exactly the scale where an incident
  * recovery matters.
  *
@@ -1025,7 +931,7 @@ async function handleScheduled(env: Env): Promise<void> {
 /**
  * Worst-case binding calls one restored record costs. Cloudflare counts every
  * KV/D1/DO binding call against the same per-request subrequest ceiling as
- * `fetch`, so this is what actually bounds a page:
+ * `fetch`. We use these costs to bound a page within our operational budget:
  *
  * - a published pack: the `pack:` KV put + the D1 upsert + the tag batch = 3
  * - a draft pack: the KV put + one D1 batch = 2
@@ -1035,45 +941,29 @@ async function handleScheduled(env: Env): Promise<void> {
  * cost nothing here. Keeping the constant at 4 deliberately over-reserves per
  * record; the slack absorbs cost growth without retuning.
  *
- * The ceiling this protects is now the DURABLE OBJECT's, not this route's:
+ * This operational budget applies to the DURABLE OBJECT, not this route:
  * PackIndexDO.writeRestorePage performs those writes so its staging journal can
- * order them against account deletion, and a Durable Object gets its own
- * 1000-subrequest budget. The route itself now spends a couple of dozen. Do not
+ * order them against account deletion. We conservatively budget 1000
+ * subrequests per invocation; Workers Paid defaults to 10,000 since February
+ * 11, 2026. The route itself now spends a couple of dozen. Do not
  * read that slack as room to raise the page cap — the writes did not get
- * cheaper, they moved, and the DO is what would throw.
+ * cheaper, they moved, and the DO consumes the operational budget.
  *
  * Derive the caps from this rather than picking a round number: a page cap of
- * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
- * is the failure the paging was added to avoid in the first place.
+ * 400 was ~1200 subrequests, above our conservative budget and the former
+ * platform ceiling that originally motivated paging.
  */
 export const SUBREQUESTS_PER_RECORD = 4;
-/** Per-request subrequest ceiling on Workers Paid. */
+/** Conservative operational budget, below Workers Paid's 10,000 default.
+ *  See https://developers.cloudflare.com/changelog/post/2026-02-11-subrequests-limit/ */
 export const SUBREQUEST_CEILING = 1000;
 /** Held back for the backup read, the fresh index read, the DO index swap, the
  *  cache purge, the tombstone list pages plus the capped legacy-value gets
  *  (~60 worst case), and the capped final-page exclusion pass — everything a
  *  page does outside the record loop. */
 export const SUBREQUEST_RESERVE = 100;
-/**
- * Budget for the final page's exclusion pass — deleting records that were
- * tombstoned AFTER the job began (begin-time tombstones were already filtered
- * out of the staged snapshot, so this set is normally empty). Bounded because
- * an author deleting a large corpus mid-restore could otherwise push the final
- * page past the subrequest ceiling and wedge it in a deterministic retry loop.
- * Skipping the remainder is safe: the DO index replacement is what stops
- * excluded packs being served, writeBackup filters votes to live packs, and
- * the nightly D1 reconcile sweeps orphan rows. The one residual reconcile
- * does NOT sweep is a skipped vote's orphan `vote:` KEY in KV — if that exact
- * slug is later recycled, the stale record makes a previous voter's first
- * vote toggle off; self-corrects on their second vote.
- */
-const EXCLUSION_SUBREQUEST_BUDGET = 60;
-
 /** One KV delete for `vote:{packId}:{userId}` and one for the reverse index. */
 export const SUBREQUESTS_PER_VOTE = 2;
-/** Worst-case cost of entering another vote page: the list call plus one
- *  full record. */
-const VOTE_DELETE_SUBREQUESTS_PER_PAGE = 1 + SUBREQUESTS_PER_VOTE;
 /**
  * Subrequests account deletion may spend clearing votes. The reserve covers
  * everything outside the vote loop: the tombstone put, the DO call, the capped
@@ -1086,9 +976,8 @@ export const RESTORE_MAX_PAGE_SIZE = Math.floor(
   (SUBREQUEST_CEILING - SUBREQUEST_RESERVE) / SUBREQUESTS_PER_RECORD,
 );
 /** Default page: half the cap, so an operator who passes no limit stays well
- *  clear of the ceiling even if the per-record cost grows. */
+ *  clear of the operational budget even if the per-record cost grows. */
 const RESTORE_PAGE_SIZE = Math.floor(RESTORE_MAX_PAGE_SIZE / 2);
-const RESTORE_CONCURRENCY = 10;
 
 /**
  * A cursor's position, or 0 for "start from the beginning".
@@ -1193,16 +1082,7 @@ async function fingerprintRestorePlan(plan: RestorePlan): Promise<string> {
 }
 
 /** Run `tasks` with at most `concurrency` in flight, preserving fail-fast. */
-async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): Promise<void> {
-  let next = 0;
-  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
-    while (next < tasks.length) {
-      const index = next++;
-      await tasks[index]!();
-    }
-  });
-  await Promise.all(workers);
-}
+
 /**
  * Restore the pack corpus from a retained backup through a server-owned Durable
  * Object job. The opaque token identifies the job; caller-supplied cursors are
@@ -1458,71 +1338,12 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   const restoredPacks = pageResult.restoredPacks;
   const restoredVotes = pageResult.restoredVotes;
 
-  let finalReplacement: { packs: Pack[]; restoredIds: string[] } | undefined;
-  if (claim.final) {
-    const filtered = dropDeletedUsers(deletionTombstones, {
-      created_at: snapshot.created_at,
-      packs: plan.packs,
-      packBodies: plan.packBodies,
-      votes: plan.voteMap,
-    });
-    const finalSnapshot = normalizeBackupSnapshot({
-      created_at: snapshot.created_at,
-      packs: filtered.packs,
-      packBodies: filtered.packBodies,
-      votes: filtered.votes,
-    });
-    const finalPlan = buildRestorePlan(finalSnapshot);
-    const keptPackIds = new Set(finalPlan.packIds);
-    const keptVoteKeys = new Set(Object.keys(finalPlan.voteMap));
-    const excludedPackIds = plan.packIds.filter((id) => !keptPackIds.has(id));
-    const excludedVotes = plan.votes.filter(
-      (vote) => !keptVoteKeys.has(`${vote.packId}:${vote.userId}`),
-    );
-
-    // Cap this tidiness pass so a mid-restore account deletion of a large
-    // corpus cannot push the final page past the subrequest ceiling (see
-    // EXCLUSION_SUBREQUEST_BUDGET for why skipping the tail is safe).
-    // Costs here are EXACT, not estimates: a pack is one KV delete + one D1
-    // batch (2); a vote is deleteVote's two key deletes (2). Deliberately NOT
-    // deleteVotesForPack — its cost is 1 list + 2 per live vote, unknowable in
-    // advance and unbounded for a vote-heavy pack. The excluded pack's
-    // snapshot votes are already in excludedVotes below; any live votes
-    // outside the snapshot are unserved orphans like the skipped tail.
-    const exclusionTasks: (() => Promise<void>)[] = [];
-    let exclusionCost = 0;
-    let exclusionsSkipped = 0;
-    for (const id of excludedPackIds) {
-      if (exclusionCost + 2 > EXCLUSION_SUBREQUEST_BUDGET) {
-        exclusionsSkipped++;
-        continue;
-      }
-      exclusionCost += 2;
-      exclusionTasks.push(async () => {
-        await env.ESO_PACKS.delete(`pack:${id}`);
-        await d1DeletePack(env, id);
-      });
-    }
-    for (const vote of excludedVotes) {
-      if (exclusionCost + 2 > EXCLUSION_SUBREQUEST_BUDGET) {
-        exclusionsSkipped++;
-        continue;
-      }
-      exclusionCost += 2;
-      exclusionTasks.push(async () => {
-        await deleteVote(env, vote.packId, vote.userId);
-      });
-    }
-    if (exclusionsSkipped > 0) {
-      console.warn(
-        `Restore final page skipped ${exclusionsSkipped} exclusion deletion(s) over budget; ` +
-          "orphans are unserved and swept by reconcile.",
-      );
-    }
-    await runBounded(exclusionTasks, RESTORE_CONCURRENCY);
-
-    finalReplacement = { packs: finalPlan.packs, restoredIds: plan.packIds };
-  }
+  // The DO applies deletion cutoffs and vote membership under the same lock
+  // as account erasure. Passing the original records also lets it preserve a
+  // fresh pack that reuses an erased snapshot's slug.
+  const finalReplacement = claim.final
+    ? { packs: plan.packs, restoredIds: plan.packIds, votes: plan.votes }
+    : undefined;
 
   const completed = await index.completeRestorePage({
     tokenHash,
@@ -1570,80 +1391,6 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
 
 // ── DELETE /account ────────────────────────────────────────────
 
-/**
- * Scrub a deleted user's records out of the non-expiring `backup:latest`
- * snapshot.
- *
- * The daily `backup:YYYY-MM-DD` snapshots carry a 90-day TTL, so a deleted
- * user's data ages out of those on its own. `backup:latest` is deliberately
- * written WITHOUT a TTL (it is the floor that survives a >90-day backup gap),
- * so without this it would retain the packs and votes of a user who asked for
- * deletion — indefinitely, and invisibly to them. Rewriting this one key bounds
- * the retention of deleted data to the dailies' 90-day window, which is what
- * PRIVACY.md commits to.
- *
- * Mirrors handleDeleteAccount's treatment of live data exactly: it drops the
- * user's own packs, their own votes, and every vote attached to a removed pack
- * id. Slugs are reusable, so retaining those votes would let a restored or
- * recreated pack inherit votes from an earlier lifecycle.
- *
- * Best-effort. The live data is already gone by the time this runs, so a
- * failure here must not fail the deletion request — it is logged and swallowed.
- *
- * This scrub alone does NOT stop a concurrent scheduled backup reintroducing the
- * user, and an earlier version of this comment claimed it did. `handleScheduled`
- * reads the live index and votes and then writes `backup:latest`, sharing no
- * lock with this path, so a cron that read before the deletion could write after
- * this scrub and put the records back — into the one key with no TTL.
- *
- * What actually closes that is the tombstone written by the caller before this
- * runs: `dropDeletedUsers` filters tombstoned users out at WRITE time, so a
- * stale read cannot publish them however the two interleave. This function
- * remains necessary for the snapshot that is already on disk.
- */
-async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void> {
-  try {
-    const raw = await env.ESO_PACKS.get("backup:latest");
-    if (!raw) return;
-
-    const snapshot = JSON.parse(raw) as PackBackupSnapshot;
-
-    const removedPackIds = new Set(
-      (snapshot.packs ?? []).filter((pack) => pack.author_id === userId).map((pack) => pack.id),
-    );
-    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
-      if (pack?.author_id === userId) removedPackIds.add(id);
-    }
-    const keptPacks = (snapshot.packs ?? []).filter((p) => !removedPackIds.has(p.id));
-    const keptBodies: Record<string, Pack> = {};
-    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
-      if (!removedPackIds.has(id) && pack?.author_id !== userId) keptBodies[id] = pack;
-    }
-    const keptVotes: Record<string, VoteRecord> = {};
-    for (const [key, vote] of Object.entries(snapshot.votes ?? {})) {
-      if (vote?.userId !== userId && !removedPackIds.has(vote?.packId)) keptVotes[key] = vote;
-    }
-
-    const removed =
-      (snapshot.packs?.length ?? 0) -
-      keptPacks.length +
-      (Object.keys(snapshot.packBodies ?? {}).length - Object.keys(keptBodies).length) +
-      (Object.keys(snapshot.votes ?? {}).length - Object.keys(keptVotes).length);
-    if (removed === 0) return; // nothing of theirs in the snapshot — skip the write
-
-    const scrubbed: PackBackupSnapshot = {
-      created_at: snapshot.created_at,
-      packs: keptPacks,
-      packBodies: keptBodies,
-      votes: keptVotes,
-    };
-    await env.ESO_PACKS.put("backup:latest", JSON.stringify(scrubbed));
-    console.log(`Purged ${removed} record(s) for deleted user from backup:latest`);
-  } catch (err) {
-    console.error("Failed to purge deleted user from backup:latest:", err);
-  }
-}
-
 async function handleDeleteAccount(request: Request, env: Env, url: URL): Promise<Response> {
   const user = await validateBearerToken(request);
   if (!user) return unauthorized(request);
@@ -1674,69 +1421,12 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   const removedIds = await getPackIndexDO(env).removePacksByAuthor(userId);
   const packIds = removedIds;
 
-  // Delete individual pack KV entries
-  for (const packId of packIds) {
-    await env.ESO_PACKS.delete(`pack:${packId}`);
-  }
+  // 2. Clear durable membership before retryable KV cleanup.
+  const { removed: voteCount, complete: votesComplete } =
+    await getPackIndexDO(env).deleteUserVotes(userId);
 
-  // 2. Delete all user's votes via reverse index (user-votes:{userId}:{packId})
-  // Does not decrement vote_count — denormalized aggregates, acceptable for rare deletion.
-  //
-  // Packs are capped at MAX_PACKS_PER_USER and shares at MAX_SHARES_PER_USER,
-  // so those loops are inherently bounded. Votes are not capped, so this is the
-  // one loop in account deletion that can spend an unbounded number of
-  // subrequests. Left unbudgeted it is the same failure the restore path was
-  // paged to avoid: past the ceiling the whole request throws, and the bounded
-  // cleanup below it — share codes and the never-expiring backup scrub — never
-  // runs at all. Budget the votes, always reach the bounded tail, and tell the
-  // caller when there is more to collect. Erasure stays convergent because
-  // every deleted key simply stops being listed on the next pass.
-  let voteCount = 0;
-  let voteCursor: string | undefined;
-  let votesComplete = true;
-  let voteSubrequests = 0;
-  do {
-    if (voteSubrequests + VOTE_DELETE_SUBREQUESTS_PER_PAGE > ACCOUNT_DELETE_VOTE_BUDGET) {
-      votesComplete = false;
-      break;
-    }
-    const list = await env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor: voteCursor });
-    voteSubrequests++;
-    for (const key of list.keys) {
-      if (voteSubrequests + SUBREQUESTS_PER_VOTE > ACCOUNT_DELETE_VOTE_BUDGET) {
-        votesComplete = false;
-        break;
-      }
-      const packId = key.name.slice(`user-votes:${userId}:`.length);
-      if (packId) {
-        await env.ESO_PACKS.delete(`vote:${packId}:${userId}`);
-        voteSubrequests++;
-      }
-      await env.ESO_PACKS.delete(key.name);
-      voteSubrequests++;
-      voteCount++;
-    }
-    if (!votesComplete) break;
-    voteCursor = list.list_complete ? undefined : list.cursor;
-  } while (voteCursor);
-
-  // 3. Delete all user's share codes
-  let shareCount = 0;
-  let shareCursor: string | undefined;
-  do {
-    const list = await env.ESO_PACKS.list({ prefix: `share-user:${userId}:`, cursor: shareCursor });
-    for (const key of list.keys) {
-      // Extract the share code from key format: share-user:{userId}:{code}
-      const parts = key.name.split(":");
-      const code = parts[parts.length - 1];
-      if (code) {
-        await env.ESO_PACKS.delete(`share:${code}`);
-      }
-      await env.ESO_PACKS.delete(key.name);
-      shareCount++;
-    }
-    shareCursor = list.list_complete ? undefined : list.cursor;
-  } while (shareCursor);
+  // 3. Clear share reservations and record deletion before retryable KV cleanup.
+  const shareCount = await getPackIndexDO(env).deleteUserShares(userId);
 
   if (packIds.length > 0) {
     await invalidatePackListCache(url);
@@ -1744,7 +1434,7 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   // 4. Scrub them from the one backup key that never expires. The dated
   // snapshots keep their 90-day TTL and age out on their own.
-  await purgeUserFromLatestBackup(env, userId);
+  await getPackIndexDO(env).purgeDeletedUsersFromLatestBackup();
 
   return json(request, {
     // `false` means the bounded work is done but votes remain; the caller

@@ -992,50 +992,124 @@ pub fn list_snapshots(addons_dir: &Path) -> Vec<SnapshotManifest> {
     store.snapshots
 }
 
-/// Extract a snapshot ZIP archive entry-by-entry onto the live directory.
-/// Pure extraction with no snapshotting side effects — shared by the normal
-/// restore path and by the automatic rollback path, so rollback can never
-/// recursively create another Pre-restore snapshot.
-fn extract_archive_entries(archive_path: &Path, parent: &Path) -> Result<u32, String> {
+/// Names created by this extraction, needed in addition to restoring old bytes:
+/// a safety snapshot cannot contain names that did not exist before the restore.
+#[derive(Default)]
+struct RestoreCreated {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+impl RestoreCreated {
+    fn rollback(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for path in self.files.iter().rev() {
+            if let Err(e) = fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    errors.push(format!("{}: {e}", path.display()));
+                }
+            }
+        }
+        for path in self.dirs.iter().rev() {
+            // Never recursively remove: unrelated contents must survive.
+            if let Err(e) = fs::remove_dir(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    errors.push(format!("{}: {e}", path.display()));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+fn restore_path_metadata(path: &Path) -> Result<Option<fs::Metadata>, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let linked = metadata.file_type().is_symlink();
+            #[cfg(windows)]
+            let linked = {
+                use std::os::windows::fs::MetadataExt;
+                linked || metadata.file_attributes() & 0x400 != 0
+            };
+            if linked {
+                return Err(format!("Refusing linked restore path: {}", path.display()));
+            }
+            Ok(Some(metadata))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Inspect restore path {}: {e}", path.display())),
+    }
+}
+
+fn create_restore_dirs(
+    root: &Path,
+    relative: &Path,
+    created: &mut RestoreCreated,
+) -> Result<(), String> {
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err("Invalid snapshot entry path".into());
+        }
+        path.push(component);
+        match restore_path_metadata(&path)? {
+            Some(metadata) if metadata.is_dir() => {}
+            Some(_) => return Err(format!("Restore directory is a file: {}", path.display())),
+            None => {
+                fs::create_dir(&path).map_err(|e| format!("Create restore directory: {e}"))?;
+                created.dirs.push(path.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shared by restore and rollback. Temporary files are unique and removed on
+/// every failure; publishing replaces a name without following its old inode.
+fn extract_archive_entries(
+    archive_path: &Path,
+    parent: &Path,
+    created: &mut RestoreCreated,
+) -> Result<u32, String> {
     let file = fs::File::open(archive_path)
         .map_err(|e| format!("Failed to open snapshot archive: {e}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read snapshot archive: {e}"))?;
-
-    let mut restored: u32 = 0;
+    let mut restored = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Failed to read archive entry: {e}"))?;
-
-        let entry_path = match entry.enclosed_name() {
-            Some(p) => p.to_path_buf(),
-            None => continue, // Skip entries with path traversal
-        };
-
-        let dest = parent.join(&entry_path);
-
-        // Defense-in-depth: ensure extracted path stays within the target directory
-        if !dest.starts_with(parent) {
+        let relative = entry
+            .enclosed_name()
+            .ok_or("Invalid snapshot entry path")?
+            .to_path_buf();
+        if entry.is_dir() {
+            create_restore_dirs(parent, &relative, created)?;
             continue;
         }
-
-        if entry.is_dir() {
-            let _ = fs::create_dir_all(&dest);
-        } else {
-            if let Some(parent_dir) = dest.parent() {
-                let _ = fs::create_dir_all(parent_dir);
-            }
-            let mut out = crate::atomic_file::AtomicFile::create(&dest)
-                .map_err(|e| format!("Failed to create restore file: {e}"))?;
-            std::io::copy(&mut entry, &mut out)
-                .map_err(|e| format!("Failed to write restore file: {e}"))?;
-            out.commit()
-                .map_err(|e| format!("Failed to finalize restored file: {e}"))?;
-            restored += 1;
+        create_restore_dirs(
+            parent,
+            relative.parent().ok_or("Invalid snapshot entry path")?,
+            created,
+        )?;
+        let dest = parent.join(&relative);
+        let existed = restore_path_metadata(&dest)?.is_some();
+        let mut out = crate::atomic_file::AtomicFile::create(&dest)
+            .map_err(|e| format!("Failed to create restore file: {e}"))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("Failed to write restore file: {e}"))?;
+        out.commit()
+            .map_err(|e| format!("Failed to finalize restored file: {e}"))?;
+        if !existed {
+            created.files.push(dest);
         }
+        restored += 1;
     }
-
     Ok(restored)
 }
 
@@ -1077,6 +1151,13 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             },
         )?;
 
+    if pre_restore_manifest.skipped_count > 0 {
+        return Err(format!(
+            "Safety snapshot could not read {} file(s). Restore aborted before changing any files.",
+            pre_restore_manifest.skipped_count
+        ));
+    }
+
     let root = snapshots_root(addons_dir);
     let archive_path = root.join(format!("{snapshot_id}.zip"));
     if !archive_path.is_file() {
@@ -1094,7 +1175,8 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
 
     let parent = addons_dir.parent().unwrap_or(addons_dir);
 
-    let restored = match extract_archive_entries(&archive_path, parent) {
+    let mut created = RestoreCreated::default();
+    let restored = match extract_archive_entries(&archive_path, parent, &mut created) {
         Ok(restored) => restored,
         Err(e) => {
             // Best-effort rollback: restore the just-created Pre-restore snapshot's
@@ -1102,7 +1184,19 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             // restore_snapshot itself), so this can never re-enter the rollback
             // logic or create yet another Pre-restore snapshot.
             let pre_restore_archive = root.join(format!("{}.zip", pre_restore_manifest.id));
-            let rollback_result = extract_archive_entries(&pre_restore_archive, parent);
+            let cleanup = created.rollback();
+            let restore = extract_archive_entries(
+                &pre_restore_archive,
+                parent,
+                &mut RestoreCreated::default(),
+            );
+            let rollback_result = match (cleanup, restore) {
+                (Ok(()), result) => result,
+                (Err(cleanup), Ok(_)) => {
+                    Err(format!("Could not remove newly created paths: {cleanup}"))
+                }
+                (Err(cleanup), Err(restore)) => Err(format!("{cleanup}; {restore}")),
+            };
             let rollback_ok = rollback_result.is_ok();
 
             let _ = append_op_log(
@@ -1545,6 +1639,55 @@ mod tests {
         assert!(result.addons_folder_ok);
         assert!(!result.saved_variables_ok);
         assert!(result.issues.iter().any(|i| i.contains("SavedVariables")));
+    }
+
+    #[test]
+    fn failed_restore_removes_new_files_and_restores_old_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let sv = tmp.path().join("SavedVariables");
+        fs::create_dir_all(&addons).unwrap();
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("Existing.lua"), b"before").unwrap();
+        fs::write(sv.join("blocked"), b"not a directory").unwrap();
+        let root = snapshots_root(&addons);
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("broken.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        for name in [
+            "SavedVariables/new/nested.lua",
+            "SavedVariables/Existing.lua",
+            "SavedVariables/blocked/failure.lua",
+        ] {
+            zip.start_file(name, SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"restore bytes").unwrap();
+        }
+        zip.finish().unwrap();
+        let manifest = SnapshotManifest {
+            id: "broken".into(),
+            label: "Broken".into(),
+            created_at: now_timestamp(),
+            source_paths: vec!["SavedVariables".into()],
+            file_count: 3,
+            total_size: 39,
+            archive_sha256: sha256_file(&archive).unwrap(),
+            skipped_count: 0,
+            skipped_files: vec![],
+        };
+        save_snapshot_store(
+            &addons,
+            &SnapshotStore {
+                version: 1,
+                snapshots: vec![manifest],
+            },
+        )
+        .unwrap();
+        let error = restore_snapshot(&addons, "broken").unwrap_err();
+        assert!(error.contains("automatically restored"), "{error}");
+        assert_eq!(fs::read(sv.join("Existing.lua")).unwrap(), b"before");
+        assert_eq!(fs::read(sv.join("blocked")).unwrap(), b"not a directory");
+        assert!(!sv.join("new").exists());
+        assert_eq!(fs::read_dir(&sv).unwrap().count(), 2);
     }
 
     #[test]

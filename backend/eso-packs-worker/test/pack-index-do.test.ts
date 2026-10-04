@@ -48,6 +48,93 @@ describe("PackIndexDO authoritative mutations", () => {
     await index.replaceIndex({ packs: [] });
   });
 
+  it("commits a vote and counter despite a failed reverse-key write, then repairs it", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-partial");
+    await index.addPack(pack);
+    const original = e.ESO_PACKS.put.bind(e.ESO_PACKS);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockImplementation((key, value, options) => {
+      if (key.startsWith("user-votes:")) throw new Error("reverse index unavailable");
+      return original(key, value, options);
+    });
+    expect(await index.toggleVote(pack.id, "77")).toMatchObject({ voted: true, pack: { vote_count: 1 } });
+    expect(await index.getVotedPackIds("77", [pack.id])).toEqual(new Set([pack.id]));
+    put.mockRestore();
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(await e.ESO_PACKS.get(`user-votes:77:${pack.id}`)).toBe("1");
+    expect(await index.toggleVote(pack.id, "77")).toMatchObject({ voted: false, pack: { vote_count: 0 } });
+    expect(await index.getVotedPackIds("77", [pack.id])).toEqual(new Set());
+  });
+
+  it("backs up canonical votes during a KV outage and never replays a deleted user's vote", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-backup");
+    await index.addPack(pack);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValue(new Error("KV offline"));
+    await index.toggleVote(pack.id, "77");
+    put.mockRestore();
+    await index.writeBackup("backup:audit-vote", { created_at: pack.created_at, packs: [pack], packBodies: {}, votes: {} });
+    const snapshot = await e.ESO_PACKS.get<{ votes: Record<string, unknown> }>("backup:audit-vote", "json");
+    expect(snapshot!.votes[`${pack.id}:77`]).toMatchObject({ packId: pack.id, userId: "77" });
+    expect(await index.deleteUserVotes("77")).toEqual({ removed: 1, complete: true });
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(await e.ESO_PACKS.get(`vote:${pack.id}:77`)).toBeNull();
+    expect(await index.getPack(pack.id)).toMatchObject({ vote_count: 0 });
+  });
+
+  it("restores membership with its counter and discards votes absent from the snapshot", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-restore");
+    await index.addPack(pack);
+    await index.toggleVote(pack.id, "77");
+    await putVote(e, pack.id, "legacy");
+    const restored = { ...pack, vote_count: 1 };
+    await index.replaceIndexPreserving({ packs: [restored] }, [pack.id], [
+      { packId: pack.id, userId: "88", votedAt: "2026-01-01T00:00:00.000Z" },
+    ]);
+    expect(await index.getVotedPackIds("77", [pack.id])).toEqual(new Set());
+    expect(await index.getVotedPackIds("legacy", [pack.id])).toEqual(new Set());
+    expect(await index.getVotedPackIds("88", [pack.id])).toEqual(new Set([pack.id]));
+    expect(await index.toggleVote(pack.id, "88")).toMatchObject({ voted: false, pack: { vote_count: 0 } });
+  });
+
+  it("drains large vote sets across alarms before allowing slug reuse", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-pages");
+    expect(await index.addPack(pack)).toMatchObject({ ok: true });
+    for (let i = 0; i < 23; i++) await putVote(e, pack.id, `paged-voter-${i}`);
+
+    expect(await index.removePack(pack.id)).toBe("ok");
+    expect(await index.getPack(pack.id)).toBeNull();
+    expect((await e.ESO_PACKS.list({ prefix: `vote:${pack.id}:` })).keys).toHaveLength(13);
+    const replacement = { ...pack, created_at: "2026-10-03T00:00:00.000Z" };
+    expect(await index.addPack(replacement)).toEqual({ ok: false, reason: "duplicate" });
+
+    for (let i = 0; i < 3; i++) await runDurableObjectAlarm(index);
+    expect((await e.ESO_PACKS.list({ prefix: `vote:${pack.id}:` })).keys).toHaveLength(0);
+    for (let i = 0; i < 23; i++) {
+      expect(await e.ESO_PACKS.get(`user-votes:paged-voter-${i}:${pack.id}`)).toBeNull();
+    }
+    expect(await index.addPack(replacement)).toMatchObject({ ok: true });
+    expect(await index.toggleVote(pack.id, "fresh-paged-voter")).toMatchObject({ voted: true });
+    await runDurableObjectAlarm(index);
+    expect(await e.ESO_PACKS.get(`vote:${pack.id}:fresh-paged-voter`)).not.toBeNull();
+  });
+
+  it("does not recreate a vote after pack deletion and slug reuse", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-lifecycle");
+    await index.addPack(pack);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValue(new Error("KV offline"));
+    await index.toggleVote(pack.id, "77");
+    put.mockRestore();
+    await index.removePack(pack.id);
+    await index.addPack({ ...pack, created_at: "2026-10-03T00:00:00.000Z" });
+    await runDurableObjectAlarm(index);
+    expect(await e.ESO_PACKS.get(`vote:${pack.id}:77`)).toBeNull();
+    expect(await index.toggleVote(pack.id, "77")).toMatchObject({ voted: true, pack: { vote_count: 1 } });
+  });
+
   it("accepts only one concurrent create for the same id", async () => {
     const pack = makePack("w1-duplicate-create");
 
@@ -59,6 +146,64 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(results.filter((result) => result.ok)).toHaveLength(1);
     expect(results.find((result) => !result.ok)).toMatchObject({ reason: "duplicate" });
     expect((await packIndex().getIndex()).packs.filter(({ id }) => id === pack.id)).toHaveLength(1);
+  });
+
+  it("repairs a failed D1 update from the current canonical body", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-d1-retry");
+    await index.addPack(pack);
+    const originalPrepare = e.ROSTER_HUB_DB!.prepare.bind(e.ROSTER_HUB_DB);
+    const prepare = vi.spyOn(e.ROSTER_HUB_DB!, "prepare").mockImplementation(() => {
+      throw new Error("injected D1 outage");
+    });
+    expect(await index.updatePack(pack.id, { ...pack, title: "New title" }))
+      .toMatchObject({ status: "ok", pack: { title: "New title" } });
+    const titles: unknown[] = [];
+    prepare.mockImplementation((sql) => {
+      const statement = originalPrepare(sql);
+      const bind = statement.bind.bind(statement);
+      statement.bind = (...args: unknown[]) => {
+        if (sql.includes("INSERT INTO packs")) titles.push(args[4]);
+        return bind(...args);
+      };
+      return statement;
+    });
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(titles).toEqual(["New title"]);
+    prepare.mockRestore();
+  });
+
+  it("removes the public D1 row on draft even when KV is unavailable", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-d1-draft");
+    await index.addPack(pack);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValue(new Error("KV offline"));
+    const prepare = vi.spyOn(e.ROSTER_HUB_DB!, "prepare");
+    await index.updatePack(pack.id, { ...pack, status: "draft" });
+    expect(prepare.mock.calls.some(([sql]) => sql === "DELETE FROM packs WHERE id = ?"))
+      .toBe(true);
+    expect(prepare.mock.calls.some(([sql]) => sql.includes("INSERT INTO packs"))).toBe(false);
+    put.mockRestore();
+    prepare.mockClear();
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(prepare.mock.calls.some(([sql]) => sql.includes("INSERT INTO packs"))).toBe(false);
+    prepare.mockRestore();
+  });
+
+  it("does not replay a failed D1 update after its pack is deleted", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-d1-delete");
+    await index.addPack(pack);
+    const prepare = vi.spyOn(e.ROSTER_HUB_DB!, "prepare").mockImplementation(() => {
+      throw new Error("D1 offline");
+    });
+    await index.updatePack(pack.id, { ...pack, title: "Stale public title" });
+    prepare.mockRestore();
+    await index.removePack(pack.id);
+    const reads = vi.spyOn(e.ROSTER_HUB_DB!, "prepare");
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(reads.mock.calls.some(([sql]) => sql.includes("INSERT INTO packs"))).toBe(false);
+    reads.mockRestore();
   });
 
   it("does not overwrite an omitted pre-deploy pack during shadow mutation", async () => {
@@ -769,6 +914,51 @@ describe("PackIndexDO authoritative mutations", () => {
     });
   });
 
+  it("repairs a fresh pack overwritten by a restore write racing account deletion", async () => {
+    const index = packIndex();
+    const stale = makePack("audit-raced-restore", { author_id: "raced-restore-author" });
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const fresh = { ...stale, title: "New publication", created_at: future, updated_at: future };
+    const started = await index.beginRestoreJob({
+      backupKey: "backup:latest",
+      snapshotCreatedAt: stale.created_at,
+      snapshotFingerprint: "raced-restore",
+      total: 1,
+    });
+    if (!started.ok) throw new Error("restore job did not start");
+    const tokenHash = await restoreTokenHash(started.token);
+    const claim = await index.claimRestorePage({ tokenHash, limit: 1 });
+    if (!claim.ok) throw new Error("restore page was not claimed");
+
+    await runInDurableObject(index, async (instance) => {
+      const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
+      let raced = false;
+      const put = vi.spyOn(e.ESO_PACKS, "put").mockImplementation(async (key, value, options) => {
+        if (key === `pack:${stale.id}` && !raced) {
+          raced = true;
+          expect(await instance.removePacksByAuthor(stale.author_id)).toContain(stale.id);
+          expect(await instance.addPack(fresh)).toMatchObject({ ok: true });
+        }
+        return originalPut(key, value, options);
+      });
+      try {
+        expect(await instance.writeRestorePage({
+          tokenHash,
+          claimId: claim.claimId,
+          jobId: started.job.jobId,
+          packs: [stale],
+          votes: [],
+        })).toMatchObject({ ok: true, restoredPacks: 0 });
+        expect(raced).toBe(true);
+        expect(await instance.getPack(stale.id)).toMatchObject({ title: fresh.title, created_at: future });
+        expect(await e.ESO_PACKS.get(`pack:${stale.id}`, "json"))
+          .toMatchObject({ title: fresh.title, created_at: future });
+      } finally {
+        put.mockRestore();
+      }
+    });
+  });
+
   it("removes expired restore jobs from alarm cleanup", async () => {
     const index = packIndex();
     const started = await index.beginRestoreJob({
@@ -999,15 +1189,9 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await e.ESO_PACKS.get("pack:w1-expired-orphan")).toBeNull();
   });
 
-  it("erases a staged restore body without enumerating its votes", async () => {
-    // deleteVotesForPack costs one list plus two subrequests per live vote --
-    // unknowable in advance and unbounded for a vote-heavy pack. The restore
-    // route's exclusion pass refuses exactly that spend on exactly these
-    // orphaned bodies; paying it here could push account deletion past the
-    // Durable Object's subrequest ceiling, where it throws and reports no
-    // removed ids at all, so the user can never finish erasing. The vote left
-    // behind hangs off a body nothing serves, and writeBackup keeps only votes
-    // on live packs.
+  it("erases a staged restore body and its votes through the deletion journal", async () => {
+    // Staged bodies are not canonical yet, but account deletion must discover
+    // them and queue the same bounded cleanup used for published packs.
     const T0 = Date.now();
     const index = packIndex();
     const authorId = "staged-vote-author";
@@ -1047,7 +1231,8 @@ describe("PackIndexDO authoritative mutations", () => {
     expect(await index.removePacksByAuthor(authorId)).toContain(staged.id);
 
     expect(await e.ESO_PACKS.get(`pack:${staged.id}`)).toBeNull();
-    expect(await e.ESO_PACKS.get(`vote:${staged.id}:${voterId}`)).not.toBeNull();
+    expect(await e.ESO_PACKS.get(`vote:${staged.id}:${voterId}`)).toBeNull();
+    expect(await e.ESO_PACKS.get(`user-votes:${voterId}:${staged.id}`)).toBeNull();
   });
 
   it("filters deleted authors while writing backups", async () => {

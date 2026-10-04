@@ -3,12 +3,14 @@ import {
   buildD1ReconciliationPlan,
   reconcileD1,
   recordD1MirrorFailure,
+  toD1PackRow,
   type D1PackRow,
   type ReconciliationAuthority,
 } from "../src/d1-reconcile";
 import type { Env, Pack } from "../src/types";
 import { makePack } from "./helpers";
-import { d1UpsertPack, migrationWitnessIds } from "../src/index";
+import { migrationWitnessIds } from "../src/index";
+import { ANONYMOUS_AUTHOR_NAME } from "../src/redact";
 
 function row(pack: Pack): D1PackRow {
   return {
@@ -514,19 +516,40 @@ describe("D1 reconciliation", () => {
     expect(await migrationWitnessIds(env, new Set(["website"]))).toEqual(["pack-hub"]);
   });
 
-  it("updates D1 author ownership when restore upserts an existing id", async () => {
-    const sql: string[] = [];
-    const env = {
-      ESO_PACKS: { put: vi.fn() },
-      ROSTER_HUB_DB: {
-        prepare: vi.fn().mockImplementation((statement: string) => {
-          sql.push(statement);
-          return { bind: () => ({ run: vi.fn().mockResolvedValue({ success: true }) }) };
-        }),
-        batch: vi.fn().mockResolvedValue([]),
-      },
-    } as unknown as Env;
-    await d1UpsertPack(env, makePack("restored-owner", { author_id: "new-owner" }));
-    expect(sql[0]).toContain("author_id = excluded.author_id");
+  it("routes D1 ownership correction through the canonical Durable Object", async () => {
+    const restored = makePack("restored-owner", { author_id: "new-owner" });
+    const fixture = fakeEnv({
+      authority: { packs: [restored], tombstones: [] },
+      rows: [row(makePack(restored.id, { author_id: "old-owner" }))],
+      mode: "apply",
+    });
+    const result = await reconcileD1(fixture.env);
+    expect(result.applied.upserts).toBe(1);
+    expect(fixture.stub.reconcileWriteD1).toHaveBeenCalledWith(
+      restored.id,
+      restored.created_at,
+      true,
+      false
+    );
+    expect(toD1PackRow(restored).author_id).toBe("new-owner");
+  });
+
+  it("redacts anonymous D1 author names while preserving ownership", () => {
+    const anonymous = makePack("anonymous", {
+      author_id: "private-owner",
+      author_name: "Private Name",
+      is_anonymous: true,
+    });
+    expect(toD1PackRow(anonymous)).toMatchObject({
+      author_id: "private-owner",
+      author_name: ANONYMOUS_AUTHOR_NAME,
+      is_anonymous: 1,
+    });
+    const plan = buildD1ReconciliationPlan(
+      { authority: "do", packs: [anonymous], tombstones: [] },
+      [row(anonymous)],
+      []
+    );
+    expect(plan.upserts).toEqual([anonymous]);
   });
 });

@@ -229,7 +229,7 @@ describe("resolveEffectiveField — metadata", () => {
     const field = resolve({ key: "seg\0ment", valueType: "string", value: "val" }, { path });
     // path is the raw segments (not split on "/" or escaped like nodeId)
     expect(field.path).toEqual(path);
-    expect(field.nodeId).toBe("MyAddon\0a/b\0seg\\0ment");
+    expect(field.nodeId).toBe("\0path:" + JSON.stringify(path));
   });
 
   it("humanizes key for label when no overlay", () => {

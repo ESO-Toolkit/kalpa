@@ -249,15 +249,20 @@ const AddonListItem = memo(function AddonListItem({
               : "w-0 opacity-0 group-hover:w-6 group-hover:opacity-100 group-focus-within:w-6 group-focus-within:opacity-100"
           )}
         >
-          {/* The Checkbox is the control itself — it renders a native <button
-              role="checkbox">, so wrapping it in another button nested two
-              interactive elements and announced two checkboxes per row. */}
+          {/* Checkbox renders a native button; its keyboard activation also
+              lets users enter batch selection before any row is selected. */}
           <Checkbox
             checked={isSelected}
             onCheckedChange={() => onToggleSelect(addon.folderName)}
             aria-label={`Select ${addon.title}`}
-            tabIndex={batchMode ? 0 : -1}
+            tabIndex={0}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onToggleSelect(addon.folderName);
+              }
+            }}
             className="focus-visible:ring-2 focus-visible:ring-accent-sky/40"
           />
         </div>

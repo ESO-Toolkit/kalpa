@@ -223,11 +223,11 @@ describe("AddonList", () => {
     expect(container.querySelectorAll("button button")).toHaveLength(0);
   });
 
-  it("keeps the row checkbox out of the tab order until batch mode is active", async () => {
+  it("keeps the row checkbox keyboard accessible before and during batch mode", async () => {
     const { rerender } = render(<Harness />);
     expect(await screen.findByRole("checkbox", { name: `Select ${addon.title}` })).toHaveAttribute(
       "tabindex",
-      "-1"
+      "0"
     );
 
     rerender(<Harness selectedFolders={new Set([addon.folderName])} />);
@@ -299,18 +299,18 @@ describe("AddonList", () => {
 
     const checkbox = await screen.findByRole("checkbox", { name: `Select ${addon.title}` });
     expect(checkbox).toHaveAttribute("aria-checked", "false");
-    expect(checkbox).toHaveAttribute("tabindex", "-1");
+    expect(checkbox).toHaveAttribute("tabindex", "0");
 
-    // Entering batch mode checks the row and pulls the checkbox into the tab order.
+    // Entering batch mode checks the row and keeps the checkbox keyboard accessible.
     await user.click(checkbox);
     expect(checkbox).toHaveAttribute("aria-checked", "true");
     expect(checkbox).toHaveAttribute("tabindex", "0");
     expect(await screen.findByText("· 1 selected")).toBeInTheDocument();
 
-    // Leaving it again clears the row and drops the checkbox back out.
+    // Leaving it again clears the row and keeps its selection control accessible.
     await user.click(checkbox);
     expect(checkbox).toHaveAttribute("aria-checked", "false");
-    expect(checkbox).toHaveAttribute("tabindex", "-1");
+    expect(checkbox).toHaveAttribute("tabindex", "0");
     expect(screen.queryByText("· 1 selected")).not.toBeInTheDocument();
     expect(onSelect).not.toHaveBeenCalled();
   });

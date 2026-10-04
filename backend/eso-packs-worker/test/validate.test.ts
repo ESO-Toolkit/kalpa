@@ -323,6 +323,48 @@ describe("sanitizeAddons", () => {
 });
 
 describe("readJsonBody", () => {
+  it("accepts the exact byte ceiling and rejects one byte more", async () => {
+    expect(await readJsonBody(post(JSON.stringify("x".repeat(MAX_BODY_BYTES - 2))))).toMatchObject({ ok: true });
+    expect(await readJsonBody(post(JSON.stringify("x".repeat(MAX_BODY_BYTES - 1))))).toEqual({ ok: false, reason: "too-large" });
+  });
+
+  it("counts multibyte UTF-8 bytes rather than string length", async () => {
+    const body = JSON.stringify({ blob: "界".repeat(90_000) });
+    expect(body.length).toBeLessThan(MAX_BODY_BYTES);
+    expect(await readJsonBody(post(body))).toEqual({ ok: false, reason: "too-large" });
+  });
+
+  it.each([false, true])("cancels oversized streams before reading the tail (declared length: %s)", async (declared) => {
+    let reads = 0;
+    let canceled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads++;
+        controller.enqueue(new Uint8Array(reads === 1 ? MAX_BODY_BYTES : 1));
+      },
+      cancel() { canceled = true; },
+    }, { highWaterMark: 0 });
+    const request = new Request("https://example.com/packs", {
+      method: "POST", body: stream,
+      headers: declared ? { "Content-Length": "1" } : undefined,
+    });
+    expect(await readJsonBody(request)).toEqual({ ok: false, reason: "too-large" });
+    expect(reads).toBe(2);
+    expect(canceled).toBe(true);
+  });
+
+  it("decodes UTF-8 characters spanning chunk boundaries", async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ title: "界" }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      },
+    });
+    expect(await readJsonBody(new Request("https://example.com/packs", { method: "POST", body: stream })))
+      .toEqual({ ok: true, body: { title: "界" } });
+  });
+
   function post(body: string): Request {
     return new Request("https://example.com/packs", { method: "POST", body });
   }
