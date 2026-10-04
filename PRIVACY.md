@@ -218,8 +218,8 @@ Two further details:
 - Votes **other people** cast on a deleted pack lifecycle are also removed,
   so a later pack using the same ID does not inherit those votes. Failed mirror
   cleanup is retried.
-- Pack vote totals shown elsewhere are denormalized counters and are not
-  recalculated when your votes are removed.
+- Removing your votes updates the Pack Hub's canonical vote totals. Copies of
+  those totals in storage mirrors may temporarily lag; failed writes are retried.
 
 ### Remove build-evidence records
 
