@@ -196,6 +196,14 @@ pub fn copy_sv_profile_blocking(
             .rfind('\n')
             .map(|p| p + 1)
             .unwrap_or(dest_start);
+        let remove_start = if content[line_start..dest_start]
+            .bytes()
+            .all(|b| b.is_ascii_whitespace())
+        {
+            line_start
+        } else {
+            dest_start
+        };
         let mut remove_end = dest_brace_end + 1;
         let rest = content.as_bytes();
         while remove_end < rest.len()
@@ -211,7 +219,7 @@ pub fn copy_sv_profile_blocking(
         if remove_end < rest.len() && rest[remove_end] == b'\n' {
             remove_end += 1;
         }
-        content = format!("{}{}", &content[..line_start], &content[remove_end..]);
+        content = format!("{}{}", &content[..remove_start], &content[remove_end..]);
     }
 
     // Re-search for the source key after potential removal (positions may have
@@ -568,5 +576,27 @@ mod tests {
         let acct1_block = &out[acct1..acct2];
         assert!(acct1_block.contains("[\"Gamma\"]"));
         assert!(acct1_block.contains("[\"setting\"] = \"a\""));
+    }
+
+    #[test]
+    fn overwriting_inline_destination_preserves_siblings() {
+        for input in [
+            "Var = { [\"Default\"] = { [\"@Acct\"] = {\n[\"Other\"] = { [\"keep\"] = 7 }, [\"Beta\"] = { [\"setting\"] = \"b\" }, [\"Alpha\"] = { [\"setting\"] = \"a\" }, [\"After\"] = { [\"keep\"] = 8 },\n} } }",
+            "Var = { [\"Default\"] = { [\"@Acct\"] = { [\"Other\"] = { [\"keep\"] = 7 }, [\"Beta\"] = { [\"setting\"] = \"b\" }, [\"Alpha\"] = { [\"setting\"] = \"a\" }, [\"After\"] = { [\"keep\"] = 8 } } } }",
+        ] {
+            let (_tmp, addons, file) = setup(input);
+            copy_sv_profile_blocking(&addons, "Test.lua", "Alpha", "Beta").unwrap();
+            let out = fs::read_to_string(file).unwrap();
+            let tree = parser::parse_sv_file(&out, "Test.lua").unwrap();
+            let account = &tree.children.as_ref().unwrap()[0].children.as_ref().unwrap()[0].children.as_ref().unwrap()[0];
+            let children = account.children.as_ref().unwrap();
+            assert_eq!(children.len(), 4, "{out}");
+            for (key, value) in [("Other", 7.0), ("After", 8.0)] {
+                let child = children.iter().find(|c| c.key == key).unwrap();
+                assert_eq!(child.children.as_ref().unwrap()[0].value, Some(serde_json::json!(value)));
+            }
+            let beta = children.iter().find(|c| c.key == "Beta").unwrap();
+            assert_eq!(beta.children.as_ref().unwrap()[0].value, Some(serde_json::json!("a")));
+        }
     }
 }

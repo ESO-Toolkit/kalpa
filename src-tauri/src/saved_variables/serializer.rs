@@ -1,4 +1,4 @@
-use super::types::{SvTreeNode, SvValueType};
+use super::types::{SvKeyType, SvTreeNode, SvValueType};
 use std::fmt::{self, Write};
 
 /// Serialize an `SvTreeNode` tree back to Lua source text.
@@ -138,7 +138,11 @@ fn serialize_table<W: Write>(out: &mut W, node: &SvTreeNode, depth: usize) {
             // (character-key extraction in io.rs, copy-profile in profile.rs)
             // depend on that. Emitting bare identifiers here would make
             // identifier-like character names vanish from those features.
-            if is_numeric_key(&child.key) {
+            let numeric = match child.key_type {
+                Some(SvKeyType::String) => false,
+                Some(SvKeyType::Number) | None => is_numeric_key(&child.key),
+            };
+            if numeric {
                 w(out, "[");
                 w(out, &child.key);
                 w(out, "] = ");
@@ -209,6 +213,7 @@ mod tests {
                 key: "MyVar".into(),
                 value_type: SvValueType::Table,
                 value: None,
+                key_type: None,
                 raw_lua_value: None,
                 children: Some(vec![
                     SvTreeNode {
@@ -216,6 +221,7 @@ mod tests {
                         value_type: SvValueType::Boolean,
                         value: Some(serde_json::json!(true)),
                         children: None,
+                        key_type: None,
                         raw_lua_value: None,
                     },
                     SvTreeNode {
@@ -223,6 +229,7 @@ mod tests {
                         value_type: SvValueType::Number,
                         value: Some(serde_json::json!(42.0)),
                         children: None,
+                        key_type: None,
                         raw_lua_value: None,
                     },
                     SvTreeNode {
@@ -230,10 +237,12 @@ mod tests {
                         value_type: SvValueType::String,
                         value: Some(serde_json::json!("hello")),
                         children: None,
+                        key_type: None,
                         raw_lua_value: None,
                     },
                 ]),
             }]),
+            key_type: None,
             raw_lua_value: None,
         };
 
@@ -252,17 +261,20 @@ mod tests {
             key: "test.lua".into(),
             value_type: SvValueType::Table,
             value: None,
+            key_type: None,
             raw_lua_value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
                 value_type: SvValueType::Table,
                 value: None,
+                key_type: None,
                 raw_lua_value: None,
                 children: Some(vec![SvTreeNode {
                     key: "msg".into(),
                     value_type: SvValueType::String,
                     value: Some(serde_json::json!("line\nbreak\ttab\\slash\"quote")),
                     children: None,
+                    key_type: None,
                     raw_lua_value: None,
                 }]),
             }]),
@@ -280,17 +292,20 @@ mod tests {
             key: "test.lua".into(),
             value_type: SvValueType::Table,
             value: None,
+            key_type: None,
             raw_lua_value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
                 value_type: SvValueType::Table,
                 value: None,
+                key_type: None,
                 raw_lua_value: None,
                 children: Some(vec![SvTreeNode {
                     key: "nothing".into(),
                     value_type: SvValueType::Nil,
                     value: Some(serde_json::Value::Null),
                     children: None,
+                    key_type: None,
                     raw_lua_value: None,
                 }]),
             }]),
@@ -305,11 +320,13 @@ mod tests {
             key: "test.lua".into(),
             value_type: SvValueType::Table,
             value: None,
+            key_type: None,
             raw_lua_value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
                 value_type: SvValueType::Table,
                 value: None,
+                key_type: None,
                 raw_lua_value: None,
                 children: Some(vec![
                     SvTreeNode {
@@ -317,6 +334,7 @@ mod tests {
                         value_type: SvValueType::String,
                         value: Some(serde_json::json!("first")),
                         children: None,
+                        key_type: None,
                         raw_lua_value: None,
                     },
                     SvTreeNode {
@@ -324,6 +342,7 @@ mod tests {
                         value_type: SvValueType::String,
                         value: Some(serde_json::json!("second")),
                         children: None,
+                        key_type: None,
                         raw_lua_value: None,
                     },
                 ]),
@@ -553,22 +572,26 @@ Var2 =
             key: "test.lua".into(),
             value_type: SvValueType::Table,
             value: None,
+            key_type: None,
             raw_lua_value: None,
             children: Some(vec![SvTreeNode {
                 key: "MyAddon_SV".into(),
                 value_type: SvValueType::Table,
                 value: None,
+                key_type: None,
                 raw_lua_value: None,
                 children: Some(vec![SvTreeNode {
                     key: "Baelthor".into(),
                     value_type: SvValueType::Table,
                     value: None,
+                    key_type: None,
                     raw_lua_value: None,
                     children: Some(vec![SvTreeNode {
                         key: "level".into(),
                         value_type: SvValueType::Number,
                         value: Some(serde_json::json!(50.0)),
                         children: None,
+                        key_type: None,
                         raw_lua_value: None,
                     }]),
                 }]),
@@ -628,17 +651,20 @@ Var2 =
             key: "test.lua".into(),
             value_type: SvValueType::Table,
             value: None,
+            key_type: None,
             raw_lua_value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
                 value_type: SvValueType::Table,
                 value: None,
+                key_type: None,
                 raw_lua_value: None,
                 children: Some(vec![SvTreeNode {
                     key: "broken".into(),
                     value_type: SvValueType::Number,
                     value: Some(serde_json::Value::Null),
                     children: None,
+                    key_type: None,
                     raw_lua_value: None,
                 }]),
             }]),
@@ -686,6 +712,7 @@ Var2 =
                 value_type: SvValueType::String,
                 value: Some(serde_json::json!("v\u{00E9}alue")),
                 children: None,
+                key_type: None,
                 raw_lua_value: None,
             });
         }
@@ -706,5 +733,25 @@ Var2 =
         assert!(!is_numeric_key("abc"));
         assert!(!is_numeric_key(""));
         assert!(!is_numeric_key("1.5"));
+    }
+
+    #[test]
+    fn numeric_looking_string_keys_survive_edit_and_json() {
+        let input = r#"Var = { ["123"] = "string", [123] = "number", ['-3'] = true, ["001"] = 1, "array", ["setting"] = false }"#;
+        let tree = parser::parse_sv_file(input, "Test.lua").unwrap();
+        let json = serde_json::to_value(&tree).unwrap();
+        let mut edited: SvTreeNode = serde_json::from_value(json).unwrap();
+        let children = edited.children.as_mut().unwrap()[0]
+            .children
+            .as_mut()
+            .unwrap();
+        children.last_mut().unwrap().value = Some(serde_json::json!(true));
+        let output = serialize_to_lua(&edited);
+        assert!(output.contains("[\"123\"] = \"string\""));
+        assert!(output.contains("[123] = \"number\""));
+        assert!(output.contains("[\"-3\"] = true"));
+        assert!(output.contains("[\"001\"] = 1"));
+        assert!(output.contains("[1] = \"array\""));
+        assert_eq!(parser::parse_sv_file(&output, "Test.lua").unwrap(), edited);
     }
 }

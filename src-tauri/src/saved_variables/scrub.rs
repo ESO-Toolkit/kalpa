@@ -2694,6 +2694,7 @@ mod tests {
             value_type: SvValueType::String,
             value: Some(serde_json::Value::String(key.to_string())),
             children: None,
+            key_type: None,
             raw_lua_value: None,
         }
     }
@@ -2704,6 +2705,7 @@ mod tests {
             value_type: SvValueType::Table,
             value: None,
             children: Some(children),
+            key_type: None,
             raw_lua_value: None,
         }
     }

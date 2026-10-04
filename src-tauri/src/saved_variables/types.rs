@@ -28,10 +28,21 @@ pub struct SavedVariableFile {
     pub character_keys: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SvKeyType {
+    String,
+    Number,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SvTreeNode {
     pub key: String,
+    /// Lua key type, retained even when a string key looks like a number.
+    /// Optional for compatibility with trees created by older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_type: Option<SvKeyType>,
     pub value_type: SvValueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
