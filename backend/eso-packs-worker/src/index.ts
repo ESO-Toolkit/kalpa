@@ -2,9 +2,6 @@ import type { Env, Pack, PackType, PackStatus, PackView, VoteRecord, VoteRespons
 import {
   getPackIndex,
   putPack,
-  getVotedPackIds,
-  getVote,
-  restoreVote,
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
@@ -222,7 +219,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const votedIds =
     viewerId === undefined
       ? null
-      : await getVotedPackIds(env, viewerId, paginated.map((p) => p.id));
+      : await getPackIndexDO(env).getVotedPackIds(viewerId, paginated.map((p) => p.id));
   const visible: PackView[] = votedIds
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
@@ -256,7 +253,7 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     // A viewer-specific response: it carries their user_voted, and for the
     // author it carries the real fields of their own anonymous pack. Never
     // cacheable.
-    const voted = (await getVote(env, id, viewerId)) !== null;
+    const voted = (await getPackIndexDO(env).getVotedPackIds(viewerId, [id])).has(id);
     const view: PackView = { ...redactAnonymousPack(pack, viewerId), user_voted: voted };
     return json(request, { pack: view }, 200, 0, "private");
   }
@@ -1092,9 +1089,9 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
     }),
     // Use each record's own packId/userId fields rather than parsing the
     // "<packId>:<userId>" map key, since userId could itself contain ":".
-    ...voteRecords.map((record) => async () => {
-      await restoreVote(env, record.packId, record.userId, record);
-    }),
+    // Preserve cursor positions, but promote votes atomically with each pack's
+    // counter at finalization. Intermediate pages must not mutate live votes.
+    ...voteRecords.map(() => async () => {}),
   ];
 
   // A cursor only means anything against the snapshot that issued it. Two ways
@@ -1177,7 +1174,7 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   // absent from `preservedPacks` and dropped from the rebuilt index — which is
   // exactly what the preservation above promises not to do, and restore runs
   // at incident time when recent writes are most likely in flight.
-  await getPackIndexDO(env).replaceIndexPreserving({ packs }, Object.keys(packBodies));
+  await getPackIndexDO(env).replaceIndexPreserving({ packs }, Object.keys(packBodies), voteRecords);
 
   await invalidatePackListCache(url);
 
@@ -1292,27 +1289,8 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   const removedIds = await getPackIndexDO(env).removePacksByAuthor(userId);
   const packIds = removedIds;
 
-  // Delete individual pack KV entries
-  for (const packId of packIds) {
-    await env.ESO_PACKS.delete(`pack:${packId}`);
-  }
-
-  // 2. Delete all user's votes via reverse index (user-votes:{userId}:{packId})
-  // Does not decrement vote_count — denormalized aggregates, acceptable for rare deletion.
-  let voteCount = 0;
-  let voteCursor: string | undefined;
-  do {
-    const list = await env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor: voteCursor });
-    for (const key of list.keys) {
-      const packId = key.name.slice(`user-votes:${userId}:`.length);
-      if (packId) {
-        await env.ESO_PACKS.delete(`vote:${packId}:${userId}`);
-      }
-      await env.ESO_PACKS.delete(key.name);
-      voteCount++;
-    }
-    voteCursor = list.list_complete ? undefined : list.cursor;
-  } while (voteCursor);
+  // 2. Clear durable membership before retryable KV cleanup.
+  const voteCount = await getPackIndexDO(env).deleteUserVotes(userId);
 
   // 3. Delete all user's share codes
   let shareCount = 0;

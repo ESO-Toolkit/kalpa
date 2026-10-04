@@ -17,6 +17,70 @@ describe("PackIndexDO authoritative mutations", () => {
     await packIndex().replaceIndex({ packs: [] });
   });
 
+  it("commits a vote and counter despite a failed reverse-key write, then repairs it", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-partial");
+    await index.addPack(pack);
+    const original = e.ESO_PACKS.put.bind(e.ESO_PACKS);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockImplementation((key, value, options) => {
+      if (key.startsWith("user-votes:")) throw new Error("reverse index unavailable");
+      return original(key, value, options);
+    });
+    expect(await index.toggleVote(pack.id, "77")).toMatchObject({ voted: true, pack: { vote_count: 1 } });
+    expect(await index.getVotedPackIds("77", [pack.id])).toEqual(new Set([pack.id]));
+    put.mockRestore();
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(await e.ESO_PACKS.get(`user-votes:77:${pack.id}`)).toBe("1");
+    expect(await index.toggleVote(pack.id, "77")).toMatchObject({ voted: false, pack: { vote_count: 0 } });
+    expect(await index.getVotedPackIds("77", [pack.id])).toEqual(new Set());
+  });
+
+  it("backs up canonical votes during a KV outage and never replays a deleted user's vote", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-backup");
+    await index.addPack(pack);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValue(new Error("KV offline"));
+    await index.toggleVote(pack.id, "77");
+    put.mockRestore();
+    await index.writeBackup("backup:audit-vote", { created_at: pack.created_at, packs: [pack], packBodies: {}, votes: {} });
+    const snapshot = await e.ESO_PACKS.get<{ votes: Record<string, unknown> }>("backup:audit-vote", "json");
+    expect(snapshot!.votes[`${pack.id}:77`]).toMatchObject({ packId: pack.id, userId: "77" });
+    expect(await index.deleteUserVotes("77")).toBe(1);
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(await e.ESO_PACKS.get(`vote:${pack.id}:77`)).toBeNull();
+    expect(await index.getPack(pack.id)).toMatchObject({ vote_count: 0 });
+  });
+
+  it("restores membership with its counter and discards votes absent from the snapshot", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-restore");
+    await index.addPack(pack);
+    await index.toggleVote(pack.id, "77");
+    await putVote(e, pack.id, "legacy");
+    const restored = { ...pack, vote_count: 1 };
+    await index.replaceIndexPreserving({ packs: [restored] }, [pack.id], [
+      { packId: pack.id, userId: "88", votedAt: "2026-01-01T00:00:00.000Z" },
+    ]);
+    expect(await index.getVotedPackIds("77", [pack.id])).toEqual(new Set());
+    expect(await index.getVotedPackIds("legacy", [pack.id])).toEqual(new Set());
+    expect(await index.getVotedPackIds("88", [pack.id])).toEqual(new Set([pack.id]));
+    expect(await index.toggleVote(pack.id, "88")).toMatchObject({ voted: false, pack: { vote_count: 0 } });
+  });
+
+  it("does not recreate a vote after pack deletion and slug reuse", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-vote-lifecycle");
+    await index.addPack(pack);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValue(new Error("KV offline"));
+    await index.toggleVote(pack.id, "77");
+    put.mockRestore();
+    await index.removePack(pack.id);
+    await index.addPack({ ...pack, created_at: "2026-10-03T00:00:00.000Z" });
+    await runDurableObjectAlarm(index);
+    expect(await e.ESO_PACKS.get(`vote:${pack.id}:77`)).toBeNull();
+    expect(await index.toggleVote(pack.id, "77")).toMatchObject({ voted: true, pack: { vote_count: 1 } });
+  });
+
   it("accepts only one concurrent create for the same id", async () => {
     const pack = makePack("w1-duplicate-create");
 

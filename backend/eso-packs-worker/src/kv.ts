@@ -122,8 +122,9 @@ export async function deleteVotesForPack(env: Env, packId: string): Promise<numb
     const page = await env.ESO_PACKS.list({ prefix, cursor });
     for (const key of page.keys) {
       const userId = key.name.slice(prefix.length);
-      await env.ESO_PACKS.delete(key.name);
       if (userId) await env.ESO_PACKS.delete(userVoteKey(userId, packId));
+      // Keep the enumerable primary key until reverse-key cleanup succeeds.
+      await env.ESO_PACKS.delete(key.name);
       removed++;
     }
     cursor = page.list_complete ? undefined : page.cursor;

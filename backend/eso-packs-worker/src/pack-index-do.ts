@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, Pack, PackIndex, VoteRecord } from "./types";
-import { deleteVote, deleteVotesForPack, getVote, putVote } from "./kv";
+import { deleteVote, deleteVotesForPack, getVote, restoreVote } from "./kv";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -11,7 +11,11 @@ const PENDING_PREFIX = "pending:";
 const DIRTY_MIRROR_PREFIX = "dirty:";
 const DELETED_AUTHOR_PREFIX = "deleted-author:";
 const AUTHORITY_KEY = "meta:authority";
-const VOTE_MEMO_LIMIT = 5000;
+const VOTE_STATE_PREFIX = "vote-state:";
+const VOTE_DIRTY_PREFIX = "vote-dirty:";
+const VOTE_AUTHORITY_PREFIX = "vote-authority:";
+const VOTE_RESET_PREFIX = "vote-reset:";
+const MIRROR_BATCH_SIZE = 10;
 const RETRY_DELAY_MS = 30_000;
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
 
@@ -20,6 +24,13 @@ interface BackupSnapshot {
   packs: Pack[];
   packBodies: Record<string, Pack>;
   votes: Record<string, VoteRecord>;
+}
+
+interface StoredVote {
+  packId: string;
+  userId: string;
+  lifecycle: string;
+  record: VoteRecord | null;
 }
 
 interface BackupMeta {
@@ -81,7 +92,6 @@ export interface WitnessAdoption {
 
 /** Serializes mutations while migrating authority from KV to DO storage. */
 export class PackIndexDO extends DurableObject<Env> {
-  private readonly voteMemo = new Map<string, boolean>();
 
   async addPack(
     pack: Pack,
@@ -114,13 +124,18 @@ export class PackIndexDO extends DurableObject<Env> {
 
       const operation = this.createOperation("create", pack, pack.author_id);
       await this.ctx.storage.transaction(async (txn) => {
+        if (await txn.get(this.tombstoneKey(pack.id))) {
+          // A recycled slug starts with no members, even if an old KV read
+          // still exposes votes belonging to its deleted lifecycle.
+          await txn.put(`${VOTE_AUTHORITY_PREFIX}${pack.id}`, pack.created_at);
+        }
         await txn.delete(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`);
         await txn.delete(this.tombstoneKey(pack.id));
         await txn.put(this.packKey(pack.id), pack);
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(pack.id), operation.id);
-        await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
+        await this.armRetry(txn);
       });
       return await this.finishCreate(operation)
         ? { ok: true, pack }
@@ -177,16 +192,18 @@ export class PackIndexDO extends DurableObject<Env> {
         return { voted: false, pack: null };
       }
 
-      const memoKey = `${packId}:${userId}`;
-      const memo = this.voteMemo.get(memoKey);
-      const hadVote = memo ?? (await getVote(this.env, packId, userId)) !== null;
+      const hadVote = (await this.readVote(existing!, userId)) !== null;
       const voted = !hadVote;
-      if (voted) await putVote(this.env, packId, userId);
-      else await deleteVote(this.env, packId, userId);
-
-      if (this.voteMemo.size >= VOTE_MEMO_LIMIT) this.voteMemo.clear();
-      this.voteMemo.set(memoKey, voted);
-      const pack = await this.applyCounter(existing!, "vote_count", voted ? 1 : -1);
+      const state: StoredVote = {
+        packId, userId, lifecycle: existing!.created_at,
+        record: voted ? { packId, userId, votedAt: new Date().toISOString() } : null,
+      };
+      const pack = { ...existing!, vote_count: Math.max(0, existing!.vote_count + (voted ? 1 : -1)) };
+      // Membership, counter, and retry intent commit together. KV is only a
+      // mirror: a partial two-key write cannot turn a retry into an unvote.
+      await this.stagePackMirror(pack, [state]);
+      await this.mirrorVote(state);
+      await this.mirrorChangedBestEffort(pack);
       return { voted, pack };
     });
   }
@@ -223,10 +240,52 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.tombstoneKey(id), tombstone);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(id), operation.id);
-        await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
+        await this.armRetry(txn);
       });
-      this.forgetVotes(id);
       return await this.finishDelete(operation) ? "ok" : "retry";
+    });
+  }
+
+  async getVotedPackIds(userId: string, packIds: string[]): Promise<Set<string>> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const voted = new Set<string>();
+      for (const id of packIds) {
+        const pack = await this.ctx.storage.get<Pack>(this.packKey(id));
+        if (pack && await this.readVote(pack, userId)) voted.add(id);
+      }
+      return voted;
+    });
+  }
+
+  async deleteUserVotes(userId: string): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const states = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_STATE_PREFIX });
+      const ids = new Set([...states.values()].filter((v) => v.userId === userId).map((v) => v.packId));
+      let cursor: string | undefined;
+      do {
+        const page = await this.env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor });
+        for (const key of page.keys) ids.add(key.name.slice(`user-votes:${userId}:`.length));
+        cursor = page.list_complete ? undefined : page.cursor;
+      } while (cursor);
+      let removed = 0;
+      for (const packId of ids) {
+        const pack = await this.ctx.storage.get<Pack>(this.packKey(packId));
+        const hadVote = pack ? await this.readVote(pack, userId) : null;
+        const state: StoredVote = { packId, userId, lifecycle: pack?.created_at ?? "", record: null };
+        if (hadVote) removed++;
+        if (pack) {
+          await this.stagePackMirror({ ...pack, vote_count: Math.max(0, pack.vote_count - (hadVote ? 1 : 0)) }, [state]);
+        } else {
+          await this.ctx.storage.transaction(async (txn) => {
+            await this.stageVote(txn, state);
+            await this.armRetry(txn);
+          });
+        }
+        await this.mirrorVote(state);
+      }
+      return removed;
     });
   }
 
@@ -253,9 +312,8 @@ export class PackIndexDO extends DurableObject<Env> {
           await txn.put(this.tombstoneKey(pack.id), tombstone);
           await txn.put(this.operationKey(operation.id), operation);
           await txn.put(this.pendingKey(pack.id), operation.id);
-          await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
+          await this.armRetry(txn);
         });
-        this.forgetVotes(pack.id);
         await this.finishDelete(operation);
       }
       return removedPacks.map(({ id }) => id);
@@ -283,6 +341,19 @@ export class PackIndexDO extends DurableObject<Env> {
           liveIds.has(vote.packId) && !deletedAuthors.has(String(vote.userId)),
         ),
       );
+      const ownedVotes = await this.ctx.storage.list<string>({ prefix: VOTE_AUTHORITY_PREFIX });
+      for (const [key, vote] of Object.entries(votes)) {
+        if (ownedVotes.has(`${VOTE_AUTHORITY_PREFIX}${vote.packId}`)) delete votes[key];
+      }
+      const states = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_STATE_PREFIX });
+      const lifecycles = new Map(packs.map((pack) => [pack.id, pack.created_at]));
+      for (const state of states.values()) {
+        const key = `${state.packId}:${state.userId}`;
+        delete votes[key];
+        if (state.record && lifecycles.get(state.packId) === state.lifecycle && !deletedAuthors.has(state.userId)) {
+          votes[key] = state.record;
+        }
+      }
       const snapshot: BackupSnapshot = {
         created_at: incoming.created_at,
         packs,
@@ -316,14 +387,14 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
-  async replaceIndexPreserving(index: PackIndex, restoredIds: string[]): Promise<void> {
+  async replaceIndexPreserving(index: PackIndex, restoredIds: string[], votes?: VoteRecord[]): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
       const current = await this.loadPacks();
       const restored = new Set(restoredIds);
       const preserved = current.filter(({ id }) => !restored.has(id));
       const desired = new Map<string, Pack>();
       for (const pack of [...index.packs, ...preserved]) desired.set(pack.id, pack);
-      await this.applyReplacement([...desired.values()], false);
+      await this.applyReplacement([...desired.values()], false, votes, restored);
     });
   }
 
@@ -345,7 +416,7 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
-      const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX });
+      const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX, limit: MIRROR_BATCH_SIZE });
       for (const operationId of pending.values()) {
         const operation = await this.ctx.storage.get<PendingOperation>(
           this.operationKey(operationId),
@@ -354,7 +425,11 @@ export class PackIndexDO extends DurableObject<Env> {
         if (operation.kind === "create") await this.finishCreate(operation);
         else await this.finishDelete(operation);
       }
-      const dirty = await this.ctx.storage.list<string>({ prefix: DIRTY_MIRROR_PREFIX });
+      const resets = await this.ctx.storage.list<string>({ prefix: VOTE_RESET_PREFIX, limit: MIRROR_BATCH_SIZE });
+      for (const key of resets.keys()) await this.resetVoteMirror(key.slice(VOTE_RESET_PREFIX.length));
+      const voteDirty = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_DIRTY_PREFIX, limit: MIRROR_BATCH_SIZE });
+      for (const state of voteDirty.values()) await this.mirrorVote(state);
+      const dirty = await this.ctx.storage.list<string>({ prefix: DIRTY_MIRROR_PREFIX, limit: MIRROR_BATCH_SIZE });
       for (const [key, lifecycle] of dirty) {
         const packId = key.slice(DIRTY_MIRROR_PREFIX.length);
         const pack = await this.ctx.storage.get<Pack>(this.packKey(packId));
@@ -365,8 +440,10 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.mirrorChangedBestEffort(pack);
       }
       if (
-        (await this.ctx.storage.list({ prefix: PENDING_PREFIX })).size > 0 ||
-        (await this.ctx.storage.list({ prefix: DIRTY_MIRROR_PREFIX })).size > 0
+        (await this.ctx.storage.list({ prefix: PENDING_PREFIX, limit: 1 })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: DIRTY_MIRROR_PREFIX, limit: 1 })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: VOTE_RESET_PREFIX, limit: 1 })).size > 0 ||
+        (await this.ctx.storage.list({ prefix: VOTE_DIRTY_PREFIX, limit: 1 })).size > 0
       ) {
         await this.scheduleRetry();
       }
@@ -510,15 +587,67 @@ export class PackIndexDO extends DurableObject<Env> {
     return pack;
   }
 
-  private async stagePackMirror(pack: Pack): Promise<void> {
+  private async stagePackMirror(pack: Pack, votes: StoredVote[] = [], resetVotes = false): Promise<void> {
     // The retry intent must survive a reset immediately after the canonical
     // write, before the first external mirror request can even start.
     await this.ctx.storage.transaction(async (txn) => {
       await txn.put(this.packKey(pack.id), pack);
       await txn.put(this.ownershipKey(pack.id), pack.updated_at);
       await txn.put(`${DIRTY_MIRROR_PREFIX}${pack.id}`, pack.created_at);
-      await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
+      for (const vote of votes) await this.stageVote(txn, vote);
+      if (resetVotes) {
+        await txn.put(`${VOTE_AUTHORITY_PREFIX}${pack.id}`, pack.created_at);
+        await txn.put(`${VOTE_RESET_PREFIX}${pack.id}`, pack.created_at);
+      }
+      await this.armRetry(txn);
     });
+  }
+
+  private async armRetry(txn: DurableObjectTransaction): Promise<void> {
+    const next = Date.now() + RETRY_DELAY_MS;
+    const current = await txn.getAlarm();
+    if (current === null || current > next) await txn.setAlarm(next);
+  }
+
+  private async stageVote(txn: DurableObjectTransaction, state: StoredVote): Promise<void> {
+    const suffix = `${state.packId}:${state.userId}`;
+    await txn.put(`${VOTE_STATE_PREFIX}${suffix}`, state);
+    await txn.put(`${VOTE_DIRTY_PREFIX}${suffix}`, state);
+  }
+
+  private async readVote(pack: Pack, userId: string): Promise<VoteRecord | null> {
+    const state = await this.ctx.storage.get<StoredVote>(`${VOTE_STATE_PREFIX}${pack.id}:${userId}`);
+    if (state) return state.lifecycle === pack.created_at ? state.record : null;
+    if (await this.ctx.storage.get(`${VOTE_AUTHORITY_PREFIX}${pack.id}`)) return null;
+    return getVote(this.env, pack.id, userId);
+  }
+
+  private async mirrorVote(state: StoredVote): Promise<void> {
+    if (await this.ctx.storage.get(`${VOTE_RESET_PREFIX}${state.packId}`)) return;
+    try {
+      const pack = await this.ctx.storage.get<Pack>(this.packKey(state.packId));
+      if (state.record && pack?.created_at === state.lifecycle) {
+        await restoreVote(this.env, state.packId, state.userId, state.record);
+      } else {
+        await deleteVote(this.env, state.packId, state.userId);
+      }
+      await this.ctx.storage.delete(`${VOTE_DIRTY_PREFIX}${state.packId}:${state.userId}`);
+    } catch (error) {
+      console.error(`Vote mirror deferred [${state.packId}]:`, error);
+      await this.scheduleRetry();
+    }
+  }
+
+  private async resetVoteMirror(packId: string): Promise<void> {
+    try {
+      // Snapshot restore owns the complete membership set. Clear old KV keys
+      // before replaying current durable states, including votes cast since restore.
+      await deleteVotesForPack(this.env, packId);
+      await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${packId}`);
+    } catch (error) {
+      console.error(`Vote reset deferred [${packId}]:`, error);
+      await this.scheduleRetry();
+    }
   }
 
   private async mirrorChangedBestEffort(pack: Pack): Promise<void> {
@@ -546,7 +675,7 @@ export class PackIndexDO extends DurableObject<Env> {
     return pack.created_at === createdAt;
   }
 
-  private async applyReplacement(packs: Pack[], forceIndex: boolean): Promise<void> {
+  private async applyReplacement(packs: Pack[], forceIndex: boolean, votes?: VoteRecord[], restoredIds?: Set<string>): Promise<void> {
     const current = await this.getStoredPacks();
     const deletedEntries = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
     const deletedAuthors = new Set(
@@ -576,19 +705,34 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.tombstoneKey(pack.id), tombstone);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(pack.id), operation.id);
-        await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
+        await this.armRetry(txn);
       });
-      this.forgetVotes(pack.id);
       deleteOperations.push(operation);
     }
     for (const pack of accepted) {
       await this.ctx.storage.delete(this.tombstoneKey(pack.id));
-      await this.stagePackMirror(pack);
+      const restoreVotes = votes !== undefined && restoredIds?.has(pack.id) === true;
+      const states = new Map<string, StoredVote>();
+      if (restoreVotes) {
+        const old = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_STATE_PREFIX}${pack.id}:` });
+        for (const state of old.values()) states.set(state.userId, { ...state, lifecycle: pack.created_at, record: null });
+        for (const vote of votes!) {
+          if (vote.packId === pack.id && !deletedAuthors.has(vote.userId)) {
+            states.set(vote.userId, { packId: pack.id, userId: vote.userId, lifecycle: pack.created_at, record: vote });
+          }
+        }
+      }
+      await this.stagePackMirror(pack, [...states.values()], restoreVotes);
+    }
+    // Bound external mirror work per event; every remaining item is journaled.
+    for (const pack of accepted.slice(0, MIRROR_BATCH_SIZE)) {
+      if (await this.ctx.storage.get(`${VOTE_RESET_PREFIX}${pack.id}`)) await this.resetVoteMirror(pack.id);
+      const states = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_DIRTY_PREFIX}${pack.id}:`, limit: MIRROR_BATCH_SIZE });
+      for (const state of states.values()) await this.mirrorVote(state);
       await this.mirrorChangedBestEffort(pack);
     }
     await this.mirror(accepted, undefined, undefined, [], forceIndex);
-    for (const operation of deleteOperations) await this.finishDelete(operation);
-    this.voteMemo.clear();
+    for (const operation of deleteOperations.slice(0, MIRROR_BATCH_SIZE)) await this.finishDelete(operation);
   }
 
   private async deleteD1Pack(id: string): Promise<boolean> {
@@ -605,13 +749,6 @@ export class PackIndexDO extends DurableObject<Env> {
       // external row to reconcile in that case; production's shared database
       // has both tables and every other failure remains journaled for retry.
       return error instanceof Error && error.message.includes("no such table");
-    }
-  }
-
-  private forgetVotes(packId: string): void {
-    const prefix = `${packId}:`;
-    for (const key of this.voteMemo.keys()) {
-      if (key.startsWith(prefix)) this.voteMemo.delete(key);
     }
   }
 
@@ -754,7 +891,14 @@ export class PackIndexDO extends DurableObject<Env> {
     operation.attempts++;
     if (!operation.votesDone) {
       try {
+        const states = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_STATE_PREFIX}${operation.packId}:` });
+        for (const [key, state] of states) {
+          await this.ctx.storage.put(key, { ...state, record: null });
+          await deleteVote(this.env, state.packId, state.userId);
+          await this.ctx.storage.delete(`${VOTE_DIRTY_PREFIX}${state.packId}:${state.userId}`);
+        }
         await deleteVotesForPack(this.env, operation.packId);
+        await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${operation.packId}`);
         operation.votesDone = true;
         await this.saveOperation(operation);
       } catch (error) {
