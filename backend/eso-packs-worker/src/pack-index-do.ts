@@ -120,6 +120,7 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(pack.id), operation.id);
+        await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
       });
       return await this.finishCreate(operation)
         ? { ok: true, pack }
@@ -144,8 +145,7 @@ export class PackIndexDO extends DurableObject<Env> {
         install_count: existing.install_count,
         created_at: existing.created_at,
       };
-      await this.ctx.storage.put(this.packKey(id), updated);
-      await this.ctx.storage.put(this.ownershipKey(id), updated.updated_at);
+      await this.stagePackMirror(updated);
       await this.mirrorChangedBestEffort(updated);
       return { status: "ok", pack: updated };
     });
@@ -223,6 +223,7 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.tombstoneKey(id), tombstone);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(id), operation.id);
+        await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
       });
       this.forgetVotes(id);
       return await this.finishDelete(operation) ? "ok" : "retry";
@@ -252,6 +253,7 @@ export class PackIndexDO extends DurableObject<Env> {
           await txn.put(this.tombstoneKey(pack.id), tombstone);
           await txn.put(this.operationKey(operation.id), operation);
           await txn.put(this.pendingKey(pack.id), operation.id);
+          await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
         });
         this.forgetVotes(pack.id);
         await this.finishDelete(operation);
@@ -360,12 +362,7 @@ export class PackIndexDO extends DurableObject<Env> {
           await this.ctx.storage.delete(key);
           continue;
         }
-        try {
-          await this.mirror(await this.getStoredPacks(), pack);
-          await this.ctx.storage.delete(key);
-        } catch (error) {
-          console.error(`KV dirty mirror retry failed [${packId}]:`, error);
-        }
+        await this.mirrorChangedBestEffort(pack);
       }
       if (
         (await this.ctx.storage.list({ prefix: PENDING_PREFIX })).size > 0 ||
@@ -508,19 +505,36 @@ export class PackIndexDO extends DurableObject<Env> {
     delta: number,
   ): Promise<Pack> {
     pack[field] = Math.max(0, (pack[field] ?? 0) + delta);
-    await this.ctx.storage.put(this.packKey(pack.id), pack);
-    await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
+    await this.stagePackMirror(pack);
     await this.mirrorChangedBestEffort(pack);
     return pack;
   }
 
+  private async stagePackMirror(pack: Pack): Promise<void> {
+    // The retry intent must survive a reset immediately after the canonical
+    // write, before the first external mirror request can even start.
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.put(this.packKey(pack.id), pack);
+      await txn.put(this.ownershipKey(pack.id), pack.updated_at);
+      await txn.put(`${DIRTY_MIRROR_PREFIX}${pack.id}`, pack.created_at);
+      await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
+    });
+  }
+
   private async mirrorChangedBestEffort(pack: Pack): Promise<void> {
+    let kvDone = false;
     try {
       await this.mirror(await this.getStoredPacks(), pack);
-      await this.ctx.storage.delete(`${DIRTY_MIRROR_PREFIX}${pack.id}`);
+      kvDone = true;
     } catch (error) {
       console.error(`KV pack mirror deferred [${pack.id}]:`, error);
-      await this.ctx.storage.put(`${DIRTY_MIRROR_PREFIX}${pack.id}`, pack.created_at);
+    }
+    // A failed KV write must not prevent a draft's public D1 row from being
+    // removed. Both mirrors run under this object's serialization boundary.
+    const d1Done = await this.upsertD1Pack(pack);
+    if (kvDone && d1Done) {
+      await this.ctx.storage.delete(`${DIRTY_MIRROR_PREFIX}${pack.id}`);
+    } else {
       await this.scheduleRetry();
     }
   }
@@ -562,14 +576,15 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.tombstoneKey(pack.id), tombstone);
         await txn.put(this.operationKey(operation.id), operation);
         await txn.put(this.pendingKey(pack.id), operation.id);
+        await txn.setAlarm(Date.now() + RETRY_DELAY_MS);
       });
       this.forgetVotes(pack.id);
       deleteOperations.push(operation);
     }
     for (const pack of accepted) {
       await this.ctx.storage.delete(this.tombstoneKey(pack.id));
-      await this.ctx.storage.put(this.packKey(pack.id), pack);
-      await this.ctx.storage.put(this.ownershipKey(pack.id), pack.updated_at);
+      await this.stagePackMirror(pack);
+      await this.mirrorChangedBestEffort(pack);
     }
     await this.mirror(accepted, undefined, undefined, [], forceIndex);
     for (const operation of deleteOperations) await this.finishDelete(operation);

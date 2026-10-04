@@ -30,6 +30,64 @@ describe("PackIndexDO authoritative mutations", () => {
     expect((await packIndex().getIndex()).packs.filter(({ id }) => id === pack.id)).toHaveLength(1);
   });
 
+  it("repairs a failed D1 update from the current canonical body", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-d1-retry");
+    await index.addPack(pack);
+    const originalPrepare = e.ROSTER_HUB_DB!.prepare.bind(e.ROSTER_HUB_DB);
+    const prepare = vi.spyOn(e.ROSTER_HUB_DB!, "prepare").mockImplementation(() => {
+      throw new Error("injected D1 outage");
+    });
+    expect(await index.updatePack(pack.id, { ...pack, title: "New title" }))
+      .toMatchObject({ status: "ok", pack: { title: "New title" } });
+    const titles: unknown[] = [];
+    prepare.mockImplementation((sql) => {
+      const statement = originalPrepare(sql);
+      const bind = statement.bind.bind(statement);
+      statement.bind = (...args: unknown[]) => {
+        if (sql.includes("INSERT INTO packs")) titles.push(args[4]);
+        return bind(...args);
+      };
+      return statement;
+    });
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(titles).toEqual(["New title"]);
+    prepare.mockRestore();
+  });
+
+  it("removes the public D1 row on draft even when KV is unavailable", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-d1-draft");
+    await index.addPack(pack);
+    const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValue(new Error("KV offline"));
+    const prepare = vi.spyOn(e.ROSTER_HUB_DB!, "prepare");
+    await index.updatePack(pack.id, { ...pack, status: "draft" });
+    expect(prepare.mock.calls.some(([sql]) => sql === "DELETE FROM packs WHERE id = ?"))
+      .toBe(true);
+    expect(prepare.mock.calls.some(([sql]) => sql.includes("INSERT INTO packs"))).toBe(false);
+    put.mockRestore();
+    prepare.mockClear();
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(prepare.mock.calls.some(([sql]) => sql.includes("INSERT INTO packs"))).toBe(false);
+    prepare.mockRestore();
+  });
+
+  it("does not replay a failed D1 update after its pack is deleted", async () => {
+    const index = packIndex();
+    const pack = makePack("audit-d1-delete");
+    await index.addPack(pack);
+    const prepare = vi.spyOn(e.ROSTER_HUB_DB!, "prepare").mockImplementation(() => {
+      throw new Error("D1 offline");
+    });
+    await index.updatePack(pack.id, { ...pack, title: "Stale public title" });
+    prepare.mockRestore();
+    await index.removePack(pack.id);
+    const reads = vi.spyOn(e.ROSTER_HUB_DB!, "prepare");
+    expect(await runDurableObjectAlarm(index)).toBe(true);
+    expect(reads.mock.calls.some(([sql]) => sql.includes("INSERT INTO packs"))).toBe(false);
+    reads.mockRestore();
+  });
+
   it("does not overwrite an omitted pre-deploy pack during shadow mutation", async () => {
     const visible = makePack("w1-visible-shadow");
     const delayed = makePack("w1-omitted-shadow");

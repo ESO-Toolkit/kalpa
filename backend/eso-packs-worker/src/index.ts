@@ -8,96 +8,13 @@ import {
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
-import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
+import { redactAnonymousPack } from "./redact";
 import { readJsonBody, sanitizeAddons, validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 export { PackIndexDO } from "./pack-index-do";
 
-// ── D1 dual-write helpers ─────────────────────────────────────────
-// Both workers share the same Cloudflare account. kalpa-pack-hub binds
-// directly to roster-hub-db (D1) so every KV mutation is atomically
-// mirrored — no async sync, no reconciliation, no deployment ordering.
-
-async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  const isPublished = (pack.status ?? "published") === "published";
-  try {
-    if (isPublished) {
-      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
-        esouiId: a.esouiId,
-        name: a.name,
-        required: a.required,
-        note: a.note,
-      })));
-      await env.ROSTER_HUB_DB
-        .prepare(
-          `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-           ON CONFLICT(id) DO UPDATE SET
-             title = excluded.title,
-             description = excluded.description,
-             pack_type = excluded.pack_type,
-             addons = excluded.addons,
-             is_anonymous = excluded.is_anonymous,
-             author_name = excluded.author_name,
-             vote_count = excluded.vote_count,
-             updated_at = datetime('now')`,
-        )
-        .bind(
-          pack.id,
-          pack.author_id,
-          // The D1 mirror feeds the ESO Toolkit website; never hand it the
-          // real display name of an anonymous pack's author. author_id stays
-          // for ownership joins but is not rendered there.
-          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
-          pack.is_anonymous ? 1 : 0,
-          pack.title,
-          pack.description,
-          pack.pack_type,
-          addonsJson,
-          // Inserting a literal 0 here (and omitting vote_count from the
-          // upsert) froze the website's counters at zero and reset them on
-          // every author edit.
-          pack.vote_count ?? 0,
-        )
-        .run();
-
-      // Replace tags
-      const tagStmts = [
-        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-        ...pack.tags.map((tag) =>
-          env.ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)").bind(pack.id, tag),
-        ),
-      ];
-      await env.ROSTER_HUB_DB.batch(tagStmts);
-    } else {
-      await env.ROSTER_HUB_DB.batch([
-        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-        env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id),
-      ]);
-    }
-  } catch (err) {
-    console.error(`D1 sync failed [${pack.id}]:`, err);
-  }
-}
-
-/**
- * Mirror a counter bump into D1. The vote endpoint goes through the DO rather
- * than d1UpsertPack, so without this the website's vote counts never move.
- * Best-effort, like the other D1 writes.
- */
-async function d1UpdateVoteCount(env: Env, id: string, voteCount: number): Promise<void> {
-  if (!env.ROSTER_HUB_DB) return;
-  try {
-    await env.ROSTER_HUB_DB
-      .prepare("UPDATE packs SET vote_count = ? WHERE id = ?")
-      .bind(voteCount, id)
-      .run();
-  } catch (err) {
-    console.error(`D1 vote_count sync failed [${id}]:`, err);
-  }
-}
+// Canonical pack changes and external mirrors are serialized by PackIndexDO.
 
 const PACKS_PER_PAGE = 20;
 
@@ -490,7 +407,6 @@ async function handleUpdatePack(
   const updated = result.pack;
 
   await invalidatePackListCache(url);
-  await d1UpsertPack(env, updated);
 
   return json(request, { pack: updated });
 }
@@ -591,7 +507,6 @@ async function handleVotePack(
   await invalidatePackListCache(url);
 
   const voteCount = updated.vote_count;
-  await d1UpdateVoteCount(env, id, voteCount);
 
   const response: VoteResponse = { voted, voteCount };
   return json(request, response);
@@ -956,12 +871,10 @@ async function handleScheduled(env: Env): Promise<void> {
  * KV/D1/DO binding call against the same per-request subrequest ceiling as
  * `fetch`, so this is what actually bounds a page:
  *
- * - a published pack: `putPack` (1 KV) + `d1UpsertPack` (the upsert, then the
- *   tag batch) = 3
- * - a draft pack: `putPack` + one D1 batch = 2
+ * - a pack body: `putPack` = 1 (D1 is reconciled by the final DO promotion)
  * - a vote: `restoreVote` writes both `vote:` and the user index = 2
  *
- * Derive the caps from this rather than picking a round number: a page cap of
+ * Keep the conservative historical cost of 3 calls per record: a page cap of
  * 400 was ~1200 subrequests in production, comfortably over the ceiling, which
  * is the failure the paging was added to avoid in the first place.
  */
@@ -1090,7 +1003,7 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
  * exists specifically to disable seed-with-fake-data in production and
  * would defeat the purpose of a restore endpoint if reused here.
  *
- * Replays pack bodies (+ D1 mirror) and vote records directly to KV, then
+ * Stages pack bodies and vote records in KV, then
  * atomically replaces the index via the PackIndexDO — never via raw
  * putPackIndex, which would race a concurrent mutation (see kv.ts's
  * getPackIndex comment on why counter/index writes go through the DO). The
@@ -1176,7 +1089,6 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   const work: (() => Promise<void>)[] = [
     ...packs.map((pack) => async () => {
       await putPack(env, pack);
-      await d1UpsertPack(env, pack);
     }),
     // Use each record's own packId/userId fields rather than parsing the
     // "<packId>:<userId>" map key, since userId could itself contain ":".
@@ -1236,20 +1148,9 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   // pack write is an idempotent put, so a page replayed after a network failure
   // is harmless.
   //
-  // Deferring the index swap is NOT a rollback, and this comment used to imply
-  // it was. Each page has already written pack bodies to KV and mirrored them
-  // into D1, and `/packs/:id` reads the KV body directly rather than going
-  // through the index — so an abandoned restore leaves a corpus that is
-  // genuinely part-old, part-new, with the website mirror updated too. Holding
-  // the index back only avoids ADDING entries for bodies that were never
-  // written; it cannot un-write the ones that were.
-  //
-  // That property predates the paging (the single-request version wrote every
-  // pack the same way before swapping the index) but paging makes abandonment
-  // far more likely, since stopping between pages is now a normal thing to do.
-  // Fixing it properly means a server-owned job with staged writes and an
-  // atomic promote — see the follow-up note on the PR. Until then an operator
-  // must finish a restore they start.
+  // Pack bodies are staged in KV; the final serialized replacement updates
+  // canonical records and D1 from the same state. This is still a paged admin
+  // restore, not an all-or-nothing transaction across the entire corpus.
   if (end < work.length) {
     return json(request, {
       ok: true,
