@@ -4,12 +4,13 @@ name: Slint Prototype CI
 # src-tauri/tauri.windows.conf.json + scripts/build-native-slint-sidecar.mjs),
 # so its tree must stay green — but it is a full separate Rust workspace that
 # would roughly double CI time if built on every PR. Path-filter it instead:
-# any PR touching the prototype or its packaging wiring gets the full gate.
+# any PR touching the prototype, shared Rust, or packaging gets the full gate.
 on:
   pull_request:
     branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
+      - "src-tauri/src/**"
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
   # Also run on main pushes: GitHub Actions caches saved on PR branches are
@@ -20,6 +21,7 @@ on:
     branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
+      - "src-tauri/src/**"
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
 

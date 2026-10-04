@@ -261,8 +261,10 @@ The General tab: AddOns folder, the detected NA/EU/PTS installs, and the native 
 | Platform                    | Status | Download                      | Notes                                                            |
 | --------------------------- | ------ | ----------------------------- | ---------------------------------------------------------------- |
 | **Windows** 10 (1803+) / 11 | Stable | `.exe` (NSIS)                 | WebView2 ships with Win 11 and is bootstrapped on Win 10         |
-| **macOS** 10.15+            | Beta   | `.dmg` (universal)            | Intel and Apple Silicon. See [first launch](#macos-first-launch) |
+| **macOS** 13.3+             | Beta   | `.dmg` (universal)            | Intel and Apple Silicon. See [first launch](#macos-first-launch) |
 | **Linux** x86_64            | Beta   | `.AppImage` / `.deb` / `.rpm` | AppImage self-updates. Detects ESO under Steam Proton            |
+
+The macOS minimum is Ventura 13.3 so the system WebKit meets [Tailwind 4's Safari 16.4 requirement](https://tailwindcss.com/docs/compatibility). [Safari 16.4's WebKit release](https://webkit.org/blog/13966/webkit-features-in-safari-16-4/) accompanied Ventura 13.3. Older macOS releases with a separately updated Safari are outside Kalpa's supported baseline.
 
 > [!IMPORTANT]
 > Each release ships a `.sig` updater signature for every auto-updatable artifact, plus one shared `latest.json`. The `.dmg` is the exception: macOS updates ship as the `.app.tar.gz`, so that is what gets signed. [Verify your download](docs/verify-download.md) explains how to check what you downloaded.

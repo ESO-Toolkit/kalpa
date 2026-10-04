@@ -140,7 +140,7 @@ jobs:
 
             **Windows** (stable): download the `.exe` installer and run it. Requires Windows 10 (1803+) or Windows 11; WebView2 is pre-installed on Windows 11 and bootstrapped automatically on Windows 10.
 
-            **macOS** (beta): download the `.dmg` (universal — Intel & Apple Silicon, macOS 10.15+). These builds are not yet notarized with Apple, so on first launch **right-click the app → Open → Open**. If macOS still reports the app as damaged, clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Kalpa.app`
+            **macOS** (beta): download the `.dmg` (universal — Intel & Apple Silicon, macOS 13.3+). These builds are not yet notarized with Apple, so on first launch **right-click the app → Open → Open**. If macOS still reports the app as damaged, clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Kalpa.app`
 
             **Linux** (beta): the `.AppImage` is recommended (`chmod +x` and run — it self-updates like the Windows build). `.deb` and `.rpm` packages are also provided but do **not** self-update; install new versions from this page. ESO under Steam Proton is detected automatically, including Flatpak Steam and secondary Steam libraries.
 
