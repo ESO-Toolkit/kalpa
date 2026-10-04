@@ -365,10 +365,66 @@ fn merge_pending_dep(
 /// indication why.
 const MAX_PENDING_DEPENDENCIES: usize = 200;
 
+fn dependency_satisfied(
+    name: &str,
+    min_version: Option<u32>,
+    installed: &HashSet<String>,
+    versions: &HashMap<String, Option<u32>>,
+) -> bool {
+    let key = normalize_addon_name(name);
+    installed.contains(&key)
+        && min_version.is_none_or(|minimum| {
+            versions
+                .get(&key)
+                .copied()
+                .flatten()
+                .is_some_and(|v| v >= minimum)
+        })
+}
+
+/// Recover the strictest current manifest requirement when the frontend passes
+/// a selected dependency name back without its version floor.
+fn dependency_minimum(addons_dir: &Path, name: &str) -> Option<u32> {
+    let folders: Vec<String> = fs::read_dir(addons_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|f| !f.ends_with(".disabled"))
+        .collect();
+    let missing = discover_missing_deps(addons_dir, &folders, &HashSet::new(), &HashMap::new());
+    missing
+        .into_iter()
+        .find(|d| normalize_addon_name(&d.name) == normalize_addon_name(name))
+        .and_then(|d| d.min_version)
+}
+
+/// Validate the downloaded manifests before overwriting any installed copy.
+fn verify_dependency_archive(
+    archive: &Path,
+    name: &str,
+    min_version: Option<u32>,
+) -> Result<(), String> {
+    let Some(minimum) = min_version else {
+        return Ok(());
+    };
+    let staging = tempfile::tempdir().map_err(|e| format!("Dependency staging failed: {e}"))?;
+    installer::extract_addon_zip(archive, staging.path())?;
+    let (installed, versions) = build_installed_index(staging.path());
+    if !dependency_satisfied(name, Some(minimum), &installed, &versions) {
+        return Err(format!(
+            "Downloaded {name} does not satisfy AddOnVersion >= {minimum}."
+        ));
+    }
+    Ok(())
+}
+
 fn discover_missing_deps(
     addons_dir: &Path,
     folders: &[String],
     installed: &HashSet<String>,
+    versions: &HashMap<String, Option<u32>>,
 ) -> Vec<PendingDependency> {
     let mut found: Vec<PendingDependency> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -382,12 +438,12 @@ fn discover_missing_deps(
         // `title` falls back to the folder name in the parser, so it is always a
         // usable label for the "<Addon> won't load without this" warning.
         for dep in &addon.depends_on {
-            if !installed.contains(&normalize_addon_name(&dep.name)) {
+            if !dependency_satisfied(&dep.name, dep.min_version, installed, versions) {
                 merge_pending_dep(&mut found, &mut index, dep, true, &addon.title);
             }
         }
         for dep in &addon.optional_depends_on {
-            if !installed.contains(&normalize_addon_name(&dep.name)) {
+            if !dependency_satisfied(&dep.name, dep.min_version, installed, versions) {
                 merge_pending_dep(&mut found, &mut index, dep, false, &addon.title);
             }
         }
@@ -418,11 +474,9 @@ fn resolve_deps_with_policy(
             // auto path uses the same helper and must install every required
             // library it finds.
             pending_deps: {
-                let mut found = discover_missing_deps(
-                    addons_dir,
-                    installed_folders,
-                    &build_installed_set(addons_dir),
-                );
+                let (installed, versions) = build_installed_index(addons_dir);
+                let mut found =
+                    discover_missing_deps(addons_dir, installed_folders, &installed, &versions);
                 found.truncate(MAX_PENDING_DEPENDENCIES);
                 found
             },
@@ -438,25 +492,34 @@ fn resolve_transitive_deps(
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
 ) -> ResolvedDeps {
-    let mut all_installed = build_installed_set(addons_dir);
-
     let mut installed_deps: Vec<String> = Vec::new();
     let mut failed_deps: Vec<String> = Vec::new();
     let mut skipped_deps: Vec<String> = Vec::new();
 
     // Seed with the folders we just installed; loop resolves the full chain.
     let mut folders_to_scan: Vec<String> = installed_folders.to_vec();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashMap<String, u32> = HashMap::new();
 
     while !folders_to_scan.is_empty() {
         // Auto-resolution installs REQUIRED dependencies only. Optional
         // (`OptionalDependsOn`) entries are surfaced by the "ask" flow and are
         // never installed behind the user's back.
-        let missing_deps: Vec<String> =
-            discover_missing_deps(addons_dir, &folders_to_scan, &all_installed)
+        let (all_installed, versions) = build_installed_index(addons_dir);
+        let missing_deps: Vec<PendingDependency> =
+            discover_missing_deps(addons_dir, &folders_to_scan, &all_installed, &versions)
                 .into_iter()
-                .filter(|d| d.required && seen.insert(normalize_addon_name(&d.name)))
-                .map(|d| d.name)
+                .filter(|d| {
+                    if !d.required {
+                        return false;
+                    }
+                    let key = normalize_addon_name(&d.name);
+                    let floor = d.min_version.unwrap_or(0);
+                    if seen.get(&key).is_some_and(|previous| *previous >= floor) {
+                        return false;
+                    }
+                    seen.insert(key, floor);
+                    true
+                })
                 .collect();
 
         if missing_deps.is_empty() {
@@ -464,24 +527,15 @@ fn resolve_transitive_deps(
         }
 
         let mut newly_installed_folders: Vec<String> = Vec::new();
-        for (i, dep_name) in missing_deps.iter().enumerate() {
+        for (i, dep) in missing_deps.iter().enumerate() {
+            let dep_name = &dep.name;
             // Throttle between ESOUI requests to avoid hammering the server
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            match try_install_dep(dep_name, addons_dir, store) {
+            match try_install_dep(dep_name, dep.min_version, addons_dir, store) {
                 Ok(dep_folders) => {
-                    for f in &dep_folders {
-                        // Only mark an extracted folder as installed if it is
-                        // actually a loadable addon (has a matching manifest);
-                        // a stray non-addon folder in the zip must not satisfy
-                        // a dependency. Subfolders are gated the same way.
-                        if find_manifest(addons_dir, f).is_some() {
-                            all_installed.insert(normalize_addon_name(f));
-                        }
-                        newly_installed_folders.push(f.clone());
-                        collect_subfolder_names(&addons_dir.join(f), &mut all_installed);
-                    }
+                    newly_installed_folders.extend(dep_folders);
                     installed_deps.push(dep_name.clone());
                 }
                 Err("not_found") => skipped_deps.push(dep_name.clone()),
@@ -505,6 +559,7 @@ fn resolve_transitive_deps(
 /// Returns Ok(folders) on success, or Err(reason) on failure.
 fn try_install_dep(
     dep_name: &str,
+    min_version: Option<u32>,
     addons_dir: &Path,
     store: &mut metadata::MetadataStore,
 ) -> Result<Vec<String>, &'static str> {
@@ -520,16 +575,24 @@ fn try_install_dep(
     let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
     let dep_tmp = esoui::download_addon(&dep_info.download_url, Some(&dep_info.checksum))
         .map_err(|_| "download_failed")?;
+    verify_dependency_archive(dep_tmp.path(), dep_name, min_version)
+        .map_err(|_| "version_unsatisfied")?;
     let dep_folders =
         installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
 
     file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
         .map_err(|_| "hash_record_failed")?;
 
-    for f in &dep_folders {
-        let dep_version = read_local_version(addons_dir, f);
-        metadata::record_install(store, f, dep_id, &dep_version, &dep_info.download_url);
-    }
+    record_installed_folders(
+        store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+        0,
+    );
     Ok(dep_folders)
 }
 
@@ -1580,6 +1643,11 @@ fn install_dependency_blocking(
     dep_info: EsouiAddonInfo,
     dep_tmp: NamedTempFile,
 ) -> Result<InstallResult, String> {
+    verify_dependency_archive(
+        dep_tmp.path(),
+        dep_name,
+        dependency_minimum(addons_dir, dep_name),
+    )?;
     // Surface the real extraction error (installer already explains the common
     // Controlled Folder Access / permission case with fix steps) rather than a
     // generic "extract_failed" the user can't act on.
@@ -1590,10 +1658,16 @@ fn install_dependency_blocking(
         .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
     let mut store = metadata::load_metadata(addons_dir);
-    for f in &dep_folders {
-        let dep_version = read_local_version(addons_dir, f);
-        metadata::record_install(&mut store, f, dep_id, &dep_version, &dep_info.download_url);
-    }
+    record_installed_folders(
+        &mut store,
+        addons_dir,
+        &dep_folders,
+        dep_id,
+        &dep_info.version,
+        &dep_info.title,
+        &dep_info.download_url,
+        0,
+    );
 
     // Hard-wired to "auto": the user explicitly asked for THIS library, and its
     // own libraries are an implementation detail — prompting again here would be
@@ -1671,7 +1745,12 @@ pub async fn install_selected_dependencies(
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(200));
             }
-            match try_install_dep(dep_name, &addons_dir, &mut store) {
+            match try_install_dep(
+                dep_name,
+                dependency_minimum(&addons_dir, dep_name),
+                &addons_dir,
+                &mut store,
+            ) {
                 Ok(dep_folders) => {
                     for f in &dep_folders {
                         if !installed_folders.contains(f) {
@@ -1814,15 +1893,16 @@ fn check_for_updates_metadata(
             .or_else(|| api_entry.version.trim().strip_prefix('V'))
             .unwrap_or(api_entry.version.trim());
 
-        let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
+        // Empty legacy dependency metadata must offer a download so the API
+        // release can be recorded, rather than suppressing all future updates.
+        let has_update = !remote_ver.is_empty() && remote_ver != local_ver;
 
         if let Some(entry) = store.addons.get_mut(folder_name) {
             // Sync the raw string only when both sides are real versions that
             // normalized to the same value (the v-prefix/whitespace case). With
-            // either side empty, `has_update` is false for lack of information,
-            // not because the addon is current — stamping the remote string in
-            // would mark it up to date without downloading anything and mask
-            // that update forever.
+            // an empty local version, keep the record until a download establishes
+            // the installed release; stamping the remote string here would
+            // mark it up to date without downloading anything.
             if !has_update
                 && !remote_ver.is_empty()
                 && !local_ver.is_empty()
@@ -3939,6 +4019,32 @@ pub struct ExportData {
     pub addons: Vec<ExportEntry>,
 }
 
+fn addon_list_entries(addons_dir: &Path, store: &metadata::MetadataStore) -> Vec<ExportEntry> {
+    let mut entries: Vec<ExportEntry> = store
+        .addons
+        .iter()
+        .filter(|(folder, _)| addon_list_folder_exists(addons_dir, folder))
+        .map(|(folder, meta)| ExportEntry {
+            esoui_id: meta.esoui_id,
+            folder_name: folder.clone(),
+            version: meta.installed_version.clone(),
+        })
+        .collect();
+
+    entries.sort_by(|a, b| a.folder_name.cmp(&b.folder_name));
+
+    // Deduplicate by esoui_id (multiple folders can share an ID),
+    // but keep all untracked entries (esoui_id == 0)
+    let mut seen_ids: HashSet<u32> = HashSet::new();
+    entries.retain(|e| e.esoui_id == 0 || seen_ids.insert(e.esoui_id));
+
+    entries
+}
+
+fn addon_list_folder_exists(addons_dir: &Path, folder: &str) -> bool {
+    addons_dir.join(folder).is_dir() || addons_dir.join(format!("{folder}.disabled")).is_dir()
+}
+
 /// Blocking pool: loads kalpa.json and stats every tracked folder, which on a
 /// large install is far too much disk I/O for the main thread.
 #[tauri::command]
@@ -3950,23 +4056,7 @@ pub async fn export_addon_list(
     tokio::task::spawn_blocking(move || {
         let store = metadata::load_metadata(&addons_dir);
 
-        let mut entries: Vec<ExportEntry> = store
-            .addons
-            .iter()
-            .filter(|(folder, _)| addons_dir.join(folder).is_dir())
-            .map(|(folder, meta)| ExportEntry {
-                esoui_id: meta.esoui_id,
-                folder_name: folder.clone(),
-                version: meta.installed_version.clone(),
-            })
-            .collect();
-
-        entries.sort_by(|a, b| a.folder_name.cmp(&b.folder_name));
-
-        // Deduplicate by esoui_id (multiple folders can share an ID),
-        // but keep all untracked entries (esoui_id == 0)
-        let mut seen_ids: HashSet<u32> = HashSet::new();
-        entries.retain(|e| e.esoui_id == 0 || seen_ids.insert(e.esoui_id));
+        let entries = addon_list_entries(&addons_dir, &store);
 
         let export = ExportData {
             version: 1,
@@ -4348,7 +4438,7 @@ pub async fn import_addon_list(
         let (to_skip, to_install): (Vec<_>, Vec<_>) = export
             .addons
             .iter()
-            .partition(|e| addons_dir.join(&e.folder_name).is_dir());
+            .partition(|e| addon_list_folder_exists(&addons_dir, &e.folder_name));
 
         let skipped: Vec<String> = to_skip.iter().map(|e| e.folder_name.clone()).collect();
 
@@ -10975,6 +11065,157 @@ mod tests {
         fs::write(dir.join(format!("{folder}.txt")), manifest).unwrap();
     }
 
+    fn dependency_archive(version: u32, manifest_version: &str) -> NamedTempFile {
+        use std::io::Write;
+        let file = NamedTempFile::new().unwrap();
+        let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
+        archive
+            .start_file(
+                "LibFoo/LibFoo.txt",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        write!(
+            archive,
+            "## Title: LibFoo\n## AddOnVersion: {version}\n{manifest_version}"
+        )
+        .unwrap();
+        archive.finish().unwrap();
+        file
+    }
+
+    #[test]
+    fn dependency_discovery_reports_outdated_and_unknown_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(dir.path(), "NeedsLib", "libfoo>=200", "LibUnknown>=5");
+        make_addon_folder(dir.path(), "LibFoo", "## AddOnVersion: 100\n");
+        make_addon_folder(dir.path(), "LibUnknown", "## Title: x\n");
+        let (names, versions) = build_installed_index(dir.path());
+        let found = discover_missing_deps(dir.path(), &["NeedsLib".into()], &names, &versions);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].min_version, Some(200));
+        assert_eq!(dependency_minimum(dir.path(), "LIBFOO"), Some(200));
+        make_addon_folder(dir.path(), "LibFoo", "## AddOnVersion: 200\n");
+        let (names, versions) = build_installed_index(dir.path());
+        let found = discover_missing_deps(dir.path(), &["NeedsLib".into()], &names, &versions);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "LibUnknown");
+    }
+
+    #[test]
+    fn dependency_install_rejects_release_below_manifest_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(dir.path(), "NeedsLib", "LibFoo>=200", "");
+        make_addon_folder(dir.path(), "LibFoo", "## AddOnVersion: 100\n");
+        let info = EsouiAddonInfo {
+            id: 42,
+            title: "LibFoo".into(),
+            version: "2.0.0".into(),
+            download_url: "https://example.com/lib.zip".into(),
+            updated: String::new(),
+            checksum: String::new(),
+        };
+        assert!(install_dependency_blocking(
+            dir.path(),
+            "LibFoo",
+            42,
+            info.clone(),
+            dependency_archive(150, "")
+        )
+        .is_err());
+        assert_eq!(
+            read_addon_version(&dir.path().join("LibFoo/LibFoo.txt")),
+            Some(100)
+        );
+        let result = install_dependency_blocking(
+            dir.path(),
+            "LibFoo",
+            42,
+            info,
+            dependency_archive(200, ""),
+        )
+        .unwrap();
+        assert_eq!(result.installed_folders, vec!["LibFoo"]);
+        assert_eq!(
+            metadata::load_metadata(dir.path()).addons["LibFoo"].installed_version,
+            "2.0.0"
+        );
+    }
+
+    #[test]
+    fn dependency_release_metadata_avoids_repeat_and_repairs_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = EsouiAddonInfo {
+            id: 42,
+            title: "LibFoo".into(),
+            version: "2.0.0".into(),
+            download_url: "https://example.com/lib.zip".into(),
+            updated: String::new(),
+            checksum: String::new(),
+        };
+        install_dependency_blocking(
+            dir.path(),
+            "LibFoo",
+            42,
+            info,
+            dependency_archive(200, "## Version: 2.0\n"),
+        )
+        .unwrap();
+        let mut lookup = HashMap::new();
+        lookup.insert(
+            "LibFoo".into(),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 42,
+                title: "LibFoo".into(),
+                version: "2.0.0".into(),
+                author: String::new(),
+                last_update: 0,
+                file_info_uri: String::new(),
+            }),
+        );
+        assert!(!check_for_updates_metadata(dir.path(), &lookup).unwrap()[0].has_update);
+        let mut store = metadata::load_metadata(dir.path());
+        store
+            .addons
+            .get_mut("LibFoo")
+            .unwrap()
+            .installed_version
+            .clear();
+        metadata::save_metadata(dir.path(), &store).unwrap();
+        assert!(check_for_updates_metadata(dir.path(), &lookup).unwrap()[0].has_update);
+        assert!(metadata::load_metadata(dir.path()).addons["LibFoo"]
+            .installed_version
+            .is_empty());
+    }
+
+    #[test]
+    fn addon_list_export_and_import_preserve_disabled_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        make_addon_folder(dir.path(), "LibFoo", "## Version: 2.0\n");
+        fs::rename(
+            dir.path().join("LibFoo"),
+            dir.path().join("LibFoo.disabled"),
+        )
+        .unwrap();
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "LibFoo",
+            42,
+            "2.0.0",
+            "https://example.com/lib.zip",
+        );
+        let entries = addon_list_entries(dir.path(), &store);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].folder_name, "LibFoo");
+        assert!(addon_list_folder_exists(
+            dir.path(),
+            &entries[0].folder_name
+        ));
+        assert!(!dir.path().join("LibFoo").exists());
+        assert!(dir.path().join("LibFoo.disabled").is_dir());
+    }
+
     #[test]
     fn dependency_policy_defaults_to_auto() {
         // The WIRE default is "auto": an absent or unrecognized argument must
@@ -11007,11 +11248,12 @@ mod tests {
         write_dep_addon(tmp.path(), "LibPresent", "", "");
         write_dep_addon(tmp.path(), "AddonB", "LibPresent", "");
 
-        let installed = build_installed_set(tmp.path());
+        let (installed, versions) = build_installed_index(tmp.path());
         let found = discover_missing_deps(
             tmp.path(),
             &["AddonA".to_string(), "AddonB".to_string()],
             &installed,
+            &versions,
         );
 
         assert_eq!(found.len(), 2, "only the two absent deps are reported");
@@ -11034,11 +11276,12 @@ mod tests {
         write_dep_addon(tmp.path(), "AddonOptional", "", "LibShared");
         write_dep_addon(tmp.path(), "AddonRequired", "libshared>=7", "");
 
-        let installed = build_installed_set(tmp.path());
+        let (installed, versions) = build_installed_index(tmp.path());
         let found = discover_missing_deps(
             tmp.path(),
             &["AddonOptional".to_string(), "AddonRequired".to_string()],
             &installed,
+            &versions,
         );
 
         assert_eq!(found.len(), 1, "case-insensitive dedup into one entry");
