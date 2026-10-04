@@ -12,6 +12,8 @@ const OPERATION_PREFIX = "op:";
 const PENDING_PREFIX = "pending:";
 const DIRTY_MIRROR_PREFIX = "dirty:";
 const DELETED_AUTHOR_PREFIX = "deleted-author:";
+const BACKUP_DELETION_PREFIX = "backup-deletion:";
+const BACKUP_PURGE_PENDING = "meta:backup-purge-pending";
 const AUTHORITY_KEY = "meta:authority";
 const VOTE_STATE_PREFIX = "vote-state:";
 const VOTE_DIRTY_PREFIX = "vote-dirty:";
@@ -305,10 +307,17 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async removePacksByAuthor(authorId: string): Promise<string[]> {
     return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
       // This latch shares the same serialization boundary as backup writes.
       // Once present, no stale cron snapshot can publish this author's data.
-      await this.ctx.storage.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, new Date().toISOString());
-      await this.loadPacks();
+      const deletedAt = new Date().toISOString();
+      await this.ctx.storage.transaction(async (txn) => {
+        await txn.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, deletedAt);
+        // Unlike the live-author latch, this history survives a returning user.
+        await txn.put(`${BACKUP_DELETION_PREFIX}${authorId}`, deletedAt);
+        await txn.put(BACKUP_PURGE_PENDING, true);
+        await this.armRetry(txn);
+      });
       await this.hydrateDetailsByAuthor(authorId);
       const packs = await this.getStoredPacks();
       const removedPacks = packs.filter((pack) => pack.author_id === authorId);
@@ -368,16 +377,17 @@ export class PackIndexDO extends DurableObject<Env> {
           votes[key] = state.record;
         }
       }
-      const snapshot: BackupSnapshot = {
+      const snapshot = await this.filterDeletedBackupRecords({
         created_at: incoming.created_at,
         packs,
         packBodies: Object.fromEntries(packs.map((pack) => [pack.id, pack])),
         votes,
-      };
+      });
       const serialized = JSON.stringify(snapshot);
-      if (serialized.length > BACKUP_SIZE_WARN_BYTES) {
+      const bytes = new TextEncoder().encode(serialized).byteLength;
+      if (bytes > BACKUP_SIZE_WARN_BYTES) {
         console.warn(
-          `Backup snapshot for ${backupKey} is ${serialized.length} bytes, approaching KV's 25MB value limit`,
+          `Backup snapshot for ${backupKey} is ${bytes} bytes, approaching KV's 25MB value limit`,
         );
       }
       await this.env.ESO_PACKS.put(backupKey, serialized, { expirationTtl: 90 * 86400 });
@@ -385,13 +395,78 @@ export class PackIndexDO extends DurableObject<Env> {
       const meta: BackupMeta = {
         last_success: Date.now(),
         last_backup_key: backupKey,
-        pack_count: packs.length,
-        pack_body_count: packs.length,
-        vote_count: Object.keys(votes).length,
+        pack_count: snapshot.packs.length,
+        pack_body_count: Object.keys(snapshot.packBodies).length,
+        vote_count: Object.keys(snapshot.votes).length,
       };
       await this.env.ESO_PACKS.put("backup:meta", JSON.stringify(meta));
       return meta;
     });
+  }
+
+  async purgeDeletedUsersFromLatestBackup(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(() => this.purgeLatestBackup());
+  }
+
+  async stageRestoredPack(pack: Pack): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      // Restore pages must not put erased records back into live detail keys,
+      // including pages resumed after an account deletion.
+      if (await this.isDeletedPack(pack)) return;
+      await this.env.ESO_PACKS.put(`pack:${pack.id}`, JSON.stringify(pack));
+    });
+  }
+
+  private async isDeletedPack(pack: Pack): Promise<boolean> {
+    if (await this.ctx.storage.get(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`)) return true;
+    const cutoff = await this.ctx.storage.get<string>(`${BACKUP_DELETION_PREFIX}${pack.author_id}`);
+    return cutoff !== undefined && !(Date.parse(pack.created_at) > Date.parse(cutoff));
+  }
+
+  private async filterDeletedBackupRecords(snapshot: BackupSnapshot): Promise<BackupSnapshot> {
+    const entries = await this.ctx.storage.list<string>({ prefix: BACKUP_DELETION_PREFIX });
+    const cutoffs = new Map([...entries].map(([key, value]) => [key.slice(BACKUP_DELETION_PREFIX.length), Date.parse(value)]));
+    // Include latches written before deletion history was introduced.
+    const legacy = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
+    for (const [key, value] of legacy) {
+      const userId = key.slice(DELETED_AUTHOR_PREFIX.length);
+      if (!cutoffs.has(userId)) cutoffs.set(userId, Date.parse(value));
+    }
+    const deleted = (userId: string, createdAt: string): boolean => {
+      const cutoff = cutoffs.get(String(userId));
+      return cutoff !== undefined && !(Date.parse(createdAt) > cutoff);
+    };
+    const removedIds = new Set((snapshot.packs ?? []).filter((pack) => deleted(pack.author_id, pack.created_at)).map(({ id }) => id));
+    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
+      if (deleted(pack.author_id, pack.created_at)) removedIds.add(id);
+    }
+    return {
+      created_at: snapshot.created_at,
+      packs: (snapshot.packs ?? []).filter(({ id }) => !removedIds.has(id)),
+      packBodies: Object.fromEntries(Object.entries(snapshot.packBodies ?? {}).filter(([id]) => !removedIds.has(id))),
+      votes: Object.fromEntries(Object.entries(snapshot.votes ?? {}).filter(([, vote]) =>
+        !removedIds.has(vote.packId) && !deleted(vote.userId, vote.votedAt),
+      )),
+    };
+  }
+
+  private async purgeLatestBackup(): Promise<void> {
+    if (!await this.ctx.storage.get(BACKUP_PURGE_PENDING)) return;
+    try {
+      const raw = await this.env.ESO_PACKS.get("backup:latest");
+      if (raw) {
+        const snapshot = JSON.parse(raw) as BackupSnapshot;
+        const scrubbed = await this.filterDeletedBackupRecords(snapshot);
+        // Preserve the original timestamp and exact bytes when nothing changes.
+        if (JSON.stringify(scrubbed) !== JSON.stringify(snapshot)) {
+          await this.env.ESO_PACKS.put("backup:latest", JSON.stringify(scrubbed));
+        }
+      }
+      await this.ctx.storage.delete(BACKUP_PURGE_PENDING);
+    } catch (error) {
+      console.error("Backup privacy cleanup failed; retained for retry", error);
+      await this.scheduleRetry();
+    }
   }
 
   async replaceIndex(index: PackIndex): Promise<void> {
@@ -431,6 +506,7 @@ export class PackIndexDO extends DurableObject<Env> {
   async alarm(): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
       await new ShareStore(this.ctx.storage, this.env).retry();
+      await this.purgeLatestBackup();
       const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX, limit: MIRROR_BATCH_SIZE });
       for (const operationId of pending.values()) {
         const operation = await this.ctx.storage.get<PendingOperation>(
@@ -498,6 +574,10 @@ export class PackIndexDO extends DurableObject<Env> {
           result.unavailable.push(id);
           continue;
         }
+        if (await this.isDeletedPack(detail)) {
+          result.tombstoned.push(id);
+          continue;
+        }
         await this.ctx.storage.put(this.packKey(id), detail);
         result.adopted.push(id);
       }
@@ -561,6 +641,7 @@ export class PackIndexDO extends DurableObject<Env> {
         cacheTtl: 30,
       });
       const candidate = this.newerPack(pack, detail);
+      if (await this.isDeletedPack(candidate)) continue;
       const current = stored.get(this.packKey(pack.id));
       if (!current || this.isNewerOrDifferent(candidate, current)) {
         await this.ctx.storage.put(this.packKey(pack.id), candidate);
@@ -691,6 +772,12 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   private async applyReplacement(packs: Pack[], forceIndex: boolean, votes?: VoteRecord[], restoredIds?: Set<string>): Promise<void> {
+    const filtered = await this.filterDeletedBackupRecords({
+      created_at: "", packs, packBodies: {},
+      votes: Object.fromEntries((votes ?? []).map((vote) => [`${vote.packId}:${vote.userId}`, vote])),
+    });
+    packs = filtered.packs;
+    if (votes !== undefined) votes = Object.values(filtered.votes);
     const current = await this.getStoredPacks();
     const deletedEntries = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
     const deletedAuthors = new Set(
@@ -737,16 +824,20 @@ export class PackIndexDO extends DurableObject<Env> {
           }
         }
       }
-      await this.stagePackMirror(pack, [...states.values()], restoreVotes);
+      const restoredPack = restoreVotes
+        ? { ...pack, vote_count: [...states.values()].filter(({ record }) => record !== null).length }
+        : pack;
+      await this.stagePackMirror(restoredPack, [...states.values()], restoreVotes);
     }
     // Bound external mirror work per event; every remaining item is journaled.
     for (const pack of accepted.slice(0, MIRROR_BATCH_SIZE)) {
       if (await this.ctx.storage.get(`${VOTE_RESET_PREFIX}${pack.id}`)) await this.resetVoteMirror(pack.id);
       const states = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_DIRTY_PREFIX}${pack.id}:`, limit: MIRROR_BATCH_SIZE });
       for (const state of states.values()) await this.mirrorVote(state);
-      await this.mirrorChangedBestEffort(pack);
+      const stored = await this.ctx.storage.get<Pack>(this.packKey(pack.id));
+      if (stored) await this.mirrorChangedBestEffort(stored);
     }
-    await this.mirror(accepted, undefined, undefined, [], forceIndex);
+    await this.mirror(await this.getStoredPacks(), undefined, undefined, [], forceIndex);
     for (const operation of deleteOperations.slice(0, MIRROR_BATCH_SIZE)) await this.finishDelete(operation);
   }
 

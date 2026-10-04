@@ -1032,7 +1032,8 @@ describe("POST /admin/restore", () => {
     expect(body.restored_votes).toBe(1);
 
     const restoredPack = await e.ESO_PACKS.get(`pack:${pack.id}`, "json");
-    expect(restoredPack).toEqual(pack);
+    // Membership is authoritative even if an old snapshot's counter drifted.
+    expect(restoredPack).toEqual({ ...pack, vote_count: 1 });
 
     const restoredVote = await e.ESO_PACKS.get(`vote:${pack.id}:${TEST_USER.id}`);
     expect(restoredVote).toBeTruthy();

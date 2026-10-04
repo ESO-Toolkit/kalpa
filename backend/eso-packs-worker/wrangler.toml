@@ -17,8 +17,8 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 crons = ["0 0 * * *"]
 
 # Shared D1 binding — same database roster-hub-api uses.
-# Dual-write: every KV mutation is mirrored to D1 inline so
-# esotk.com always reflects the latest pack data.
+# Durable mutations queue KV/D1 mirror work for retry.
+# esotk.com converges after failed writes recover.
 [[d1_databases]]
 binding = "ROSTER_HUB_DB"
 database_name = "roster-hub-db"
@@ -46,7 +46,7 @@ namespace_id = "1003"
   limit = 20
   period = 60
 
-# ── Durable Object for atomic pack index mutations ────────────────
+# ── Durable Object for pack, vote, and share mutations ────────────────
 [[durable_objects.bindings]]
 name = "PACK_INDEX"
 class_name = "PackIndexDO"

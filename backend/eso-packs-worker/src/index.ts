@@ -816,17 +816,9 @@ async function handleScheduled(env: Env): Promise<void> {
     ),
   );
 
-  // Drop anyone who asked to be deleted, at WRITE time.
-  //
-  // This read of the index and votes may predate an account deletion that
-  // completes before the put below. `purgeUserFromLatestBackup` scrubs
-  // `backup:latest` when the deletion runs, but nothing orders the two, so a
-  // cron holding a stale read could put those records straight back — into the
-  // one backup key with no TTL, where a later restore replays them.
-  //
-  // Filtering here rather than relying on having read after the delete is what
-  // makes the ordering irrelevant: the tombstone outlives the read, so a stale
-  // snapshot still cannot publish a deleted user.
+  // Apply the legacy KV privacy markers, then let writeBackup revalidate
+  // against durable deletion history inside the same boundary as account
+  // deletion and backup cleanup. KV propagation alone cannot order these.
   const { packs, packBodies: keptBodies, votes: keptVotes } = await dropDeletedUsers(env, {
     packs: index.packs,
     packBodies,
@@ -915,10 +907,9 @@ function readCursor(value: unknown): number {
  * `created_at` and the record count cover the snapshot changing mid-restore, and
  * they are enough only because of WHICH rewriters exist. This worker has exactly
  * two. The midnight cron writes a fresh `created_at`, so it is caught by the
- * timestamp. `purgeUserFromLatestBackup` deliberately preserves `created_at`
- * (pinning to the dated twin would resurrect GDPR-deleted data) but returns
- * early unless `removed > 0`, so any write it performs has dropped at least one
- * record and is caught by the count.
+ * timestamp. The durable backup scrub deliberately preserves `created_at`
+ * (pinning to the dated twin would resurrect deleted data). Privacy removals
+ * change the record count and invalidate a continuation.
  *
  * That is a narrower guarantee than a content hash: two snapshots with the same
  * timestamp AND the same record count but different records would collide. No
@@ -1000,8 +991,8 @@ async function runBounded(tasks: (() => Promise<void>)[], concurrency: number): 
  * exists specifically to disable seed-with-fake-data in production and
  * would defeat the purpose of a restore endpoint if reused here.
  *
- * Stages pack bodies and vote records in KV, then
- * atomically replaces the index via the PackIndexDO — never via raw
+ * Stages eligible pack bodies through the PackIndexDO, then
+ * serializes index replacement and vote promotion there — never via raw
  * putPackIndex, which would race a concurrent mutation (see kv.ts's
  * getPackIndex comment on why counter/index writes go through the DO). The
  * replacement index is built from only the ids we actually restored a body
@@ -1085,7 +1076,7 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
   // position on every call against the same snapshot.
   const work: (() => Promise<void>)[] = [
     ...packs.map((pack) => async () => {
-      await putPack(env, pack);
+      await getPackIndexDO(env).stageRestoredPack(pack);
     }),
     // Use each record's own packId/userId fields rather than parsing the
     // "<packId>:<userId>" map key, since userId could itself contain ":".
@@ -1190,81 +1181,6 @@ async function handleRestore(request: Request, env: Env, url: URL): Promise<Resp
 
 // ── DELETE /account ────────────────────────────────────────────
 
-/**
- * Scrub a deleted user's records out of the non-expiring `backup:latest`
- * snapshot.
- *
- * The daily `backup:YYYY-MM-DD` snapshots carry a 90-day TTL, so a deleted
- * user's data ages out of those on its own. `backup:latest` is deliberately
- * written WITHOUT a TTL (it is the floor that survives a >90-day backup gap),
- * so without this it would retain the packs and votes of a user who asked for
- * deletion — indefinitely, and invisibly to them. Rewriting this one key bounds
- * the retention of deleted data to the dailies' 90-day window, which is what
- * PRIVACY.md commits to.
- *
- * Mirrors handleDeleteAccount's treatment of live data exactly: it drops the
- * user's own packs, their own votes, and every vote attached to a removed pack
- * id. Slugs are reusable, so retaining those votes would let a restored or
- * recreated pack inherit votes from an earlier lifecycle.
- *
- * Best-effort. The live data is already gone by the time this runs, so a
- * failure here must not fail the deletion request — it is logged and swallowed.
- *
- * This scrub alone does NOT stop a concurrent scheduled backup reintroducing the
- * user, and an earlier version of this comment claimed it did. `handleScheduled`
- * reads the live index and votes and then writes `backup:latest`, sharing no
- * lock with this path, so a cron that read before the deletion could write after
- * this scrub and put the records back — into the one key with no TTL.
- *
- * What actually closes that is the tombstone written by the caller before this
- * runs: `dropDeletedUsers` filters tombstoned users out at WRITE time, so a
- * stale read cannot publish them however the two interleave. This function
- * remains necessary for the snapshot that is already on disk.
- */
-async function purgeUserFromLatestBackup(env: Env, userId: string): Promise<void> {
-  try {
-    const raw = await env.ESO_PACKS.get("backup:latest");
-    if (!raw) return;
-
-    const snapshot = JSON.parse(raw) as PackBackupSnapshot;
-
-    const removedPackIds = new Set(
-      (snapshot.packs ?? [])
-        .filter((pack) => pack.author_id === userId)
-        .map((pack) => pack.id),
-    );
-    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
-      if (pack?.author_id === userId) removedPackIds.add(id);
-    }
-    const keptPacks = (snapshot.packs ?? []).filter((p) => !removedPackIds.has(p.id));
-    const keptBodies: Record<string, Pack> = {};
-    for (const [id, pack] of Object.entries(snapshot.packBodies ?? {})) {
-      if (!removedPackIds.has(id) && pack?.author_id !== userId) keptBodies[id] = pack;
-    }
-    const keptVotes: Record<string, VoteRecord> = {};
-    for (const [key, vote] of Object.entries(snapshot.votes ?? {})) {
-      if (vote?.userId !== userId && !removedPackIds.has(vote?.packId)) keptVotes[key] = vote;
-    }
-
-    const removed =
-      (snapshot.packs?.length ?? 0) - keptPacks.length +
-      (Object.keys(snapshot.packBodies ?? {}).length - Object.keys(keptBodies).length) +
-      (Object.keys(snapshot.votes ?? {}).length - Object.keys(keptVotes).length);
-    if (removed === 0) return; // nothing of theirs in the snapshot — skip the write
-
-    const scrubbed: PackBackupSnapshot = {
-      created_at: snapshot.created_at,
-      packs: keptPacks,
-      packBodies: keptBodies,
-      votes: keptVotes,
-    };
-    await env.ESO_PACKS.put("backup:latest", JSON.stringify(scrubbed));
-    console.log(`Purged ${removed} record(s) for deleted user from backup:latest`);
-  } catch (err) {
-    console.error("Failed to purge deleted user from backup:latest:", err);
-  }
-}
-
 async function handleDeleteAccount(request: Request, env: Env, url: URL): Promise<Response> {
   const user = await validateBearerToken(request);
   if (!user) return unauthorized(request);
@@ -1301,7 +1217,7 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
 
   // 4. Scrub them from the one backup key that never expires. The dated
   // snapshots keep their 90-day TTL and age out on their own.
-  await purgeUserFromLatestBackup(env, userId);
+  await getPackIndexDO(env).purgeDeletedUsersFromLatestBackup();
 
   return json(request, {
     deleted: {
