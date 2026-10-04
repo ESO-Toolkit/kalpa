@@ -19,11 +19,9 @@ export function corsHeaders(request: Request): Record<string, string> {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-API-Key, Authorization",
     "Access-Control-Max-Age": "86400",
-    // Allow-Origin below echoes the caller's Origin, and several responses
-    // carrying it are cacheable. Without Vary a shared cache would replay one
-    // origin's Allow-Origin (or a header-less copy) to a different origin,
-    // where the browser then fails CORS.
-    Vary: "Origin",
+    // Allow-Origin below echoes the caller's Origin, while Authorization can
+    // change redaction and viewer state. Shared caches must key on both.
+    Vary: "Origin, Authorization",
   };
 
   if (isAllowedOrigin(origin)) {

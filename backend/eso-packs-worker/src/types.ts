@@ -87,6 +87,95 @@ export interface ShareCodeResponse {
   deepLink: string;
 }
 
+// ── Addon index (ESOUI catalogue full-text search) ────────────────────
+/** One search hit. snake_case to match the Rust AddonSearchHit struct. */
+export interface AddonSearchHit {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  downloads: number;
+  favorites: number;
+  /** Epoch millis, straight from the ESOUI filelist. */
+  last_update: number;
+  file_info_uri: string;
+  is_library: boolean;
+  snippet: string;
+  /** Higher is better. Sign-flipped bm25 — comparable within one result set
+   *  only, never across queries. */
+  score: number;
+  /** True when this came from the embedding index rather than keyword search.
+   *  Marked explicitly rather than inferred from `score === 0`, so the flag
+   *  cannot be confused with a genuine zero-scoring keyword hit. */
+  semantic?: boolean;
+}
+
+export interface AddonSearchResult {
+  hits: AddonSearchHit[];
+  matched: number;
+  /** Which pass produced the hits: the strict pass only, the permissive pass
+   *  only, both merged, or nothing matched. */
+  mode: "and" | "or" | "union" | "fused" | "none";
+}
+
+export interface AddonIndexStats {
+  version: number;
+  total: number;
+  live: number;
+  described: number;
+  /** Live rows still awaiting a description fetch — how far behind the crawl is. */
+  pending_details: number;
+  indexed_at: number;
+  last_sync: string | null;
+  /** Hours since the last successful filelist sync, or null if never synced. */
+  stale_hours: number | null;
+}
+
+/**
+ * One semantic-retrieval hit: an addon uid and its cosine similarity to the
+ * question. Deliberately carries no addon fields — the row is rehydrated from
+ * D1, so the vector store can never be the source of a title or a link.
+ */
+export interface AddonVectorHit {
+  uid: number;
+  /** -1..1. Comparable within one question's result set. */
+  cosine: number;
+}
+
+// ── Ask (natural-language addon assistant) ───────────────────────────
+/** One recommended addon. Links are always rebuilt from the index, never
+ *  taken from model output. */
+export interface AskRecommendation {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  file_info_uri: string;
+  reason: string;
+}
+
+export interface AskResponse {
+  /** Prose answer. Empty when the model was skipped — see `degraded`. */
+  answer: string;
+  recommendations: AskRecommendation[];
+  /** Ranked candidates the model did not pick. Free (no extra model call) and
+   *  shown collapsed, so a short answer does not look like it missed things. */
+  also_considered: AskRecommendation[];
+  no_good_match: boolean;
+  /** True when the ranked candidates are shown without model prose (model
+   *  unavailable, over budget, or output failed grounding). */
+  degraded: boolean;
+  cached: boolean;
+}
+
+export interface CrawlOutcome {
+  fetched: number;
+  removed: number;
+  failed: number;
+  remaining: number;
+  complete: boolean;
+}
+
 // ── Env bindings ──────────────────────────────────────────────────────
 export interface Env {
   ESO_PACKS: KVNamespace;
@@ -94,10 +183,53 @@ export interface Env {
   ALLOW_SEED?: string;
   /** Shared D1 binding to roster-hub-db — same database roster-hub-api uses */
   ROSTER_HUB_DB?: D1Database;
+  /** Exact values: off, dry-run (default/fail-closed), or apply. */
+  D1_RECONCILIATION_MODE?: string;
   /** Built-in atomic rate limit bindings (GA Sep 2025) */
   READ_LIMITER: RateLimit;
   WRITE_LIMITER: RateLimit;
   VOTE_LIMITER: RateLimit;
+  /**
+   * DELETE /account only. Erasure is paged: ACCOUNT_DELETE_VOTE_BUDGET caps one
+   * request at ~450 votes and returns `complete: false` for the caller to
+   * repeat, so an account with a few thousand votes needs a dozen or more
+   * rounds. On WRITE_LIMITER's 10/min the user was 429'd partway through
+   * deleting their own data and could never finish the erasure.
+   *
+   * Optional so a deployment that has not added the binding yet still falls
+   * back to WRITE_LIMITER rather than losing rate limiting on the route.
+   */
+  ERASURE_LIMITER?: RateLimit;
   /** Durable Object for atomic pack index mutations */
   PACK_INDEX: DurableObjectNamespace<import("./pack-index-do").PackIndexDO>;
+  /**
+   * Dedicated D1 for the ESOUI addon full-text index.
+   *
+   * Deliberately NOT roster-hub-db: that database is shared with the ESO
+   * Toolkit website and CLAUDE.md requires coordinating every schema change
+   * there. Optional so the worker keeps serving Pack Hub if the binding is
+   * absent — the addon routes 503 instead of the whole worker failing.
+   */
+  ADDON_INDEX?: D1Database;
+  /**
+   * Gate on the nightly ESOUI crawl. Exact value "enabled" turns it on;
+   * anything else (including unset) leaves it off.
+   *
+   * Fail-closed on purpose. The cron reaches out to a third party, and it must
+   * not start doing that the moment the D1 binding is added — the initial
+   * backfill has to be run and checked first. It also keeps the scheduled
+   * tests off the network.
+   */
+  ADDON_INDEX_SYNC?: string;
+  /** Bounds the addon search route independently of pack reads. */
+  ADDON_SEARCH_LIMITER?: RateLimit;
+  /** Workers AI binding for the Ask assistant. Optional: without it /ask still
+   *  answers, returning ranked candidates with no prose. */
+  AI?: Ai;
+  /** Tighter budget than search — an Ask costs a model call, not just a query. */
+  ASK_LIMITER?: RateLimit;
+  /** Workers AI model id. Overridable so swapping models is config, not code. */
+  ASK_MODEL?: string;
+  /** Max model calls per UTC day before /ask degrades to candidates-only. */
+  ASK_DAILY_BUDGET?: string;
 }

@@ -167,6 +167,43 @@ describe("sameAddonsFolder", () => {
   });
 });
 
+describe("successful-removal epochs", () => {
+  it("invalidates a pre-removal request only after the backend confirms success", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const requestEpoch = queue.captureRemovalEpoch(LIVE);
+
+    // Undo leaves the request valid: the optimistic removal never reached disk.
+    queue.add("Undone", entry("Undone", { addonsPath: LIVE }));
+    queue.drop("Undone");
+    expect(queue.isRemovalEpochCurrent(LIVE, requestEpoch)).toBe(true);
+
+    // A failed backend call also leaves it valid: begin/end only manage the
+    // temporary visibility mask; failure does not change filesystem history.
+    queue.beginCommit("Failed", LIVE);
+    queue.endCommit("Failed", LIVE);
+    expect(queue.isRemovalEpochCurrent(LIVE, requestEpoch)).toBe(true);
+
+    queue.beginCommit("Removed", LIVE);
+    queue.recordSuccessfulRemoval(LIVE);
+    queue.endCommit("Removed", LIVE);
+
+    expect(queue.isRemovalEpochCurrent(LIVE, requestEpoch)).toBe(false);
+    expect(queue.isRemovalEpochCurrent(LIVE, queue.captureRemovalEpoch(LIVE))).toBe(true);
+  });
+
+  it("normalizes equivalent paths while isolating different game instances", () => {
+    const queue = new RemovalQueue(vi.fn());
+    const liveEpoch = queue.captureRemovalEpoch("  C:/Games/ESO/LIVE/AddOns/  ");
+    const ptsEpoch = queue.captureRemovalEpoch(PTS);
+
+    queue.recordSuccessfulRemoval("c:/games/eso/live/addons/");
+
+    expect(queue.isRemovalEpochCurrent(LIVE, liveEpoch)).toBe(false);
+    expect(queue.isRemovalEpochCurrent("C:/GAMES/ESO/live/AddOns/", liveEpoch)).toBe(false);
+    expect(queue.isRemovalEpochCurrent(PTS, ptsEpoch)).toBe(true);
+  });
+});
+
 describe("restore reducers", () => {
   it("restores the update row alongside the addon", () => {
     // Regression: undo put the addon back but dropped its UpdateCheckResult, so

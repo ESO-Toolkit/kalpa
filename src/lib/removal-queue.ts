@@ -84,6 +84,17 @@ export class RemovalQueue {
   private readonly entries = new Map<string, PendingRemoval>();
 
   /**
+   * Monotonic successful-removal generation per AddOns folder.
+   *
+   * A request captures this before asking the backend to enumerate disk. If a
+   * delete succeeds before that request is delivered, the generation changes
+   * and the whole stale snapshot is rejected. Failed deletes and Undo never
+   * advance it. Keeping one number per visited instance avoids both permanent
+   * addon tombstones and expiry races.
+   */
+  private readonly successfulRemovalEpochs = new Map<string, number>();
+
+  /**
    * Folders whose undo window has closed and whose `remove_addon` call is
    * in flight.
    *
@@ -145,6 +156,22 @@ export class RemovalQueue {
     const queued = this.entries.get(folderName);
     if (queued && sameAddonsFolder(queued.addonsPath, addonsPath)) return true;
     return this.committing.has(maskKey(addonsPath, folderName));
+  }
+
+  /** Snapshot the successful-removal generation before a filesystem read. */
+  captureRemovalEpoch(addonsPath: string): number {
+    return this.successfulRemovalEpochs.get(normalizeAddonsFolder(addonsPath)) ?? 0;
+  }
+
+  /** Can a filesystem snapshot captured at epoch still be published? */
+  isRemovalEpochCurrent(addonsPath: string, epoch: number): boolean {
+    return this.captureRemovalEpoch(addonsPath) === epoch;
+  }
+
+  /** Invalidate filesystem snapshots that predate a confirmed deletion. */
+  recordSuccessfulRemoval(addonsPath: string): void {
+    const path = normalizeAddonsFolder(addonsPath);
+    this.successfulRemovalEpochs.set(path, (this.successfulRemovalEpochs.get(path) ?? 0) + 1);
   }
 
   /** The undo window has closed and the backend delete is starting. */
@@ -209,10 +236,9 @@ export class RemovalQueue {
  * Generic over anything folder-keyed, so the addon list and its update rows
  * filter through the same rule.
  *
- * KNOWN LIMIT — the mask is read when the request RESOLVES, not when the
- * backend read the folder, and it only knows about removals that are still
- * queued or still committing. So the race is between the backend ENUMERATING
- * the addon and this code applying the result:
+ * The mask is read when the request RESOLVES, not when the backend read the
+ * folder, so by itself it cannot catch this race between ENUMERATING the addon
+ * and applying the result:
  *
  *     t=0.0  Refresh issues scan_installed_addons
  *     t=0.1  the backend enumerates the folder — Foo is still on disk
@@ -230,12 +256,9 @@ export class RemovalQueue {
  * so a delete during that fetch is simply reflected. Its exposure is the
  * narrower gap between the metadata phase and delivery.
  *
- * The result is a phantom row and an inflated banner count until the next
- * scan. Closing it needs the queue to remember removals that COMPLETED after a
- * given request enumerated — a generation stamped on each request and an
- * expiring log of finished removals — which is materially more machinery than
- * the mask itself, on a path where the wrong answer is a stale row rather than
- * a lost file. Deliberately not built here; tracked as a follow-up.
+ * The path-scoped successful-removal epoch closes that delivery window: callers
+ * capture it before the request and reject the whole snapshot if a confirmed
+ * delete advances it before delivery. No addon tombstone or expiry is needed.
  *
  * On `main` this window was not narrower, it was total: nothing masked these
  * lists at all, so every scan inside the undo window resurrected the row.

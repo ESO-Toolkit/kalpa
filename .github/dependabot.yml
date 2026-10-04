@@ -39,6 +39,17 @@ updates:
       worker-dependencies:
         patterns: ["*"]
     open-pull-requests-limit: 5
+    ignore:
+      # These tests run inside workerd through
+      # @cloudflare/vitest-pool-workers, which caps its peer range at
+      # vitest ^4.1.0. 0.22.0 is the latest release and still does, so there
+      # is no newer pool to move to and a vitest 5 bump simply cannot
+      # install - npm ERESOLVE, seen on #450 both before and after a rebase,
+      # which is what ruled out flakiness. Drop this rule when
+      # @cloudflare/vitest-pool-workers ships a vitest 5 peer range. The
+      # root project keeps its own vitest and is unaffected by this rule.
+      - dependency-name: vitest
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: cargo
     directory: /src-tauri

@@ -1280,8 +1280,7 @@ export function outstandingAfter<T>(files: T[], uploadedCount: number): T[] {
 
 async function showInFolder(path: string): Promise<void> {
   try {
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    await revealItemInDir(path);
+    await invokeOrThrow("reveal_allowed_path", { path });
   } catch {
     toast.error("Couldn't show the file in its folder.");
   }

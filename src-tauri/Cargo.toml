@@ -1,6 +1,6 @@
 [package]
 name = "kalpa"
-version = "0.1.0-beta.18"
+version = "0.1.0-beta.26"
 edition = "2021"
 description = "A source-available desktop addon manager for Elder Scrolls Online"
 license = "BUSL-1.1"
@@ -24,7 +24,18 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dirs = "6"
+# A `log` sink is the only way a dependency's diagnostics can reach disk: this
+# app is `windows_subsystem = "windows"` in release, so stderr goes nowhere, and
+# tauri-runtime-wry reports a failed window creation through `log::error!` while
+# still returning `Ok(..)` to its caller. See `diag_log`.
+log = { version = "0.4", features = ["std"] }
+# Timestamps for that sink. Already in the tree transitively, so this adds no
+# build cost — only a direct name to call it by.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# For `tauri_runtime::Error::FailedToReceiveMessage`, the one signal that
+# distinguishes a real window from one Tauri registered but the runtime refused.
+tauri-runtime = "2"
+dirs = "7"
 reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
 scraper = "0.27"
@@ -60,6 +71,7 @@ notify = "8"
 # then rejects. dunce::canonicalize keeps paths in drive-letter form. Already in
 # the lock file as a transitive dep, so this adds no new compilation.
 dunce = "1"
+fs4 = { version = "1.1.0", features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
@@ -75,7 +87,23 @@ keyring = { version = "3", features = ["windows-native"] }
 # 0.38/windows-core-0.61 type. Dependabot minors for these two crates are
 # ignored in .github/dependabot.yml; drop those rules when tauri/wry move.
 webview2-com = "0.38"
-windows = "0.61"
+# Features are additive within a version and cannot create the duplicate
+# windows-core the note above warns about — that hazard is specific to moving
+# off 0.61. WinTrust/Cryptography are needed by `client_signature` for
+# Authenticode verification of user-supplied DLLs; generated bindings are used
+# there rather than hand-written `extern "system"` declarations because a single
+# wrong field offset in CERT_INFO would mean reading the wrong bytes while
+# reporting a confident answer, in the one place that gates writing a binary
+# into the user's game folder.
+windows = { version = "0.61", features = [
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    # `launch_gate`: a named mutex plus a lookup of the single-instance plugin's
+    # hidden window, to close the gap where two launches both become full
+    # instances.
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS Keychain for token storage (same chunked layout as Windows).

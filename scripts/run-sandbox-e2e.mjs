@@ -19,11 +19,11 @@
  *
  * Isolated (throwaway, deleted afterwards):
  *   - the AddOns folder and its `.kalpa-metadata`
+ *   - the main-window WebView2 profile (localStorage, IndexedDB, cookies)
  *
  * NOT isolated — these are the developer's real, live files:
  *   - `settings.json` (sortMode, filterMode, autoUpdate, addonsPath, …)
  *   - the manifest-cache SQLite DB, uploader history, saved auth tokens
- *   - the WebView2 profile (localStorage, IndexedDB, cookies)
  *   - anything else under the app-data dir
  *
  * Tauri resolves the app-data dir from the bundle identifier through the OS
@@ -31,13 +31,10 @@
  * `KALPA_ADDONS_DIR` redirects the AddOns folder. Full isolation needs a fixture
  * profile or a dedicated test binary — tracked as follow-up, not solved here.
  *
- * The WebView2 profile belongs in that second list even though this runner sets
- * `WEBVIEW2_USER_DATA_FOLDER`: that variable is only consulted when the
- * `userDataFolder` passed to `CreateCoreWebView2EnvironmentWithOptions` is
- * empty, and Tauri always fills it in from the bundle identifier. The directory
- * this runner creates is therefore made, never used, and deleted. It is kept
- * only so that wiring a real per-run profile later is a one-line change — but
- * do not read it as a boundary that exists today.
+ * The debug app does isolate the WebView2 profile when `KALPA_E2E_TOKEN` is
+ * present. Tauri supplies WebView2's userDataFolder itself, so the app configures
+ * a token-scoped window data directory instead of relying on the ignored
+ * `WEBVIEW2_USER_DATA_FOLDER` environment variable.
  *
  * Three consequences, all of which have already bitten:
  *   1. Persisted settings CHANGE test behaviour. A developer whose last session
@@ -88,6 +85,10 @@ async function main() {
   if (process.platform !== "win32") {
     throw new Error("The sandboxed e2e gate is Windows-only because it drives WebView2 CDP.");
   }
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData) {
+    throw new Error("LOCALAPPDATA is required to isolate and clean up the WebView2 profile.");
+  }
 
   await assertNoExistingCdp();
   await assertNoExistingKalpaProcess();
@@ -122,17 +123,12 @@ async function main() {
   const sandboxDir = path.join(root, "AddOns");
   const fixturesDir = path.join(root, "fixtures");
   const fixtureZip = path.join(fixturesDir, `${FIXTURE_FOLDER}.zip`);
-  // Give WebView2 its own user-data folder rather than letting it default to
-  // one beside the exe. A run that cannot create that folder brings the app up
-  // without a webview — so no window, and no debug port to attach to.
-  const webviewDataDir = path.join(root, "webview2");
 
   // Non-recursive on purpose: if this root somehow already exists, that is a
   // collision and must be a hard error, never a silent reuse.
   mkdirSync(root);
   mkdirSync(sandboxDir);
   mkdirSync(fixturesDir);
-  mkdirSync(webviewDataDir);
 
   // The marker authorises the destructive debug commands — not
   // KALPA_ADDONS_DIR, which can name any folder including a live ESO install.
@@ -143,6 +139,15 @@ async function main() {
   const runToken = `${process.pid}-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}`;
+  // Tauri resolves a relative window dataDirectory beneath
+  // %LOCALAPPDATA%/<window-label>. Keep this in lockstep with the debug-only
+  // configuration in src-tauri/src/lib.rs and validate the recursive-delete
+  // target before the app can create it.
+  const webviewProfilesRoot = path.resolve(localAppData, "main", "kalpa-e2e");
+  const webviewDataDir = path.resolve(webviewProfilesRoot, runToken);
+  if (path.dirname(webviewDataDir) !== webviewProfilesRoot) {
+    throw new Error(`Refusing unsafe WebView2 profile path: ${webviewDataDir}`);
+  }
   writeFileSync(path.join(sandboxDir, ".kalpa-e2e-sandbox"), runToken);
   writeFileSync(fixtureZip, makeAddonZip(FIXTURE_FOLDER, { title: "Kalpa E2E Fixture" }));
   console.log(`[${TAG}] sandbox ${sandboxDir}`);
@@ -154,7 +159,6 @@ async function main() {
       env: {
         KALPA_ADDONS_DIR: sandboxDir,
         KALPA_E2E_TOKEN: runToken,
-        WEBVIEW2_USER_DATA_FOLDER: webviewDataDir,
       },
     });
     await proveOwnedLaunch(child);
@@ -180,14 +184,15 @@ async function main() {
     if (child?.pid) {
       await killProcessTree(child.pid, TAG);
     }
-    // Only after the app is gone: it holds the metadata file open, and
-    // WebView2 keeps a handle on its user-data folder for a moment past
-    // taskkill — so retry rather than warning on a race that resolves itself.
+    // Only after the app is gone: it holds metadata files open, and WebView2
+    // keeps profile handles briefly past taskkill. Retry both exact per-run
+    // targets instead of warning on a teardown race that resolves itself.
+    await removeWithRetry(webviewDataDir);
     await removeWithRetry(root);
   }
 }
 
-async function removeWithRetry(dir, attempts = 10) {
+async function removeWithRetry(dir, attempts = 30) {
   for (let i = 0; i < attempts; i++) {
     try {
       rmSync(dir, { recursive: true, force: true });

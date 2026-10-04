@@ -1,0 +1,349 @@
+[
+  {
+    "kind": "name",
+    "question": "Bandits User Interface",
+    "expected_esoui_ids": [1643],
+    "note": "KNOWN FAILING ROW. The real addon (Hoft, 6.2M downloads, live) loses rank 1 to 'KR Patch for Bandits User Interface' and 'Patcher for Bandits User Interface'. This row exists to keep that regression measured."
+  },
+  {
+    "kind": "name",
+    "question": "Master Merchant",
+    "expected_esoui_ids": [2753],
+    "note": "Master Merchant 3.0 by Sharlikran is the canonical addon; 'Importers for Master Merchant 3.0' and 'Guild Sales Assistant for Master Merchant' are companions, not the answer."
+  },
+  {
+    "kind": "name",
+    "question": "Combat Indicator",
+    "expected_esoui_ids": [1543]
+  },
+  {
+    "kind": "name",
+    "question": "Srendarr",
+    "expected_esoui_ids": [655],
+    "note": "Srendarr - Aura, Buff & Debuff Tracker by Phinix."
+  },
+  {
+    "kind": "name",
+    "question": "Inventory Insight",
+    "expected_esoui_ids": [731]
+  },
+  {
+    "kind": "name",
+    "question": "Item Set Browser",
+    "expected_esoui_ids": [1480]
+  },
+  {
+    "kind": "name",
+    "question": "AwesomeGuildStore",
+    "expected_esoui_ids": [695],
+    "note": "By sirinsidiator. Two filter plugins currently outrank it."
+  },
+  {
+    "kind": "name",
+    "question": "Arkadius Trade Tools",
+    "expected_esoui_ids": [1752],
+    "note": "Loses to a KR patch and a donation plugin today."
+  },
+  {
+    "kind": "name",
+    "question": "Tamriel Trade Centre",
+    "expected_esoui_ids": [1245],
+    "note": "By cyxui. Buried under localisation patches on the exact-name query."
+  },
+  {
+    "kind": "name",
+    "question": "Votan's Minimap",
+    "expected_esoui_ids": [1399]
+  },
+  {
+    "kind": "name",
+    "question": "Map Pins",
+    "expected_esoui_ids": [1881],
+    "note": "Hoft's Map Pins, the 8.3M-download addon, not the derivative pin packs."
+  },
+  {
+    "kind": "name",
+    "question": "Dolgubon's Lazy Writ Crafter",
+    "expected_esoui_ids": [1346],
+    "note": "Seven translation patches carry the full name; the base addon is the answer."
+  },
+  {
+    "kind": "name",
+    "question": "Advanced Filters",
+    "expected_esoui_ids": [2215],
+    "note": "'Advanced Filters - Updated' by Baertram is the base addon. Dozens of 'Advanced Filters - X filter' plugins share the prefix."
+  },
+  {
+    "kind": "name",
+    "question": "HodorReflexes",
+    "expected_esoui_ids": [2311],
+    "note": "HodorReflexes - DPS & ULT tracker by andy.s."
+  },
+  {
+    "kind": "name",
+    "question": "RaidNotifier",
+    "expected_esoui_ids": [1355],
+    "note": "RaidNotifier Updated by Kyoma is the maintained one."
+  },
+  {
+    "kind": "name",
+    "question": "Essential Housing Tools",
+    "expected_esoui_ids": [1959]
+  },
+  {
+    "kind": "name",
+    "question": "Quest Map",
+    "expected_esoui_ids": [1022],
+    "note": "CaptainBlagbird's Quest Map."
+  },
+  {
+    "kind": "name",
+    "question": "Destinations",
+    "expected_esoui_ids": [667]
+  },
+  {
+    "kind": "name",
+    "question": "SkyShards",
+    "expected_esoui_ids": [128]
+  },
+  {
+    "kind": "name",
+    "question": "LoreBooks",
+    "expected_esoui_ids": [288]
+  },
+  {
+    "kind": "name",
+    "question": "CraftStore",
+    "expected_esoui_ids": [1590]
+  },
+  {
+    "kind": "name",
+    "question": "pChat",
+    "expected_esoui_ids": [93],
+    "note": "Puddy's pChat. A jp nickname patch currently outranks it."
+  },
+  {
+    "kind": "name",
+    "question": "Azurah",
+    "expected_esoui_ids": [602],
+    "note": "Azurah - Interface Enhanced by Kith; loses rank 1 to Azurah-KR."
+  },
+  {
+    "kind": "name",
+    "question": "AlphaGear",
+    "expected_esoui_ids": [1812],
+    "note": "AlphaGear 2 (Builds, Gear, Skills, Banking); the 'Preview Channel' build is not the answer."
+  },
+  {
+    "kind": "name",
+    "question": "Untaunted",
+    "expected_esoui_ids": [1475]
+  },
+  {
+    "kind": "name",
+    "question": "Code's Combat Alerts",
+    "expected_esoui_ids": [1855]
+  },
+  {
+    "kind": "name",
+    "question": "Lost Treasure",
+    "expected_esoui_ids": [561]
+  },
+  {
+    "kind": "name",
+    "question": "HarvestMap",
+    "expected_esoui_ids": [57],
+    "note": "Shinni's HarvestMap. The separate HarvestMap-Data package and several patches rank above it."
+  },
+  {
+    "kind": "name",
+    "question": "Research Assistant",
+    "expected_esoui_ids": [111],
+    "note": "Baertram's 'Research Assistant (Find your researchable items)'."
+  },
+  {
+    "kind": "name",
+    "question": "Wizard's Wardrobe",
+    "expected_esoui_ids": [3170],
+    "note": "By ownedbynico; two extension packs share the name."
+  },
+  {
+    "kind": "name",
+    "question": "Miat's PVP Alerts",
+    "expected_esoui_ids": [1545]
+  },
+  {
+    "kind": "name",
+    "question": "PerfectPixel",
+    "expected_esoui_ids": [2103],
+    "note": "KLISK's PerfectPixel; several 'for PerfectPixel' skins compete."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows when I am in combat",
+    "expected_esoui_ids": [1543, 4246],
+    "note": "Combat Indicator, and Fighting Display - Shows Fighting! when in combat. Both are literally about in-combat state."
+  },
+  {
+    "kind": "concept",
+    "question": "is there an addon that measures my DPS",
+    "expected_esoui_ids": [1360, 2311, 2849],
+    "note": "Combat Metrics, HodorReflexes (DPS & ULT tracker), SimpleDPS Meter."
+  },
+  {
+    "kind": "concept",
+    "question": "something that warns me about incoming boss mechanics in trials",
+    "expected_esoui_ids": [1355, 1855],
+    "note": "RaidNotifier Updated and Code's Combat Alerts are the two standard mechanic-warning addons."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that does my daily crafting writs for me",
+    "expected_esoui_ids": [1346],
+    "note": "Dolgubon's Lazy Writ Crafter."
+  },
+  {
+    "kind": "concept",
+    "question": "how can I see skyshard locations on the map",
+    "expected_esoui_ids": [128],
+    "note": "SkyShards by AssemblerManiac."
+  },
+  {
+    "kind": "concept",
+    "question": "something that tracks my buffs and debuffs",
+    "expected_esoui_ids": [655, 1367],
+    "note": "Srendarr and Auramastery."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows item prices when buying from guild traders",
+    "expected_esoui_ids": [1245, 2753],
+    "note": "Tamriel Trade Centre and Master Merchant 3.0 are the two price-data addons."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon to sort my inventory into categories automatically",
+    "expected_esoui_ids": [2300, 2136],
+    "note": "Auto Category - Revised and Rulebased Inventory."
+  },
+  {
+    "kind": "concept",
+    "question": "something that shows which traits I still need to research",
+    "expected_esoui_ids": [111, 1058],
+    "note": "Research Assistant and TraitBuddy."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that lets me save and switch gear and skill setups",
+    "expected_esoui_ids": [1812, 3170],
+    "note": "AlphaGear 2 and Wizard's Wardrobe."
+  },
+  {
+    "kind": "concept",
+    "question": "is there an addon that adds a minimap",
+    "expected_esoui_ids": [1399, 3384],
+    "note": "Votan's Minimap and MiniMap by Fyrakin (Masteroshi430's branch)."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows treasure map and survey report locations",
+    "expected_esoui_ids": [561],
+    "note": "Lost Treasure is the canonical treasure/survey map pin addon."
+  },
+  {
+    "kind": "concept",
+    "question": "something to help me decorate my house and place furniture precisely",
+    "expected_esoui_ids": [1959],
+    "note": "Essential Housing Tools."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows nearby quests on the map",
+    "expected_esoui_ids": [1022],
+    "note": "Quest Map by CaptainBlagbird."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that saves my chat history between sessions",
+    "expected_esoui_ids": [93],
+    "note": "pChat - chat customization & help: look/notification/sound/automation/history."
+  },
+  {
+    "kind": "concept",
+    "question": "something that warns me when my taunt is about to fall off",
+    "expected_esoui_ids": [1475, 3754],
+    "note": "Untaunted and Branddi's Taunt Helper."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that alerts me when enemies are attacking me in Cyrodiil",
+    "expected_esoui_ids": [1545],
+    "note": "Miat's PVP Alerts."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows how many of an item I have across all my characters",
+    "expected_esoui_ids": [731],
+    "note": "Inventory Insight."
+  },
+  {
+    "kind": "concept",
+    "question": "how do I find out where a gear set drops",
+    "expected_esoui_ids": [1480],
+    "note": "Item Set Browser."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that stops me accidentally selling or deconstructing good items",
+    "expected_esoui_ids": [630],
+    "note": "FCO ItemSaver (mark, filter and save your items against decon/sell/etc.)."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows which recipes I have not learned yet",
+    "expected_esoui_ids": [1043, 163],
+    "note": "ESO Master Recipe List and Sous Chef - Provisioning Helper."
+  },
+  {
+    "kind": "concept",
+    "question": "something that shows ability duration timers on my action bar",
+    "expected_esoui_ids": [1536],
+    "note": "Action Duration Reminder."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that makes the default interface smaller and cleaner",
+    "expected_esoui_ids": [2103],
+    "note": "PerfectPixel."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that stacks and tidies items in the guild bank",
+    "expected_esoui_ids": [402],
+    "note": "Roomba - Guildbank Stacker."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows resource node locations for farming materials",
+    "expected_esoui_ids": [57],
+    "note": "HarvestMap."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that helps me keep track of antiquity leads",
+    "expected_esoui_ids": [2689, 2651],
+    "note": "AlphaScry (Leads, Antiquities, Filter) and Display Leads - with Location Info."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that improves the mail window for sending lots of mail",
+    "expected_esoui_ids": [850, 20],
+    "note": "Postmaster Mail and Wykkyd Mailbox."
+  },
+  {
+    "kind": "concept",
+    "question": "an addon that shows fishing spots and which bait to use",
+    "expected_esoui_ids": [918],
+    "note": "Votan's Fisherman."
+  }
+]

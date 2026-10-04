@@ -30,33 +30,37 @@ export async function readJsonBody(request: Request): Promise<JsonBodyResult> {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { ok: false, reason: "too-large" };
   }
-  if (!request.body) return { ok: false, reason: "invalid-json" };
-  const reader = request.body.getReader();
+  const reader = request.body?.getReader();
+  if (!reader) return { ok: false, reason: "invalid-json" };
   const chunks: Uint8Array[] = [];
-  let byteLength = 0;
+  let byteCount = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      byteLength += value.byteLength;
-      if (byteLength > MAX_BODY_BYTES) {
-        await reader.cancel();
+      byteCount += value.byteLength;
+      if (byteCount > MAX_BODY_BYTES) {
+        try {
+          await reader.cancel("Request body is too large");
+        } catch {
+          // The size verdict is already known; an aborted stream cannot change it.
+        }
         return { ok: false, reason: "too-large" };
       }
       chunks.push(value);
     }
-  } finally {
-    reader.releaseLock();
+  } catch {
+    return { ok: false, reason: "invalid-json" };
   }
-  const bytes = new Uint8Array(byteLength);
+
+  const bytes = new Uint8Array(byteCount);
   let offset = 0;
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const text = new TextDecoder().decode(bytes);
   try {
-    return { ok: true, body: JSON.parse(text) };
+    return { ok: true, body: JSON.parse(new TextDecoder().decode(bytes)) };
   } catch {
     return { ok: false, reason: "invalid-json" };
   }
@@ -87,7 +91,7 @@ export function sanitizeAddons(addons: unknown): PackAddonEntry[] {
 export function validatePack(pack: unknown): ValidationError[] {
   const errors: ValidationError[] = [];
 
-  if (!pack || typeof pack !== "object" || Array.isArray(pack)) {
+  if (!pack || typeof pack !== "object") {
     return [{ field: "pack", message: "Pack must be a JSON object" }];
   }
 
@@ -155,11 +159,14 @@ export function validatePack(pack: unknown): ValidationError[] {
     });
   } else {
     for (let i = 0; i < p.addons.length; i++) {
-      if (!p.addons[i] || typeof p.addons[i] !== "object" || Array.isArray(p.addons[i])) {
-        errors.push({ field: `addons[${i}]`, message: "each addon must be a JSON object" });
+      const addon = p.addons[i];
+      if (!addon || typeof addon !== "object" || Array.isArray(addon)) {
+        errors.push({
+          field: `addons[${i}]`,
+          message: "each addon must be a JSON object",
+        });
         continue;
       }
-      const addon = p.addons[i] as Record<string, unknown>;
       if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({
           field: `addons[${i}].esouiId`,

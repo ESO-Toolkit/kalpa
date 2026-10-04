@@ -66,6 +66,93 @@ fn offsets_still_valid(src: &Path, first: &LogSession) -> bool {
     matches!(fields.next(), Some(ts) if ts.trim() == first.start_time_ms.to_string())
 }
 
+/// Validate preflight byte ranges before trusting them for a copy. A compromised
+/// or stale webview can supply offsets without going through the scanner.
+fn valid_session_ranges(src: &Path, sessions: &[LogSession], snapshot_len: u64) -> bool {
+    let Ok(mut reader) = File::open(src) else {
+        return false;
+    };
+    let mut previous_end = 0;
+    for (i, session) in sessions.iter().enumerate() {
+        if session.start_offset >= session.end_offset
+            || session.end_offset > snapshot_len
+            || (i > 0 && session.start_offset < previous_end)
+            || !line_boundary_at(&mut reader, session.start_offset, snapshot_len)
+            || (i + 1 < sessions.len()
+                && !line_boundary_at(&mut reader, session.end_offset, snapshot_len))
+            || !offsets_still_valid(src, session)
+        {
+            return false;
+        }
+        previous_end = session.end_offset;
+    }
+    true
+}
+
+fn valid_fight_ranges(
+    src: &Path,
+    fights: &[FightSummary],
+    sessions: &[LogSession],
+    snapshot_len: u64,
+) -> bool {
+    let Ok(mut reader) = File::open(src) else {
+        return false;
+    };
+    let mut previous_end = 0;
+    let mut session_pos = 0;
+    for fight in fights {
+        if fight.start_offset >= fight.end_offset
+            || fight.end_offset > snapshot_len
+            || fight.start_offset < previous_end
+            || !line_boundary_at(&mut reader, fight.start_offset, snapshot_len)
+            || !line_boundary_at(&mut reader, fight.end_offset, snapshot_len)
+            || !fight_start_at(&mut reader, fight)
+        {
+            return false;
+        }
+        while session_pos < sessions.len() && sessions[session_pos].end_offset <= fight.start_offset
+        {
+            session_pos += 1;
+        }
+        if session_pos == sessions.len()
+            || fight.start_offset < sessions[session_pos].start_offset
+            || fight.end_offset > sessions[session_pos].end_offset
+        {
+            return false;
+        }
+        previous_end = fight.end_offset;
+    }
+    true
+}
+
+fn line_boundary_at(reader: &mut File, offset: u64, snapshot_len: u64) -> bool {
+    if offset == 0 || offset == snapshot_len {
+        return true;
+    }
+    if reader.seek(SeekFrom::Start(offset - 1)).is_err() {
+        return false;
+    }
+    let mut prior = [0u8; 1];
+    reader.read_exact(&mut prior).is_ok() && prior[0] == b'\n'
+}
+
+fn fight_start_at(reader: &mut File, fight: &FightSummary) -> bool {
+    if reader.seek(SeekFrom::Start(fight.start_offset)).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 512];
+    let Ok(n) = reader.read(&mut buf) else {
+        return false;
+    };
+    let line_end = buf[..n].iter().position(|b| *b == b'\n').unwrap_or(n);
+    let Ok(line) = std::str::from_utf8(&buf[..line_end]) else {
+        return false;
+    };
+    let mut fields = line.split(',');
+    matches!(fields.next(), Some(ms) if ms.trim().parse::<u64>().unwrap_or(0) == fight.start_ms)
+        && matches!(fields.next(), Some(event) if event.trim().eq_ignore_ascii_case("BEGIN_COMBAT"))
+}
+
 /// The offset of the first byte of the line containing `at` — i.e. one past the
 /// nearest `\n` at or before `at`, or 0 if there is none. Lets the appended-tail
 /// scan begin at a true line start even when `at` (a preflight `end_offset`)
@@ -395,6 +482,11 @@ fn resolve_sessions(
             {
                 scanner::scan_file(source_path)?.sessions
             } else {
+                if !valid_session_ranges(src, &s, snapshot_len) {
+                    return Err(
+                        "Invalid session byte ranges. Re-scan the log and try again.".into(),
+                    );
+                }
                 s
             }
         }
@@ -767,7 +859,14 @@ fn resolve_scan(
     };
     if trust {
         // Both are `Some` and trusted (the match guard above proved it).
-        Ok((sessions.unwrap(), fights.unwrap(), snapshot_len))
+        let sessions = sessions.unwrap();
+        let fights = fights.unwrap();
+        if !valid_session_ranges(src, &sessions, snapshot_len)
+            || !valid_fight_ranges(src, &fights, &sessions, snapshot_len)
+        {
+            return Err("Invalid preflight byte ranges. Re-scan the log and try again.".into());
+        }
+        Ok((sessions, fights, snapshot_len))
     } else {
         let scan = scanner::scan_file(source_path)?;
         if scan.sessions.is_empty() {
@@ -1214,6 +1313,38 @@ mod tests {
         assert!(has(b"BBB"), "the selected fight's events must be present");
         assert!(!has(b"AAA"), "an earlier fight's events must be dropped");
         assert!(!has(b"CCC"), "a later fight's events must be dropped");
+    }
+
+    #[test]
+    fn split_fights_accepts_crlf_preflight_offsets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(
+            &log,
+            b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\r\n10,BEGIN_COMBAT\r\n11,COMBAT_EVENT,AAA\r\n20,END_COMBAT\r\n30,END_LOG\r\n",
+        );
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+        assert_eq!(scan.fights.len(), 1);
+
+        let written = split_selected_fights(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(scan.sessions),
+            Some(scan.fights.clone()),
+            vec![FightSelection {
+                index: 0,
+                name: None,
+                start_offset: Some(scan.fights[0].start_offset),
+                start_ms: Some(scan.fights[0].start_ms),
+            }],
+        )
+        .unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(std::fs::read(&written[0])
+            .unwrap()
+            .windows(3)
+            .any(|w| w == b"AAA"));
     }
 
     // Extracting the FIRST fight (index 0) keeps the header/preamble and only that
@@ -1861,20 +1992,15 @@ mod tests {
         );
     }
 
-    // B2: two sessions that share (index, start_time) map to the SAME auto file name;
-    // without de-duplication `File::create` truncates and the first is silently lost.
-    // Both must be written as distinct files (the collision gets a `-2` suffix).
+    // A repeated session range must never cause the same bytes to be copied twice.
     #[test]
-    fn split_by_session_dedupes_identical_session_names() {
+    fn split_by_session_rejects_duplicate_ranges() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("Encounter.log");
         let out = tmp.path().join("out");
         let bytes = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
         write(&log, bytes);
         let len = bytes.len() as u64;
-        // Two sessions with the SAME index + start_time. The trust gate passes (s[0]
-        // points at the real BEGIN_LOG with matching start_time, max_end == snapshot,
-        // no appended session), so the crafted list is used verbatim.
         let dup = LogSession {
             index: 0,
             start_offset: 0,
@@ -1885,23 +2011,122 @@ mod tests {
             fight_count: 1,
             size_bytes: len,
         };
-        let written = split_by_session(
+        let result = split_by_session(
             log.to_str().unwrap(),
             out.to_str().unwrap(),
             Some(vec![dup.clone(), dup]),
-        )
-        .unwrap();
-        assert_eq!(
-            written.len(),
-            2,
-            "both duplicate-named sessions must be written"
         );
-        assert_ne!(written[0], written[1], "the two files must be distinct");
-        assert!(
-            written[1].ends_with("-2.log"),
-            "the name collision must get a -2 suffix: {}",
-            written[1]
+        assert!(result.unwrap_err().contains("Invalid session byte ranges"));
+        assert!(!out.exists() || std::fs::read_dir(out).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn split_by_session_dedupes_identical_session_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(
+            &log,
+            b"0,BEGIN_LOG,1000,15,NA,en,x\n10,END_LOG\n0,BEGIN_LOG,1000,15,NA,en,x\n10,END_LOG\n",
         );
+        let mut sessions = scanner::scan_file(log.to_str().unwrap()).unwrap().sessions;
+        assert_eq!(sessions.len(), 2);
+        sessions[1].index = sessions[0].index;
+        let written =
+            split_by_session(log.to_str().unwrap(), out.to_str().unwrap(), Some(sessions)).unwrap();
+        assert_eq!(written.len(), 2);
+        assert_ne!(written[0], written[1]);
+        assert!(written[1].ends_with("-2.log"));
+    }
+
+    #[test]
+    fn valid_session_ranges_rejects_inverted_and_out_of_file_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        write(
+            &log,
+            b"0,BEGIN_LOG,1000,15,NA,en,x\n10,BEGIN_COMBAT\n20,END_COMBAT\n",
+        );
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+        let mut bad = scan.sessions.clone();
+        bad[0].end_offset = bad[0].start_offset;
+        assert!(!valid_session_ranges(
+            &log,
+            &bad,
+            std::fs::metadata(&log).unwrap().len()
+        ));
+        let mut bad = scan.sessions.clone();
+        bad[0].start_offset = bad[0].end_offset + 1;
+        assert!(!valid_session_ranges(
+            &log,
+            &bad,
+            std::fs::metadata(&log).unwrap().len()
+        ));
+        let mut bad = scan.sessions.clone();
+        bad[0].end_offset += 1;
+        assert!(!valid_session_ranges(
+            &log,
+            &bad,
+            std::fs::metadata(&log).unwrap().len()
+        ));
+    }
+
+    #[test]
+    fn valid_session_ranges_accepts_unterminated_final_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        write(
+            &log,
+            b"0,BEGIN_LOG,1000,15,NA,en,x\n10,BEGIN_COMBAT\n20,END_COMBAT",
+        );
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+        assert!(valid_session_ranges(
+            &log,
+            &scan.sessions,
+            std::fs::metadata(&log).unwrap().len()
+        ));
+    }
+
+    #[test]
+    fn split_fights_rejects_overlapping_and_out_of_session_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(&log, &three_fight_session());
+        let scan = scanner::scan_file(log.to_str().unwrap()).unwrap();
+        let selection = || FightSelection {
+            index: scan.fights[1].index,
+            name: None,
+            start_offset: Some(scan.fights[1].start_offset),
+            start_ms: Some(scan.fights[1].start_ms),
+        };
+        for mutate in [0, 1, 2] {
+            let mut fights = scan.fights.clone();
+            match mutate {
+                0 => fights[1].start_offset = fights[0].start_offset,
+                1 => fights[1].end_offset = fights[1].start_offset,
+                _ => fights[1].end_offset = scan.sessions[0].end_offset + 1,
+            }
+            let result = split_selected_fights(
+                log.to_str().unwrap(),
+                out.to_str().unwrap(),
+                Some(scan.sessions.clone()),
+                Some(fights),
+                vec![selection()],
+            );
+            assert!(result
+                .unwrap_err()
+                .contains("Invalid preflight byte ranges"));
+        }
+        let mut short_sessions = scan.sessions.clone();
+        short_sessions[0].end_offset = scan.fights[0].end_offset;
+        assert!(!valid_fight_ranges(
+            &log,
+            &scan.fights,
+            &short_sessions,
+            std::fs::metadata(&log).unwrap().len()
+        ));
+        assert!(!out.exists() || std::fs::read_dir(out).unwrap().next().is_none());
     }
 
     // Sanity: when the file only GREW the final (open) session — no new

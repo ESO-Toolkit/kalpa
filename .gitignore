@@ -43,6 +43,9 @@ e2e/screenshots/
 test-results/
 playwright-report/
 
+# Local CDP captures from the Elder Scrolls theme review (source is in src/lib/)
+/kalpa-elder-scrolls-themes/
+
 # Claude Code
 .claude/
 

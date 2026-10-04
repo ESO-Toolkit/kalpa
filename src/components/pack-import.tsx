@@ -33,6 +33,7 @@ export function PackImportView({
   onToggleImportedAddon,
   onResolveCode,
   onImportFile,
+  onImportModeChange,
   onInstall,
   onClear,
   hasSettings = false,
@@ -51,6 +52,7 @@ export function PackImportView({
   onToggleImportedAddon: (id: number) => void;
   onResolveCode: (code: string) => void;
   onImportFile: () => void;
+  onImportModeChange: (mode: ImportMode) => void;
   onInstall: () => void;
   onClear: () => void;
   hasSettings?: boolean;
@@ -269,7 +271,10 @@ export function PackImportView({
         {(["enter-code", "import-file"] as ImportMode[]).map((mode) => (
           <button
             key={mode}
-            onClick={() => setImportMode(mode)}
+            onClick={() => {
+              if (mode !== importMode) onImportModeChange(mode);
+              setImportMode(mode);
+            }}
             className={cn(
               "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
               importMode === mode

@@ -1,27 +1,28 @@
-import { memo, useState, useRef, useEffect } from "react";
+import { memo, useCallback, useState, useRef, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Check,
   ChevronDown,
-  CloudUpload,
-  FileSliders,
-  Layers,
+  DownloadIcon,
+  LifeBuoy,
+  Loader2Icon,
   MinusIcon,
   Monitor,
-  PackageIcon,
   Plus,
   Power,
   RefreshCwIcon,
   SettingsIcon,
   SquareIcon,
   Tag,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { AccountChip } from "@/components/account-chip";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
 import { SimpleTooltip } from "@/components/ui/tooltip";
+import type { FeatureDef, FeatureId } from "@/lib/features";
 import { isMac, modKeyLabel } from "@/lib/platform";
 import { PRESET_TAGS, type AuthUser, type GameInstance } from "@/types";
 import { cn } from "@/lib/utils";
@@ -47,11 +48,10 @@ interface AppHeaderProps {
   onBatchRemove: () => void;
   onBatchTag: (tag: string) => void;
   onBatchUpdate: () => void;
-  onOpenPacks: () => void;
-  onOpenProfiles: () => void;
-  onOpenSavedVars: () => void;
+  toolbarFeatures: FeatureDef[];
+  onOpenFeature: (id: FeatureId) => void;
   onOpenSettings: () => void;
-  onOpenLogUpload: () => void;
+  onOpenSupport: () => void;
   onAuthChange: (user: AuthUser | null) => void;
   onRefresh: () => void;
   onSwitchInstance: (path: string) => void;
@@ -102,7 +102,7 @@ function InstanceBadge({
   const switchable = instances.length > 1;
 
   return (
-    <div className="relative" ref={menuRef}>
+    <div className="relative min-w-0" ref={menuRef}>
       <SimpleTooltip content={switchable ? "Switch ESO instance" : activeAddonsPath} side="bottom">
         <button
           type="button"
@@ -110,16 +110,18 @@ function InstanceBadge({
           aria-label={`Managing ${label}${switchable ? " — switch instance" : ""}`}
           aria-expanded={open}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300",
+            "inline-flex w-full max-w-40 min-w-0 items-center gap-1.5 rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider whitespace-nowrap text-foreground backdrop-blur-sm transition-colors duration-300",
             switchable
               ? "cursor-pointer hover:border-accent-sky/20 hover:text-foreground"
               : "cursor-default"
           )}
         >
-          <Monitor className="size-3" />
-          {label}
+          <Monitor className="size-3 shrink-0" />
+          <span className="min-w-0 truncate">{label}</span>
           {switchable && (
-            <ChevronDown className={cn("size-2.5 transition-transform", open && "rotate-180")} />
+            <ChevronDown
+              className={cn("size-2.5 shrink-0 transition-transform", open && "rotate-180")}
+            />
           )}
         </button>
       </SimpleTooltip>
@@ -174,14 +176,14 @@ function AppHeaderBase({
   onBatchRemove,
   onBatchTag,
   onBatchUpdate,
-  onOpenPacks,
-  onOpenProfiles,
-  onOpenSavedVars,
+  toolbarFeatures,
+  onOpenFeature,
   onOpenSettings,
-  onOpenLogUpload,
+  onOpenSupport,
   onAuthChange,
   onRefresh,
 }: AppHeaderProps) {
+  const openLogUpload = useCallback(() => onOpenFeature("log-upload"), [onOpenFeature]);
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const [customTagInput, setCustomTagInput] = useState("");
   const tagMenuRef = useRef<HTMLDivElement>(null);
@@ -218,31 +220,38 @@ function AppHeaderBase({
       }`}
     >
       <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
-      <div className="flex items-center gap-2.5">
-        <Logo size={20} className="text-[#4dc2e6]" />
-        <div className="flex items-center gap-2">
-          <h1 className="bg-gradient-to-r from-primary via-primary-hover to-primary bg-clip-text font-heading text-[13px] font-bold uppercase tracking-[0.15em] text-transparent">
-            Kalpa
-          </h1>
-          <div className="h-3 w-px bg-structure-12" />
-          <button
-            onClick={() => void openUrl("https://esotk.com")}
-            className="hidden cursor-pointer items-center rounded-full border border-structure-08 bg-structure-04 px-2 py-0.5 font-mono text-[11px] font-medium tracking-wider text-foreground backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-muted-foreground min-[860px]:inline-flex"
+      <div className="flex min-w-0 items-center gap-2.5">
+        {/* The brand doubles as the esotk.com link — a separate promo pill
+            next to it squeezed the instance badge into truncation on narrow
+            windows. An <a> (not <button>) so the h1 stays valid content. */}
+        <SimpleTooltip content="Open esotk.com" side="bottom">
+          <a
+            href="https://esotk.com"
+            onClick={(e) => {
+              e.preventDefault();
+              void openUrl("https://esotk.com");
+            }}
+            // Middle/ctrl-click must not navigate the webview either.
+            onAuxClick={(e) => e.preventDefault()}
+            className="flex shrink-0 cursor-pointer items-center gap-2.5 rounded-md outline-none transition-opacity hover:opacity-80 focus-visible:ring-3 focus-visible:ring-accent-sky/20"
           >
-            esotk.com
-          </button>
-          <InstanceBadge
-            instances={instances}
-            activeAddonsPath={activeAddonsPath}
-            onSwitchInstance={onSwitchInstance}
-          />
-        </div>
+            <Logo size={20} className="shrink-0 text-[#4dc2e6]" />
+            <h1 className="whitespace-nowrap bg-gradient-to-r from-primary via-primary-hover to-primary bg-clip-text font-heading text-[13px] font-bold uppercase tracking-[0.15em] text-transparent">
+              Kalpa
+            </h1>
+          </a>
+        </SimpleTooltip>
+        <InstanceBadge
+          instances={instances}
+          activeAddonsPath={activeAddonsPath}
+          onSwitchInstance={onSwitchInstance}
+        />
       </div>
       <div className="flex-1" data-tauri-drag-region />
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         {batchMode ? (
           <>
-            <span className="mr-2 text-xs font-medium text-primary">
+            <span className="mr-2 text-xs font-medium whitespace-nowrap text-primary">
               <CountingNumber
                 number={selectedCount}
                 transition={{ stiffness: 200, damping: 25 }}
@@ -250,31 +259,67 @@ function AppHeaderBase({
               />{" "}
               selected
             </span>
-            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+            {/* Labels collapse to icon-only below 960px so the whole batch bar
+                fits the minimum window width; tooltips + aria-labels carry the
+                names in compact mode. */}
+            <SimpleTooltip
+              content={
+                isOffline ? "Updates require an internet connection" : "Update selected addons"
+              }
+              side="bottom"
+            >
               <Button
                 size="sm"
                 variant="outline"
                 onClick={onBatchUpdate}
                 disabled={updatingAll || isOffline}
+                aria-label="Update selected addons"
+                aria-busy={updatingAll}
               >
-                {updatingAll ? "Updating..." : "Update"}
+                {updatingAll ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <DownloadIcon className="size-3.5" />
+                )}
+                <span className="hidden min-[960px]:inline">
+                  {updatingAll ? "Updating..." : "Update"}
+                </span>
               </Button>
             </SimpleTooltip>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onBatchDisable}
-              disabled={batchDisabling}
-              className="border-status-warning-strong/25 text-status-warning hover:bg-status-warning-strong/10"
-            >
-              <Power className="size-3.5 mr-1" />
-              {batchDisabling ? "Working..." : "Disable"}
-            </Button>
-            <div className="relative" ref={tagMenuRef}>
-              <Button size="sm" variant="outline" onClick={() => setTagMenuOpen((v) => !v)}>
-                <Tag className="size-3.5 mr-1" />
-                Tag
+            <SimpleTooltip content="Disable selected addons" side="bottom">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onBatchDisable}
+                disabled={batchDisabling}
+                aria-label="Disable selected addons"
+                aria-busy={batchDisabling}
+                className="border-status-warning-strong/25 text-status-warning hover:bg-status-warning-strong/10"
+              >
+                {batchDisabling ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <Power className="size-3.5" />
+                )}
+                <span className="hidden min-[960px]:inline">
+                  {batchDisabling ? "Working..." : "Disable"}
+                </span>
               </Button>
+            </SimpleTooltip>
+            <div className="relative" ref={tagMenuRef}>
+              <SimpleTooltip content="Tag selected addons" side="bottom">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setTagMenuOpen((v) => !v)}
+                  aria-label="Tag selected addons"
+                  aria-haspopup={true}
+                  aria-expanded={tagMenuOpen}
+                >
+                  <Tag className="size-3.5" />
+                  <span className="hidden min-[960px]:inline">Tag</span>
+                </Button>
+              </SimpleTooltip>
               {tagMenuOpen && (
                 <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-structure-06 bg-surface-overlay backdrop-blur-xl p-1 shadow-lg">
                   {PRESET_TAGS.map((tag) => (
@@ -334,9 +379,37 @@ function AppHeaderBase({
                 </div>
               )}
             </div>
-            <Button size="sm" variant="destructive" onClick={onBatchRemove}>
-              Remove
-            </Button>
+            <SimpleTooltip
+              content={
+                updatingAll
+                  ? "Wait for the current update batch to finish before removing addons."
+                  : "Remove selected addons"
+              }
+              side="bottom"
+            >
+              <span
+                className="inline-flex"
+                tabIndex={updatingAll ? 0 : undefined}
+                aria-label={
+                  updatingAll
+                    ? "Remove selected addons unavailable. Wait for the current update batch to finish before removing addons."
+                    : undefined
+                }
+              >
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={updatingAll}
+                  onClick={onBatchRemove}
+                  aria-label="Remove selected addons"
+                >
+                  <Trash2Icon className="size-3.5" />
+                  <span className="hidden min-[960px]:inline">Remove</span>
+                </Button>
+              </span>
+            </SimpleTooltip>
+            {/* Cancel keeps its word at every width: an icon here would read as
+                a duplicate of the window close button sitting right beside it. */}
             <Button size="sm" variant="outline" onClick={onBatchCancel}>
               Cancel
             </Button>
@@ -344,7 +417,7 @@ function AppHeaderBase({
         ) : (
           <>
             <span
-              className="mr-1 text-xs text-muted-foreground"
+              className="mr-1 text-xs whitespace-nowrap text-muted-foreground"
               aria-live="polite"
               aria-atomic="true"
             >
@@ -372,43 +445,37 @@ function AppHeaderBase({
                 <RefreshCwIcon className={loading ? "animate-spin" : ""} />
               </Button>
             </SimpleTooltip>
-            <SimpleTooltip content="Addon Packs" side="bottom">
-              <Button variant="ghost" size="icon-sm" onClick={onOpenPacks} aria-label="Addon Packs">
-                <PackageIcon />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="Addon Profiles" side="bottom">
-              <Button variant="ghost" size="icon-sm" onClick={onOpenProfiles} aria-label="Profiles">
-                <Layers />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="SavedVariables Manager" side="bottom">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onOpenSavedVars}
-                aria-label="Saved Vars"
-              >
-                <FileSliders />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="Upload to ESO Logs" side="bottom">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onOpenLogUpload}
-                aria-label="Upload to ESO Logs"
-              >
-                <CloudUpload className="size-3.5" />
-                <span className="hidden min-[860px]:inline">Upload logs</span>
-              </Button>
-            </SimpleTooltip>
+            {toolbarFeatures.map((feature) => {
+              const Icon = feature.icon;
+              return (
+                <SimpleTooltip
+                  key={feature.id}
+                  content={feature.tooltip ?? feature.label}
+                  side="bottom"
+                >
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => onOpenFeature(feature.id)}
+                    aria-label={feature.ariaLabel ?? feature.label}
+                  >
+                    <Icon />
+                  </Button>
+                </SimpleTooltip>
+              );
+            })}
             <AccountChip
               authUser={authUser}
               authVerifying={authVerifying}
               onAuthChange={onAuthChange}
-              onOpenLogUpload={onOpenLogUpload}
+              onOpenLogUpload={openLogUpload}
             />
+            <SimpleTooltip content="Get help" side="bottom">
+              <Button variant="ghost" size="sm" onClick={onOpenSupport} aria-label="Get help">
+                <LifeBuoy className="size-3.5" />
+                <span className="hidden min-[900px]:inline">Help</span>
+              </Button>
+            </SimpleTooltip>
             <SimpleTooltip content="Settings" side="bottom">
               <Button variant="ghost" size="icon-sm" onClick={onOpenSettings} aria-label="Settings">
                 <SettingsIcon />
@@ -420,7 +487,7 @@ function AppHeaderBase({
       {/* macOS renders native traffic-light controls (titleBarStyle: Overlay),
           so the custom Windows/Linux window buttons are hidden there. */}
       {!isMac() && (
-        <div className="ml-3 -mr-2 flex items-center">
+        <div className="ml-3 -mr-2 flex shrink-0 items-center">
           <SimpleTooltip content="Minimize" side="bottom">
             <button
               onClick={() => void getCurrentWindow().minimize()}

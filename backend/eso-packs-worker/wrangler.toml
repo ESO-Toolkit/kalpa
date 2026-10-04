@@ -12,6 +12,26 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 # For local dev, create a .dev.vars file (git-ignored):
 #   ADMIN_API_KEY=dev-secret-key
 
+[vars]
+# Remains log-only until a maintainer approves deletion-capable apply mode.
+D1_RECONCILIATION_MODE = "dry-run"
+# In-worker nightly ESOUI addon-index crawl. Fail-closed: only the exact value
+# "enabled" turns it on.
+#
+# It stays "disabled" on purpose. The updater is now
+# .github/workflows/sync-addon-index.yml, which drives /admin/index/sync plus a
+# paged /admin/index/backfill loop. The in-worker cron can only manage one
+# 12-addon detail page per day (MAX_DETAIL_BATCH — larger pages hit Cloudflare
+# "error code: 1102"), which is far below ESOUI's daily churn and would leave
+# new addons unsearchable for weeks while the index looked healthy.
+ADDON_INDEX_SYNC = "disabled"
+# Workers AI model for /ask. Swappable without a code change.
+ASK_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8"
+# Model calls per UTC day before /ask degrades to candidates-only. Workers AI
+# gives 10k neurons/day free and one ask costs ~25, so ~400/day is the free
+# ceiling; this sits under it deliberately.
+ASK_DAILY_BUDGET = "350"
+
 # Daily backup of pack index (midnight UTC)
 [triggers]
 crons = ["0 0 * * *"]
@@ -46,7 +66,51 @@ namespace_id = "1003"
   limit = 20
   period = 60
 
-# ── Durable Object for pack, vote, and share mutations ────────────────
+# DELETE /account only. Erasure is paged -- one request clears ~450 votes and
+# asks the caller to repeat -- so an account with a few thousand votes needs a
+# dozen or more rounds. WRITE_LIMITER's 10/min cut the user off partway through
+# deleting their own data. 60/min covers ~27,000 votes a minute and leaves the
+# write limit for pack mutations untouched.
+[[ratelimits]]
+name = "ERASURE_LIMITER"
+namespace_id = "1006"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "ADDON_SEARCH_LIMITER"
+namespace_id = "1004"
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[ratelimits]]
+name = "ASK_LIMITER"
+namespace_id = "1005"
+  [ratelimits.simple]
+  limit = 8
+  period = 60
+
+# ── Workers AI (natural-language addon assistant) ─────────────────
+# No provisioning needed — this binding is all it takes. Free allocation is
+# 10,000 neurons/day; one ask is ~25 neurons.
+[ai]
+binding = "AI"
+
+# ── ESOUI addon full-text index (D1 + FTS5) ───────────────────────
+# Dedicated database. Deliberately NOT roster-hub-db: that one is shared with
+# the ESO Toolkit website and every schema change there needs coordinating.
+#
+# Provisioned via `wrangler d1 create kalpa-addon-index`.
+# The ADDON_INDEX binding is optional in code: if this is ever removed the
+# worker still serves Pack Hub and /addons/* returns 503 rather than erroring.
+[[d1_databases]]
+binding = "ADDON_INDEX"
+database_name = "kalpa-addon-index"
+database_id = "1a306019-3260-4337-a7af-e3d860016a90"
+
+# ── Durable Object for atomic pack index mutations ────────────────
 [[durable_objects.bindings]]
 name = "PACK_INDEX"
 class_name = "PackIndexDO"
@@ -55,5 +119,11 @@ class_name = "PackIndexDO"
 tag = "v1"
 new_sqlite_classes = ["PackIndexDO"]
 
+# Worker Logs. Without this, every console.error in the worker goes nowhere:
+# `console.error("ask model call failed")` was invisible while EVERY /ask call
+# failed (AiError 5025 — the model rejects json_schema), so the route silently
+# served degraded answers with no signal that anything was wrong. Logs are how
+# that gets caught next time, without needing someone to be attached to
+# `wrangler tail` at the moment it breaks.
 [observability]
-enabled = false
+enabled = true

@@ -134,6 +134,7 @@ describe("production action callbacks", () => {
       addonsPath: "/addons",
       onRefresh: vi.fn(),
       resolvePendingDeps: vi.fn(),
+      reportDependencyFailures: vi.fn(),
       toast: { success: vi.fn(), error: vi.fn() },
     })();
     expect(runBatchPackInstall).toHaveBeenCalledWith(
@@ -158,6 +159,7 @@ describe("imported optional addon preview", () => {
       expiresAt: "",
     };
     const props = {
+      onImportModeChange: vi.fn(),
       shareCodeInput: "",
       onShareCodeInputChange: vi.fn(),
       resolvingCode: false,
@@ -249,6 +251,7 @@ describe("addon selection keyboard access", () => {
       expect(checkbox.tabIndex).toBe(0);
       checkbox.focus();
       await userEvent.keyboard(key);
+      expect(onToggleSelect).toHaveBeenCalledTimes(1);
       expect(onToggleSelect).toHaveBeenCalledWith("one");
       expect(onSelect).not.toHaveBeenCalled();
     }

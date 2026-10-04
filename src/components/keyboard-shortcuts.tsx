@@ -9,6 +9,7 @@ import {
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { Kbd } from "@/components/ui/kbd";
 import { SectionHeader } from "@/components/ui/section-header";
+import { FEATURES } from "@/lib/features";
 import { modKeyLabel, modKeySpokenLabel } from "@/lib/platform";
 
 type ShortcutSeparator = "chord" | "or";
@@ -29,6 +30,18 @@ interface ShortcutGroup {
 function shortcutGroups(): ShortcutGroup[] {
   const modifier = modKeyLabel();
   const spokenModifier = modKeySpokenLabel();
+
+  // The "?" shortcut is also handled from the registry (see App.tsx's keydown
+  // handler), so source its keys/spoken copy from there rather than from a
+  // second set of literals that could drift out of sync.
+  const showShortcutsFeature = FEATURES.find(
+    (f) => f.shortcut?.key === "?" && f.shortcut.mod === false
+  );
+  const showShortcutsItem: ShortcutItem = {
+    action: "Show this list",
+    keys: [showShortcutsFeature?.shortcut?.key ?? "?"],
+    spoken: showShortcutsFeature?.shortcut?.spoken ?? "Question mark",
+  };
 
   return [
     {
@@ -77,11 +90,7 @@ function shortcutGroups(): ShortcutGroup[] {
           keys: ["Escape"],
           spoken: "Escape",
         },
-        {
-          action: "Show this list",
-          keys: ["?"],
-          spoken: "Question mark",
-        },
+        showShortcutsItem,
       ],
     },
     {

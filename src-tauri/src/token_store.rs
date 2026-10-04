@@ -276,13 +276,10 @@ pub fn clear_upload_session() {
 pub fn migrate_from_store(app: &tauri::AppHandle) {
     use tauri_plugin_store::StoreExt;
 
-    // This is the FIRST opener of settings.json (runs in the setup hook, before
-    // the webview loads). Register the store with autosave OFF so it stays off for
-    // the whole app lifetime: plugin-store caches stores by path and ignores the
-    // options passed by later openers, so the frontend reuses THIS instance. The
-    // theme-migration writes there rely on fully explicit, atomic saves — a
-    // debounced autosave could otherwise flush a partial multi-key batch and
-    // strand a user mid-migration.
+    // `settings_store::ensure_open` has already opened settings.json with
+    // autosave off, and plugin-store caches by path while ignoring a later
+    // opener's options, so this reuses that instance. The options are repeated
+    // rather than dropped so this still behaves if it is ever called first.
     let store = match app
         .store_builder("settings.json")
         .disable_auto_save()
@@ -319,8 +316,7 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
         // autosave is off, so persist the plaintext deletion explicitly and
         // atomically (crash-safe) via settings_store, instead of relying on the
         // plugin's non-atomic truncate-write at exit.
-        let _ = store.delete("auth_tokens");
-        let _ = crate::settings_store::flush(app);
+        let _ = crate::settings_store::delete_entries(app, &["auth_tokens"]);
     } else {
         eprintln!(
             "[token_store] migration: commit/verify failed (committed={committed}, \

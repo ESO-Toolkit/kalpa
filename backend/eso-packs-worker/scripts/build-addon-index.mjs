@@ -1,0 +1,189 @@
+#!/usr/bin/env node
+/**
+ * Build (or top up) the ESOUI addon full-text index.
+ *
+ * Drives the worker's own admin routes rather than talking to ESOUI directly,
+ * so the crawl runs through exactly the code the tests cover — no second
+ * implementation to drift.
+ *
+ *   ADMIN_API_KEY=... node scripts/build-addon-index.mjs
+ *
+ * Two phases:
+ *   1. POST /admin/index/sync      — one bulk filelist request, ~4000 rows of
+ *                                    metadata, tombstones anything removed.
+ *   2. POST /admin/index/backfill  — repeated until complete. Each page fetches
+ *                                    up to 40 descriptions at ~4 req/s.
+ *
+ * The initial run is roughly 4000 requests / ~100 pages / ~20 minutes. Later
+ * runs are near-instant, because only addons whose `lastUpdate` moved are
+ * re-fetched. Safe to re-run and safe to interrupt: progress is committed per
+ * page, and `detail_stale` is only cleared on a successful fetch, so a resumed
+ * run picks up exactly where it stopped.
+ *
+ * Options:
+ *   --base <url>   Worker base URL (default: production)
+ *   --max <n>      Stop after n backfill pages (for a smoke test)
+ *   --sync-only    Run phase 1 and stop
+ *   --embed        After descriptions are current, rebuild the vector index.
+ *                  Nothing else does this, so without it the embeddings drift
+ *                  stale against D1 and newly published addons — exactly the
+ *                  case semantic search exists for — stay invisible to it.
+ */
+
+const DEFAULT_BASE = "https://kalpa-pack-hub.eso-toolkit.workers.dev";
+
+function arg(name, fallback = undefined) {
+  const i = process.argv.indexOf(`--${name}`);
+  return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+}
+
+const BASE = arg("base", DEFAULT_BASE).replace(/\/$/, "");
+const MAX_PAGES = Number.parseInt(arg("max", "0"), 10) || Infinity;
+const SYNC_ONLY = process.argv.includes("--sync-only");
+/** Rebuild the semantic (embedding) index after the descriptions are current. */
+const WITH_EMBED = process.argv.includes("--embed");
+const KEY = process.env.ADMIN_API_KEY;
+
+if (!KEY) {
+  console.error("ADMIN_API_KEY is not set.\n");
+  console.error("  ADMIN_API_KEY=<key> node scripts/build-addon-index.mjs");
+  process.exit(1);
+}
+
+/** Transient failures that say "try again", not "this is broken". */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 5;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * POST with backoff.
+ *
+ * A full crawl is ~100 sequential requests over half an hour, so a single
+ * blip — a worker reload, a 503, a dropped socket — should not discard the
+ * run. Progress is committed per page server-side, so retrying a page is
+ * always safe: already-described addons are simply no longer queued.
+ */
+async function post(path) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      const backoff = Math.min(2000 * 2 ** (attempt - 2), 15000);
+      console.log(`    retry ${attempt - 1}/${MAX_ATTEMPTS - 1} in ${backoff / 1000}s — ${lastError}`);
+      await sleep(backoff);
+    }
+
+    let response;
+    try {
+      response = await fetch(`${BASE}${path}`, {
+        method: "POST",
+        headers: { "X-API-Key": KEY },
+      });
+    } catch (err) {
+      // Network-level failure (worker restarting, socket dropped).
+      lastError = err instanceof Error ? err.message : String(err);
+      continue;
+    }
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      if (RETRYABLE_STATUS.has(response.status)) {
+        lastError = `HTTP ${response.status}`;
+        continue;
+      }
+      throw new Error(`${path} failed (HTTP ${response.status}): ${text.slice(0, 200)}`);
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      // A 200 carrying an HTML error page is the shape a reloading dev worker
+      // returns; treat it as transient rather than as corrupt data.
+      lastError = "non-JSON response";
+    }
+  }
+
+  throw new Error(`${path} failed after ${MAX_ATTEMPTS} attempts: ${lastError}`);
+}
+
+/**
+ * Rebuild the embedding index.
+ *
+ * Only rows with `detail_stale = 0` are embedded, so this must run AFTER the
+ * description backfill has settled or it will skip whatever is still queued.
+ * Roughly 4.5k neurons for a full ~3000-row corpus.
+ */
+async function maybeEmbed() {
+  if (!WITH_EMBED) return;
+  console.log("\nPhase 3/3 — rebuilding the semantic index…");
+  let embedded = 0;
+  for (let i = 0; i < 200; i += 1) {
+    const out = await post("/admin/index/embed?limit=100");
+    embedded += out.embedded ?? 0;
+    if (out.complete) {
+      console.log(`  vector index rebuilt: ${embedded} embedded [${elapsed()}]`);
+      return;
+    }
+    if ((out.embedded ?? 0) === 0) {
+      console.error("  embed page returned nothing but is not complete; stopping.");
+      process.exit(1);
+    }
+  }
+  console.error("  embed did not complete within 200 pages; re-run to continue.");
+  process.exit(1);
+}
+
+const started = Date.now();
+const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
+
+console.log(`Target: ${BASE}`);
+console.log("Phase 1/2 — syncing the bulk filelist…");
+const sync = await post("/admin/index/sync");
+console.log(`  ${sync.seen} addons seen, ${sync.removed} removed [${elapsed()}]`);
+
+if (SYNC_ONLY) {
+  console.log("--sync-only set; stopping before the description backfill.");
+  process.exit(0);
+}
+
+console.log("Phase 2/2 — fetching descriptions…");
+let page = 0;
+let fetched = 0;
+let removed = 0;
+let failed = 0;
+
+while (page < MAX_PAGES) {
+  const outcome = await post("/admin/index/backfill");
+  page++;
+  fetched += outcome.fetched;
+  removed += outcome.removed;
+  failed += outcome.failed;
+
+  console.log(
+    `  page ${page}: +${outcome.fetched} descriptions` +
+      (outcome.removed ? `, ${outcome.removed} removed` : "") +
+      (outcome.failed ? `, ${outcome.failed} failed` : "") +
+      ` (total ${fetched}) [${elapsed()}]`,
+  );
+
+  if (outcome.complete) {
+    await maybeEmbed();
+    console.log(`\nDone. ${fetched} described, ${removed} removed, ${failed} failed in ${elapsed()}.`);
+    // Deliberately does NOT tell the operator to enable ADDON_INDEX_SYNC. The
+    // in-worker cron manages one page a day (MAX_DETAIL_BATCH = 12) and a real
+    // observed delta was 13, so it would fall behind on a quiet day and badly
+    // after a patch. .github/workflows/sync-addon-index.yml is the updater.
+    process.exit(0);
+  }
+
+  // A page that fetched nothing but is not complete means every addon in it
+  // failed. Retrying immediately would just hammer a struggling upstream.
+  if (outcome.fetched === 0 && outcome.failed > 0) {
+    console.error(`\nStopping: page ${page} failed entirely. Re-run later to resume.`);
+    process.exit(1);
+  }
+}
+
+console.log(`\nStopped after ${page} pages (--max). Re-run to continue; progress is saved.`);

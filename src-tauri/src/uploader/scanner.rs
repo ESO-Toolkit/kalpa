@@ -582,6 +582,42 @@ pub fn scan_file(path: &str) -> Result<ScanResult, String> {
     scan_file_with_fight_limit(path, None)
 }
 
+// A corrupt or truncated log can contain no newline for the rest of the file.
+// Bound the allocation made by read_until before attempting to parse that line.
+const MAX_LOG_LINE_BYTES: usize = 1 << 20;
+
+// Return the byte count and whether the line was too large to classify. Drain
+// oversized lines through the BufRead buffer so later valid lines remain usable
+// without allocating in proportion to a corrupt line's length.
+fn read_log_line<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> Result<(u64, bool), String> {
+    let n = reader
+        .take(MAX_LOG_LINE_BYTES as u64 + 1)
+        .read_until(b'\n', buf)
+        .map_err(|e| format!("Failed to read log: {e}"))?;
+    if n <= MAX_LOG_LINE_BYTES {
+        return Ok((n as u64, false));
+    }
+    let mut total = n as u64;
+    if buf.last() != Some(&b'\n') {
+        loop {
+            let available = reader
+                .fill_buf()
+                .map_err(|e| format!("Failed to read log: {e}"))?;
+            if available.is_empty() {
+                break;
+            }
+            let newline = available.iter().position(|&b| b == b'\n');
+            let consumed = newline.map_or(available.len(), |pos| pos + 1);
+            reader.consume(consumed);
+            total += consumed as u64;
+            if newline.is_some() {
+                break;
+            }
+        }
+    }
+    Ok((total, true))
+}
+
 /// Scan an entire log file while optionally capping the retained fight summaries.
 /// `total_fights` and each session's `fight_count` still count every completed
 /// fight, so callers can omit a large IPC payload without losing counts.
@@ -604,13 +640,15 @@ pub fn scan_file_with_fight_limit(
         // `read_until(b'\n')` makes offsets account for `\r\n` vs `\n`: the byte
         // count `n` always includes the terminator, so `next_offset` is the
         // start of the following line.
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .map_err(|e| format!("Failed to read log: {e}"))?;
+        let (n, oversized) = read_log_line(&mut reader, &mut buf)?;
         if n == 0 {
             break;
         }
-        let next_offset = offset + n as u64;
+        let next_offset = offset + n;
+        if oversized {
+            offset = next_offset;
+            continue;
+        }
         // An UNTERMINATED final line is a partially-flushed append: ESO writes
         // non-atomically, so a preflight of the active Encounter.log can land inside a
         // forming `0,BEGIN_LOG,…`/`…,END_COMBAT` header, and classifying it would create
@@ -670,13 +708,15 @@ pub fn scan_range_with_fight_limit(
 
     while offset < end {
         buf.clear();
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .map_err(|e| format!("Failed to read log: {e}"))?;
+        let (n, oversized) = read_log_line(&mut reader, &mut buf)?;
         if n == 0 {
             break;
         }
-        let next_offset = offset + n as u64;
+        let next_offset = offset + n;
+        if oversized {
+            offset = next_offset;
+            continue;
+        }
         if next_offset >= end && buf.last() != Some(&b'\n') {
             break;
         }
@@ -1002,6 +1042,28 @@ mod tests {
         let count_only = scan_file_with_fight_limit(path.to_str().unwrap(), Some(0)).unwrap();
         assert_eq!(count_only.total_fights, 3);
         assert!(count_only.fights.is_empty());
+    }
+
+    #[test]
+    fn file_and_range_scans_skip_oversized_line_and_keep_later_fights() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let header = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n";
+        let mut log = header.to_vec();
+        log.extend(std::iter::repeat_n(b'x', MAX_LOG_LINE_BYTES + 1));
+        log.extend_from_slice(b"\n10,BEGIN_COMBAT\n20,END_COMBAT\n");
+        std::fs::write(&path, &log).unwrap();
+        let path = path.to_str().unwrap();
+
+        let expected_start = (header.len() + MAX_LOG_LINE_BYTES + 2) as u64;
+        for scan in [
+            scan_file(path).unwrap(),
+            scan_range(path, 0, log.len() as u64).unwrap(),
+        ] {
+            assert_eq!(scan.sessions.len(), 1);
+            assert_eq!(scan.fights.len(), 1);
+            assert_eq!(scan.fights[0].start_offset, expected_start);
+        }
     }
 
     #[test]

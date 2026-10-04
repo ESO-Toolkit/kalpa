@@ -29,7 +29,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea on a native stack:
 
 - **No bundled runtime.** A Rust backend instead of Minion's Java: 17 MB to install on Windows, 10 MB from the Linux `.deb`/`.rpm`. (The AppImage is 84 MB because it carries its own GTK and WebKit.)
-- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 135 MB with the window open. Task Manager figures on a 119-addon profile.
+- **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 250 MB with the window open. Task Manager figures on a 119-addon profile.
 - **Dependency resolution that actually resolves**, including transitive dependencies, embedded libraries, and version checks.
 - **Pack Hub**, for publishing and installing shared addon collections. Minion has no equivalent.
 
@@ -77,7 +77,7 @@ A pack is a named set of addons that someone can install in one click. Packs com
 
 ### Themes
 
-Fifty-four built-in themes live under Settings → Appearance: eight Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora and others), ESO faction palettes, editor classics like Dracula, Nord, and Catppuccin, and five built for legibility.
+Fifty-eight built-in themes live under Settings → Appearance: twelve Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora and others), ESO faction palettes, editor classics like Dracula, Nord, and Catppuccin, and five built for legibility.
 
 The theme builder takes twelve seed colors and previews the result live, with a WCAG AA contrast check to catch unreadable combinations. Themes copy and paste as plain text. Whichever theme is active is applied before the window first paints, so there's no flash of the wrong palette on launch.
 
@@ -122,7 +122,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 
 ### Also
 
-- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 85 MB from around 135 MB. It suspends when minimized too, releasing its working set and dropping to about 11 MB — measured on the sidecar binary itself, so expect a little more with a large addon list loaded. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
+- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers, which cuts memory with the window open to about 125 MB from around 250 MB. It suspends when minimized too, releasing its working set and dropping to about 11 MB — measured on the sidecar binary itself at its default window size, so expect more with a large addon list loaded or a larger window. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
 - **Addon file browser** — read and edit an addon's Lua, XML, and text files in place, with a backup taken before each edit.
 - **Tags and filters** — preset and custom tags, live-counted filters, and built-in views for Addons, Libraries, Favorites, Outdated, and Issues. Sort by name, author, recently updated, or recently downloaded.
 - **API compatibility check** against the current game version.
@@ -138,9 +138,10 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 - **Path validation** — path-taking IPC commands canonicalize caller-supplied paths and confine them to the approved AddOns folder before any I/O. The uploader applies its own equivalent check against the ESO Logs folder.
 - **ZIP extraction** rejects absolute paths, drive prefixes, and `..` components, skips symlink entries, and caps total extraction at 500 MB. That is what stops path traversal and zip bombs.
 - **Content-Security-Policy** — strict, with `frame-ancestors 'none'` to block clickjacking and embedding.
-- **Pack Hub worker** rate-limits requests and serializes pack and vote mutations through a Durable Object. The committed canonical-storage and mirror-retry changes have **not been deployed to production**; see [Worker architecture](claude.md#architecture) for rollout and recovery details.
-- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies, `cargo audit` over the Rust lockfile. Advisories with no upstream fix are assessed one at a time and recorded in [`ci.yml`](.github/workflows/ci.yml). Today that's two quick-xml DoS advisories that none of Kalpa's code paths can reach.
+- **Pack Hub worker** rate-limits requests and serializes pack and vote mutations through a Durable Object. The canonical-storage and mirror-retry changes await deployment; merging Worker changes to main triggers the deployment workflow. No successful production deployment is recorded here; see [Worker architecture](claude.md#architecture) for rollout and recovery details.
+- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` includes runtime and development dependencies, and `cargo audit` checks both the desktop and Slint lockfiles. The Slint sidecar also rejects any resolved `quick-xml` version below the patched 0.41.0 release. Informational Rust advisories remain visible beside their CI gate.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
+- **`kalpa.log`** sits beside your settings (`%APPDATA%\com.kalpa.desktop` on Windows, `~/Library/Application Support/com.kalpa.desktop` on macOS, `~/.local/share/com.kalpa.desktop` on Linux). It records startup and window-lifecycle events, plus warnings and errors from Kalpa's dependencies — which can include the URLs those dependencies were fetching. It is capped at 512 KB, never leaves your machine on its own, and nothing writes it anywhere else. Skim it before pasting it into a bug report.
 
 When you export account-wide settings in a `.esopack` v2, Kalpa strips personal data before writing the file: account handles, character names and IDs, chat logs, mail, friends and roster lists, trade history. Placeholders are mapped back to your own identity on import. [What's scrubbed in `.esopack` v2](docs/settings-export.md) has the full list, including what is deliberately kept.
 
@@ -333,6 +334,7 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 | **Linux: sign-in doesn't persist**                              | Install or enable a Secret Service keyring (GNOME Keyring or KWallet)                                                                               |
 | **Linux: ESO install not detected**                             | Kalpa scans Steam Proton prefixes, including Flatpak and Snap. Launch ESO once so the prefix exists, or set the AddOns path manually in Settings    |
 | **White screen on launch**                                      | Check WebView2 is installed and current; reinstalling it usually fixes this                                                                         |
+| **Kalpa is in the tray but the window won't open**              | Fixed in beta.26 — it now recovers or closes so the next launch works. If it recurs, quit from the tray menu and check `kalpa.log` (see below)      |
 
 ---
 
@@ -368,12 +370,21 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 
 ```
 src/                        # React frontend
+  __mocks__/                # Shared frontend test mocks
+  __tests__/                # Frontend setup and source-hygiene tests
   components/               # Feature components (addon list, packs, settings)
+  components/__tests__/     # Feature-component tests
+  components/animate-ui/    # Motion primitives grouped by animate/base/buttons/effects/texts
   components/ui/            # shadcn-ui primitives
   components/uploader/      # ESO Logs uploader workspace
+  components/uploader/__tests__/ # Uploader component and reducer tests
   hooks/                    # Shared React hooks
+  hooks/__tests__/          # Shared hook tests
   lib/                      # Utilities, Tauri bindings, store, theme presets
+  lib/__tests__/            # Frontend utility and contract tests
   types.ts                  # Shared TypeScript interfaces
+
+e2e/                       # Windows WebView2 read-only and sandbox Playwright specs
 
 src-tauri/src/              # Rust backend
   commands.rs               # All Tauri command handlers
@@ -401,6 +412,7 @@ backend/eso-packs-worker/   # Pack Hub API (packs, votes, shares)
   src/validate.ts           # Input validation
   src/shares.ts             # Share code generation and resolution
   src/pack-index-do.ts      # Canonical pack/vote storage and mirror repair
+  test/                     # Worker unit, route, Durable Object, and scheduled tests
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar
 context/                    # Architecture and design documentation

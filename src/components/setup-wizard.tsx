@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { exampleAddonsPath } from "@/lib/platform";
@@ -10,6 +9,7 @@ import { Logo } from "@/components/ui/logo";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { Blur } from "@/components/animate-ui/primitives/effects/blur";
 import type { GameInstance } from "@/types";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 
 interface SetupWizardProps {
   instances: GameInstance[];
@@ -175,15 +175,12 @@ function BrowseButton({
   const handleBrowse = async () => {
     setBrowsing(true);
     try {
-      const selected = await open({
-        directory: true,
-        title: "Select ESO AddOns Folder",
-      });
+      const selected = await invokeOrThrow<string | null>("choose_addons_path");
       if (selected) {
         onSelect(selected);
       }
     } catch (e) {
-      toast.error(`Failed to open folder picker: ${e}`);
+      toast.error(`Failed to select AddOns folder: ${getTauriErrorMessage(e)}`);
     } finally {
       setBrowsing(false);
     }

@@ -96,7 +96,9 @@ describe("scheduled backup", () => {
     await putVote(e, "purge-me", "9003");
     await putVote(e, "keep-me", "9002");
 
-    await e.ESO_PACKS.put("deleted:9001", new Date().toISOString());
+    await e.ESO_PACKS.put("deleted:9001", new Date().toISOString(), {
+      expirationTtl: 97 * 24 * 60 * 60,
+    });
 
     const ctrl = createScheduledController({
       scheduledTime: new Date(),
@@ -115,7 +117,10 @@ describe("scheduled backup", () => {
         votes: Record<string, { userId: string; packId: string }>;
       };
 
-      expect(snapshot.packs.map((p) => p.id), key).toEqual(["keep-me"]);
+      expect(
+        snapshot.packs.map((p) => p.id),
+        key
+      ).toEqual(["keep-me"]);
       expect(Object.keys(snapshot.packBodies), key).toEqual(["keep-me"]);
       expect(
         Object.values(snapshot.votes).map((v) => v.userId),
@@ -123,7 +128,7 @@ describe("scheduled backup", () => {
       ).not.toContain("9001");
       expect(
         Object.values(snapshot.votes).map((v) => v.packId),
-        key,
+        key
       ).not.toContain("purge-me");
     }
 

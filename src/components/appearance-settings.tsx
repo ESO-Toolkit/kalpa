@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { Check, Plus, ClipboardPaste, Pencil, CopyPlus, Bug, MessageCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { GlassPanel } from "@/components/ui/glass-panel";
+import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
+import { getTauriErrorMessage, invokeResult, type TauriResult } from "@/lib/tauri";
 import { ambientAnimationsEnabled, setAmbientAnimations } from "@/lib/ambient-animations";
+import { FEATURES, visibleToolbar, type FeatureContext, type FeatureId } from "@/lib/features";
 import {
   TEXT_ZOOM_CHANGE_EVENT,
   TEXT_ZOOM_STOPS,
@@ -26,6 +29,16 @@ import { Kbd } from "@/components/ui/kbd";
 import type { Theme, ThemeColors } from "@/lib/theme-types";
 
 type Mode = { view: "gallery" } | { view: "editor"; draft: Theme; isNew: boolean };
+
+/**
+ * The context to assume when the caller supplies none.
+ *
+ * Both flags start false in App.tsx too and are filled in by startup probes, so
+ * "nothing detected yet" is the state the header itself is in at that moment —
+ * this list agreeing with it is the conservative answer, not a guess. Module
+ * scope keeps the identity stable across renders.
+ */
+const NOTHING_DETECTED: FeatureContext = { minionDetected: false, graphicsStackDetected: false };
 
 /** Validate + normalize a pasted theme JSON into a custom Theme, or null. */
 function parseImportedTheme(raw: string): Theme | null {
@@ -57,7 +70,33 @@ function parseImportedTheme(raw: string): Theme | null {
   };
 }
 
-export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () => void }) {
+export function AppearanceSettings({
+  onShowShortcuts,
+  toolbarHidden,
+  onToolbarHiddenChange,
+  featureCtx = NOTHING_DETECTED,
+}: {
+  onShowShortcuts: () => void;
+  toolbarHidden: FeatureId[];
+  /**
+   * Takes an updater, not a value. `handleToolbarPinChange` below can await a
+   * Tauri round trip before it decides, and by then the `toolbarHidden` prop it
+   * captured may describe a toolbar two toggles old — so the parent applies the
+   * change against its own latest state. The parent stays the only writer;
+   * this component never persists anything itself.
+   */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
+  /**
+   * The same detection snapshot the header consults, so this list can tell the
+   * truth about which rows are actually up there.
+   *
+   * `pinnableToToolbar` only says a feature MAY be pinned. Without this, the
+   * Toolbar list had no way to apply `pinnedWhen` and drew "Graphics stack" as
+   * a checked, pinned row on every machine — including the majority of ESO
+   * installs with no ReShade at all, where that header button does not exist.
+   */
+  featureCtx?: FeatureContext;
+}) {
   const {
     activeThemeId,
     activeTheme,
@@ -72,6 +111,66 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
   // so no load effect is needed.
   const [ambientOn, setAmbientOn] = useState(ambientAnimationsEnabled);
   const [textZoom, setTextZoomState] = useState(textZoomFactor);
+  // Guards unpinning the log uploader while a live session is streaming — the
+  // check is async (a Tauri round trip), so the row disables itself while in
+  // flight to avoid a second click racing the first.
+  const [checkingLogUpload, setCheckingLogUpload] = useState(false);
+  const logUploadCheckInFlight = useRef(false);
+
+  const pinnableFeatures = useMemo(() => FEATURES.filter((f) => f.pinnableToToolbar), []);
+  // What the header is showing RIGHT NOW, from the very function the header
+  // calls. Re-deriving "is it pinned?" from `pinnableToToolbar` alone is what
+  // let this list and the header disagree, so the `pinnedWhen` half is not
+  // reimplemented here — it is imported. Recomputed each render rather than
+  // memoised: it is one filter over a dozen registry entries, and `featureCtx`
+  // arrives as a fresh object from Settings, so a memo keyed on it would
+  // recompute anyway.
+  const pinnedNow = new Set(visibleToolbar(FEATURES, toolbarHidden, featureCtx).map((f) => f.id));
+
+  const handleToolbarPinChange = async (id: FeatureId, pinned: boolean) => {
+    if (!pinned && id === "log-upload") {
+      // The checkbox is disabled after the first render, but keep the guard in
+      // the handler too: an already queued DOM event must not create a second
+      // safety check that can race the first one.
+      if (logUploadCheckInFlight.current) return;
+      logUploadCheckInFlight.current = true;
+      setCheckingLogUpload(true);
+      try {
+        let liveActive: TauriResult<boolean>;
+        try {
+          liveActive = await invokeResult<boolean>("uploader_live_active");
+        } catch (error) {
+          toast.error("Couldn't verify live log upload status.", {
+            description: getTauriErrorMessage(error),
+          });
+          return;
+        }
+        if (!liveActive.ok) {
+          toast.error("Couldn't verify live log upload status.", {
+            description: liveActive.error,
+          });
+          return;
+        }
+        if (liveActive.data) {
+          toast.error("A live log upload is running.", {
+            description:
+              "Stop live logging (or let the session finish) before moving the uploader out of the toolbar.",
+          });
+          return;
+        }
+      } finally {
+        logUploadCheckInFlight.current = false;
+        setCheckingLogUpload(false);
+      }
+    }
+    // Derived from `prev` — the parent's latest value — rather than from the
+    // `toolbarHidden` prop this closure captured, which for the log uploader is
+    // a snapshot from before the await above and may have been superseded by a
+    // toggle on another row in the meantime.
+    onToolbarHiddenChange((prev) =>
+      pinned ? prev.filter((hiddenId) => hiddenId !== id) : [...prev.filter((h) => h !== id), id]
+    );
+  };
 
   useEffect(() => {
     const syncTextZoom = () => setTextZoomState(textZoomFactor());
@@ -242,6 +341,71 @@ export function AppearanceSettings({ onShowShortcuts }: { onShowShortcuts: () =>
               </p>
             </div>
           </label>
+        </GlassPanel>
+      </section>
+
+      {/* Toolbar */}
+      <section className="space-y-2">
+        <SectionHeader>Toolbar</SectionHeader>
+        <GlassPanel variant="subtle" className="p-3 space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Choose which of these appear as buttons in the header. Hiding one doesn&apos;t disable
+            it — it stays listed under Settings › Tools, and its deep links keep working exactly as
+            before.
+          </p>
+          <div className="space-y-2">
+            {pinnableFeatures.map((feature, index) => {
+              const Icon = feature.icon;
+              const hidden = toolbarHidden.includes(feature.id);
+              // Pinned by preference, but not in the header: `pinnedWhen` has
+              // not been satisfied yet. The checkbox deliberately stays checked
+              // and live — this is a standing preference that takes effect the
+              // moment the feature earns its slot — so the row explains the gap
+              // instead of leaving a checked box pointing at a button that is
+              // not there.
+              const awaitingSlot = !hidden && !pinnedNow.has(feature.id);
+              const rowBusy = feature.id === "log-upload" && checkingLogUpload;
+              return (
+                <label
+                  key={feature.id}
+                  className={`flex items-center gap-3 ${
+                    index > 0 ? "border-t border-structure-06 pt-2" : ""
+                  } ${rowBusy ? "cursor-wait opacity-70" : "cursor-pointer"}`}
+                >
+                  <Checkbox
+                    checked={!hidden}
+                    disabled={rowBusy}
+                    onCheckedChange={(checked) => {
+                      void handleToolbarPinChange(feature.id, checked === true);
+                    }}
+                  />
+                  <Icon className="size-4 shrink-0 text-muted-foreground" />
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-foreground">{feature.label}</p>
+                      {rowBusy && (
+                        <span
+                          className="size-3 shrink-0 animate-spin rounded-full border-2 border-structure-10 border-t-primary"
+                          aria-hidden
+                        />
+                      )}
+                      {!rowBusy && hidden && <InfoPill color="muted">In Settings › Tools</InfoPill>}
+                      {!rowBusy && awaitingSlot && (
+                        <InfoPill color="muted">Not in the header yet</InfoPill>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">{feature.description}</p>
+                    {awaitingSlot && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        It joins the header once Kalpa detects the setup it manages. Until then it
+                        lives in Settings › Tools, and this choice applies as soon as it appears.
+                      </p>
+                    )}
+                  </div>
+                </label>
+              );
+            })}
+          </div>
         </GlassPanel>
       </section>
 

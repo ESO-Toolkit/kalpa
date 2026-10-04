@@ -2,6 +2,10 @@ import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { toast } from "sonner";
 import type {
+  AddonSearchPage,
+  AddonSearchSource,
+  AskResponse,
+  AskRecommendation,
   BrowsePopularPage,
   DiscoverTab,
   EsouiSearchResult,
@@ -12,6 +16,8 @@ import type {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { ProgressBar } from "@/components/ui/progress-bar";
 import {
   Select,
   SelectContent,
@@ -21,6 +27,7 @@ import {
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
@@ -34,10 +41,14 @@ import {
   Flame,
   Check,
   WifiOff,
+  Sparkles,
+  ChevronRight,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
+import { useInstallProgress } from "@/hooks/use-install-progress";
+import { formatInstallProgress, type InstallProgress } from "@/lib/install-progress";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
-import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
+import { AskAnswerSkeleton, DiscoverResultListSkeleton } from "@/components/ui/skeletons";
 import { motion, AnimatePresence } from "motion/react";
 
 const PAGE_SIZE = 25;
@@ -53,14 +64,51 @@ interface DiscoverPanelProps {
   isOffline?: boolean;
 }
 
-function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
+/**
+ * Exported for tests: the install-then-uninstall regression below is a property
+ * of this hook's state, and reaching it through the whole panel would mean
+ * standing up the virtualizer and the ESOUI catalog for a badge.
+ */
+export function useAddonInstall(
+  addonsPath: string,
+  onInstalled: () => void,
+  persistedIds: Set<number>
+) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const resolvePendingDeps = useResolvePendingDeps();
   const [installingId, setInstallingId] = useState<number | null>(null);
+  const { progress, beginOperation, endOperation } = useInstallProgress();
+
+  /**
+   * Ids installed this session that the scan behind `persistedIds` has not
+   * reported yet. Bridges install-success -> rescan-lands, and nothing more.
+   */
   const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
 
-  // Merge persisted (from metadata) with session-installed IDs
+  // A new `persistedIds` identity is App publishing a freshly scanned addon
+  // list — a better answer than this overlay, so the overlay retires.
+  //
+  // Retiring the STATE is the point, not just ignoring it when merging. This
+  // was a plain set that was only ever added to, so an addon installed and then
+  // UNINSTALLED in the same session stayed badged as Installed for the rest of
+  // the session; the only thing that cleared it was the tab switch that
+  // unmounts this panel. Holding a snapshot of `persistedIds` from install time
+  // and merging only while it still matches does NOT fix that: an overlay
+  // recorded when nothing was installed matches the empty set again the moment
+  // the addon is removed, and revives the badge it was supposed to drop.
+  //
+  // The cost is that an `addons` change from a non-scan source (a tag edit, a
+  // disable toggle) also retires it, which can flash "Install" on an addon
+  // whose scan has not landed. That needs the user to act on the installed list
+  // during the few hundred ms after an install they started from Discover, and
+  // a momentary understatement beats a badge that is wrong until restart.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSessionInstalledIds((prev) => (prev.size === 0 ? prev : new Set()));
+  }, [persistedIds]);
+
   const installedIds = useMemo(() => {
+    if (sessionInstalledIds.size === 0) return persistedIds;
     const merged = new Set(persistedIds);
     for (const id of sessionInstalledIds) merged.add(id);
     return merged;
@@ -84,9 +132,13 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
           esouiTitle: info.title,
           esouiVersion: info.version,
           dependencyPolicy: await getDependencyPolicy(),
+          // Correlates the download/extract/dependency events streamed back on
+          // `update-progress` with this row.
+          operationId: beginOperation(),
         });
         setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
+        reportDependencyFailures(res.failedDeps);
         onInstalled();
         // Empty unless the policy is "ask"; the app-level picker owns the rest.
         void resolvePendingDeps(res.pendingDeps, addonsPath);
@@ -94,18 +146,27 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         toast.error(getTauriErrorMessage(e));
       } finally {
         setInstallingId(null);
+        endOperation();
       }
     },
-    [addonsPath, onInstalled, ensureEsoNotBlocking, resolvePendingDeps]
+    [
+      addonsPath,
+      onInstalled,
+      ensureEsoNotBlocking,
+      resolvePendingDeps,
+      beginOperation,
+      endOperation,
+    ]
   );
 
-  return { installingId, installedIds, install };
+  return { installingId, installProgress: progress, installedIds, install };
 }
 
 const DiscoverResultRow = memo(function DiscoverResultRow({
   result,
   selected,
   isInstalling,
+  progress,
   anyInstalling,
   installed,
   onSelect,
@@ -116,6 +177,8 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   result: EsouiSearchResult;
   selected: boolean;
   isInstalling: boolean;
+  /** Live phase/counts for THIS row's install; null until the first event. */
+  progress: InstallProgress | null;
   anyInstalling: boolean;
   installed: boolean;
   onSelect: (result: EsouiSearchResult) => void;
@@ -124,58 +187,87 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   rank?: number;
 }) {
   const isInstalled = installed;
+  // Until the first event lands the backend is still resolving the addon, so
+  // there is genuinely nothing to measure — say so rather than show 0%.
+  const progressLabel = progress ? formatInstallProgress(progress) : "Preparing…";
 
   return (
     <div
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-structure-04 group",
+        "group cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-structure-04",
         selected &&
           "bg-primary/[0.06] border-l-primary! shadow-[inset_4px_0_16px_-4px_color-mix(in_oklab,var(--primary)_15%,transparent),inset_0_0_0_1px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
       )}
       onClick={() => onSelect(result)}
     >
       <div className="flex items-center gap-2.5">
-        {rank != null && (
-          <span
-            className={cn(
-              "shrink-0 size-6 flex items-center justify-center rounded-md text-[11px] font-bold font-heading tabular-nums",
-              rank <= 3
-                ? "bg-primary/12 text-primary border border-primary/20"
-                : "bg-structure-03 text-muted-foreground border border-structure-06"
-            )}
-          >
-            {rank}
-          </span>
-        )}
-        <span className="flex-1 truncate text-sm font-medium">{result.title}</span>
-        <Button
-          size="xs"
-          variant={isInstalled ? "ghost" : "default"}
+        <button
+          type="button"
           onClick={(e) => {
             e.stopPropagation();
-            onInstall(result.id);
+            onSelect(result);
           }}
-          disabled={anyInstalling}
-          className={cn(
-            "shrink-0 transition-all",
-            isInstalling || isInstalled ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-          )}
+          aria-current={selected ? "true" : undefined}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-sky"
         >
-          {isInstalling ? (
-            <span className="flex items-center gap-1">
-              <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
-              Installing
+          {rank != null && (
+            <span
+              className={cn(
+                "shrink-0 size-6 flex items-center justify-center rounded-md text-[11px] font-bold font-heading tabular-nums",
+                rank <= 3
+                  ? "bg-primary/12 text-primary border border-primary/20"
+                  : "bg-structure-03 text-muted-foreground border border-structure-06"
+              )}
+            >
+              {rank}
             </span>
-          ) : isInstalled ? (
-            <span className="flex items-center gap-1 text-status-success">
-              <Check className="size-3" />
-              Installed
-            </span>
-          ) : (
-            "Install"
           )}
-        </Button>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{result.title}</span>
+        </button>
+        {isInstalled ? (
+          <InfoPill color="emerald" className="shrink-0" role="status">
+            <Check className="size-3" />
+            Installed
+          </InfoPill>
+        ) : (
+          <Button
+            size="xs"
+            variant="default"
+            onClick={(e) => {
+              e.stopPropagation();
+              onInstall(result.id);
+            }}
+            disabled={anyInstalling}
+            className={cn(
+              "shrink-0 transition-all",
+              isInstalling
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+            )}
+          >
+            {isInstalling ? (
+              <span className="flex items-center gap-1">
+                <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
+                Installing
+              </span>
+            ) : (
+              "Install"
+            )}
+          </Button>
+        )}
       </div>
+      {isInstalling && (
+        <div className="mt-2 space-y-1">
+          <ProgressBar
+            value={progress?.done ?? 0}
+            max={progress?.determinate ? progress.total : 100}
+            indeterminate={!progress?.determinate}
+            label={`${result.title}: ${progressLabel}`}
+            className="h-1.5"
+          />
+          <div className="text-[11px] tabular-nums text-muted-foreground">{progressLabel}</div>
+        </div>
+      )}
       <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {result.author && <span className="truncate">by {result.author}</span>}
         {result.category && <InfoPill color="muted">{result.category}</InfoPill>}
@@ -210,6 +302,7 @@ function VirtualResultRows({
   results,
   selectedResultId,
   installingId,
+  installProgress,
   installedIds,
   onSelectResult,
   onInstall,
@@ -219,6 +312,7 @@ function VirtualResultRows({
   results: EsouiSearchResult[];
   selectedResultId: number | null;
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   onInstall: (id: number) => void;
@@ -253,6 +347,7 @@ function VirtualResultRows({
               result={r}
               selected={selectedResultId === r.id}
               isInstalling={installingId === r.id}
+              progress={installingId === r.id ? installProgress : null}
               anyInstalling={installingId !== null}
               installed={installedIds.has(r.id)}
               onSelect={onSelectResult}
@@ -286,6 +381,7 @@ export function DiscoverPanel({
 }: DiscoverPanelProps) {
   const {
     installingId,
+    installProgress,
     installedIds,
     install: handleInstall,
   } = useAddonInstall(addonsPath, onInstalled, installedEsouiIds);
@@ -294,17 +390,19 @@ export function DiscoverPanel({
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         {/* Sub-tab selector (disabled) */}
-        <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+        <div className="@container flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
           {DISCOVER_TABS.map(([tab, label, Icon]) => (
             <button
               key={tab}
               role="tab"
               aria-selected={false}
               disabled
-              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
+              title={label}
+              aria-label={label}
+              className="flex-1 min-w-0 rounded-lg px-2 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground border border-transparent cursor-not-allowed"
             >
               <Icon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className="truncate hidden @md:inline">{label}</span>
             </button>
           ))}
         </div>
@@ -320,14 +418,24 @@ export function DiscoverPanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Sub-tab selector */}
-      <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+      {/* The tab labels never fit side by side in a 300-380px panel — they
+          alone need well over the panel's width, so every one truncated to an
+          ellipsis. Only the ACTIVE tab shows its label; the rest are icons with
+          tooltips, which fits comfortably and still names where you are. A wide
+          enough container (a future resizable panel) shows every label again. */}
+      <div className="@container flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
         {DISCOVER_TABS.map(([tab, label, Icon]) => (
           <button
             key={tab}
             role="tab"
             aria-selected={activeTab === tab}
+            title={label}
+            aria-label={label}
             className={cn(
-              "relative flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
+              "relative min-w-0 rounded-lg px-2 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
+              // The active tab earns the room for its label; the others stay
+              // icon-sized so nothing has to truncate.
+              activeTab === tab ? "flex-1" : "flex-none @md:flex-1",
               activeTab === tab
                 ? "text-primary"
                 : "text-muted-foreground hover:text-foreground hover:bg-structure-05 border border-transparent"
@@ -341,9 +449,11 @@ export function DiscoverPanel({
                 transition={{ type: "spring", stiffness: 400, damping: 30 }}
               />
             )}
-            <span className="relative z-10 flex items-center justify-center gap-1">
+            <span className="relative z-10 flex min-w-0 items-center justify-center gap-1">
               <Icon className="size-3 shrink-0" />
-              <span className="truncate">{label}</span>
+              <span className={cn("truncate", activeTab === tab ? "inline" : "hidden @md:inline")}>
+                {label}
+              </span>
             </span>
           </button>
         ))}
@@ -361,6 +471,7 @@ export function DiscoverPanel({
           >
             <SearchContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -379,6 +490,7 @@ export function DiscoverPanel({
           >
             <PopularContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -397,6 +509,7 @@ export function DiscoverPanel({
           >
             <CategoryContent
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onInstall={handleInstall}
               onSelectResult={onSelectResult}
@@ -425,16 +538,47 @@ export function DiscoverPanel({
   );
 }
 
-/* ── Search Tab ───────────────────────────────────────── */
+/* ── Search Tab (search + ask) ────────────────────────── */
 
+/**
+ * Shown in the empty state rather than the placeholder.
+ *
+ * The panel is ~380px, so any placeholder long enough to carry a real example
+ * gets truncated mid-word — and the example is exactly the half that gets cut.
+ * Here they wrap, stay fully readable, and are clickable, so discovering that
+ * the box also takes a question costs no typing.
+ */
+const ASK_EXAMPLES = [
+  "an addon that shows when I'm in combat",
+  "something to manage my inventory and bank",
+  "how do I track my dps",
+];
+
+/**
+ * One box for both retrieval paths.
+ *
+ * Search and Ask used to be separate tabs, but they run the SAME retrieval —
+ * the worker's /ask does a `limit: 20` search of the very same index before it
+ * shows anything to a model. The split only made the user guess: a question
+ * typed into Search got no answer, and keywords typed into Ask burned a model
+ * call to rank what a free search would have ranked.
+ *
+ * So typing is always the free path (debounced `search_addon_index`), and the
+ * assistant is an explicit act — the Ask button, or Shift+Enter. Its answer
+ * stacks ABOVE the result list rather than replacing it, which is also what
+ * makes a degraded assistant a non-event: the search results the user would
+ * have got anyway are still sitting right underneath it.
+ */
 function SearchContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -442,9 +586,13 @@ function SearchContent({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
+  const [searchSource, setSearchSource] = useState<AddonSearchSource | null>(null);
   const [searching, setSearching] = useState(false);
+  const [askResponse, setAskResponse] = useState<AskResponse | null>(null);
+  const [asking, setAsking] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchIdRef = useRef(0);
+  const askIdRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
 
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -465,16 +613,26 @@ function SearchContent({
 
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) {
+      searchIdRef.current++;
       setResults([]);
+      setSearchSource(null);
+      setSearching(false);
       return;
     }
     setSearching(true);
     const id = ++searchIdRef.current;
     try {
-      const r = await invokeOrThrow<EsouiSearchResult[]>("search_esoui_addons", {
+      // Full-text search over titles AND descriptions, served by the Pack Hub
+      // worker's addon index. The command falls back to the ESOUI scraper on
+      // its own when the index cannot answer, so this never regresses to a
+      // dead search — `source` just reports which backend replied.
+      const page = await invokeOrThrow<AddonSearchPage>("search_addon_index", {
         query: searchQuery.trim(),
       });
-      if (searchIdRef.current === id) setResults(r);
+      if (searchIdRef.current === id) {
+        setResults(page.results);
+        setSearchSource(page.source);
+      }
     } catch (e) {
       if (searchIdRef.current === id) toast.error(getTauriErrorMessage(e));
     } finally {
@@ -482,10 +640,54 @@ function SearchContent({
     }
   }, []);
 
+  const handleAsk = useCallback(async (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    setAsking(true);
+    const id = ++askIdRef.current;
+    try {
+      const result = await invokeOrThrow<AskResponse>("ask_addon_assistant", {
+        question: trimmed,
+      });
+      if (askIdRef.current === id) setAskResponse(result);
+    } catch (e) {
+      if (askIdRef.current === id) {
+        toast.error(getTauriErrorMessage(e));
+        setAskResponse(null);
+      }
+    } finally {
+      if (askIdRef.current === id) setAsking(false);
+    }
+  }, []);
+
+  /** Retires an answer (and any in-flight one) that no longer matches the box. */
+  const dismissAsk = useCallback(() => {
+    askIdRef.current++;
+    setAsking(false);
+    setAskResponse(null);
+  }, []);
+
   const handleInputChange = (value: string) => {
     setQuery(value);
+    // An answer to the previous wording is worse than no answer, so editing the
+    // box drops it rather than leaving it stranded above fresh results.
+    if (askResponse || asking) dismissAsk();
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    // Retire an in-flight response as soon as the wording changes, rather than
+    // waiting for the next debounced request (or allowing a cleared box to refill).
+    searchIdRef.current++;
+    setResults([]);
+    setSearchSource(null);
+    setSearching(Boolean(value.trim()));
+    if (!value.trim()) return;
     debounceRef.current = setTimeout(() => handleSearch(value), 500);
+  };
+
+  const runExample = (example: string) => {
+    setQuery(example);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    void handleSearch(example);
+    void handleAsk(example);
   };
 
   // Keyboard navigation
@@ -511,25 +713,79 @@ function SearchContent({
     [results, selectedResultId, onSelectResult, rowVirtualizer]
   );
 
+  const canAsk = query.trim().length > 0 && !asking;
+
   return (
     <>
-      <div className="px-3 pb-2">
+      <div className="flex items-center gap-1.5 px-3 pb-2">
         <Input
-          placeholder="Search ESOUI addons..."
-          aria-label="Search ESOUI addons"
+          placeholder="Search or ask about addons…"
+          aria-label="Search or ask about addons"
           value={query}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") handleSearch(query);
+            // Shift+Enter is the assistant; plain Enter stays the free search.
+            if (e.key === "Enter" && e.shiftKey) {
+              e.preventDefault();
+              if (canAsk) void handleAsk(query);
+              return;
+            }
+            if (e.key === "Enter") void handleSearch(query);
             handleKeyDown(e);
           }}
+          className="min-w-0 flex-1"
           autoFocus
         />
+        <Button
+          variant="outline"
+          onClick={() => handleAsk(query)}
+          disabled={!canAsk}
+          title="Ask the assistant (Shift+Enter)"
+          aria-label="Ask the assistant"
+        >
+          <Sparkles className="size-3.5" />
+          Ask
+        </Button>
       </div>
+
+      {/* The assistant's answer sits ABOVE the results it was drawn from, and is
+          capped so it can never push the result list off a 300px panel. */}
+      {(asking || askResponse) && (
+        <div className="flex max-h-[45%] shrink-0 flex-col overflow-hidden border-b border-structure-06 pb-2">
+          <div className="flex items-center justify-between px-3 pb-1.5">
+            <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+              Assistant
+            </span>
+            {!asking && (
+              <button
+                type="button"
+                onClick={dismissAsk}
+                className="rounded px-1 text-xs text-muted-foreground transition-colors duration-150 hover:text-foreground"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-3">
+            {asking ? (
+              /* A centred spinner sat in the middle of an empty column and then
+                 the answer appeared at the top — the whole panel jumped. The
+                 skeleton occupies the same shape the cards will. */
+              <AskAnswerSkeleton />
+            ) : askResponse ? (
+              <AskAnswer
+                response={askResponse}
+                onSelectResult={onSelectResult}
+                selectedResultId={selectedResultId}
+              />
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* Results count bar */}
       {results.length > 0 && (
-        <div className="flex items-center justify-between px-3 pb-1.5">
+        <div className="flex items-center justify-between px-3 pt-1.5 pb-1.5">
           <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
             {results.length} result{results.length !== 1 ? "s" : ""}
           </span>
@@ -537,7 +793,17 @@ function SearchContent({
         </div>
       )}
 
-      <div ref={listRef} className="flex-1 overflow-y-auto">
+      {/* The index searches descriptions; the scraper only matches titles. Say
+          so when we fall back, otherwise a thinner result set looks like a bug. */}
+      {results.length > 0 && searchSource === "esoui" && (
+        <div className="px-3 pb-1.5">
+          <span className="text-xs text-muted-foreground">
+            Matching addon names only &mdash; description search is unavailable right now.
+          </span>
+        </div>
+      )}
+
+      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto">
         {searching ? (
           <DiscoverResultListSkeleton />
         ) : results.length === 0 && query.trim() ? (
@@ -550,7 +816,24 @@ function SearchContent({
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/20" />}
             title="Search ESOUI"
-            subtitle="Type to find addons by name, author, or keyword"
+            subtitleClassName="mt-2 w-full max-w-[260px]"
+            subtitle={
+              <span className="flex flex-col items-center gap-2">
+                <span>Keywords search names and descriptions. For a question, press Ask. Try:</span>
+                <span className="flex w-full flex-col items-stretch gap-1.5">
+                  {ASK_EXAMPLES.map((example) => (
+                    <button
+                      key={example}
+                      type="button"
+                      onClick={() => runExample(example)}
+                      className="rounded-lg border border-structure-06 px-2.5 py-1.5 text-left text-xs leading-snug text-foreground transition-colors duration-150 hover:border-primary/25 hover:bg-primary/[0.06]"
+                    >
+                      &ldquo;{example}&rdquo;
+                    </button>
+                  ))}
+                </span>
+              </span>
+            }
           />
         ) : (
           <VirtualResultRows
@@ -558,6 +841,7 @@ function SearchContent({
             results={results}
             selectedResultId={selectedResultId}
             installingId={installingId}
+            installProgress={installProgress}
             installedIds={installedIds}
             onSelectResult={onSelectResult}
             onInstall={onInstall}
@@ -568,18 +852,163 @@ function SearchContent({
   );
 }
 
+/**
+ * The assistant's grounded answer, rendered above the plain search results.
+ *
+ * The worker does the retrieval and the grounding; every recommendation here
+ * corresponds to a real indexed addon, and clicking one opens the same
+ * DiscoverDetail pane (and Install button) the result rows use.
+ */
+function AskAnswer({
+  response,
+  onSelectResult,
+  selectedResultId,
+}: {
+  response: AskResponse;
+  onSelectResult: (result: EsouiSearchResult | null) => void;
+  selectedResultId: number | null;
+}) {
+  // Only the ESOUI id is load-bearing: DiscoverDetail fetches everything else
+  // itself, so a recommendation can open the full detail pane directly.
+  const selectRecommendation = (rec: AskRecommendation) => {
+    onSelectResult({
+      id: rec.esoui_id,
+      title: rec.title,
+      author: rec.author,
+      category: rec.category,
+      downloads: "",
+      updated: "",
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* The per-addon reasons carry the useful information. A summary
+          paragraph on top of them just restated the question back at the
+          user, so it is shown only when there is nothing to recommend
+          and the sentence has to do the whole job. */}
+      {response.answer && response.no_good_match && (
+        <GlassPanel variant="subtle" className="p-3">
+          <p className="text-sm leading-relaxed text-foreground">{response.answer}</p>
+        </GlassPanel>
+      )}
+
+      {/* Say plainly when the assistant itself did not run, rather than passing
+          off raw search hits as an answer. It is a soft failure now — the plain
+          search results are already on screen just below this block. */}
+      {response.degraded && (
+        <p className="text-xs text-muted-foreground">
+          {response.recommendations.length > 0
+            ? "The assistant is unavailable right now — showing the closest matches instead. Your search results below are unaffected."
+            : "The assistant is unavailable right now. Your search results below are unaffected."}
+        </p>
+      )}
+
+      {!response.degraded && response.no_good_match && response.recommendations.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No indexed addon looks like a good fit. Try describing it differently, or scan the search
+          results below.
+        </p>
+      )}
+
+      {response.recommendations.map((rec) => (
+        <button
+          key={rec.esoui_id}
+          onClick={() => selectRecommendation(rec)}
+          className={cn(
+            "w-full rounded-lg border p-2.5 text-left transition-colors duration-150",
+            selectedResultId === rec.esoui_id
+              ? "border-primary/25 bg-primary/[0.06]"
+              : "border-structure-06 hover:bg-structure-05"
+          )}
+        >
+          {/* The pill used to share a row with the title and would wrap
+              to two lines ("Graphic UI / Mods") whenever the title was
+              long. The title now owns the row and truncates; the category
+              sits with the reason, where it never competes for width. */}
+          <div className="min-w-0">
+            <span className="block truncate font-heading text-sm font-medium text-foreground">
+              {rec.title}
+            </span>
+          </div>
+          {rec.reason && (
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{rec.reason}</p>
+          )}
+          {rec.category && (
+            <InfoPill color="muted" className="mt-1.5 max-w-full whitespace-nowrap">
+              <span className="truncate">{rec.category}</span>
+            </InfoPill>
+          )}
+        </button>
+      ))}
+
+      {/* The assistant answers with a few picks, but retrieval found more.
+          Showing the rest collapsed means a short answer never looks like
+          it missed something — and it costs no extra model call. */}
+      {response.also_considered.length > 0 && (
+        <details className="group mt-1">
+          <summary className="cursor-pointer list-none rounded-lg px-1 py-1 text-xs text-muted-foreground transition-colors duration-150 hover:text-foreground">
+            <span className="inline-flex items-center gap-1">
+              <ChevronRight className="size-3 shrink-0 transition-transform duration-150 group-open:rotate-90" />
+              {response.also_considered.length} more{" "}
+              {response.also_considered.length === 1 ? "match" : "matches"}
+            </span>
+          </summary>
+          <div className="mt-1.5 flex flex-col gap-1">
+            {response.also_considered.map((rec) => (
+              <button
+                key={rec.esoui_id}
+                onClick={() => selectRecommendation(rec)}
+                className={cn(
+                  "w-full rounded-lg border px-2.5 py-1.5 text-left transition-colors duration-150",
+                  selectedResultId === rec.esoui_id
+                    ? "border-primary/25 bg-primary/[0.06]"
+                    : "border-structure-06 hover:bg-structure-05"
+                )}
+              >
+                {/* The tail is no longer relevance-capped, so it can trail
+                    weak matches on a vague question. Bare titles gave no cue
+                    which rows those were; the category is the cheapest signal
+                    that "Deconstruction Junk Marker" is not a combat addon.
+
+                    Inline rather than stacked, because this list is long and
+                    its container is short. A second line took tail rows from
+                    28px to 54px, and at 23 rows that is 1249px of scroll
+                    inside a 189px region — expanding the disclosure pushed the
+                    answer and the picks off screen entirely. */}
+                <span className="flex items-baseline gap-2">
+                  <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+                    {rec.title}
+                  </span>
+                  {rec.category && (
+                    <InfoPill color="muted" className="shrink-0 whitespace-nowrap">
+                      {rec.category}
+                    </InfoPill>
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 /* ── Popular Tab ─────────────────────────────────────── */
 
 type PopularSort = "downloads" | "newest";
 
 function PopularContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -691,6 +1120,7 @@ function PopularContent({
               results={results}
               selectedResultId={selectedResultId}
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onSelectResult={onSelectResult}
               onInstall={onInstall}
@@ -709,12 +1139,14 @@ function PopularContent({
 
 function CategoryContent({
   installingId,
+  installProgress,
   installedIds,
   onInstall,
   onSelectResult,
   selectedResultId,
 }: {
   installingId: number | null;
+  installProgress: InstallProgress | null;
   installedIds: Set<number>;
   onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
@@ -897,6 +1329,7 @@ function CategoryContent({
               results={filteredResults}
               selectedResultId={selectedResultId}
               installingId={installingId}
+              installProgress={installProgress}
               installedIds={installedIds}
               onSelectResult={onSelectResult}
               onInstall={onInstall}
@@ -930,6 +1363,7 @@ function UrlContent({
   const [addonInfo, setAddonInfo] = useState<EsouiAddonInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<InstallResult | null>(null);
+  const { progress, beginOperation, endOperation } = useInstallProgress();
 
   const handleResolve = async () => {
     if (!input.trim()) return;
@@ -963,16 +1397,20 @@ function UrlContent({
         esouiTitle: addonInfo.title,
         esouiVersion: addonInfo.version,
         dependencyPolicy: await getDependencyPolicy(),
+        operationId: beginOperation(),
       });
       setResult(installResult);
       setState("installed");
       toast.success(`Installed ${installResult.installedFolders.join(", ")}`);
+      reportDependencyFailures(installResult.failedDeps);
       onInstalled();
       // Empty unless the policy is "ask"; the app-level picker owns the rest.
       void resolvePendingDeps(installResult.pendingDeps, addonsPath);
     } catch (e) {
       setError(getTauriErrorMessage(e));
       setState("error");
+    } finally {
+      endOperation();
     }
   };
 
@@ -1064,10 +1502,22 @@ function UrlContent({
       )}
 
       {state === "installing" && (
-        <Button disabled className="w-full" size="sm">
-          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
-          Installing...
-        </Button>
+        <div className="space-y-2">
+          <Button disabled className="w-full" size="sm">
+            <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
+            Installing...
+          </Button>
+          <ProgressBar
+            value={progress?.done ?? 0}
+            max={progress?.determinate ? progress.total : 100}
+            indeterminate={!progress?.determinate}
+            label={progress ? formatInstallProgress(progress) : "Preparing…"}
+            className="h-1.5"
+          />
+          <div className="text-[11px] tabular-nums text-muted-foreground text-center">
+            {progress ? formatInstallProgress(progress) : "Preparing…"}
+          </div>
+        </div>
       )}
 
       {state === "installed" && result && (
@@ -1100,10 +1550,14 @@ function EmptyState({
   icon,
   title,
   subtitle,
+  subtitleClassName,
 }: {
   icon: React.ReactNode;
   title: string;
   subtitle: React.ReactNode;
+  /** Overrides the default narrow measure. The 200px cap suits a sentence but
+   *  squashes richer content such as the Ask tab's example buttons. */
+  subtitleClassName?: string;
 }) {
   return (
     <Fade transition={{ type: "spring", stiffness: 200, damping: 25 }}>
@@ -1113,7 +1567,14 @@ function EmptyState({
         </div>
         <div className="text-center">
           <p className="font-heading text-sm font-medium text-foreground">{title}</p>
-          <p className="mt-1 text-xs text-muted-foreground max-w-[200px]">{subtitle}</p>
+          <div
+            className={cn(
+              "mt-1 text-xs text-muted-foreground",
+              subtitleClassName ?? "max-w-[200px]"
+            )}
+          >
+            {subtitle}
+          </div>
         </div>
       </div>
     </Fade>

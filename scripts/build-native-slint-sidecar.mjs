@@ -16,6 +16,31 @@ if (!targetTriple) {
   throw new Error("Could not determine the Rust target triple for the Slint sidecar.");
 }
 
+const destinationDir = path.join(repoRoot, "src-tauri", "binaries");
+const destination = path.join(destinationDir, `kalpa-slint-${targetTriple}${exeExt}`);
+
+// The release workflow compiles the sidecar in its own job, in parallel with
+// the app builds, and drops the binary into src-tauri/binaries before the
+// Windows app job runs `npm run build:release-assets`. This env var tells that
+// second invocation to trust the file it was handed instead of spending
+// another ~14 minutes rebuilding it on the critical path. It is opt-in and
+// fails loudly, so a missing download cannot degrade into either a silent
+// rebuild or a bundle that ships the zero-byte dev placeholder
+// (scripts/ensure-slint-sidecar-placeholder.mjs) as the real sidecar.
+if (process.env.KALPA_SIDECAR_PREBUILT === "1") {
+  if (!fs.existsSync(destination) || fs.statSync(destination).size === 0) {
+    throw new Error(
+      `KALPA_SIDECAR_PREBUILT=1 but ${path.relative(repoRoot, destination)} is missing or empty; ` +
+        "the sidecar artifact was not downloaded before the app build."
+    );
+  }
+  console.log(
+    `Using prebuilt Slint sidecar: ${path.relative(repoRoot, destination)} ` +
+      `(${fs.statSync(destination).size} bytes)`
+  );
+  process.exit(0);
+}
+
 const cargoArgs = [
   "build",
   "--manifest-path",
@@ -42,8 +67,6 @@ const source = path.join(
   targetDir,
   `kalpa-slint-prototype${exeExt}`
 );
-const destinationDir = path.join(repoRoot, "src-tauri", "binaries");
-const destination = path.join(destinationDir, `kalpa-slint-${targetTriple}${exeExt}`);
 
 if (!fs.existsSync(source)) {
   throw new Error(`Slint sidecar build did not produce ${source}`);

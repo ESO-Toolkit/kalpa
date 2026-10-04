@@ -18,7 +18,6 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { SearchResultListSkeleton } from "@/components/ui/skeletons";
 import { toast } from "sonner";
-import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import {
   SearchIcon,
@@ -300,28 +299,9 @@ export function PackCreateView({
       toast.error("Add at least one addon.");
       return;
     }
-    const safeName = title
-      .trim()
-      .replace(/[^a-zA-Z0-9-_ ]/g, "")
-      .trim()
-      .replace(/\s+/g, "-");
-    // Inside try/catch: a denied dialog permission rejects here, and an
-    // unhandled rejection from the click handler would look like a dead button.
-    let path: string | null;
-    try {
-      path = await saveFileDialog({
-        defaultPath: `${safeName}.esopack`,
-        filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
-      });
-    } catch (e) {
-      toast.error(`Couldn't open the save dialog: ${getTauriErrorMessage(e)}`);
-      return;
-    }
-    if (!path) return;
-
     setSavingToFile(true);
     try {
-      await invokeOrThrow("export_pack_file", {
+      const exported = await invokeOrThrow<boolean>("export_pack_file", {
         pack: {
           format: "esopack",
           version: 1,
@@ -335,8 +315,8 @@ export function PackCreateView({
           sharedAt: new Date().toISOString(),
           sharedBy: authUser?.userName ?? "Anonymous",
         },
-        path,
       });
+      if (!exported) return;
       toast.success("Pack saved to file");
     } catch (e) {
       toast.error(`Failed to save pack: ${getTauriErrorMessage(e)}`);
@@ -434,10 +414,14 @@ export function PackCreateView({
 
           {/* Title */}
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block">
+            <label
+              htmlFor="pack-name"
+              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1 block"
+            >
               Pack Name <span className="text-status-danger">*</span>
             </label>
             <Input
+              id="pack-name"
               placeholder="e.g. Trial Essentials, PvP Toolkit"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -645,6 +629,7 @@ export function PackCreateView({
             <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/40" />
             {addonSource === "search" ? (
               <Input
+                aria-label="Search ESOUI addons"
                 placeholder="Search ESOUI addons..."
                 value={searchQuery}
                 onChange={(e) => handleSearchChange(e.target.value)}
@@ -653,6 +638,7 @@ export function PackCreateView({
               />
             ) : (
               <Input
+                aria-label="Filter installed addons"
                 placeholder="Filter installed addons..."
                 value={installedFilter}
                 onChange={(e) => setInstalledFilter(e.target.value)}

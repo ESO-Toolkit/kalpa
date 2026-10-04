@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
@@ -18,6 +17,7 @@ import {
   type DependencyPolicy,
 } from "@/lib/dependency-policy";
 import { useConfirmedSetting } from "@/hooks/use-confirmed-setting";
+import { useOptimisticSetting } from "@/hooks/use-optimistic-setting";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -36,16 +36,12 @@ import {
   Database,
   FolderSearch,
   RefreshCw,
-  Archive,
-  Users,
-  ShieldCheck,
   ArrowDownToLine,
   ClipboardCopy,
   ClipboardPaste,
   ChevronRight,
   Monitor,
   Gauge,
-  Shield,
   Sparkles,
   Trash2,
   Palette,
@@ -55,6 +51,7 @@ import {
 } from "lucide-react";
 import { AccountSettings } from "./account-settings";
 import { AppearanceSettings } from "./appearance-settings";
+import { FEATURES, toolsMenuFeatures, type FeatureId, type ToolsGroup } from "@/lib/features";
 
 type SettingsTab = "general" | "appearance" | "tools" | "data";
 type PerformanceMode = "webview" | "native-slint";
@@ -70,13 +67,14 @@ interface SettingsProps {
   onClose: () => void;
   onRefresh: () => void;
   onOpenLogUpload: () => void;
-  onShowBackups: () => void;
-  onShowApiCompat: () => void;
-  onShowCharacters: () => void;
-  onShowMigrationWizard: () => void;
-  onShowSafetyCenter: () => void;
+  onOpenFeature: (id: FeatureId) => void;
+  graphicsStackDetected: boolean;
+  minionDetected: boolean;
   onShowShortcuts: () => void;
   onCheckForAppUpdate: () => void;
+  toolbarHidden: FeatureId[];
+  /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
 }
 
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
@@ -85,6 +83,22 @@ const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "data", label: "Data", icon: Database },
 ];
+
+/**
+ * Mirrors `DELETE_INCOMPLETE_MESSAGE` in `src-tauri/src/pack_hub/commands.rs`,
+ * asserted byte-for-byte by `settings-delete-account.test.tsx`.
+ *
+ * `delete_pack_hub_account` returns this as an `Err` because erasure is not
+ * finished, but it is the ONE error on that command that is not a failure: by
+ * the time it is sent, the packs, share codes and backup scrub are already
+ * done and only a bounded remainder of votes is left. Reporting it through the
+ * generic "Failed to delete account data" branch told a user finishing a GDPR
+ * erasure that nothing had happened, and implied re-running it was pointless —
+ * when re-running is the one thing that finishes the job.
+ */
+export const DELETE_INCOMPLETE_MESSAGE =
+  "Most of your data is deleted, but there was too much to finish in one go. " +
+  "Run Delete Account once more to clear the rest.";
 
 export function Settings({
   addonsPath,
@@ -97,13 +111,13 @@ export function Settings({
   onClose,
   onRefresh,
   onOpenLogUpload,
-  onShowBackups,
-  onShowApiCompat,
-  onShowCharacters,
-  onShowMigrationWizard,
-  onShowSafetyCenter,
+  onOpenFeature,
+  graphicsStackDetected,
+  minionDetected,
   onShowShortcuts,
   onCheckForAppUpdate,
+  toolbarHidden,
+  onToolbarHiddenChange,
 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [path, setPath] = useState(addonsPath);
@@ -111,16 +125,37 @@ export function Settings({
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
-  const [autoUpdate, setAutoUpdate] = useState(false);
-  const [warnEsoRunning, setWarnEsoRunning] = useState(true);
-  const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("webview");
+  const {
+    value: autoUpdate,
+    commit: commitAutoUpdate,
+    hydrate: hydrateAutoUpdate,
+  } = useOptimisticSetting(false, (value) => setSetting("autoUpdate", value));
+  const {
+    value: warnEsoRunning,
+    commit: commitWarnEsoRunning,
+    hydrate: hydrateWarnEsoRunning,
+  } = useOptimisticSetting(true, (value) => setSetting("suppressEsoRunningWarning", !value));
+  const {
+    value: performanceMode,
+    commit: commitPerformanceMode,
+    hydrate: hydratePerformanceMode,
+  } = useOptimisticSetting<PerformanceMode>(
+    "webview",
+    (value) => setSetting("performanceMode", value),
+    "Couldn't save performance mode."
+  );
   const [switchingPerformanceMode, setSwitchingPerformanceMode] = useState(false);
-  const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
   const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
   const [copying, setCopying] = useState(false);
-  const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
+  const {
+    value: conflictPolicy,
+    commit: commitConflictPolicy,
+    hydrate: hydrateConflictPolicy,
+  } = useOptimisticSetting<"ask" | "keep_mine" | "take_update">("ask", (value) =>
+    setSetting("conflictPolicy", value)
+  );
   const {
     value: dependencyPolicy,
     commit: commitDependencyPolicy,
@@ -148,14 +183,29 @@ export function Settings({
   // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
   // `manualUseOfficialUploader` key the uploader workspace reads; the toggle writes
   // both manual + live opt-out keys.
-  const [useOfficialUploader, setUseOfficialUploader] = useState(false);
-  const [autoOpenAnalysis, setAutoOpenAnalysis] = useState(false);
+  const {
+    value: useOfficialUploader,
+    commit: commitUseOfficialUploader,
+    hydrate: hydrateUseOfficialUploader,
+  } = useOptimisticSetting(false, (value) =>
+    setSettings({
+      manualUseOfficialUploader: value,
+      liveUseOfficialUploader: value,
+    })
+  );
+  const {
+    value: autoOpenAnalysis,
+    commit: commitAutoOpenAnalysis,
+    hydrate: hydrateAutoOpenAnalysis,
+  } = useOptimisticSetting(false, (value) => setSetting("autoOpenAnalysis", value));
 
   useEffect(() => {
-    void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
-    void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
+    void getSetting<boolean>("autoUpdate", false).then(hydrateAutoUpdate);
+    void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) =>
+      hydrateWarnEsoRunning(!s)
+    );
     void getSetting<string>("performanceMode", "webview").then((mode) =>
-      setPerformanceMode(mode === "native-slint" ? "native-slint" : "webview")
+      hydratePerformanceMode(mode === "native-slint" ? "native-slint" : "webview")
     );
     // The toggle WRITES both opt-out keys, so its checked state must REFLECT both: a
     // pre-existing user who opted out of LIVE direct upload (liveUseOfficialUploader)
@@ -164,10 +214,10 @@ export function Settings({
     void Promise.all([
       getSetting<boolean>("manualUseOfficialUploader", false),
       getSetting<boolean>("liveUseOfficialUploader", false),
-    ]).then(([manual, live]) => setUseOfficialUploader(manual || live));
-    void getSetting<boolean>("autoOpenAnalysis", false).then(setAutoOpenAnalysis);
+    ]).then(([manual, live]) => hydrateUseOfficialUploader(manual || live));
+    void getSetting<boolean>("autoOpenAnalysis", false).then(hydrateAutoOpenAnalysis);
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
-      setConflictPolicy
+      hydrateConflictPolicy
     );
     // Via the module's reader, which narrows: settings.json is user-editable and
     // survives downgrades, so a bad value must fall back rather than leave every
@@ -175,14 +225,18 @@ export function Settings({
     void getDependencyPolicy().then(hydrateDependencyPolicy);
     void getSkippedDependencies().then(setSkippedDependencies);
     void getAskRequiredDependenciesOnly().then(hydrateAskRequiredOnly);
-    void invokeResult<boolean>("detect_minion").then((result) => {
-      if (result.ok) {
-        setMinionDetected(result.data);
-      }
-    });
-    // Both hydrators are useCallback([]) inside the hook, so listing them keeps
-    // this a mount-only load rather than re-running it.
-  }, [hydrateDependencyPolicy, hydrateAskRequiredOnly]);
+    // Hydrators are stable callbacks, so listing them keeps this a mount-only
+    // load while documenting every setting seeded by the effect.
+  }, [
+    hydrateAskRequiredOnly,
+    hydrateAutoOpenAnalysis,
+    hydrateAutoUpdate,
+    hydrateConflictPolicy,
+    hydrateDependencyPolicy,
+    hydratePerformanceMode,
+    hydrateUseOfficialUploader,
+    hydrateWarnEsoRunning,
+  ]);
 
   // Silently refresh the detected-instance list every time Settings opens, so
   // a PTS install created after app startup shows up in the switcher without
@@ -228,11 +282,7 @@ export function Settings({
 
   const handleBrowse = async () => {
     try {
-      const selected = await open({
-        directory: true,
-        title: "Select ESO AddOns Folder",
-        defaultPath: path || undefined,
-      });
+      const selected = await invokeOrThrow<string | null>("choose_addons_path");
       if (selected) {
         setPath(selected);
       }
@@ -320,7 +370,20 @@ export function Settings({
         `Deleted ${result.packs} pack${result.packs !== 1 ? "s" : ""}, ${result.votes} vote${result.votes !== 1 ? "s" : ""}, and ${result.shares} share code${result.shares !== 1 ? "s" : ""}.`
       );
     } catch (e) {
-      toast.error(`Failed to delete account data: ${getTauriErrorMessage(e)}`);
+      const message = getTauriErrorMessage(e);
+      if (message === DELETE_INCOMPLETE_MESSAGE) {
+        // Not `toast.error`: this is partial success, and the backend says so.
+        // The sign-out is skipped on purpose too — the leftover votes can only
+        // be cleared by a signed-in session, so calling `onAuthChange(null)`
+        // here would lock the user out of finishing their own erasure. The
+        // confirm panel is left open for the same reason: the second run the
+        // message asks for is then one click away, not five.
+        toast.warning(message, {
+          description: "Your packs and share codes are already gone.",
+        });
+        return;
+      }
+      toast.error(`Failed to delete account data: ${message}`);
     } finally {
       setDeletingAccount(false);
     }
@@ -372,14 +435,11 @@ export function Settings({
 
     const next: PerformanceMode = checked ? "native-slint" : "webview";
     const previous = performanceMode;
-    setPerformanceMode(next);
     setSwitchingPerformanceMode(true);
 
-    const saved = await setSetting("performanceMode", next);
+    const saved = await commitPerformanceMode(next);
     if (!saved) {
-      setPerformanceMode(previous);
       setSwitchingPerformanceMode(false);
-      toast.error("Couldn't save performance mode.");
       return;
     }
 
@@ -392,14 +452,39 @@ export function Settings({
       await invokeOrThrow<{ exePath: string }>("launch_native_performance_mode");
       toast.success("Switching to native performance mode...");
     } catch (e) {
-      setPerformanceMode(previous);
-      void setSetting("performanceMode", previous);
+      void commitPerformanceMode(previous);
       toast.error(`Native performance mode is not available: ${getTauriErrorMessage(e)}`);
       setSwitchingPerformanceMode(false);
     }
   };
 
   const pathDirty = path.trim() !== addonsPath;
+
+  // One detection snapshot for the whole dialog. The Appearance tab's Toolbar
+  // list reads the same object, so the two tabs cannot disagree about whether a
+  // `pinnedWhen` feature is in the header — the Toolbar list having no context
+  // at all is exactly why it used to claim the graphics stack was pinned when
+  // the Tools tab was simultaneously listing it as not.
+  const featureCtx = { minionDetected, graphicsStackDetected };
+  // Selected by `toolsGroup`, NOT by `placement`. A toolbar feature may also own
+  // a permanent catalog row, and the graphics stack does: its header button is
+  // conditional on `pinnedWhen`, so without a fixed row here, plugging in a
+  // ReShade setup would MOVE the panel out of the one place the user had learned
+  // to find it. Nothing else changes — a feature with no `toolsGroup` is still
+  // absent from these blocks.
+  const toolFeatures = (group: ToolsGroup) =>
+    FEATURES.filter((f) => f.toolsGroup === group && (f.visibleWhen?.(featureCtx) ?? true));
+  // Pinnable features the user has unpinned from the header toolbar. Without
+  // this block they would appear in NEITHER surface, leaving an unpinned Pack
+  // Hub reachable only by deep link. This tab is the catalog, so it lists them
+  // first.
+  //
+  // Features carrying a `toolsGroup` are excluded: they already have a permanent
+  // row below, and listing them here as well would print the same feature twice
+  // in one tab whenever it happened to be unpinned.
+  const unpinnedFeatures = toolsMenuFeatures(FEATURES, toolbarHidden, featureCtx).filter(
+    (f) => f.pinnableToToolbar && !f.toolsGroup
+  );
 
   return (
     <>
@@ -468,6 +553,7 @@ export function Settings({
                     <SectionHeader>AddOns Folder</SectionHeader>
                     <Input
                       id="addons-path"
+                      aria-label="AddOns folder path"
                       value={path}
                       onChange={(e) => setPath(e.target.value)}
                       placeholder={exampleAddonsPath()}
@@ -621,13 +707,7 @@ export function Settings({
                         checked={autoUpdate}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setAutoUpdate(value);
-                          void setSetting("autoUpdate", value).then((ok) => {
-                            if (!ok) {
-                              setAutoUpdate(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitAutoUpdate(value);
                         }}
                       />
                       <div>
@@ -679,13 +759,7 @@ export function Settings({
                         checked={warnEsoRunning}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setWarnEsoRunning(value);
-                          void setSetting("suppressEsoRunningWarning", !value).then((ok) => {
-                            if (!ok) {
-                              setWarnEsoRunning(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitWarnEsoRunning(value);
                         }}
                       />
                       <div>
@@ -709,21 +783,12 @@ export function Settings({
                         checked={useOfficialUploader}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setUseOfficialUploader(value);
                           // Mirror live's opt-out model for manual too. Write both keys
                           // ATOMICALLY (one flush, all-or-nothing) so a failed/crashed
                           // write can't leave one mode opted out and the other native —
                           // the exact split-brain this unified toggle exists to prevent.
                           // On failure, revert the optimistic UI and surface it.
-                          void setSettings({
-                            manualUseOfficialUploader: value,
-                            liveUseOfficialUploader: value,
-                          }).then((ok) => {
-                            if (!ok) {
-                              setUseOfficialUploader(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitUseOfficialUploader(value);
                         }}
                       />
                       <div>
@@ -748,13 +813,7 @@ export function Settings({
                         checked={autoOpenAnalysis}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          setAutoOpenAnalysis(value);
-                          void setSetting("autoOpenAnalysis", value).then((ok) => {
-                            if (!ok) {
-                              setAutoOpenAnalysis(!value);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitAutoOpenAnalysis(value);
                         }}
                       />
                       <div>
@@ -785,14 +844,7 @@ export function Settings({
                         type="button"
                         className="flex items-center gap-3 cursor-pointer w-full text-left"
                         onClick={() => {
-                          const previous = conflictPolicy;
-                          setConflictPolicy(value);
-                          void setSetting("conflictPolicy", value).then((ok) => {
-                            if (!ok) {
-                              setConflictPolicy(previous);
-                              toast.error("Couldn't save that setting — try again.");
-                            }
-                          });
+                          void commitConflictPolicy(value);
                         }}
                       >
                         <span
@@ -921,7 +973,12 @@ export function Settings({
                   exit={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.08 }}
                 >
-                  <AppearanceSettings onShowShortcuts={onShowShortcuts} />
+                  <AppearanceSettings
+                    onShowShortcuts={onShowShortcuts}
+                    toolbarHidden={toolbarHidden}
+                    onToolbarHiddenChange={onToolbarHiddenChange}
+                    featureCtx={featureCtx}
+                  />
                 </motion.div>
               )}
 
@@ -934,24 +991,27 @@ export function Settings({
                   transition={{ duration: 0.08 }}
                   className="space-y-2"
                 >
-                  <ToolItem
-                    icon={Archive}
-                    label="Backup & Restore"
-                    description="Save and recover your addon settings"
-                    onClick={onShowBackups}
-                  />
-                  <ToolItem
-                    icon={Users}
-                    label="Characters"
-                    description="View and manage your ESO characters"
-                    onClick={onShowCharacters}
-                  />
-                  <ToolItem
-                    icon={ShieldCheck}
-                    label="API Compatibility"
-                    description="Check addons against current API version"
-                    onClick={onShowApiCompat}
-                  />
+                  {unpinnedFeatures.map((f) => (
+                    <ToolItem
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
+                    />
+                  ))}
+                  {unpinnedFeatures.length > 0 && <div className="border-t border-structure-06" />}
+                  {toolFeatures("primary").map((f) => (
+                    <ToolItem
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
+                    />
+                  ))}
                   <ToolItem
                     icon={ArrowDownToLine}
                     label="Check for App Updates"
@@ -959,21 +1019,16 @@ export function Settings({
                     onClick={onCheckForAppUpdate}
                   />
                   <FeedbackToolGroup />
-                  {minionDetected && (
+                  {toolFeatures("secondary").map((f) => (
                     <ToolItem
-                      icon={Sparkles}
-                      label="Minion Migration"
-                      description="Import tracking data from Minion with backup and preview"
-                      onClick={onShowMigrationWizard}
-                      accent="gold"
+                      key={f.id}
+                      icon={f.icon}
+                      label={f.label}
+                      description={f.description}
+                      accent={f.accent}
+                      onClick={() => onOpenFeature(f.id)}
                     />
-                  )}
-                  <ToolItem
-                    icon={Shield}
-                    label="Safety Center"
-                    description="Snapshots, integrity checks, and operation log"
-                    onClick={onShowSafetyCenter}
-                  />
+                  ))}
                 </motion.div>
               )}
 

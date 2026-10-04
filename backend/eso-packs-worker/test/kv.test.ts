@@ -102,13 +102,23 @@ describe("vote KV operations", () => {
     await putVote(e, "survivor", "user4");
 
     const removed = await deleteVotesForPack(e, "doomed");
-    expect(removed).toBe(2);
+    expect(removed).toEqual({ removed: 2, complete: true });
     expect(await getVote(e, "doomed", "user4")).toBeNull();
     expect(await getVote(e, "doomed", "user5")).toBeNull();
     expect(await e.ESO_PACKS.get("user-votes:user4:doomed")).toBeNull();
     expect(await e.ESO_PACKS.get("user-votes:user5:doomed")).toBeNull();
     // An unrelated pack's vote by the same user is untouched.
     expect(await getVote(e, "survivor", "user4")).not.toBeNull();
+  });
+
+  it("bounds cleanup and resumes from the remaining primary keys", async () => {
+    const e = env as unknown as import("../src/types").Env;
+    for (let i = 0; i < 23; i++) await putVote(e, "paged-doomed", `user${i}`);
+    expect(await deleteVotesForPack(e, "paged-doomed")).toEqual({ removed: 10, complete: false });
+    expect(await deleteVotesForPack(e, "paged-doomed")).toEqual({ removed: 10, complete: false });
+    expect(await deleteVotesForPack(e, "paged-doomed")).toEqual({ removed: 3, complete: true });
+    expect((await e.ESO_PACKS.list({ prefix: "vote:paged-doomed:" })).keys).toHaveLength(0);
+    for (let i = 0; i < 23; i++) expect(await e.ESO_PACKS.get(`user-votes:user${i}:paged-doomed`)).toBeNull();
   });
 
   it("mirrors each vote into its key metadata so the backup can enumerate by list()", async () => {

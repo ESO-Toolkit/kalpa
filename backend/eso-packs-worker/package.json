@@ -1,22 +1,28 @@
 {
   "name": "eso-packs-worker",
-  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "npm run check && wrangler deploy",
-    "check": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
-    "test": "vitest run"
+    "check": "npm run check:version-policy && tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "check:version-policy": "node scripts/check-version-policy.mjs",
+    "test": "vitest run",
+    "index:build": "node scripts/build-addon-index.mjs",
+    "eval:search": "node scripts/eval-search.mjs",
+    "eval:ask": "node scripts/eval-ask.mjs"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.21.3",
-    "@cloudflare/workers-types": "^5.20260714.1",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260906.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.147.0"
   },
+  "version": "0.0.0",
   "overrides": {
+    "sharp": "^0.35.4",
+    "undici": "^7.29.1",
     "wrangler": "$wrangler",
     "miniflare": "5.20261001.0-alpha"
   }

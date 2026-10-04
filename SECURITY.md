@@ -56,14 +56,11 @@ only — the flagged advisories are in dev/build tooling that never ships), and
 `cargo audit --file src-tauri/Cargo.lock` for the Rust crate graph.
 
 Advisories that cannot yet be fixed upstream are assessed individually and
-recorded, with their justification, in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). At the time of writing
-that is two transitive `quick-xml` advisories — `--ignore RUSTSEC-2026-0194
---ignore RUSTSEC-2026-0195`, a quadratic-runtime DoS on duplicate attribute
-names — which are pinned below the fixed version by upstream Tauri crates and
-are not reachable from Kalpa's code paths (build-time plist parsing and Windows
-toast notifications, neither of which sees untrusted XML). The suppression list
-is revisited whenever those crates bump.
+recorded, with their justification, beside the applicable CI gate. The main
+Rust audit currently runs without advisory exceptions. The Slint sidecar also
+has a locked dependency-graph check that rejects any resolved `quick-xml`
+version below 0.41.0, which contains the fixes for RUSTSEC-2026-0194 and
+RUSTSEC-2026-0195.
 
 A summary of the hardening measures is in the
 [Security & privacy](README.md#security--privacy) section of the README.

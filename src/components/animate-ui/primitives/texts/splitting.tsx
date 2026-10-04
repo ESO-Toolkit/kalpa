@@ -11,8 +11,10 @@ import {
 
 import { useIsInView, type UseIsInViewOptions } from "@/hooks/use-is-in-view";
 
+// The root element rendered below is a `motion.span`, so the prop surface has
+// to be typed against "span" — "div" allowed props a span never accepts.
 type DefaultSplittingTextProps = Omit<
-  HTMLMotionProps<"div">,
+  HTMLMotionProps<"span">,
   "children" | "initial" | "animate" | "transition"
 > & {
   initial?: TargetAndTransition;

@@ -43,6 +43,14 @@ export function PackListSkeleton({ count = 4 }: { count?: number }) {
   );
 }
 
+/**
+ * Placeholder for one DiscoverResultRow. The fixed row heights are not
+ * decoration: the real row's Install button (`size="xs"` -> h-6) is only
+ * hover-faded, not unmounted, so it sets the title row's height even when
+ * invisible, and every consumer of this skeleton renders rows with
+ * `showMeta`, i.e. a third downloads/updated line. Without both, results
+ * jumped upward as they arrived.
+ */
 export function DiscoverResultRowSkeleton({ index = 0 }: { index?: number }) {
   const titleWidths = ["55%", "42%", "63%", "38%", "50%", "45%", "58%"];
   const metaWidths = ["30%", "22%", "35%", "25%", "28%", "32%", "20%"];
@@ -51,19 +59,80 @@ export function DiscoverResultRowSkeleton({ index = 0 }: { index?: number }) {
 
   return (
     <div className="border-l-3 border-l-transparent px-4 py-2.5">
-      <div className="flex items-center gap-2.5">
+      {/* Title + (hidden) Install button row */}
+      <div className="flex h-6 items-center gap-2.5">
         <Skeleton
           className="h-3.5 flex-1 rounded"
           style={{ maxWidth: titleWidths[index % titleWidths.length], ...style }}
         />
       </div>
-      <div className="mt-1 flex items-center gap-2">
+      {/* Author + category pill */}
+      <div className="mt-1 flex h-[22px] items-center gap-2">
         <Skeleton
           className="h-2.5 rounded"
           style={{ width: metaWidths[index % metaWidths.length], ...style }}
         />
-        <Skeleton className="h-4 w-12 rounded-full" style={style} />
+        <Skeleton className="h-[22px] w-14 shrink-0 rounded-lg" style={style} />
       </div>
+      {/* Downloads + updated */}
+      <div className="mt-1.5 flex h-4 items-center gap-3">
+        <Skeleton className="h-2.5 w-12 rounded" style={style} />
+        <Skeleton className="h-2.5 w-16 rounded" style={style} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Placeholder for the Ask tab's recommendation cards.
+ *
+ * Mirrors the real card in discover-panel.tsx exactly — same
+ * `rounded-lg border border-structure-06 p-2.5` shell, same `flex-col gap-2`
+ * stack — so the answer does not shove the list around when it lands. The
+ * reason lines are wrapped in 19.5px rows because the real reason is
+ * `text-xs leading-relaxed` (12px x 1.625), which a bare stack of bars does
+ * not add up to.
+ */
+export function AskAnswerSkeleton({ count = 3 }: { count?: number }) {
+  const titleWidths = ["58%", "44%", "66%", "50%"];
+  const reasonWidths: [string, string][] = [
+    ["94%", "62%"],
+    ["88%", "48%"],
+    ["96%", "70%"],
+    ["90%", "55%"],
+  ];
+  const pillWidths = ["w-20", "w-16", "w-24", "w-14"];
+
+  return (
+    <div className="flex flex-col gap-2" role="status" aria-label="Looking through addons">
+      {Array.from({ length: count }, (_, i) => {
+        const style = { "--shimmer-delay": `${i * 80}ms` } as React.CSSProperties;
+        const [first, second] = reasonWidths[i % reasonWidths.length]!;
+        return (
+          <div key={i} className="w-full rounded-lg border border-structure-06 p-2.5">
+            {/* Title */}
+            <div className="flex h-5 items-center">
+              <Skeleton
+                className="h-3.5 rounded"
+                style={{ width: titleWidths[i % titleWidths.length], ...style }}
+              />
+            </div>
+            {/* Reason */}
+            <div className="mt-1">
+              {[first, second].map((width, line) => (
+                <div key={line} className="flex h-[19.5px] items-center">
+                  <Skeleton className="h-2.5 rounded" style={{ width, ...style }} />
+                </div>
+              ))}
+            </div>
+            {/* Category pill */}
+            <Skeleton
+              className={`mt-1.5 h-[22px] rounded-lg ${pillWidths[i % pillWidths.length]}`}
+              style={style}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -306,6 +375,60 @@ export function SavedVariablesSkeleton() {
         <Skeleton className="h-8 w-full rounded-lg" style={style(11)} />
         <Skeleton className="h-3 w-48 rounded" style={style(12)} />
         <Skeleton className="h-8 w-full rounded-lg" style={style(13)} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Loading state for the ESOUI tab of an installed addon. Same body as
+ * DiscoverDetailSkeleton minus the title/author header — AddonDetail already
+ * renders the addon's title and pills above the tab strip.
+ */
+export function EsouiTabSkeleton() {
+  const style = (i: number) => ({ "--shimmer-delay": `${i * 60}ms` }) as React.CSSProperties;
+
+  return (
+    <div className="space-y-5" role="status" aria-label="Loading ESOUI details">
+      {/* Stat cards */}
+      <div className="grid grid-cols-4 gap-2">
+        {Array.from({ length: 4 }, (_, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-structure-04 bg-structure-02 p-2.5 space-y-1.5"
+          >
+            <div className="flex items-center gap-1.5">
+              <Skeleton className="size-3.5 rounded" style={style(i)} />
+              <Skeleton className="h-2 w-12 rounded" style={style(i)} />
+            </div>
+            <Skeleton className="h-4 w-16 rounded" style={style(i)} />
+          </div>
+        ))}
+      </div>
+
+      {/* Secondary metadata line (Created + MD5) */}
+      <div className="flex items-center gap-2">
+        <Skeleton className="h-2.5 w-36 rounded" style={style(4)} />
+        <Skeleton className="h-2.5 w-20 rounded" style={style(5)} />
+      </div>
+
+      {/* Screenshots */}
+      <div className="space-y-2">
+        <Skeleton className="h-2.5 w-24 rounded" style={style(6)} />
+        <Skeleton className="h-[200px] w-full rounded-xl" style={style(6)} />
+        <div className="flex gap-2">
+          {Array.from({ length: 4 }, (_, i) => (
+            <Skeleton key={i} className="h-14 w-24 shrink-0 rounded-lg" style={style(7 + i)} />
+          ))}
+        </div>
+      </div>
+
+      {/* Description */}
+      <div className="space-y-2">
+        <Skeleton className="h-2.5 w-20 rounded" style={style(11)} />
+        <Skeleton className="h-3 w-full rounded" style={style(11)} />
+        <Skeleton className="h-3 w-[92%] rounded" style={style(12)} />
+        <Skeleton className="h-3 w-[78%] rounded" style={style(13)} />
       </div>
     </div>
   );

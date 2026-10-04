@@ -3,6 +3,7 @@ import type { Env, Pack, PackIndex, VoteRecord, SharePackData } from "./types";
 import { deleteVote, deleteVotesForPack, getVote, restoreVote } from "./kv";
 
 import { ShareStore } from "./share-store";
+import { recordD1MirrorFailure, toD1PackRow } from "./d1-reconcile";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -20,8 +21,28 @@ const VOTE_DIRTY_PREFIX = "vote-dirty:";
 const VOTE_AUTHORITY_PREFIX = "vote-authority:";
 const VOTE_RESET_PREFIX = "vote-reset:";
 const MIRROR_BATCH_SIZE = 10;
+const RECONCILIATION_LEASE_KEY = "meta:d1-reconciliation-lease";
+const RECONCILIATION_LEASE_MS = 48 * 60 * 60 * 1000;
 const RETRY_DELAY_MS = 30_000;
 const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
+const DELETED_AUTHOR_TTL_MS = 97 * 86400 * 1000;
+const RESTORE_ACTIVE_KEY = "restore:active";
+const RESTORE_JOB_PREFIX = "restore:job:";
+const RESTORE_SNAPSHOT_PREFIX = "restore:snapshot:";
+const RESTORE_STAGED_PACK_PREFIX = "restore:staged-pack:";
+const RESTORE_JOB_TTL_MS = 24 * 60 * 60 * 1000;
+const RESTORE_CLAIM_TTL_MS = 5 * 60 * 1000;
+/**
+ * How many orphaned bodies one aborted restore may erase in a single call.
+ * Each costs a KV delete plus a D1 batch. We retain a conservative operational
+ * budget of 1000 subrequests per invocation, below Workers Paid's 10,000
+ * default. The alarm path shares that budget with the pending
+ * create/delete journal it drains in the same invocation, hence the headroom.
+ * Anything past the budget KEEPS its journal entry rather than losing it, so
+ * removePacksByAuthor can still find and erase it on request; the warning in
+ * discardRestoreStagedPacks is the signal that happened.
+ */
+const RESTORE_STAGED_ERASE_BUDGET = 200;
 
 interface BackupSnapshot {
   created_at: string;
@@ -45,15 +66,103 @@ interface BackupMeta {
   vote_count: number;
 }
 
+interface DeletedAuthorMarker {
+  v: 1;
+  userId: string;
+  deletedAt: string;
+  expiresAt: number;
+}
+
+type DeletedAuthorStored = DeletedAuthorMarker | string;
+
+interface RestoreActiveJob {
+  v: 1;
+  jobId: string;
+  expiresAt: number;
+}
+
+interface RestoreInFlight {
+  claimId: string;
+  start: number;
+  end: number;
+  expiresAt: number;
+}
+
+interface RestoreJobRecord {
+  v: 1;
+  jobId: string;
+  tokenHash: string;
+  backupKey: string;
+  snapshotCreatedAt: string | null;
+  snapshotFingerprint: string;
+  total: number;
+  nextCursor: number;
+  status: "running" | "done" | "cancelled";
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  inFlight?: RestoreInFlight;
+}
+
+interface RestoreStagedPack {
+  v: 1;
+  jobId: string;
+  pack: Pack;
+}
+
+export interface RestoreJobState {
+  jobId: string;
+  backupKey: string;
+  snapshotCreatedAt: string | null;
+  snapshotFingerprint: string;
+  total: number;
+  nextCursor: number;
+  status: "running" | "done" | "cancelled";
+  expiresAt: number;
+  inFlight?: RestoreInFlight;
+}
+
+export type BeginRestoreJobResult =
+  | { ok: true; token: string; job: RestoreJobState }
+  | { ok: false; reason: "active"; job: RestoreJobState };
+
+export type RestoreClaimResult =
+  | { ok: true; job: RestoreJobState; claimId: string; start: number; end: number; final: boolean }
+  | {
+      ok: false;
+      reason: "not-found" | "expired" | "done" | "cancelled" | "cursor-mismatch" | "in-flight";
+      job?: RestoreJobState;
+    };
+
+export type RestoreCompleteResult =
+  | { ok: true; job: RestoreJobState }
+  | {
+      ok: false;
+      reason: "not-found" | "expired" | "done" | "cancelled" | "claim-mismatch";
+      job?: RestoreJobState;
+    };
+
+const INSTALL_WINDOW_MS = 60 * 60 * 1000;
+const INSTALL_RING_SIZE = 5000;
+const INSTALL_DELETE_BATCH_SIZE = 100;
+const INSTALL_SEQUENCE_KEY = "meta:install-sequence";
+const INSTALL_MARKER_PREFIX = "install-marker:";
+const INSTALL_SLOT_PREFIX = "install-slot:";
+
+interface InstallSlot {
+  markerKey: string;
+  recordedAt: number;
+}
+
+interface InstallMarker extends InstallSlot {
+  slotKey: string;
+}
+
 type Authority = "kv" | "do";
 type MutationResult =
-  | { status: "ok"; pack: Pack }
-  | { status: "not-found" }
-  | { status: "forbidden" };
+  { status: "ok"; pack: Pack } | { status: "not-found" } | { status: "forbidden" };
 
-type AddResult =
-  | { ok: true; pack: Pack }
-  | { ok: false; reason: "duplicate" | "limit" | "retry" };
+type AddResult = { ok: true; pack: Pack } | { ok: false; reason: "duplicate" | "limit" | "retry" };
 type RemoveResult = "ok" | "not-found" | "forbidden" | "retry";
 
 interface Tombstone {
@@ -94,6 +203,34 @@ export interface WitnessAdoption {
   unavailable: string[];
 }
 
+export interface ReconciliationAuthority {
+  authority: Authority;
+  packs: Pack[];
+  tombstones: string[];
+}
+
+interface ReconciliationLease {
+  token: string;
+  expires_at: number;
+}
+
+function base64Url(bytes: ArrayBuffer | Uint8Array): string {
+  const array = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = "";
+  for (const byte of array) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+async function sha256Base64Url(value: string): Promise<string> {
+  return base64Url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+}
+
+function randomBase64Url(length: number): string {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return base64Url(bytes);
+}
+
 /** Serializes mutations while migrating authority from KV to DO storage. */
 export class PackIndexDO extends DurableObject<Env> {
 
@@ -109,16 +246,13 @@ export class PackIndexDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).deleteUser(userId));
   }
 
-  async addPack(
-    pack: Pack,
-    maxPerAuthor?: number,
-  ): Promise<AddResult> {
+  async addPack(pack: Pack, maxPerAuthor?: number): Promise<AddResult> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const packs = await this.loadPacks();
       const pending = await this.getPending(pack.id);
       if (pending) {
         if (pending.kind === "create" && pending.actorId === pack.author_id) {
-          return await this.finishCreate(pending)
+          return (await this.finishCreate(pending))
             ? { ok: true, pack: pending.pack }
             : { ok: false, reason: "retry" };
         }
@@ -139,13 +273,15 @@ export class PackIndexDO extends DurableObject<Env> {
       }
 
       const operation = this.createOperation("create", pack, pack.author_id);
+      // The author's deleted-author marker is deliberately NOT cleared here:
+      // filtering is scoped to the deletion timestamp, so this new pack passes
+      // while the author's pre-deletion corpus stays out of backups/restores.
       await this.ctx.storage.transaction(async (txn) => {
         if (await txn.get(this.tombstoneKey(pack.id))) {
           // A recycled slug starts with no members, even if an old KV read
           // still exposes votes belonging to its deleted lifecycle.
           await txn.put(`${VOTE_AUTHORITY_PREFIX}${pack.id}`, pack.created_at);
         }
-        await txn.delete(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`);
         await txn.delete(this.tombstoneKey(pack.id));
         await txn.put(this.packKey(pack.id), pack);
         await txn.put(this.ownershipKey(pack.id), pack.updated_at);
@@ -153,7 +289,7 @@ export class PackIndexDO extends DurableObject<Env> {
         await txn.put(this.pendingKey(pack.id), operation.id);
         await this.armRetry(txn);
       });
-      return await this.finishCreate(operation)
+      return (await this.finishCreate(operation))
         ? { ok: true, pack }
         : { ok: false, reason: "retry" };
     });
@@ -193,6 +329,546 @@ export class PackIndexDO extends DurableObject<Env> {
       const pack = await this.ctx.storage.get<Pack>(this.packKey(id));
       if (!this.lifecycleMatches(pack, expectedLifecycle)) return null;
       return this.applyCounter(pack!, field, delta);
+    });
+  }
+
+  /**
+   * Atomically claim an install identity and increment its pack once per hour.
+   * The fixed-size persistent ring bounds DO storage. Eviction can admit an
+   * older identity before its hour elapses only after 5,000 newer identities,
+   * an explicit bound preferable to unbounded per-IP records.
+   */
+  async recordInstall(
+    id: string,
+    identity: string,
+    expectedLifecycle?: string | Pack | null,
+    now = Date.now(),
+  ): Promise<Pack | null> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const result = await this.ctx.storage.transaction(async (txn) => {
+        const pack = await txn.get<Pack>(this.packKey(id));
+        if (!this.lifecycleMatches(pack, expectedLifecycle)) return null;
+
+        const markerKey = `${INSTALL_MARKER_PREFIX}${id}:${pack!.created_at}:${identity}`;
+        const marker = await txn.get<InstallMarker>(markerKey);
+        if (marker && now - marker.recordedAt < INSTALL_WINDOW_MS) {
+          return { pack: pack!, claimed: false };
+        }
+
+        if (marker) await txn.delete(marker.slotKey);
+        const sequence = (await txn.get<number>(INSTALL_SEQUENCE_KEY)) ?? 0;
+        const slotKey = `${INSTALL_SLOT_PREFIX}${sequence % INSTALL_RING_SIZE}`;
+        const evicted = await txn.get<InstallSlot>(slotKey);
+        if (evicted) await txn.delete(evicted.markerKey);
+
+        const updated = { ...pack!, install_count: (pack!.install_count ?? 0) + 1 };
+        await txn.put(this.packKey(id), updated);
+        await txn.put(markerKey, { markerKey, recordedAt: now, slotKey } satisfies InstallMarker);
+        await txn.put(slotKey, { markerKey, recordedAt: now } satisfies InstallSlot);
+        await txn.put(INSTALL_SEQUENCE_KEY, sequence + 1);
+        const cleanupAt = Math.max(now, Date.now()) + INSTALL_WINDOW_MS;
+        const currentAlarm = await txn.getAlarm();
+        if (currentAlarm === null || currentAlarm > cleanupAt) await txn.setAlarm(cleanupAt);
+        return { pack: updated, claimed: true };
+      });
+      if (!result) return null;
+
+      if (result.claimed) {
+        await this.mirror(await this.getStoredPacks(), result.pack);
+      } else {
+        // A duplicate is normally a read-only idempotent response. Only
+        // repair a missing or stale detail mirror left by an earlier failure;
+        // harmless retries must not rewrite the KV index unconditionally.
+        const mirrored = await this.env.ESO_PACKS.get<Pack>(this.packKey(id), "json");
+        if (
+          !mirrored ||
+          mirrored.created_at !== result.pack.created_at ||
+          mirrored.updated_at !== result.pack.updated_at ||
+          mirrored.install_count !== result.pack.install_count
+        ) {
+          await this.mirror(await this.getStoredPacks(), result.pack);
+        }
+      }
+      return result.pack;
+    });
+  }
+
+  async cleanupInstallClaims(now = Date.now()): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let removed = 0;
+      let nextExpiry: number | undefined;
+      let startAfter: string | undefined;
+      while (true) {
+        const slots = await this.ctx.storage.list<InstallSlot>({
+          prefix: INSTALL_SLOT_PREFIX,
+          startAfter,
+          limit: 1000,
+        });
+        for (const [slotKey, slot] of slots) {
+          const expiresAt = slot.recordedAt + INSTALL_WINDOW_MS;
+          if (expiresAt <= now) {
+            const marker = await this.ctx.storage.get<InstallMarker>(slot.markerKey);
+            await this.ctx.storage.delete(slotKey);
+            if (marker?.slotKey === slotKey) await this.ctx.storage.delete(slot.markerKey);
+            removed += 1;
+          } else {
+            nextExpiry = Math.min(nextExpiry ?? expiresAt, expiresAt);
+          }
+        }
+        if (slots.size < 1000) break;
+        startAfter = [...slots.keys()].at(-1);
+      }
+      if (nextExpiry === undefined) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(nextExpiry);
+      return removed;
+    });
+  }
+
+  async beginRestoreJob(input: {
+    backupKey: string;
+    snapshotCreatedAt: string | null;
+    snapshotFingerprint: string;
+    total: number;
+    restart?: boolean;
+    now?: number;
+    ttlMs?: number;
+  }): Promise<BeginRestoreJobResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const ttlMs = input.ttlMs ?? RESTORE_JOB_TTL_MS;
+      const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+      if (active) {
+        const activeKey = this.restoreJobKey(active.jobId);
+        const activeJob = await this.ctx.storage.get<RestoreJobRecord>(activeKey);
+        const stillRunning =
+          active.expiresAt > now &&
+          activeJob !== undefined &&
+          activeJob.expiresAt > now &&
+          activeJob.status === "running";
+        if (stillRunning) {
+          if (!input.restart) {
+            return { ok: false, reason: "active", job: this.publicRestoreState(activeJob) };
+          }
+          await this.ctx.storage.put(activeKey, {
+            ...activeJob,
+            status: "cancelled",
+            updatedAt: now,
+          });
+          await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${active.jobId}`);
+        }
+        await this.discardRestoreStagedPacks(active.jobId);
+        await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+      }
+
+      const jobId = crypto.randomUUID();
+      const token = `rst_v1_${jobId}.${randomBase64Url(32)}`;
+      const job: RestoreJobRecord = {
+        v: 1,
+        jobId,
+        tokenHash: await sha256Base64Url(token),
+        backupKey: input.backupKey,
+        snapshotCreatedAt: input.snapshotCreatedAt,
+        snapshotFingerprint: input.snapshotFingerprint,
+        total: Math.max(0, Math.floor(input.total)),
+        nextCursor: 0,
+        status: "running",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: now + ttlMs,
+      };
+
+      await this.ctx.storage.put(this.restoreJobKey(job.jobId), job);
+      await this.ctx.storage.put(RESTORE_ACTIVE_KEY, {
+        v: 1,
+        jobId: job.jobId,
+        expiresAt: job.expiresAt,
+      } satisfies RestoreActiveJob);
+      await this.scheduleAlarmAt(job.expiresAt);
+      return { ok: true, token, job: this.publicRestoreState(job) };
+    });
+  }
+
+  async resolveRestoreJob(tokenHash: string, now = Date.now()): Promise<RestoreJobState | null> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const found = await this.findRestoreJobByHash(tokenHash);
+      if (!found) return null;
+      if (found.job.expiresAt <= now || found.job.status === "cancelled") {
+        await this.ctx.storage.delete(found.key);
+        await this.deleteActiveRestoreIf(found.job.jobId);
+        await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${found.job.jobId}`);
+        await this.discardRestoreStagedPacks(found.job.jobId);
+        return null;
+      }
+      return this.publicRestoreState(found.job);
+    });
+  }
+
+  async claimRestorePage(input: {
+    tokenHash: string;
+    limit: number;
+    cursor?: number;
+    now?: number;
+  }): Promise<RestoreClaimResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const found = await this.findRestoreJobByHash(input.tokenHash);
+      if (!found) return { ok: false, reason: "not-found" };
+      const job = found.job;
+      const state = () => this.publicRestoreState(job);
+      if (job.expiresAt <= now) return { ok: false, reason: "expired", job: state() };
+      if (job.status === "cancelled") return { ok: false, reason: "cancelled", job: state() };
+      if (job.status === "done") return { ok: false, reason: "done", job: state() };
+
+      const requestedCursor = input.cursor ?? job.nextCursor;
+      if (requestedCursor !== job.nextCursor) {
+        return { ok: false, reason: "cursor-mismatch", job: state() };
+      }
+      if (job.inFlight && job.inFlight.expiresAt > now) {
+        return { ok: false, reason: "in-flight", job: state() };
+      }
+
+      const start = job.nextCursor;
+      const pageSize = Math.max(1, Math.floor(input.limit));
+      const end = Math.min(start + pageSize, job.total);
+      const claimId = crypto.randomUUID();
+      job.inFlight = {
+        claimId,
+        start,
+        end,
+        expiresAt: now + RESTORE_CLAIM_TTL_MS,
+      };
+      job.updatedAt = now;
+      await this.ctx.storage.put(found.key, job);
+      await this.scheduleAlarmAt(Math.min(job.inFlight.expiresAt, job.expiresAt));
+      return {
+        ok: true,
+        job: this.publicRestoreState(job),
+        claimId,
+        start,
+        end,
+        final: end >= job.total,
+      };
+    });
+  }
+
+  /**
+   * Publish one claimed restore page, ordered against account deletion.
+   *
+   * The deletion check and the staging journal run under the serialization
+   * latch. The external KV/D1 writes deliberately do NOT: a full page is ~675
+   * subrequests, and holding `blockConcurrencyWhile` across them stalled every
+   * vote, install, create and delete in the Pack Hub for the whole page.
+   *
+   * Journalling before any external write is what keeps the ordering sound
+   * without that latch:
+   *  - deletion first — its marker filters this page out and nothing is written;
+   *  - deletion after — it finds the journal and erases the bodies;
+   *  - deletion DURING the unlatched writes — it erased what existed and
+   *    consumed the journal, so the rest of this page would outlive the
+   *    erasure. That is the one interleaving the journal cannot cover, so the
+   *    page re-reads the markers under the latch afterwards and erases its own
+   *    writes. A page nothing raced spends no subrequests there.
+   */
+  async writeRestorePage(input: {
+    tokenHash: string;
+    claimId: string;
+    jobId: string;
+    packs: Pack[];
+    votes: Array<{ vote: VoteRecord; pack: Pack }>;
+    now?: number;
+  }): Promise<
+    | { ok: true; restoredPacks: number; restoredVotes: number }
+    | { ok: false; reason: "not-found" | "inactive" | "claim-mismatch" | "expired" }
+  > {
+    const prepared = await this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const found = await this.findRestoreJobByHash(input.tokenHash);
+      if (!found || found.job.jobId !== input.jobId) {
+        return { ok: false, reason: "not-found" } as const;
+      }
+      const job = found.job;
+      if (job.status !== "running") return { ok: false, reason: "inactive" } as const;
+      if (job.expiresAt <= now || (job.inFlight?.expiresAt ?? 0) <= now) {
+        return { ok: false, reason: "expired" } as const;
+      }
+      if (job.inFlight?.claimId !== input.claimId) {
+        return { ok: false, reason: "claim-mismatch" } as const;
+      }
+
+      const deletedAuthors = await this.getDeletedAuthorMarkers();
+      const packs = input.packs.filter((pack) => !this.packPredatesDeletion(deletedAuthors, pack));
+      const votes = input.votes.filter(
+        ({ vote, pack }) =>
+          !this.packPredatesDeletion(deletedAuthors, pack) &&
+          !this.votePredatesDeletion(deletedAuthors, vote),
+      );
+
+      // External KV/D1 writes are not part of Durable Object storage. Journal
+      // the pack first so account deletion can discover and erase a body even
+      // when it wins the race before completeRestorePage makes that body
+      // canonical. Successful job completion removes these records.
+      for (const pack of packs) {
+        await this.ctx.storage.put(this.restoreStagedPackKey(input.jobId, pack.id), {
+          v: 1,
+          jobId: input.jobId,
+          pack,
+        } satisfies RestoreStagedPack);
+      }
+
+      return { ok: true, packs, votes } as const;
+    });
+    if (!prepared.ok) return prepared;
+
+    // Unlatched, but still bounded: the route caps each page within our
+    // conservative 1000-subrequest operational budget for the Durable Object,
+    // below Workers Paid's 10,000 default.
+    await this.runBounded(
+      prepared.packs.map((pack) => async () => {
+        await this.env.ESO_PACKS.put(`pack:${pack.id}`, JSON.stringify(pack));
+        await this.mirrorD1Pack(pack);
+      }),
+      10,
+    );
+    await this.runBounded(
+      prepared.votes.map(({ vote }) => async () => {
+        await restoreVote(this.env, vote.packId, vote.userId, vote);
+      }),
+      10,
+    );
+
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const erased = await this.eraseRestorePageRacedByDeletion(
+        input.jobId,
+        prepared.packs,
+        prepared.votes,
+      );
+      return {
+        ok: true as const,
+        restoredPacks: prepared.packs.length - erased.packs,
+        restoredVotes: prepared.votes.length - erased.votes,
+      };
+    });
+  }
+
+  /**
+   * Erase a restore page's own writes when an account deletion landed while
+   * they were in flight.
+   *
+   * That deletion consumed the staging journal before this page finished
+   * writing, so nothing else can find these records afterwards: without this
+   * the erased user's packs and votes would outlive their own deletion
+   * request. Called under the latch, so no further deletion can interleave
+   * between the marker read and the erasure.
+   */
+  private async eraseRestorePageRacedByDeletion(
+    jobId: string,
+    packs: Pack[],
+    votes: Array<{ vote: VoteRecord; pack: Pack }>,
+  ): Promise<{ packs: number; votes: number }> {
+    const deletedAuthors = await this.getDeletedAuthorMarkers();
+    if (deletedAuthors.size === 0) return { packs: 0, votes: 0 };
+
+    let erasedPacks = 0;
+    for (const pack of packs) {
+      if (!this.packPredatesDeletion(deletedAuthors, pack)) continue;
+      // Slugs are reusable, so a returning author may already hold this id with
+      // a NEW pack published after the deletion — the same trap applyReplacement
+      // guards. Erasing then would take the post-deletion data the timestamped
+      // marker exists to let through, so only claim a body nothing holds.
+      const current = await this.ctx.storage.get<Pack>(this.packKey(pack.id));
+      if (current) {
+        // The unlatched page may have overwritten a returning author's mirror.
+        // Durably queue the canonical body even if immediate repair fails.
+        await this.stagePackMirror(current);
+        await this.mirrorChangedBestEffort(current);
+      } else {
+        await this.env.ESO_PACKS.delete(`pack:${pack.id}`);
+        await this.deleteD1Pack(pack.id);
+      }
+      await this.ctx.storage.delete(this.restoreStagedPackKey(jobId, pack.id));
+      erasedPacks++;
+    }
+
+    let erasedVotes = 0;
+    for (const { vote, pack } of votes) {
+      if (
+        !this.packPredatesDeletion(deletedAuthors, pack) &&
+        !this.votePredatesDeletion(deletedAuthors, vote)
+      ) {
+        continue;
+      }
+      const current = await this.ctx.storage.get<StoredVote>(`${VOTE_STATE_PREFIX}${vote.packId}:${vote.userId}`);
+      const state = current ?? { packId: vote.packId, userId: vote.userId, lifecycle: pack.created_at, record: null };
+      await this.ctx.storage.transaction(async (txn) => {
+        await this.stageVote(txn, state);
+        await this.armRetry(txn);
+      });
+      await this.mirrorVote(state);
+      erasedVotes++;
+    }
+    return { packs: erasedPacks, votes: erasedVotes };
+  }
+
+  async completeRestorePage(input: {
+    tokenHash: string;
+    claimId: string;
+    end: number;
+    finalReplacement?: { packs: Pack[]; restoredIds: string[]; votes?: VoteRecord[] };
+    now?: number;
+  }): Promise<RestoreCompleteResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = input.now ?? Date.now();
+      const found = await this.findRestoreJobByHash(input.tokenHash);
+      if (!found) return { ok: false, reason: "not-found" };
+      const job = found.job;
+      const state = () => this.publicRestoreState(job);
+      if (job.expiresAt <= now) return { ok: false, reason: "expired", job: state() };
+      if (job.status === "cancelled") return { ok: false, reason: "cancelled", job: state() };
+      if (job.status === "done") return { ok: false, reason: "done", job: state() };
+      if (
+        !job.inFlight ||
+        job.inFlight.claimId !== input.claimId ||
+        job.inFlight.end !== input.end
+      ) {
+        return { ok: false, reason: "claim-mismatch", job: state() };
+      }
+      if (job.inFlight.expiresAt <= now) {
+        delete job.inFlight;
+        job.updatedAt = now;
+        await this.ctx.storage.put(found.key, job);
+        return { ok: false, reason: "expired", job: this.publicRestoreState(job) };
+      }
+
+      if (input.finalReplacement) {
+        const current = await this.loadPacks();
+        const restored = new Set(input.finalReplacement.restoredIds);
+        const preserved = current.filter(({ id }) => !restored.has(id));
+        const desired = new Map<string, Pack>();
+        for (const pack of [...input.finalReplacement.packs, ...preserved]) {
+          desired.set(pack.id, pack);
+        }
+        await this.applyReplacement([...desired.values()], false, input.finalReplacement.votes, restored);
+      }
+
+      job.nextCursor = input.end;
+      job.updatedAt = now;
+      delete job.inFlight;
+      if (input.end >= job.total) {
+        job.status = "done";
+        await this.deleteActiveRestoreIf(job.jobId);
+        // Plain delete, not discardRestoreStagedPacks: the replacement above
+        // just made every staged body canonical, so the journal has nothing
+        // left to point at. Only the abort paths have orphans to erase.
+        await this.deleteRestoreStagedPacks(job.jobId);
+      }
+      await this.ctx.storage.put(found.key, job);
+      return { ok: true, job: this.publicRestoreState(job) };
+    });
+  }
+
+  async cancelActiveRestoreJob(tokenHash?: string, now = Date.now()): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let found: { key: string; job: RestoreJobRecord } | null = null;
+      if (tokenHash) {
+        // A supplied hash must match: falling back to "whatever is active"
+        // would let a caller with a stale token cancel someone else's job.
+        found = await this.findRestoreJobByHash(tokenHash);
+        if (!found) return false;
+      }
+      if (!found) {
+        const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+        if (!active) return false;
+        const job = await this.ctx.storage.get<RestoreJobRecord>(this.restoreJobKey(active.jobId));
+        if (!job) {
+          await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+          return false;
+        }
+        found = { key: this.restoreJobKey(active.jobId), job };
+      }
+
+      found.job.status = "cancelled";
+      found.job.updatedAt = now;
+      delete found.job.inFlight;
+      await this.ctx.storage.put(found.key, found.job);
+      await this.deleteActiveRestoreIf(found.job.jobId);
+      await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${found.job.jobId}`);
+      await this.discardRestoreStagedPacks(found.job.jobId);
+      return true;
+    });
+  }
+
+  async cleanupDeletedAuthors(now = Date.now()): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let removed = 0;
+      let nextExpiry: number | undefined;
+      let startAfter: string | undefined;
+      while (true) {
+        const markers = await this.ctx.storage.list<DeletedAuthorStored>({
+          prefix: DELETED_AUTHOR_PREFIX,
+          startAfter,
+          limit: 1000,
+        });
+        for (const [key, marker] of markers) {
+          const expiresAt = this.deletedAuthorExpiresAt(marker);
+          if (expiresAt <= now) {
+            await this.ctx.storage.delete(key);
+            removed += 1;
+          } else if (Number.isFinite(expiresAt)) {
+            nextExpiry = Math.min(nextExpiry ?? expiresAt, expiresAt);
+          }
+        }
+        if (markers.size < 1000) break;
+        startAfter = [...markers.keys()].at(-1);
+      }
+      if (nextExpiry !== undefined) await this.scheduleAlarmAt(nextExpiry);
+      return removed;
+    });
+  }
+
+  async cleanupRestoreJobs(now = Date.now()): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let removed = 0;
+      let nextExpiry: number | undefined;
+      let startAfter: string | undefined;
+      while (true) {
+        const jobs = await this.ctx.storage.list<RestoreJobRecord>({
+          prefix: RESTORE_JOB_PREFIX,
+          startAfter,
+          limit: 1000,
+        });
+        for (const [key, job] of jobs) {
+          if (job.expiresAt <= now) {
+            await this.ctx.storage.delete(key);
+            await this.deleteActiveRestoreIf(job.jobId);
+            await this.env.ESO_PACKS.delete(`${RESTORE_SNAPSHOT_PREFIX}${job.jobId}`);
+            await this.discardRestoreStagedPacks(job.jobId);
+            removed += 1;
+            continue;
+          }
+          // An abandoned claim must be cleared here, not just tolerated: its
+          // past expiresAt would otherwise feed scheduleAlarmAt below and the
+          // alarm would refire immediately, every time, until the job's own
+          // 24h TTL — a hot loop on the DO that serializes all pack mutations.
+          if (job.inFlight && job.inFlight.expiresAt <= now) {
+            delete job.inFlight;
+            job.updatedAt = now;
+            await this.ctx.storage.put(key, job);
+          }
+          nextExpiry = Math.min(nextExpiry ?? job.expiresAt, job.expiresAt);
+          if (job.inFlight) {
+            nextExpiry = Math.min(nextExpiry, job.inFlight.expiresAt);
+          }
+        }
+        if (jobs.size < 1000) break;
+        startAfter = [...jobs.keys()].at(-1);
+      }
+      const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+      if (active?.expiresAt !== undefined && active.expiresAt <= now) {
+        await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+      }
+      if (nextExpiry !== undefined) await this.scheduleAlarmAt(nextExpiry);
+      return removed;
     });
   }
 
@@ -236,7 +912,7 @@ export class PackIndexDO extends DurableObject<Env> {
         const pending = await this.getPending(id);
         if (!pending || pending.kind !== "delete") return "not-found";
         if (actorId !== undefined && pending.actorId !== actorId) return "forbidden";
-        return await this.finishDelete(pending) ? "ok" : "retry";
+        return (await this.finishDelete(pending)) ? "ok" : "retry";
       }
       if (actorId !== undefined && actorId !== existing.author_id) return "forbidden";
       if (expectedLifecycle !== undefined && expectedLifecycle !== existing.created_at) {
@@ -274,23 +950,29 @@ export class PackIndexDO extends DurableObject<Env> {
     });
   }
 
-  async deleteUserVotes(userId: string): Promise<number> {
+  async deleteUserVotes(userId: string): Promise<{ removed: number; complete: boolean }> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.loadPacks();
+      // Bound external work per RPC, including legacy vote reads and both KV
+      // deletes. Canonical negative membership survives a failed mirror.
+      const limit = 100;
       const states = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_STATE_PREFIX });
-      const ids = new Set([...states.values()].filter((v) => v.userId === userId).map((v) => v.packId));
-      let cursor: string | undefined;
-      do {
-        const page = await this.env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor });
-        for (const key of page.keys) ids.add(key.name.slice(`user-votes:${userId}:`.length));
-        cursor = page.list_complete ? undefined : page.cursor;
-      } while (cursor);
+      const dirty = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_DIRTY_PREFIX });
+      const candidates = [...states.values()].filter((state) =>
+        state.userId === userId && (state.record !== null || dirty.has(`${VOTE_DIRTY_PREFIX}${state.packId}:${userId}`)),
+      );
+      const ids = new Set(candidates.slice(0, limit).map((state) => state.packId));
+      const page = await this.env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, limit });
+      for (const key of page.keys) {
+        if (ids.size >= limit) break;
+        ids.add(key.name.slice(`user-votes:${userId}:`.length));
+      }
       let removed = 0;
       for (const packId of ids) {
         const pack = await this.ctx.storage.get<Pack>(this.packKey(packId));
         const hadVote = pack ? await this.readVote(pack, userId) : null;
         const state: StoredVote = { packId, userId, lifecycle: pack?.created_at ?? "", record: null };
-        if (hadVote) removed++;
+        removed++;
         if (pack) {
           await this.stagePackMirror({ ...pack, vote_count: Math.max(0, pack.vote_count - (hadVote ? 1 : 0)) }, [state]);
         } else {
@@ -301,7 +983,13 @@ export class PackIndexDO extends DurableObject<Env> {
         }
         await this.mirrorVote(state);
       }
-      return removed;
+      const pending = await this.ctx.storage.list<StoredVote>({ prefix: VOTE_DIRTY_PREFIX });
+      return {
+        removed,
+        complete: candidates.every((state) => ids.has(state.packId)) && page.list_complete &&
+          page.keys.every((key) => ids.has(key.name.slice(`user-votes:${userId}:`.length))) &&
+          ![...pending.values()].some((state) => state.userId === userId),
+      };
     });
   }
 
@@ -310,17 +998,27 @@ export class PackIndexDO extends DurableObject<Env> {
       await this.loadPacks();
       // This latch shares the same serialization boundary as backup writes.
       // Once present, no stale cron snapshot can publish this author's data.
-      const deletedAt = new Date().toISOString();
+      const now = Date.now();
+      const deletedAt = new Date(now).toISOString();
+      const marker = {
+        v: 1,
+        userId: authorId,
+        deletedAt,
+        expiresAt: now + DELETED_AUTHOR_TTL_MS,
+      } satisfies DeletedAuthorMarker;
       await this.ctx.storage.transaction(async (txn) => {
-        await txn.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, deletedAt);
-        // Unlike the live-author latch, this history survives a returning user.
+        await txn.put(`${DELETED_AUTHOR_PREFIX}${authorId}`, marker);
+        // Permanent history also filters old records after the live latch expires.
         await txn.put(`${BACKUP_DELETION_PREFIX}${authorId}`, deletedAt);
         await txn.put(BACKUP_PURGE_PENDING, true);
         await this.armRetry(txn);
       });
+      await this.scheduleAlarmAt(marker.expiresAt);
       await this.hydrateDetailsByAuthor(authorId);
       const packs = await this.getStoredPacks();
       const removedPacks = packs.filter((pack) => pack.author_id === authorId);
+      const removedIds = new Set(removedPacks.map(({ id }) => id));
+      const operations: PendingOperation[] = [];
       for (const pack of removedPacks) {
         const operation = this.createOperation("delete", pack, authorId);
         const tombstone: Tombstone = {
@@ -337,32 +1035,57 @@ export class PackIndexDO extends DurableObject<Env> {
           await txn.put(this.pendingKey(pack.id), operation.id);
           await this.armRetry(txn);
         });
-        await this.finishDelete(operation);
+        operations.push(operation);
       }
-      return removedPacks.map(({ id }) => id);
+
+      // A restore publishes bodies before its final canonical replacement.
+      // Consume its pre-write journal so deletion also removes packs that were
+      // published by a completed page but are not visible in storage yet.
+      //
+      // Journal staged bodies as well. Bound external cleanup per event and
+      // let alarms drain the remainder without losing erasure progress.
+      const staged = await this.getRestoreStagedPacksByAuthor(authorId);
+      for (const [key, stagedPack] of staged) {
+        if (!removedIds.has(stagedPack.pack.id) &&
+            !(await this.ctx.storage.get<Pack>(this.packKey(stagedPack.pack.id)))) {
+          const operation = this.createOperation("delete", stagedPack.pack, authorId);
+          await this.ctx.storage.transaction(async (txn) => {
+            await txn.put(this.tombstoneKey(stagedPack.pack.id), {
+              deletedAt,
+              authorId,
+              lifecycle: stagedPack.pack.created_at,
+              operationId: operation.id,
+            } satisfies Tombstone);
+            await txn.put(this.operationKey(operation.id), operation);
+            await txn.put(this.pendingKey(stagedPack.pack.id), operation.id);
+            await this.armRetry(txn);
+          });
+          operations.push(operation);
+          removedIds.add(stagedPack.pack.id);
+        }
+        await this.ctx.storage.delete(key);
+      }
+      for (const operation of operations.slice(0, MIRROR_BATCH_SIZE)) await this.finishDelete(operation);
+      return [...removedIds];
     });
   }
 
-  async writeBackup(
-    backupKey: string,
-    incoming: BackupSnapshot,
-  ): Promise<BackupMeta> {
+  async writeBackup(backupKey: string, incoming: BackupSnapshot): Promise<BackupMeta> {
     return this.ctx.blockConcurrencyWhile(async () => {
-      const deletedEntries = await this.ctx.storage.list<string>({
-        prefix: DELETED_AUTHOR_PREFIX,
-      });
-      const deletedAuthors = new Set(
-        [...deletedEntries.keys()].map((key) => key.slice(DELETED_AUTHOR_PREFIX.length)),
-      );
+      const deletedAuthors = await this.getDeletedAuthorMarkers();
       const incomingIds = new Set(incoming.packs.map(({ id }) => id));
       const packs = (await this.loadPacks()).filter(
-        (pack) => incomingIds.has(pack.id) && !deletedAuthors.has(String(pack.author_id)),
+        (pack) => incomingIds.has(pack.id) && !this.packPredatesDeletion(deletedAuthors, pack),
       );
       const liveIds = new Set(packs.map(({ id }) => id));
       const votes = Object.fromEntries(
-        Object.entries(incoming.votes).filter(([, vote]) =>
-          liveIds.has(vote.packId) && !deletedAuthors.has(String(vote.userId)),
-        ),
+        Object.entries(incoming.votes).filter(([, vote]) => {
+          if (!liveIds.has(vote.packId)) return false;
+          const deletedAt = deletedAuthors.get(String(vote.userId));
+          if (deletedAt === undefined) return true;
+          const stamp = Date.parse(vote.votedAt ?? "");
+          return (Number.isFinite(stamp) ? stamp : 0) > deletedAt;
+        }),
       );
       const ownedVotes = await this.ctx.storage.list<string>({ prefix: VOTE_AUTHORITY_PREFIX });
       for (const [key, vote] of Object.entries(votes)) {
@@ -373,7 +1096,7 @@ export class PackIndexDO extends DurableObject<Env> {
       for (const state of states.values()) {
         const key = `${state.packId}:${state.userId}`;
         delete votes[key];
-        if (state.record && lifecycles.get(state.packId) === state.lifecycle && !deletedAuthors.has(state.userId)) {
+        if (state.record && lifecycles.get(state.packId) === state.lifecycle && !this.votePredatesDeletion(deletedAuthors, state.record)) {
           votes[key] = state.record;
         }
       }
@@ -418,20 +1141,11 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   private async isDeletedPack(pack: Pack): Promise<boolean> {
-    if (await this.ctx.storage.get(`${DELETED_AUTHOR_PREFIX}${pack.author_id}`)) return true;
-    const cutoff = await this.ctx.storage.get<string>(`${BACKUP_DELETION_PREFIX}${pack.author_id}`);
-    return cutoff !== undefined && !(Date.parse(pack.created_at) > Date.parse(cutoff));
+    return this.packPredatesDeletion(await this.getDeletedAuthorMarkers(), pack);
   }
 
   private async filterDeletedBackupRecords(snapshot: BackupSnapshot): Promise<BackupSnapshot> {
-    const entries = await this.ctx.storage.list<string>({ prefix: BACKUP_DELETION_PREFIX });
-    const cutoffs = new Map([...entries].map(([key, value]) => [key.slice(BACKUP_DELETION_PREFIX.length), Date.parse(value)]));
-    // Include latches written before deletion history was introduced.
-    const legacy = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
-    for (const [key, value] of legacy) {
-      const userId = key.slice(DELETED_AUTHOR_PREFIX.length);
-      if (!cutoffs.has(userId)) cutoffs.set(userId, Date.parse(value));
-    }
+    const cutoffs = await this.getDeletedAuthorMarkers();
     const deleted = (userId: string, createdAt: string): boolean => {
       const cutoff = cutoffs.get(String(userId));
       return cutoff !== undefined && !(Date.parse(createdAt) > cutoff);
@@ -504,6 +1218,9 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    await this.cleanupInstallClaims();
+    await this.cleanupDeletedAuthors();
+    await this.cleanupRestoreJobs();
     await this.ctx.blockConcurrencyWhile(async () => {
       await new ShareStore(this.ctx.storage, this.env).retry();
       await this.purgeLatestBackup();
@@ -538,6 +1255,77 @@ export class PackIndexDO extends DurableObject<Env> {
       ) {
         await this.scheduleRetry();
       }
+    });
+  }
+
+  async getReconciliationState(): Promise<ReconciliationAuthority> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const packs = await this.loadPacks();
+      const authority = await this.getAuthority();
+      const entries = await this.ctx.storage.list<string>({ prefix: TOMBSTONE_PREFIX });
+      return {
+        authority,
+        packs,
+        tombstones: [...entries.keys()].map((key) => key.slice(TOMBSTONE_PREFIX.length)).sort(),
+      };
+    });
+  }
+
+  async beginReconciliation(token: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const now = Date.now();
+      const current = await this.ctx.storage.get<ReconciliationLease>(RECONCILIATION_LEASE_KEY);
+      if (current && current.expires_at > now) return false;
+      await this.ctx.storage.put(RECONCILIATION_LEASE_KEY, {
+        token,
+        expires_at: now + RECONCILIATION_LEASE_MS,
+      } satisfies ReconciliationLease);
+      return true;
+    });
+  }
+
+  async endReconciliation(token: string): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const current = await this.ctx.storage.get<ReconciliationLease>(RECONCILIATION_LEASE_KEY);
+      if (current?.token === token) await this.ctx.storage.delete(RECONCILIATION_LEASE_KEY);
+    });
+  }
+
+  /** Recheck liveness and remove an obsolete D1 row under the same lifecycle
+   * gate as create/update. This closes the check-then-delete window where a
+   * reused slug could otherwise be published between an RPC check and D1 I/O. */
+  async reconcileDeleteD1(id: string): Promise<boolean> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const current = await this.ctx.storage.get<Pack>(this.packKey(id));
+      if (current?.status === "published" || !this.env.ROSTER_HUB_DB) return false;
+      await this.env.ROSTER_HUB_DB.batch([
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+        this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+      ]);
+      return true;
+    });
+  }
+
+  async reconcileWriteD1(
+    id: string,
+    expectedLifecycle: string,
+    writePack: boolean,
+    writeTags: boolean,
+  ): Promise<{ upserted: boolean; tags_replaced: boolean }> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.loadPacks();
+      const current = await this.ctx.storage.get<Pack>(this.packKey(id));
+      if (
+        !current ||
+        current.status !== "published" ||
+        current.created_at !== expectedLifecycle ||
+        !this.env.ROSTER_HUB_DB
+      )
+        return { upserted: false, tags_replaced: false };
+      if (writePack) await this.upsertD1PackRow(current);
+      if (writeTags) await this.replaceD1Tags(current);
+      return { upserted: writePack, tags_replaced: writeTags };
     });
   }
 
@@ -657,9 +1445,10 @@ export class PackIndexDO extends DurableObject<Env> {
         const id = name.slice("pack:".length);
         if (
           !id ||
-          await this.ctx.storage.get<Pack>(this.packKey(id)) ||
-          await this.ctx.storage.get<string>(this.tombstoneKey(id))
-        ) continue;
+          (await this.ctx.storage.get<Pack>(this.packKey(id))) ||
+          (await this.ctx.storage.get<string>(this.tombstoneKey(id)))
+        )
+          continue;
         const detail = await this.env.ESO_PACKS.get<Pack>(name, {
           type: "json",
           cacheTtl: 30,
@@ -738,8 +1527,9 @@ export class PackIndexDO extends DurableObject<Env> {
     try {
       // Snapshot restore owns the complete membership set. Clear old KV keys
       // before replaying current durable states, including votes cast since restore.
-      await deleteVotesForPack(this.env, packId);
-      await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${packId}`);
+      const page = await deleteVotesForPack(this.env, packId);
+      if (page.complete) await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${packId}`);
+      else await this.scheduleRetry();
     } catch (error) {
       console.error(`Vote reset deferred [${packId}]:`, error);
       await this.scheduleRetry();
@@ -771,23 +1561,265 @@ export class PackIndexDO extends DurableObject<Env> {
     return pack.created_at === createdAt;
   }
 
-  private async applyReplacement(packs: Pack[], forceIndex: boolean, votes?: VoteRecord[], restoredIds?: Set<string>): Promise<void> {
-    const filtered = await this.filterDeletedBackupRecords({
-      created_at: "", packs, packBodies: {},
-      votes: Object.fromEntries((votes ?? []).map((vote) => [`${vote.packId}:${vote.userId}`, vote])),
+  private restoreJobKey(jobId: string): string {
+    return `${RESTORE_JOB_PREFIX}${jobId}`;
+  }
+
+  private publicRestoreState(job: RestoreJobRecord): RestoreJobState {
+    return {
+      jobId: job.jobId,
+      backupKey: job.backupKey,
+      snapshotCreatedAt: job.snapshotCreatedAt,
+      snapshotFingerprint: job.snapshotFingerprint,
+      total: job.total,
+      nextCursor: job.nextCursor,
+      status: job.status,
+      expiresAt: job.expiresAt,
+      ...(job.inFlight ? { inFlight: job.inFlight } : {}),
+    };
+  }
+
+  private async findRestoreJobByHash(
+    tokenHash: string,
+  ): Promise<{ key: string; job: RestoreJobRecord } | null> {
+    let startAfter: string | undefined;
+    while (true) {
+      const jobs = await this.ctx.storage.list<RestoreJobRecord>({
+        prefix: RESTORE_JOB_PREFIX,
+        startAfter,
+        limit: 1000,
+      });
+      for (const [key, job] of jobs) {
+        if (job.tokenHash === tokenHash) return { key, job };
+      }
+      if (jobs.size < 1000) return null;
+      startAfter = [...jobs.keys()].at(-1);
+    }
+  }
+
+  private async deleteActiveRestoreIf(jobId: string): Promise<void> {
+    const active = await this.ctx.storage.get<RestoreActiveJob>(RESTORE_ACTIVE_KEY);
+    if (active?.jobId === jobId) await this.ctx.storage.delete(RESTORE_ACTIVE_KEY);
+  }
+
+  private deletedAuthorExpiresAt(marker: DeletedAuthorStored): number {
+    if (
+      typeof marker === "object" &&
+      marker !== null &&
+      "expiresAt" in marker &&
+      typeof marker.expiresAt === "number"
+    ) {
+      return marker.expiresAt;
+    }
+    return Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * Active deletion markers, keyed by author id, valued by the deletion time
+   * in ms. Consumers scope their filtering to records that PREDATE the
+   * deletion, so a user who deletes their account and later returns publishes
+   * normally while everything they asked to erase stays erased. Markers whose
+   * deletion time cannot be recovered (legacy string form carries the ISO
+   * timestamp as its value) collapse to +Infinity — filter everything.
+   */
+  private async getDeletedAuthorMarkers(now = Date.now()): Promise<Map<string, number>> {
+    const deleted = new Map<string, number>();
+    let startAfter: string | undefined;
+    while (true) {
+      const entries = await this.ctx.storage.list<DeletedAuthorStored>({
+        prefix: DELETED_AUTHOR_PREFIX,
+        startAfter,
+        limit: 1000,
+      });
+      for (const [key, marker] of entries) {
+        const expiresAt = this.deletedAuthorExpiresAt(marker);
+        if (expiresAt <= now) {
+          await this.ctx.storage.delete(key);
+          continue;
+        }
+        const isRecord = typeof marker === "object" && marker !== null;
+        const userId =
+          isRecord && "userId" in marker && typeof marker.userId === "string"
+            ? marker.userId
+            : key.slice(DELETED_AUTHOR_PREFIX.length);
+        const deletedAtIso = isRecord
+          ? marker.deletedAt
+          : typeof marker === "string"
+            ? marker
+            : undefined;
+        const deletedAt = deletedAtIso ? Date.parse(deletedAtIso) : Number.NaN;
+        deleted.set(userId, Number.isFinite(deletedAt) ? deletedAt : Number.POSITIVE_INFINITY);
+        if (Number.isFinite(expiresAt)) await this.scheduleAlarmAt(expiresAt);
+      }
+      if (entries.size < 1000) break;
+      startAfter = [...entries.keys()].at(-1);
+    }
+    const history = await this.ctx.storage.list<string>({ prefix: BACKUP_DELETION_PREFIX });
+    for (const [key, value] of history) {
+      const userId = key.slice(BACKUP_DELETION_PREFIX.length);
+      const parsed = Date.parse(value);
+      const cutoff = Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+      deleted.set(userId, Math.max(deleted.get(userId) ?? 0, cutoff));
+    }
+    return deleted;
+  }
+
+  /** True when `pack` belongs to a deleted author AND predates the deletion. */
+  private packPredatesDeletion(markers: Map<string, number>, pack: Pack): boolean {
+    const deletedAt = markers.get(String(pack.author_id));
+    if (deletedAt === undefined) return false;
+    const stamp = Date.parse(pack.created_at ?? "");
+    return (Number.isFinite(stamp) ? stamp : 0) <= deletedAt;
+  }
+
+  private restoreStagedPackKey(jobId: string, packId: string): string {
+    return `${RESTORE_STAGED_PACK_PREFIX}${jobId}:${packId}`;
+  }
+
+  /**
+   * Retire an ABORTED restore's journal, erasing every body it published that
+   * nothing references.
+   *
+   * completeRestorePage may drop a finished job's journal outright, because
+   * applyReplacement has already made those bodies canonical. Cancellation and
+   * expiry cannot: the pages they abandon leave `pack:` values in KV and rows
+   * in the shared D1 mirror that no index points at, and dropping the journal
+   * with them threw away the only record of who wrote them. A later account
+   * deletion then could not erase them, and the nightly D1 reconcile does not
+   * either — an id the DO never owned is reported as unowned for manual
+   * adjudication, never swept — so a deleted user's pack stayed on esotk.com.
+   *
+   * Only a body that is orphaned RIGHT NOW is erased. A restore commonly
+   * replays packs that are already live and those must survive the abort:
+   * `pack:` storage covers the DO-authoritative case, and the KV index covers
+   * shadow mode, where DO storage may not have hydrated the record yet.
+   */
+  private async discardRestoreStagedPacks(jobId: string): Promise<void> {
+    const prefix = `${RESTORE_STAGED_PACK_PREFIX}${jobId}:`;
+    // Read the KV index once, and only when there is something to retire —
+    // every job that completed normally reaches this with an empty journal.
+    if ((await this.ctx.storage.list({ prefix, limit: 1 })).size === 0) return;
+    const liveInKv = new Set((await this.readKvIndex()).packs.map(({ id }) => id));
+    let budget = RESTORE_STAGED_ERASE_BUDGET;
+    let retained = 0;
+    let startAfter: string | undefined;
+    while (true) {
+      const entries = await this.ctx.storage.list<RestoreStagedPack>({
+        prefix,
+        startAfter,
+        limit: 128,
+      });
+      if (entries.size === 0) break;
+      startAfter = [...entries.keys()].at(-1);
+      for (const [key, staged] of entries) {
+        const id = staged.pack.id;
+        const orphaned = !(await this.ctx.storage.get<Pack>(this.packKey(id))) && !liveInKv.has(id);
+        if (orphaned) {
+          if (budget <= 0) {
+            retained += 1;
+            continue;
+          }
+          budget -= 1;
+          await this.env.ESO_PACKS.delete(`pack:${id}`);
+          await this.deleteD1Pack(id);
+        }
+        await this.ctx.storage.delete(key);
+      }
+      if (entries.size < 128) break;
+    }
+    if (retained > 0) {
+      console.warn(
+        `Restore ${jobId}: kept ${retained} staged record(s) past the erase budget; ` +
+          "their bodies stay orphaned until an account deletion consumes the journal.",
+      );
+    }
+  }
+
+  private async deleteRestoreStagedPacks(jobId: string): Promise<void> {
+    let startAfter: string | undefined;
+    const prefix = `${RESTORE_STAGED_PACK_PREFIX}${jobId}:`;
+    while (true) {
+      const entries = await this.ctx.storage.list<RestoreStagedPack>({
+        prefix,
+        startAfter,
+        limit: 1000,
+      });
+      const keys = [...entries.keys()];
+      for (let offset = 0; offset < keys.length; offset += 128) {
+        await this.ctx.storage.delete(keys.slice(offset, offset + 128));
+      }
+      if (entries.size < 1000) return;
+      startAfter = keys.at(-1);
+    }
+  }
+
+  private async getRestoreStagedPacksByAuthor(
+    authorId: string,
+  ): Promise<Array<[string, RestoreStagedPack]>> {
+    const found: Array<[string, RestoreStagedPack]> = [];
+    let startAfter: string | undefined;
+    while (true) {
+      const entries = await this.ctx.storage.list<RestoreStagedPack>({
+        prefix: RESTORE_STAGED_PACK_PREFIX,
+        startAfter,
+        limit: 1000,
+      });
+      for (const entry of entries) {
+        if (String(entry[1].pack.author_id) === authorId) found.push(entry);
+      }
+      if (entries.size < 1000) return found;
+      startAfter = [...entries.keys()].at(-1);
+    }
+  }
+
+  /** True when `vote` belongs to a deleted voter AND predates the deletion. */
+  private votePredatesDeletion(markers: Map<string, number>, vote: VoteRecord): boolean {
+    const deletedAt = markers.get(String(vote.userId));
+    if (deletedAt === undefined) return false;
+    const stamp = Date.parse(vote.votedAt ?? "");
+    return (Number.isFinite(stamp) ? stamp : 0) <= deletedAt;
+  }
+
+  private async runBounded(tasks: Array<() => Promise<void>>, concurrency: number): Promise<void> {
+    let next = 0;
+    const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+      while (next < tasks.length) {
+        const index = next++;
+        await tasks[index]!();
+      }
     });
-    packs = filtered.packs;
-    if (votes !== undefined) votes = Object.values(filtered.votes);
+    await Promise.all(workers);
+  }
+
+  private async scheduleAlarmAt(timestamp: number): Promise<void> {
+    if (!Number.isFinite(timestamp)) return;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > timestamp) await this.ctx.storage.setAlarm(timestamp);
+  }
+
+  private async applyReplacement(packs: Pack[], forceIndex: boolean, votes?: VoteRecord[], restoredIds?: Set<string>): Promise<void> {
     const current = await this.getStoredPacks();
-    const deletedEntries = await this.ctx.storage.list<string>({ prefix: DELETED_AUTHOR_PREFIX });
-    const deletedAuthors = new Set(
-      [...deletedEntries.keys()].map((key) => key.slice(DELETED_AUTHOR_PREFIX.length)),
-    );
+    const live = new Map(current.map((pack): [string, Pack] => [pack.id, pack]));
+    const deletedAuthors = await this.getDeletedAuthorMarkers();
     const accepted: Pack[] = [];
+    const preservedLifecycles = new Set<string>();
     for (const pack of packs) {
       const pending = await this.getPending(pack.id);
-      if (pending?.kind !== "delete" && !deletedAuthors.has(String(pack.author_id))) {
+      if (pending?.kind === "delete") continue;
+      if (!this.packPredatesDeletion(deletedAuthors, pack)) {
         accepted.push(pack);
+        continue;
+      }
+      // Refusing a pre-deletion body must not also delete whatever holds the
+      // slug now. Slugs are reusable, so a returning author's freshly
+      // published pack can share an id with the body a restore is replaying;
+      // dropping the id out of the desired set removed the NEW pack too, which
+      // is exactly the post-deletion data the timestamped marker exists to let
+      // through. Keep the live record unless it is pre-deletion data itself.
+      const existing = live.get(pack.id);
+      if (existing && !this.packPredatesDeletion(deletedAuthors, existing)) {
+        accepted.push(existing);
+        preservedLifecycles.add(existing.id);
       }
     }
     const desiredIds = new Set(accepted.map(({ id }) => id));
@@ -813,13 +1845,13 @@ export class PackIndexDO extends DurableObject<Env> {
     }
     for (const pack of accepted) {
       await this.ctx.storage.delete(this.tombstoneKey(pack.id));
-      const restoreVotes = votes !== undefined && restoredIds?.has(pack.id) === true;
+      const restoreVotes = votes !== undefined && restoredIds?.has(pack.id) === true && !preservedLifecycles.has(pack.id);
       const states = new Map<string, StoredVote>();
       if (restoreVotes) {
         const old = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_STATE_PREFIX}${pack.id}:` });
         for (const state of old.values()) states.set(state.userId, { ...state, lifecycle: pack.created_at, record: null });
         for (const vote of votes!) {
-          if (vote.packId === pack.id && !deletedAuthors.has(vote.userId)) {
+          if (vote.packId === pack.id && !this.votePredatesDeletion(deletedAuthors, vote)) {
             states.set(vote.userId, { packId: pack.id, userId: vote.userId, lifecycle: pack.created_at, record: vote });
           }
         }
@@ -843,6 +1875,7 @@ export class PackIndexDO extends DurableObject<Env> {
 
   private async deleteD1Pack(id: string): Promise<boolean> {
     if (!this.env.ROSTER_HUB_DB) return true;
+
     try {
       await this.env.ROSTER_HUB_DB.batch([
         this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
@@ -854,7 +1887,96 @@ export class PackIndexDO extends DurableObject<Env> {
       // Local/preview namespaces may bind an empty D1 database. There is no
       // external row to reconcile in that case; production's shared database
       // has both tables and every other failure remains journaled for retry.
-      return error instanceof Error && error.message.includes("no such table");
+      if (error instanceof Error && error.message.includes("no such table")) return true;
+      await recordD1MirrorFailure(this.env, "delete", id, error);
+      return false;
+    }
+  }
+
+
+
+  private async mirrorD1Pack(pack: Pack): Promise<void> {
+    if (!this.env.ROSTER_HUB_DB) return;
+    try {
+      if (pack.status === "published") {
+        await this.upsertD1PackRow(pack);
+        await this.replaceD1Tags(pack);
+      } else {
+        await this.env.ROSTER_HUB_DB.batch([
+          this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+          this.env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id),
+        ]);
+      }
+    } catch (error) {
+      console.error(`D1 sync failed [${pack.id}]:`, error);
+      await recordD1MirrorFailure(
+        this.env,
+        pack.status === "published" ? "upsert" : "delete",
+        pack.id,
+        error,
+      );
+    }
+  }
+
+
+
+  private async upsertD1PackRow(pack: Pack): Promise<void> {
+    const row = toD1PackRow(pack);
+    await this.env
+      .ROSTER_HUB_DB!.prepare(
+        `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET author_id = excluded.author_id, author_name = excluded.author_name,
+         is_anonymous = excluded.is_anonymous, title = excluded.title, description = excluded.description,
+         pack_type = excluded.pack_type, addons = excluded.addons, vote_count = excluded.vote_count,
+         updated_at = datetime('now')`,
+      )
+      .bind(
+        row.id,
+        row.author_id,
+        row.author_name,
+        row.is_anonymous,
+        row.title,
+        row.description,
+        row.pack_type,
+        row.addons,
+        row.vote_count,
+      )
+      .run();
+  }
+
+  private async replaceD1Tags(pack: Pack): Promise<void> {
+    await this.env.ROSTER_HUB_DB!.batch([
+      this.env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+      ...pack.tags.map((tag) =>
+        this.env
+          .ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)")
+          .bind(pack.id, tag),
+      ),
+    ]);
+  }
+
+
+
+  private async deleteInstallClaims(packId: string): Promise<void> {
+    let startAfter: string | undefined;
+    while (true) {
+      const markers = await this.ctx.storage.list<InstallMarker>({
+        prefix: `${INSTALL_MARKER_PREFIX}${packId}:`,
+        startAfter,
+        limit: 1000,
+      });
+      const keys = new Set<string>();
+      for (const [markerKey, marker] of markers) {
+        keys.add(markerKey);
+        if (marker.slotKey.startsWith(INSTALL_SLOT_PREFIX)) keys.add(marker.slotKey);
+      }
+      const deletions = [...keys];
+      for (let offset = 0; offset < deletions.length; offset += INSTALL_DELETE_BATCH_SIZE) {
+        await this.ctx.storage.delete(deletions.slice(offset, offset + INSTALL_DELETE_BATCH_SIZE));
+      }
+      if (markers.size < 1000) break;
+      startAfter = [...markers.keys()].at(-1);
     }
   }
 
@@ -873,7 +1995,9 @@ export class PackIndexDO extends DurableObject<Env> {
     const doIds = new Set(packs.map(({ id }) => id));
     const kvIds = new Set(kv.packs.map(({ id }) => id));
     const tombstoneEntries = await this.ctx.storage.list<unknown>({ prefix: TOMBSTONE_PREFIX });
-    const tombstones = [...tombstoneEntries.keys()].map((key) => key.slice(TOMBSTONE_PREFIX.length));
+    const tombstones = [...tombstoneEntries.keys()].map((key) =>
+      key.slice(TOMBSTONE_PREFIX.length),
+    );
     const tombstoneIds = new Set(tombstones);
     const witnesses = new Set([...kvIds, ...witnessIds]);
     const staleShadow: string[] = [];
@@ -956,7 +2080,9 @@ export class PackIndexDO extends DurableObject<Env> {
     const canonical = await this.ctx.storage.get<Pack>(this.packKey(operation.packId));
     if (!canonical || canonical.created_at !== operation.lifecycle) {
       await this.ctx.storage.delete(this.operationKey(operation.id));
-      if (await this.ctx.storage.get<string>(this.pendingKey(operation.packId)) === operation.id) {
+      if (
+        (await this.ctx.storage.get<string>(this.pendingKey(operation.packId))) === operation.id
+      ) {
         await this.ctx.storage.delete(this.pendingKey(operation.packId));
       }
       return false;
@@ -967,10 +2093,7 @@ export class PackIndexDO extends DurableObject<Env> {
     operation.pack = canonical;
     if (!operation.kvDetailDone) {
       try {
-        await this.env.ESO_PACKS.put(
-          `pack:${operation.packId}`,
-          JSON.stringify(operation.pack),
-        );
+        await this.env.ESO_PACKS.put(`pack:${operation.packId}`, JSON.stringify(operation.pack));
         operation.kvDetailDone = true;
         await this.saveOperation(operation);
       } catch (error) {
@@ -997,15 +2120,19 @@ export class PackIndexDO extends DurableObject<Env> {
     operation.attempts++;
     if (!operation.votesDone) {
       try {
-        const states = await this.ctx.storage.list<StoredVote>({ prefix: `${VOTE_STATE_PREFIX}${operation.packId}:` });
+        const prefix = `${VOTE_STATE_PREFIX}${operation.packId}:`;
+        const states = await this.ctx.storage.list<StoredVote>({ prefix, limit: MIRROR_BATCH_SIZE });
         for (const [key, state] of states) {
-          await this.ctx.storage.put(key, { ...state, record: null });
           await deleteVote(this.env, state.packId, state.userId);
           await this.ctx.storage.delete(`${VOTE_DIRTY_PREFIX}${state.packId}:${state.userId}`);
+          // A pending delete blocks slug reuse, so this state can be retired
+          // only after both external keys have been removed successfully.
+          await this.ctx.storage.delete(key);
         }
-        await deleteVotesForPack(this.env, operation.packId);
-        await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${operation.packId}`);
-        operation.votesDone = true;
+        const page = await deleteVotesForPack(this.env, operation.packId);
+        operation.votesDone = page.complete &&
+          (await this.ctx.storage.list({ prefix, limit: 1 })).size === 0;
+        if (operation.votesDone) await this.ctx.storage.delete(`${VOTE_RESET_PREFIX}${operation.packId}`);
         await this.saveOperation(operation);
       } catch (error) {
         console.error(`KV vote cleanup failed [${operation.packId}]:`, error);
@@ -1025,6 +2152,18 @@ export class PackIndexDO extends DurableObject<Env> {
         await this.scheduleRetry();
         return false;
       }
+    }
+    // Install claims are durable per-pack state too. Remove them before the
+    // delete journal can complete; deleteInstallClaims uses bounded batches so
+    // a pack with a full ring cannot turn this into thousands of sequential
+    // storage operations.
+    try {
+      await this.deleteInstallClaims(operation.packId);
+    } catch (error) {
+      console.error(`Install claim cleanup failed [${operation.packId}]:`, error);
+      await this.saveOperation(operation);
+      await this.scheduleRetry();
+      return false;
     }
     if (!operation.d1Done) {
       operation.d1Done = await this.deleteD1Pack(operation.packId);
@@ -1055,7 +2194,7 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   private async mirrorIndexIfAuthoritative(): Promise<boolean> {
-    if (await this.getAuthority() !== "do") return true;
+    if ((await this.getAuthority()) !== "do") return true;
     try {
       await this.env.ESO_PACKS.put(
         INDEX_KEY,
@@ -1080,9 +2219,11 @@ export class PackIndexDO extends DurableObject<Env> {
   }
 
   private isNewerOrDifferent(candidate: Pack, current: Pack): boolean {
-    return candidate.updated_at > current.updated_at ||
+    return (
+      candidate.updated_at > current.updated_at ||
       (candidate.updated_at === current.updated_at &&
-        JSON.stringify(candidate) !== JSON.stringify(current));
+        JSON.stringify(candidate) !== JSON.stringify(current))
+    );
   }
 
   private async upsertD1Pack(pack: Pack): Promise<boolean> {
@@ -1091,38 +2232,8 @@ export class PackIndexDO extends DurableObject<Env> {
       if (pack.status !== "published") {
         return await this.deleteD1Pack(pack.id);
       }
-      const addons = JSON.stringify(pack.addons.map((addon) => ({
-        esouiId: addon.esouiId,
-        name: addon.name,
-        required: addon.required,
-        note: addon.note,
-      })));
-      await this.env.ROSTER_HUB_DB.prepare(
-        `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, description = excluded.description,
-           pack_type = excluded.pack_type, addons = excluded.addons,
-           is_anonymous = excluded.is_anonymous, author_name = excluded.author_name,
-           vote_count = excluded.vote_count, updated_at = datetime('now')`,
-      ).bind(
-        pack.id,
-        pack.author_id,
-        pack.is_anonymous ? "Anonymous" : pack.author_name,
-        pack.is_anonymous ? 1 : 0,
-        pack.title,
-        pack.description,
-        pack.pack_type,
-        addons,
-        pack.vote_count ?? 0,
-      ).run();
-      await this.env.ROSTER_HUB_DB.batch([
-        this.env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
-        ...pack.tags.map((tag) =>
-          this.env.ROSTER_HUB_DB!.prepare(
-            "INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)",
-          ).bind(pack.id, tag),
-        ),
-      ]);
+      await this.upsertD1PackRow(pack);
+      await this.replaceD1Tags(pack);
       return true;
     } catch (error) {
       console.error(`D1 upsert failed [${pack.id}]:`, error);
@@ -1140,7 +2251,7 @@ export class PackIndexDO extends DurableObject<Env> {
     // During shadow mode, an eventually consistent KV read may omit a live
     // pre-deploy pack. Never publish that incomplete shadow back over the full
     // index. Reads go through getIndex() until the parity-gated authority flip.
-    if (forceIndex || await this.getAuthority() === "do") {
+    if (forceIndex || (await this.getAuthority()) === "do") {
       await this.env.ESO_PACKS.put(INDEX_KEY, JSON.stringify({ packs }));
     }
     if (changed) await this.env.ESO_PACKS.put(`pack:${changed.id}`, JSON.stringify(changed));

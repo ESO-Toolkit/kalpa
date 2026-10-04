@@ -228,8 +228,7 @@ export function Backups({
   const handleRevealFolder = async () => {
     try {
       const folderPath = await invokeOrThrow<string>("get_backups_folder_path", { addonsPath });
-      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-      await revealItemInDir(folderPath);
+      await invokeOrThrow("reveal_allowed_path", { path: folderPath });
     } catch (e) {
       toast.error(`Couldn't open folder: ${getTauriErrorMessage(e)}`);
     }

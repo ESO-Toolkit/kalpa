@@ -3,26 +3,44 @@ name: Slint Prototype CI
 # The Slint native UI ships as a Windows sidecar of the main app (see
 # src-tauri/tauri.windows.conf.json + scripts/build-native-slint-sidecar.mjs),
 # so its tree must stay green — but it is a full separate Rust workspace that
-# would roughly double CI time if built on every PR. Path-filter it instead:
-# any PR touching the prototype, shared Rust, or packaging gets the full gate.
+# would roughly double CI time if built on every PR. Path-filter it instead.
+#
+# Be clear about what that filter actually spares, because it is less than it
+# sounds: it includes src-tauri/src/**, which most Rust PRs touch, so this runs
+# on nearly all of them and only frontend-, worker- or docs-only PRs skip it.
+# That is the intended trade — commit 11ca3f89 was a sidecar-only breakage no
+# other job could see — but it is not a narrow filter.
 on:
+  # Every base, not just main; see the note in ci.yml. Stacked PRs are the
+  # reason, and they cost a full run each like any other PR.
   pull_request:
-    branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
+      # The sidecar includes a number of src-tauri modules with #[path]. Run
+      # its real build whenever any shared Rust source changes, so a desktop
+      # refactor cannot silently break packaged sidecar compilation.
       - "src-tauri/src/**"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/tauri.windows.conf.json"
+      - "package.json"
       - "scripts/build-native-slint-sidecar.mjs"
+      - "scripts/ensure-slint-sidecar-placeholder.mjs"
       - ".github/workflows/slint-ci.yml"
-  # Also run on main pushes: GitHub Actions caches saved on PR branches are
-  # not visible to tag refs, so without a main-scope run the release job would
-  # compile slint/skia cold (~20 min) on every tag. Main-branch caches ARE
-  # inherited by tags.
+  # Also run on main pushes so the debug-profile check cache lives on main,
+  # where every PR can read it. This does NOT warm the release build: this
+  # job's cache is debug-profile and keyed by job id (v0-rust-check-slint-*),
+  # while release.yml reads `shared-key: release-sidecar`. The release-profile
+  # sidecar cache is produced by warm-release-cache.yml.
   push:
     branches: [main]
     paths:
       - "prototypes/slint-kalpa/**"
       - "src-tauri/src/**"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/tauri.windows.conf.json"
+      - "package.json"
       - "scripts/build-native-slint-sidecar.mjs"
+      - "scripts/ensure-slint-sidecar-placeholder.mjs"
       - ".github/workflows/slint-ci.yml"
 
 permissions:
@@ -58,6 +76,23 @@ jobs:
       # there is invisible until someone runs clippy locally.
       - name: Rust clippy
         run: cargo clippy --manifest-path prototypes/slint-kalpa/Cargo.toml --all-targets -- -D warnings
+
+      # H6 removed RUSTSEC-2026-0194 / -0195 by moving every resolved quick-xml
+      # edge to 0.41.0. Keep this focused on that fixed bug class: the sidecar's
+      # other cargo-audit findings have separate upstream owners and remediation.
+      - name: quick-xml advisory regression
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --format-version 1 --manifest-path prototypes/slint-kalpa/Cargo.toml | ConvertFrom-Json
+          $versions = @($metadata.packages | Where-Object name -eq "quick-xml" | ForEach-Object { [version]$_.version })
+          if ($versions.Count -eq 0) {
+            throw "quick-xml is absent from the resolved Slint graph; update the H6 gate intentionally"
+          }
+          $vulnerable = @($versions | Where-Object { $_ -lt [version]"0.41.0" })
+          if ($vulnerable.Count -gt 0) {
+            throw "RUSTSEC-2026-0194/-0195: vulnerable quick-xml resolved: $($vulnerable -join ', ')"
+          }
+          Write-Host "quick-xml advisory floor satisfied: $($versions -join ', ')"
 
       - name: Rust tests
         run: cargo test --manifest-path prototypes/slint-kalpa/Cargo.toml

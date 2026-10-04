@@ -1,7 +1,10 @@
 import path from "path";
+import { fileURLToPath } from "url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
+
+const configDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(({ mode }) => {
   // Vite respects a pre-existing NODE_ENV even for `vite build`. If the shell
@@ -23,7 +26,7 @@ export default defineConfig(({ mode }) => {
     clearScreen: false,
     resolve: {
       alias: {
-        "@": path.resolve(__dirname, "./src"),
+        "@": path.resolve(configDir, "./src"),
       },
       dedupe: ["@codemirror/state", "@codemirror/view", "@codemirror/language"],
     },

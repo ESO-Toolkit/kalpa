@@ -1,5 +1,7 @@
 import { lazy, memo, Suspense, useState } from "react";
-import type { AddonManifest, AuthUser, GameInstance } from "@/types";
+import type { AddonManifest, AuthUser, GameInstance, UpdateCheckResult } from "@/types";
+import { DIALOG_LABELS } from "@/lib/features";
+import type { ActiveDialog, DialogId, FeatureId } from "@/lib/features";
 import {
   Dialog,
   DialogContent,
@@ -9,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Loader2Icon } from "lucide-react";
+import { sameAddonsFolder } from "@/lib/removal-queue";
 
 const Packs = lazy(() => import("./packs").then((m) => ({ default: m.Packs })));
 const Profiles = lazy(() => import("./profiles").then((m) => ({ default: m.Profiles })));
@@ -28,37 +31,13 @@ const MigrationWizard = lazy(() =>
 const SafetyCenter = lazy(() =>
   import("./safety-center").then((m) => ({ default: m.SafetyCenter }))
 );
+const ClientHealthPanel = lazy(() => import("./client-health"));
+const SupportDialog = lazy(() =>
+  import("./support-dialog").then((m) => ({ default: m.SupportDialog }))
+);
 const UploaderWorkspace = lazy(() =>
   import("./uploader/uploader-workspace").then((m) => ({ default: m.UploaderWorkspace }))
 );
-
-type ActiveDialog =
-  | "settings"
-  | "profiles"
-  | "packs"
-  | "backups"
-  | "api-compat"
-  | "characters"
-  | "saved-variables"
-  | "migration-wizard"
-  | "safety-center"
-  | "shortcuts"
-  | "log-upload"
-  | null;
-
-const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
-  settings: "Settings",
-  profiles: "Profiles",
-  packs: "Pack Hub",
-  backups: "Backups",
-  "api-compat": "API Compatibility",
-  characters: "Characters",
-  "saved-variables": "Saved Variables",
-  "migration-wizard": "Migration",
-  "safety-center": "Safety Center",
-  shortcuts: "Keyboard Shortcuts",
-  "log-upload": "Log Uploader",
-};
 
 interface AppDialogsProps {
   activeDialog: ActiveDialog;
@@ -69,14 +48,23 @@ interface AppDialogsProps {
   deepLinkPackId: string | null;
   deepLinkShareCode: string | null;
   knownInstances: GameInstance[];
+  checkingUpdates: boolean;
+  isOffline: boolean;
+  lastError: string | null;
   logUploaderMounted: boolean;
+  graphicsStackDetected: boolean;
+  minionDetected: boolean;
+  toolbarHidden: FeatureId[];
+  /** Takes an updater, not a value — see `handleToolbarHiddenChange` in App.tsx. */
+  onToolbarHiddenChange: (update: (prev: FeatureId[]) => FeatureId[]) => void;
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;
   onInstancesDetected: (instances: GameInstance[]) => void;
   onPathChange: (path: string) => void;
   onRefresh: () => void;
-  onShowDialog: (dialog: Exclude<ActiveDialog, null>) => void;
+  onShowDialog: (dialog: DialogId) => void;
+  updateResults: UpdateCheckResult[];
 }
 
 function DialogLoadingFallback({ title, onClose }: { title: string; onClose: () => void }) {
@@ -112,7 +100,14 @@ function AppDialogsBase({
   deepLinkPackId,
   deepLinkShareCode,
   knownInstances,
+  checkingUpdates,
+  isOffline,
+  lastError,
   logUploaderMounted,
+  graphicsStackDetected,
+  minionDetected,
+  toolbarHidden,
+  onToolbarHiddenChange,
   onAuthChange,
   onCheckForAppUpdate,
   onCloseDialog,
@@ -120,6 +115,7 @@ function AppDialogsBase({
   onPathChange,
   onRefresh,
   onShowDialog,
+  updateResults,
 }: AppDialogsProps) {
   // Shared across the Backups and Characters dialogs so a create/restore/delete
   // (or character backup) started in one surface still gates the destructive
@@ -204,11 +200,11 @@ function AppDialogsBase({
               onPathChange={onPathChange}
               onClose={onCloseDialog}
               onRefresh={onRefresh}
-              onShowBackups={() => onShowDialog("backups")}
-              onShowApiCompat={() => onShowDialog("api-compat")}
-              onShowCharacters={() => onShowDialog("characters")}
-              onShowMigrationWizard={() => onShowDialog("migration-wizard")}
-              onShowSafetyCenter={() => onShowDialog("safety-center")}
+              graphicsStackDetected={graphicsStackDetected}
+              minionDetected={minionDetected}
+              toolbarHidden={toolbarHidden}
+              onToolbarHiddenChange={onToolbarHiddenChange}
+              onOpenFeature={onShowDialog}
               onShowShortcuts={() => onShowDialog("shortcuts")}
               onCheckForAppUpdate={onCheckForAppUpdate}
               onOpenLogUpload={() => {
@@ -229,6 +225,24 @@ function AppDialogsBase({
           {activeDialog === "safety-center" && (
             <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
           )}
+
+          {activeDialog === "support" && (
+            <SupportDialog
+              addons={addons}
+              addonsPath={addonsPath}
+              checkingUpdates={checkingUpdates}
+              instanceLabel={
+                knownInstances.find((inst) => sameAddonsFolder(inst.addonsPath, addonsPath))
+                  ?.displayLabel ?? null
+              }
+              isOffline={isOffline}
+              lastError={lastError}
+              onClose={onCloseDialog}
+              updateResults={updateResults}
+            />
+          )}
+
+          {activeDialog === "client-health" && <ClientHealthPanel open onClose={onCloseDialog} />}
 
           {activeDialog === "shortcuts" && <KeyboardShortcuts onClose={onCloseDialog} />}
         </Suspense>

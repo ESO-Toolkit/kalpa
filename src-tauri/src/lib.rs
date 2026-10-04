@@ -1,22 +1,44 @@
+mod atomic_file;
 mod auth;
 /// Heap high-water-mark allocator for the uploader perf benchmark. The
 /// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
 /// so normal builds are unaffected.
 pub mod bench_alloc;
+pub mod client_adopt;
+pub mod client_backup;
+pub mod client_download;
+mod client_health;
+mod client_install;
+pub mod client_preset;
+pub mod client_runtime;
+pub mod client_shaders;
+pub mod client_signature;
+pub mod client_stack;
+pub mod client_toggle;
+pub mod client_tuning;
+pub mod client_uninstall;
+pub mod client_write;
 mod commands;
+mod diag_log;
 mod edit_backups;
 mod esoui;
 mod file_hashes;
 pub mod game_instances;
+mod install_txn;
 mod installer;
+mod launch_gate;
 mod manifest;
 mod manifest_cache;
 mod metadata;
+mod native_boot;
+mod pack_hub;
+mod phase_timer;
 pub mod platform;
 mod safe_migration;
 mod saved_variables;
 mod settings_store;
 mod token_store;
+mod transaction_lock;
 pub mod uploader;
 
 // Benchmark-only heap tracker (see `bench_alloc`). Installed solely under the
@@ -51,6 +73,11 @@ pub struct ApprovedAddonsPath {
 
 pub struct AllowedAddonsPath(pub Mutex<Option<ApprovedAddonsPath>>);
 
+/// A path selected through the native folder dialog but not yet committed by
+/// the frontend. Keeping this approval in native memory means a compromised
+/// webview cannot bless an arbitrary path merely by invoking `set_addons_path`.
+pub struct PendingAddonsPathApproval(pub Mutex<Option<ApprovedAddonsPath>>);
+
 /// Guards all load_metadata → modify → save_metadata sequences against
 /// concurrent access (TOCTOU). Wrap every read-modify-write cycle in
 /// `let _guard = lock.0.lock()…;` before touching the metadata store.
@@ -67,6 +94,13 @@ enum DeepLinkAction {
     Share(String),
     /// Install a roster pack by ID: `kalpa://install-pack/{id}`
     InstallPack(String),
+}
+
+static REVERSE_HANDOFF_ACTIVATION: std::sync::OnceLock<Mutex<Option<DeepLinkAction>>> =
+    std::sync::OnceLock::new();
+
+fn reverse_handoff_activation() -> &'static Mutex<Option<DeepLinkAction>> {
+    REVERSE_HANDOFF_ACTIVATION.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -88,17 +122,28 @@ pub struct PendingUpdate {
     pub folder_name: String,
     pub esoui_id: u32,
     pub update_version: String,
-    /// The downloaded ZIP's hash/signature map, computed once during conflict
-    /// detection (`build_conflict_report`) and reused as the post-extraction
-    /// baseline so the apply step doesn't re-decompress and re-hash the whole
-    /// archive a second time. Empty only for entries created before this field
-    /// existed or via paths that didn't compute it; the apply step falls back to
-    /// hashing the ZIP in that case.
+    /// Publication marker from the filedetails response that produced the
+    /// pending ZIP. Zero means this pending entry predates marker tracking.
+    pub artifact_last_update: u64,
+    /// Folder-qualified paths that were genuine conflicts when this pending
+    /// review was created. The frontend also submits synthetic `keep_mine`
+    /// decisions for auto-kept files, so apply-time revalidation cannot infer
+    /// scan-time conflict membership from the decision list alone.
+    pub reviewed_conflicts: Vec<String>,
+    /// Every folder the downloaded ZIP writes, each with its own hash map,
+    /// computed once during conflict detection (`build_conflict_report`) and
+    /// reused as the post-extraction baseline so the apply step doesn't
+    /// re-decompress and re-hash the whole archive a second time. Empty only
+    /// for entries created via paths that didn't compute it; the apply step
+    /// falls back to hashing the ZIP in that case.
     ///
-    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map (and
-    /// the apply step's reuse of this map) is a refcount bump rather than a deep
-    /// copy of a many-entry hash map.
-    pub zip_hashes: Arc<HashMap<String, String>>,
+    /// Archive-wide rather than primary-only: the apply step has to re-derive
+    /// the classification for every folder, or a sibling edited while the user
+    /// was deliberating would be overwritten unnoticed.
+    ///
+    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map is
+    /// a refcount bump rather than a deep copy.
+    pub zip_hashes: Arc<crate::file_hashes::ZipHashSet>,
 }
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);
@@ -143,13 +188,59 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
     }
 }
 
-/// Focus the main window and emit the appropriate deep-link event.
-fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
-    if let Some(window) = app.get_webview_window("main") {
-        webview_power::on_shown(app); // resume before showing (flash-free)
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+/// Arm the pending-reload latch. Paired with [`take_pending_page_reload`].
+fn arm_pending_page_reload(latch: &AtomicBool) {
+    latch.store(true, Ordering::SeqCst);
+}
+
+/// Clear the pending reload, reporting whether it had been armed.
+///
+/// `on_page_load` deliberately ignores the return value and flushes the
+/// activation buffer unconditionally, and that is load-bearing rather than
+/// sloppy: on an ordinary launch nothing ever arms this latch, and the
+/// reverse-handoff and second-launch buffers have no other flusher. Do not
+/// "tighten" that call site into `if take_pending_page_reload(..) { flush }` —
+/// it would silently stop delivering every deep link that no rebuild created.
+fn take_pending_page_reload(latch: &AtomicBool) -> bool {
+    latch.swap(false, Ordering::SeqCst)
+}
+
+/// Whether an `app.emit` would actually reach the main page's listeners.
+///
+/// Tauri only evaluates an emit into a webview that has registered a JS listener
+/// id for that event, so emitting into a page that has not loaded is not a
+/// failure the caller can observe - it is a silently dropped deep link.
+///
+/// Three terms, each covering a different way the window can be unready: nothing
+/// registered at all (a rebuild was dispatched from another thread and has not
+/// run yet); a rebuild that has run but whose replacement page has not loaded;
+/// and a startup that has not reached its first page load.
+fn main_page_can_receive(app: &tauri::AppHandle) -> bool {
+    let (registered, ever_loaded, reload_settled) = main_page_receive_terms(app);
+    page_can_receive(registered, ever_loaded, reload_settled)
+}
+
+/// The three inputs to [`page_can_receive`], derived in one place so a decision
+/// and any log line explaining it cannot drift apart.
+fn main_page_receive_terms(app: &tauri::AppHandle) -> (bool, bool, bool) {
+    (
+        app.get_webview_window("main").is_some(),
+        MAIN_PAGE_LOADED.load(Ordering::SeqCst),
+        !MAIN_PAGE_AWAITING_RELOAD.load(Ordering::SeqCst),
+    )
+}
+
+/// The deliverability rule itself, separated from the state it reads so the
+/// truth table can be pinned. Getting it wrong in either direction is silent: a
+/// false positive drops the deep link, a false negative parks one that could
+/// have been delivered and waits for a page load that has already happened.
+fn page_can_receive(registered: bool, ever_loaded: bool, reload_settled: bool) -> bool {
+    registered && ever_loaded && reload_settled
+}
+
+/// Emit the event for `action`. Callers must have established that the page can
+/// receive it - see `main_page_can_receive`.
+fn emit_deep_link_now(app: &tauri::AppHandle, action: &DeepLinkAction) {
     match action {
         DeepLinkAction::Pack(id) => {
             let _ = app.emit("deep-link-pack", id.as_str());
@@ -161,6 +252,40 @@ fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
             let _ = app.emit("roster-pack-install", id.as_str());
         }
     }
+}
+
+/// Focus the main window and deliver the deep link - or park it for the page
+/// that is about to load.
+///
+/// Deliverability is read *after* activation and never before: activation is
+/// what rebuilds a lost window, so this depends on the state activation just
+/// produced. The single-instance callback's own buffering gate cannot stand in
+/// for this one; it is answering a different question, namely whether to raise
+/// the window at all.
+fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
+    activate_main_window(app, "deep link");
+    let mut buffered = reverse_handoff_activation()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (registered, ever_loaded, reload_settled) = main_page_receive_terms(app);
+    if page_can_receive(registered, ever_loaded, reload_settled) {
+        // Never emit while holding this lock: `emit_buffered_activation` sits on
+        // the far side of it and `Mutex` is not reentrant.
+        drop(buffered);
+        emit_deep_link_now(app, action);
+        return;
+    }
+    // Name the failing term. `page_can_receive` is silent in both directions, so
+    // this is the only signal `kalpa.log` would carry if the latch ever stuck —
+    // note the delivery branch above leaves no trace, so an absent "parking"
+    // line does not prove a link was delivered.
+    log::info!(
+        "parking a deep link until the main page can receive it \
+         (registered={registered}, ever_loaded={ever_loaded}, reload_settled={reload_settled})"
+    );
+    // Last-writer-wins, matching every other writer of this slot. The page load
+    // that follows the rebuild flushes it, or the reveal watchdog does.
+    *buffered = Some(action.clone());
 }
 
 fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload {
@@ -229,6 +354,12 @@ fn clear_webview_cache_on_upgrade() {
         }
     }
 
+    // Recorded here, not once a page has loaded. Deferring it was tried and
+    // reverted: a native-performance-mode launch exits as soon as the Slint
+    // sidecar reports ready, before the hidden WebView has finished navigating,
+    // so the marker would never be written and the purge would repeat on every
+    // launch of a shipped Windows mode. The deferral only pays off after a
+    // *partial* purge, which is not a failure anyone has observed.
     let _ = std::fs::create_dir_all(&data_dir);
     let _ = std::fs::write(&marker, current);
 }
@@ -411,6 +542,18 @@ mod webview_power {
 }
 
 static INITIAL_MAIN_WINDOW_REVEALED: AtomicBool = AtomicBool::new(false);
+static MAIN_PAGE_LOADED: AtomicBool = AtomicBool::new(false);
+static STARTUP_NATIVE_DECISION_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Set when a replacement `main` window has been built and cleared when a page
+/// finishes loading in it.
+///
+/// Deliberately separate from `MAIN_PAGE_LOADED`, which means "has this process
+/// ever had a page" and which `rebuild_main_window` leaves set on purpose so a
+/// relaunch during a rebuild still raises the window instead of being parked.
+/// Delivering an *event* needs the narrower fact: a rebuilt window has no
+/// listeners at all until its own page load installs them.
+static MAIN_PAGE_AWAITING_RELOAD: AtomicBool = AtomicBool::new(false);
 
 fn reveal_initial_main_window(app: &tauri::AppHandle, reason: &str) {
     if INITIAL_MAIN_WINDOW_REVEALED.swap(true, Ordering::SeqCst) {
@@ -452,7 +595,365 @@ fn schedule_initial_main_window_watchdog(app: &tauri::AppHandle) {
     });
 }
 
+/// Whether `main` is registered *and* the windowing runtime actually has it.
+///
+/// Main thread only, for the reason given on `main_window_is_phantom`.
+fn main_window_is_live(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|window| !main_window_is_phantom(&window))
+}
+
+/// Whether an exit should be vetoed to preserve an in-flight activation.
+///
+/// Split out as a pure function because it decides this process's lifetime and
+/// nothing else covers it: neither e2e flavour nor the packaged gate runs in
+/// CI, so the truth table here is the only thing standing between a future edit
+/// and either "the app vanishes instead of staying up for an activation" or
+/// "the app stays up as a windowless zombie".
+///
+/// * `preserve` — the handoff-cancellation result. It has side effects, so the
+///   caller must compute it exactly once per event whatever this returns.
+/// * `code` — `None` means the runtime is exiting because the last window was
+///   destroyed. There is nothing left to preserve an activation *for*, and
+///   vetoing it is what made a lost window permanent.
+/// * `live_window` — a *live* window. A merely registered one proves nothing.
+fn should_preserve_exit(preserve: bool, code: Option<i32>, live_window: bool) -> bool {
+    preserve && code.is_some() && live_window
+}
+
+/// Admission to the one-shot window-recovery attempt. `true` means this caller
+/// owns it and must eventually call [`finish_recovery`].
+fn begin_recovery(latch: &AtomicBool) -> bool {
+    !latch.swap(true, Ordering::SeqCst)
+}
+
+/// Re-arm recovery after an attempt that did not end the process.
+fn finish_recovery(latch: &AtomicBool) {
+    latch.store(false, Ordering::SeqCst);
+}
+
+/// Set once this process has decided its main window is unrecoverable. Exit is
+/// asynchronous, so without this latch a second activation arriving before the
+/// event loop drains would report and exit a second time.
+static MAIN_WINDOW_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Whether Tauri has a `main` window registered that the windowing runtime does
+/// not actually have.
+///
+/// `tauri-runtime-wry` reports a failed window creation with a `log::error!`
+/// and still returns `Ok(DetachedWindow { .. })`, so Tauri registers a window
+/// that was never created. Every *setter* against it (`show()`, `set_focus()`)
+/// is a one-way message that returns `Ok(())`, which is exactly why such a
+/// process can sit in the tray looking healthy with nothing to show. Only a
+/// *getter* round-trips and notices: its reply channel is dropped unanswered,
+/// which surfaces as `FailedToReceiveMessage`.
+///
+/// MUST be called on the main thread. There the message is handled inline, so
+/// this is synchronous and cannot block. From any other thread the same call
+/// waits on the main thread's message pump with no timeout, which would be a
+/// worse bug than the one it detects.
+fn main_window_is_phantom(window: &tauri::WebviewWindow) -> bool {
+    // `is_visible` is the cheapest getter whose only failure mode is this one.
+    // `outer_position` can fail on a healthy window and `hwnd` collapses the
+    // distinction into a generic handle error, so neither can be used here.
+    matches!(
+        window.is_visible(),
+        Err(tauri::Error::Runtime(
+            tauri_runtime::Error::FailedToReceiveMessage
+        ))
+    )
+}
+
+/// Refuse to run on without the window the whole app is built around.
+///
+/// Continuing produces the worst outcome available: a live process holding the
+/// tray icon and the single-instance lock, so every future launch is routed
+/// into it and silently discarded, and the user's only escape is Task Manager.
+fn exit_if_main_window_was_never_created(app: &tauri::AppHandle) {
+    let missing = match app.get_webview_window("main") {
+        None => "the main window was never registered",
+        Some(window) if main_window_is_phantom(&window) => {
+            "the windowing runtime refused to create the main window"
+        }
+        Some(_) => return,
+    };
+    log::error!("{missing}; exiting instead of running without a window");
+    notify_unrecoverable_main_window(app);
+    // Not `app.exit()`: that routes through the event loop this closure runs
+    // inside, and anything that vetoed it would leave precisely the resident,
+    // windowless process this check exists to prevent. The next launch is the
+    // recovery - and the launch gate makes the race that causes this rarer.
+    std::process::exit(1);
+}
+
+/// Bring the main window back for a user activation: a tray click, the tray's
+/// "Show Window" item, a second launch routed here by the single-instance
+/// plugin, or a `kalpa://` deep link.
+///
+/// Each of those sites used to be a bare `if let Some(window)` with no `else`,
+/// which fails silently in two separate ways:
+///   * `show()` does not restore a *minimized* window on Windows. A window
+///     minimized before being hidden to tray therefore never came back -
+///     `unminimize()` first is what actually restores it.
+///   * If the window is gone the whole app is unreachable, because the tray
+///     icon and the single-instance listener keep answering: a relaunch is
+///     routed here and dropped, so the only way out is Task Manager. Losing the
+///     window has to be recovered from or reported, never ignored.
+fn activate_main_window(app: &tauri::AppHandle, reason: &str) {
+    let handle = app.clone();
+    let dispatch_reason = reason.to_string();
+    let reason = reason.to_string();
+    // Hop to the main thread. Both the phantom probe and window creation are
+    // only safe there, and this is reached from the deep-link plugin on
+    // arbitrary threads. `run_on_main_thread` executes the closure inline when
+    // it is already on that thread, so the tray and single-instance paths keep
+    // exactly the synchronous behaviour they had.
+    if let Err(error) = app.run_on_main_thread(move || {
+        match handle.get_webview_window("main") {
+            Some(window) if !main_window_is_phantom(&window) => {
+                // Resume before showing, so the restore is flash-free. Then show
+                // before unminimize: `ShowWindow(SW_HIDE)` does not clear
+                // `WS_MINIMIZE`, so a window minimized *before* being hidden to
+                // tray is still iconic. Unminimizing first would restore it,
+                // immediately re-hide it (the window is still flagged invisible)
+                // and then show it again - three visible transitions and a
+                // spurious activation where one will do.
+                webview_power::on_shown(&handle);
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            // Either nothing is registered, or what is registered is a window
+            // the runtime never created. A registered window proves nothing:
+            // `show()` and `set_focus()` are one-way messages that return
+            // `Ok(())` against a phantom, so treating one as usable is how a
+            // tray click silently does nothing forever.
+            _ => recover_lost_main_window(&handle, &reason),
+        }
+    }) {
+        log::error!("could not dispatch activation ({dispatch_reason}): {error}");
+    }
+}
+
+/// Handle an activation that found no usable main window: rebuild it, and if
+/// even that fails, say so and exit rather than staying resident and
+/// unreachable.
+///
+/// Main thread only - `activate_main_window` is the sole caller and guarantees
+/// it, which is what makes the phantom re-probe inside `rebuild_main_window`
+/// safe.
+fn recover_lost_main_window(app: &tauri::AppHandle, reason: &str) {
+    if !begin_recovery(&MAIN_WINDOW_LOST) {
+        return;
+    }
+    log::error!("main window is unusable on activation ({reason}); rebuilding it");
+    match rebuild_main_window(app) {
+        Ok(()) => {
+            log::info!("rebuilt the main window after it was lost ({reason})");
+            finish_recovery(&MAIN_WINDOW_LOST);
+        }
+        Err(error) => {
+            // A phantom lands here every time, and deterministically: `build()`
+            // rejects the label because the phantom is still registered, and
+            // Tauri exposes no way to unregister one. So this arm is the
+            // designed terminus for a phantom, not a surprising windowing
+            // failure - word it so the next reader does not go hunting a wry bug.
+            log::error!(
+                "cannot restore the main window ({reason}); closing so the next launch starts clean: {error}"
+            );
+            notify_unrecoverable_main_window(app);
+            // `std::process::exit`, not `app.exit`, for exactly the reason given
+            // in `exit_if_main_window_was_never_created`: a rebuild that fails
+            // the phantom re-probe has still left a `main` registered, and an
+            // exit routed through `ExitRequested` could be vetoed on the
+            // strength of that registration - resurrecting the resident,
+            // windowless process this path exists to eliminate.
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Rebuild the main window from its `tauri.conf.json` entry. Main thread only.
+fn rebuild_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .ok_or_else(|| "the app config has no `main` window".to_string())?;
+    // The reveal latch describes the window that just died. The config entry
+    // carries `visible: false`, so leaving it set would build the replacement
+    // hidden with nothing left to reveal it.
+    //
+    // `MAIN_PAGE_LOADED` is deliberately NOT cleared. Nothing in the reveal path
+    // reads it - `reveal_initial_main_window` keys only off the latch above -
+    // but the single-instance callback treats it as "is there a page that can
+    // receive an activation yet", and buffers into a single slot while it is
+    // false. Clearing it here would make every relaunch between the rebuild and
+    // the new page's load land in that buffer instead of raising the window,
+    // which is the same dead click this whole path exists to remove.
+    INITIAL_MAIN_WINDOW_REVEALED.store(false, Ordering::SeqCst);
+    // Before `build()`, never after: that ordering is what makes
+    // `main_page_can_receive` sound, because anyone who can see the replacement
+    // registered has necessarily already seen this store.
+    arm_pending_page_reload(&MAIN_PAGE_AWAITING_RELOAD);
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|error| format!("could not configure a replacement: {error}"))?
+        .build()
+        .map_err(|error| format!("could not build a replacement: {error}"))?;
+    // `build()` reports success even when the runtime refused the window, so
+    // that `Ok` proves nothing on its own - ask a getter.
+    if main_window_is_phantom(&window) {
+        return Err("the windowing runtime refused the replacement window".to_string());
+    }
+    // Reveal through the same two paths startup uses: `on_page_load`, plus this
+    // watchdog for a page that never finishes loading.
+    schedule_initial_main_window_watchdog(app);
+    Ok(())
+}
+
+/// Tell the user why Kalpa is about to vanish — after making sure this process
+/// can no longer pretend to be the app.
+///
+/// The order is the whole point. `MessageBoxW` blocks until it is dismissed, so
+/// while it is up this process would otherwise still hold the tray icon and the
+/// single-instance identity: the relaunch the message asks for would be routed
+/// straight back here over `WM_COPYDATA`, answered by a window the runtime
+/// never created, and dropped. That is precisely the husk this path exists to
+/// eliminate, merely bounded by how long the box stays up. So give up every
+/// way of answering first, then block.
+///
+/// The modal is also what gives the toast time to land: the notification plugin
+/// spawns onto a tokio worker and every caller exits on the very next line,
+/// which would otherwise kill that worker before it delivered anything.
+fn notify_unrecoverable_main_window(app: &tauri::AppHandle) {
+    const TITLE: &str = "Kalpa could not open its window";
+    const BODY: &str = "Kalpa is closing so it can start cleanly. Please open it again.";
+
+    // Dropping the `TrayIcon` removes it from the notification area, so there is
+    // no icon left to click while the message is up.
+    if let Ok(mut tray) = app.state::<TrayState>().0.lock() {
+        tray.take();
+    }
+    // Releases the `-sim` mutex and destroys the `-siw` guard window, so the
+    // next launch's `CreateMutexW`/`FindWindowW` sees a clean slate and starts a
+    // real instance. `ReleaseMutex` is thread-affine and the mutex was taken on
+    // the main thread; both callers of this function are already there.
+    tauri_plugin_single_instance::destroy(app);
+    launch_gate::release();
+
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(error) = app.notification().builder().title(TITLE).body(BODY).show() {
+        log::error!("could not report the lost main window to the user: {error}");
+    }
+
+    // Release builds only: `test:packaged` and `test:e2e:sandbox` drive a debug
+    // binary headless over CDP, where nothing can dismiss a modal and it would
+    // hang the runner instead of failing with the log line above.
+    #[cfg(all(windows, not(debug_assertions)))]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+        let title: Vec<u16> = TITLE.encode_utf16().chain(std::iter::once(0)).collect();
+        let body: Vec<u16> = BODY.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+}
+
+fn emit_buffered_activation(app: &tauri::AppHandle) {
+    // Peek before activating, so a page load with nothing parked does not raise
+    // and focus the window. Activation used to happen inside `emit_deep_link`,
+    // i.e. only when there was actually an action, and still should.
+    let parked = reverse_handoff_activation()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some();
+    if !parked {
+        return;
+    }
+    activate_main_window(app, "buffered deep link");
+    // Take only when it can be delivered. There is nowhere to put an action back
+    // that does not race a newer one for the single slot, and the loser of that
+    // race would be dropped - so this path never puts one back, and never calls
+    // `emit_deep_link`, which would re-enter the buffer.
+    if !main_page_can_receive(app) {
+        return;
+    }
+    let action = reverse_handoff_activation()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(action) = action {
+        emit_deep_link_now(app, &action);
+    }
+}
+
+fn finish_webview_startup_after_authority(app: &tauri::AppHandle) {
+    STARTUP_NATIVE_DECISION_PENDING.store(false, Ordering::SeqCst);
+    if MAIN_PAGE_LOADED.load(Ordering::SeqCst) {
+        reveal_initial_main_window(app, "native startup fallback");
+        emit_buffered_activation(app);
+    } else {
+        schedule_initial_main_window_watchdog(app);
+    }
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn e2e_webview_data_directory(token: &str) -> Result<PathBuf, &'static str> {
+    if token.is_empty() {
+        return Err("the E2E token is empty");
+    }
+    if token.len() > 128 {
+        return Err("the E2E token is longer than 128 bytes");
+    }
+    if !token
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("the E2E token contains characters unsafe for a profile directory");
+    }
+
+    Ok(PathBuf::from("kalpa-e2e").join(token))
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn configure_e2e_webview_profile(context: &mut tauri::Context<tauri::Wry>) {
+    let Some(token) = std::env::var_os("KALPA_E2E_TOKEN") else {
+        return;
+    };
+    let token = token
+        .into_string()
+        .expect("KALPA_E2E_TOKEN must contain valid Unicode");
+    let data_directory = e2e_webview_data_directory(&token)
+        .unwrap_or_else(|error| panic!("Invalid KALPA_E2E_TOKEN: {error}"));
+
+    // WEBVIEW2_USER_DATA_FOLDER cannot isolate Tauri's profile because Tauri
+    // supplies WebView2's userDataFolder itself. Configure the generated window
+    // definitions instead. The sandbox token makes this unique per owned run;
+    // normal debug launches and every release build retain their usual profile.
+    for window in &mut context.config_mut().app.windows {
+        window.data_directory = Some(data_directory.clone());
+    }
+}
+
 pub fn run() {
+    // First statement in the process: a sink installed any later misses window
+    // creation, which is the one event most worth capturing. Release builds are
+    // `windows_subsystem = "windows"`, so without this every diagnostic - ours
+    // and our dependencies' - is discarded.
+    diag_log::install();
+
     // msWebView2CodeCache: V8 bytecode caching for the app bundle. wry serves
     // the frontend through WebView2's WebResourceRequested interception, which
     // bypasses the HTTP-cache-backed code cache — without this feature the JS
@@ -473,11 +974,26 @@ pub fn run() {
         "--enable-features=msWebView2CodeCache",
     );
 
-    clear_webview_cache_on_upgrade();
-    cleanup_orphaned_pending_zips();
+    // Must be here: `tauri-plugin-single-instance` decides whether this process
+    // is a duplicate during `Builder::build()`, so anything later cannot
+    // influence that decision.
+    if launch_gate::acquire() == launch_gate::Outcome::Secondary {
+        log::info!("another instance owns the app; this launch will be forwarded to it");
+    }
 
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    #[cfg(all(windows, debug_assertions))]
+    let context = {
+        let mut context = context;
+        configure_e2e_webview_profile(&mut context);
+        context
+    };
+
+    let app = tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(PendingAddonsPathApproval(Mutex::new(None)))
+        .manage(client_write::AllowedGameInstallPath::new())
+        .manage(client_write::NativeClientPicks::new())
         .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
@@ -500,16 +1016,99 @@ pub fn run() {
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             {
+                MAIN_PAGE_LOADED.store(true, Ordering::SeqCst);
+                // The page really has loaded either way; only the flush below is
+                // deferred by the native-startup gate.
+                take_pending_page_reload(&MAIN_PAGE_AWAITING_RELOAD);
+                if STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Err(error) = commands::complete_webview_handoff(webview.app_handle()) {
+                    log::error!("failed to complete the WebView handoff: {error}");
+                    webview.app_handle().exit(1);
+                    return;
+                }
                 reveal_initial_main_window(webview.app_handle(), "page load finished");
+                emit_buffered_activation(webview.app_handle());
             }
         })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // Focus the existing window when a duplicate instance is launched
-            if let Some(window) = app.get_webview_window("main") {
-                webview_power::on_shown(app); // resume before showing (flash-free)
-                let _ = window.show();
-                let _ = window.set_focus();
+            // A reverse-handoff child remains hidden and non-authoritative until
+            // its first page load proves ready. Buffer an activation until the
+            // page-ready callback owns authority; never reveal/emit before then.
+            if std::env::var_os(native_boot::WEBVIEW_LAUNCH_ID_ENV).is_some() {
+                for arg in &argv {
+                    if let Some(action) = parse_deep_link(arg) {
+                        if let Ok(mut buffered) = reverse_handoff_activation().lock() {
+                            *buffered = Some(action);
+                        }
+                        break;
+                    }
+                }
+                return;
             }
+            let startup_pending = STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst);
+            let handoff_cancelled =
+                match commands::cancel_native_handoff_for_activation(app, startup_pending) {
+                    Ok(cancelled) => cancelled,
+                    Err(error) => {
+                        eprintln!("Failed to preserve activation during native handoff: {error}");
+                        false
+                    }
+                };
+            // Startup fallback is not complete until the main-thread closure
+            // clears the pending flag. Even if the worker has already claimed
+            // authority, the page may not have installed its event listeners
+            // yet, so keep the activation buffered until that closure/page-load
+            // path can reveal and emit it safely.
+            if startup_pending && handoff_cancelled {
+                for arg in &argv {
+                    if let Some(action) = parse_deep_link(arg) {
+                        *reverse_handoff_activation()
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(action);
+                        eprintln!(
+                            "[native-shell] buffered activation while startup handoff cancels"
+                        );
+                        break;
+                    }
+                }
+                return;
+            }
+            // Same rule as the reverse-handoff branch above, for the same
+            // reason: never reveal or emit without UI authority. Cancellation
+            // can fail (the native child holds or wedges the lock, or the
+            // reclaim timed out), and revealing anyway would put this WebView
+            // and a live sidecar on the same state as two independent writers.
+            if !commands::holds_webview_authority() {
+                eprintln!(
+                    "[native-shell] ignoring activation: this WebView does not hold UI authority"
+                );
+                return;
+            }
+            // Page-load publishes readiness before taking this mutex to flush
+            // buffered activations. Taking the same mutex before checking the
+            // flag closes the opposite race: either this callback observes a
+            // ready page and emits below, or page-load observes what we buffer.
+            {
+                let mut buffered = reverse_handoff_activation()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !MAIN_PAGE_LOADED.load(Ordering::SeqCst) {
+                    for arg in &argv {
+                        if let Some(action) = parse_deep_link(arg) {
+                            *buffered = Some(action);
+                            eprintln!(
+                                "[native-shell] buffered activation until the main page loads"
+                            );
+                            break;
+                        }
+                    }
+                    return;
+                }
+            }
+            // Focus the existing window when a duplicate instance is launched
+            activate_main_window(app, "second launch");
             // Check argv for deep link URLs (Windows/Linux pass them as CLI args)
             for arg in &argv {
                 if let Some(action) = parse_deep_link(arg) {
@@ -537,6 +1136,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
         .setup(|app| {
+            // Tauri creates the windows declared in tauri.conf.json immediately
+            // before this closure, on this thread, and swallows a failure. This
+            // is the first moment the result can be observed — and the last one
+            // at which refusing to continue is still cheap.
+            exit_if_main_window_was_never_created(app.handle());
+
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -562,20 +1167,52 @@ pub fn run() {
                 }
             }
 
-            if startup_deep_link.is_none() {
-                match commands::try_launch_native_performance_mode_on_startup(app.handle()) {
-                    Ok(Some(_)) => {
-                        app.handle().exit(0);
-                        return Ok(());
+            // The WebView cannot become active while the native shell still
+            // owns the cross-process UI-authority lock. For a deep-link launch,
+            // this requests an observable native shutdown and waits for its OS
+            // lock to be released before showing the WebView.
+            let reverse_handoff = std::env::var_os(native_boot::WEBVIEW_LAUNCH_ID_ENV).is_some();
+            if startup_deep_link.is_none() && !reverse_handoff {
+                // The Windows single-instance callback is delivered through
+                // the UI event loop. Keep setup non-blocking so an activation
+                // can cancel the sidecar handshake while it is in flight.
+                STARTUP_NATIVE_DECISION_PENDING.store(true, Ordering::SeqCst);
+                let startup_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let outcome =
+                        commands::try_launch_native_performance_mode_on_startup(&startup_handle);
+                    if matches!(outcome, Ok(Some(_))) {
+                        return;
                     }
-                    Ok(None) => {}
-                    Err(error) => {
+                    if let Err(error) = &outcome {
                         eprintln!("Failed to start native performance UI: {error}");
                     }
+                    if let Err(error) = commands::claim_webview_authority(&startup_handle) {
+                        eprintln!("Failed to acquire WebView UI authority: {error}");
+                        startup_handle.exit(1);
+                        return;
+                    }
+                    let dispatch_handle = startup_handle.clone();
+                    if let Err(error) = startup_handle.run_on_main_thread(move || {
+                        finish_webview_startup_after_authority(&dispatch_handle);
+                    }) {
+                        eprintln!("Failed to dispatch WebView startup fallback: {error}");
+                        startup_handle.exit(1);
+                    }
+                });
+            } else if !reverse_handoff {
+                if let Err(error) = commands::claim_webview_authority(app.handle()) {
+                    eprintln!("Failed to acquire WebView UI authority: {error}");
+                    return Err(std::io::Error::other(error).into());
                 }
             }
 
-            schedule_initial_main_window_watchdog(app.handle());
+            // A reverse-handoff child must never reveal on the ordinary timeout:
+            // the still-visible Slint parent retains authority until page-ready.
+            // If page load hangs, the parent kills this hidden child and stays up.
+            if !reverse_handoff && !STARTUP_NATIVE_DECISION_PENDING.load(Ordering::SeqCst) {
+                schedule_initial_main_window_watchdog(app.handle());
+            }
 
             // Consume the sidecar's re-entry flags, then scrub them from this
             // process's environment: children (including a sidecar launched by
@@ -645,11 +1282,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            webview_power::on_shown(app); // resume before showing
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        activate_main_window(app, "tray menu");
                     }
                     "quit" => {
                         app.exit(0);
@@ -663,12 +1296,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            webview_power::on_shown(app); // resume before showing
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        activate_main_window(tray.app_handle(), "tray click");
                     }
                 })
                 .build(app)?;
@@ -677,8 +1305,12 @@ pub fn run() {
                 *guard = Some(tray);
             }
 
+            // Open the settings store before anything reads it. The webview
+            // cannot open one itself — see `settings_store::ensure_open`.
+            settings_store::ensure_open(app.handle());
+
             // Migrate auth tokens from plaintext store to credential manager
-            // (one-time). This is also the first opener of the settings store.
+            // (one-time).
             token_store::migrate_from_store(app.handle());
 
             // If that open swallowed a load error (plugin-store ignores them) and
@@ -756,7 +1388,34 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            client_health::detect_eso_clients,
+            client_health::validate_eso_client,
+            client_health::inspect_eso_client,
+            commands::is_eso_or_launcher_running,
+            client_write::choose_client_path,
+            client_write::set_game_install_path,
+            client_write::clear_game_install_path,
+            client_stack::inspect_client_stack,
+            client_adopt::plan_adoption,
+            client_adopt::adopt_stack,
+            client_adopt::forget_stack,
+            client_toggle::plan_client_toggle,
+            client_toggle::apply_client_toggle,
+            client_tuning::read_client_tuning,
+            client_tuning::apply_client_tuning,
+            client_runtime::inspect_client_runtimes,
+            client_runtime::reapply_client_runtimes,
+            client_preset::list_client_presets,
+            client_preset::set_client_preset,
+            client_shaders::list_shader_packs,
+            client_shaders::install_shader_pack,
+            client_preset::fix_client_technique_order,
+            client_uninstall::list_managed_client_files,
+            client_uninstall::uninstall_managed_client_files,
+            client_uninstall::emergency_remove_injector,
             commands::set_addons_path,
+            commands::choose_addons_path,
+            commands::reveal_allowed_path,
             commands::set_text_zoom,
             commands::check_addons_write_access,
             commands::open_ransomware_protection_settings,
@@ -766,6 +1425,8 @@ pub fn run() {
             commands::set_addon_tags,
             commands::resolve_esoui_addon,
             commands::search_esoui_addons,
+            pack_hub::addon_search::search_addon_index,
+            pack_hub::addon_search::ask_addon_assistant,
             commands::fetch_esoui_detail,
             commands::install_addon,
             commands::remove_addon,
@@ -803,7 +1464,6 @@ pub fn run() {
             commands::list_characters,
             commands::backup_character_settings,
             commands::detect_minion,
-            commands::migrate_from_minion,
             commands::migration_check_preconditions,
             commands::migration_create_snapshot,
             commands::migration_dry_run,
@@ -815,28 +1475,28 @@ pub fn run() {
             commands::create_pre_operation_snapshot,
             commands::read_ops_log,
             commands::backup_minion_config,
-            commands::list_packs,
-            commands::get_pack,
+            pack_hub::commands::list_packs,
+            pack_hub::commands::get_pack,
             commands::auth_cancel_login,
             commands::auth_login,
             commands::auth_logout,
             commands::auth_get_user,
             commands::auth_cached_user,
             commands::consume_initial_deep_link,
-            commands::create_pack,
-            commands::update_pack,
-            commands::delete_pack,
-            commands::delete_pack_hub_account,
-            commands::vote_pack,
-            commands::track_pack_install,
-            commands::create_share_code,
-            commands::resolve_share_code,
-            commands::export_pack_file,
-            commands::import_pack_file,
-            commands::export_sv_settings,
-            commands::import_sv_settings,
-            commands::detect_local_identities,
-            commands::fetch_roster_pack,
+            pack_hub::commands::create_pack,
+            pack_hub::commands::update_pack,
+            pack_hub::commands::delete_pack,
+            pack_hub::commands::delete_pack_hub_account,
+            pack_hub::commands::vote_pack,
+            pack_hub::commands::track_pack_install,
+            pack_hub::commands::create_share_code,
+            pack_hub::commands::resolve_share_code,
+            pack_hub::commands::export_pack_file,
+            pack_hub::commands::import_pack_file,
+            pack_hub::commands::export_sv_settings,
+            pack_hub::commands::import_sv_settings,
+            pack_hub::commands::detect_local_identities,
+            pack_hub::commands::fetch_roster_pack,
             commands::get_saved_variables_path,
             commands::list_saved_variables,
             commands::scan_lam_dropdowns,
@@ -890,6 +1550,7 @@ pub fn run() {
             uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
             uploader::commands::uploader_run_native_live_spike,
+            settings_store::ensure_settings_store,
             commands::flush_settings,
             commands::settings_tainted,
             commands::launch_native_performance_mode,
@@ -900,34 +1561,186 @@ pub fn run() {
             #[cfg(debug_assertions)]
             commands::debug_install_fixture_zip,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            // On a real app exit, detach settings.json from the plugin registry so
-            // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
-            // it. ExitRequested fires before Exit (and before the plugin's exit
-            // save), so detaching here neutralises that non-atomic write. Settings
-            // are already persisted atomically on every write, so nothing is
-            // flushed here. (Window close hides to tray and never reaches this.)
-            if let tauri::RunEvent::ExitRequested { .. } = &event {
-                settings_store::detach_on_exit(app);
+        .build(context)
+        .expect("error while building tauri application");
+
+    // Purge the WebView2 profile in the one gap that is both late enough and
+    // early enough.
+    //
+    // Late enough: `build()` has returned, so `tauri-plugin-single-instance`
+    // has already exited a duplicate and published its guard window — the clear
+    // no longer sits on the latency the launch gate's deadline is sized against,
+    // and a second instance can no longer be here at all.
+    //
+    // Early enough: no window exists yet. Tauri creates the windows declared in
+    // tauri.conf.json from `RunEvent::Ready`, inside the `run` below, and that
+    // is what opens this profile. Clearing any later — from `setup`, say —
+    // would delete cache directories out from under a live WebView2 that has
+    // already issued its first navigation, which is the same shape of failure
+    // the launch gate exists to prevent one instance inflicting on another.
+    clear_webview_cache_on_upgrade();
+    cleanup_orphaned_pending_zips();
+
+    app.run(|app, event| {
+        // On a real app exit, detach settings.json from the plugin registry so
+        // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
+        // it. ExitRequested fires before Exit (and before the plugin's exit
+        // save), so detaching here neutralises that non-atomic write. Settings
+        // are already persisted atomically on every write, so nothing is
+        // flushed here. (Window close hides to tray and never reaches this.)
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+            // `code: None` is the runtime asking to exit because the last
+            // window is gone. Vetoing *that* is what turns a lost window
+            // into a resident process with a tray icon and nothing to show:
+            // it keeps answering activations, the single-instance plugin
+            // keeps routing new launches into it, and the only way out is
+            // Task Manager. Only a programmatic exit that still has a
+            // window is worth preserving an activation for.
+            // A *registered* window proves nothing - that is this whole
+            // change's premise - so the guard asks for a live one. Safe and
+            // synchronous: this closure runs on the main thread, where the
+            // probe is handled inline.
+            let preserve = commands::finish_native_handoff_exit();
+            // `&&` short-circuits, so the probe — a round trip through this
+            // thread's message loop — only runs when its answer can change
+            // the outcome. It is therefore `false` both when the window is
+            // dead and when nobody asked, which is what the decision below
+            // wants either way.
+            let live_window = preserve && code.is_some() && main_window_is_live(app);
+            if should_preserve_exit(preserve, *code, live_window) {
+                eprintln!("[native-shell] preventing exit for preserved activation");
+                api.prevent_exit();
+                return;
             }
-            // On any real process exit, signal every native live session to stop so
-            // its terminate-report + abandoned POSTs settle promptly (the OS reaps
-            // the driver threads; we don't join here, to avoid blocking exit on a
-            // wedged network). A hard exit's correctness is covered by the L2 orphan
-            // breadcrumb + next-launch recovery — this just closes reports faster.
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = &event {
-                if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
-                    state.signal_all_live_stop();
-                }
+            if preserve {
+                log::warn!("not preserving an exit with no window to preserve it for");
             }
-        });
+            settings_store::detach_on_exit(app);
+        }
+        // On any real process exit, signal every native live session to stop so
+        // its terminate-report + abandoned POSTs settle promptly (the OS reaps
+        // the driver threads; we don't join here, to avoid blocking exit on a
+        // wedged network). A hard exit's correctness is covered by the L2 orphan
+        // breadcrumb + next-launch recovery — this just closes reports faster.
+        if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = &event {
+            if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
+                state.signal_all_live_stop();
+            }
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit veto decides this process's lifetime, and getting it wrong in
+    /// either direction reproduces a shipped bug: vetoing too eagerly is what
+    /// left a live process with a tray icon and no window, and vetoing too
+    /// rarely makes the app vanish instead of staying up for an activation.
+    #[test]
+    fn an_exit_is_preserved_only_for_an_activation_that_has_somewhere_to_go() {
+        // The only case worth vetoing: a handoff was cancelled by an incoming
+        // activation, the exit was asked for programmatically, and there is a
+        // live window to hand that activation to.
+        assert!(should_preserve_exit(true, Some(0), true));
+
+        // `code: None` is the runtime exiting because the last window was
+        // destroyed. Vetoing that is what makes a lost window permanent.
+        assert!(!should_preserve_exit(true, None, true));
+
+        // No live window means nothing to preserve the activation for - and a
+        // *registered* window does not count, which is why the caller probes.
+        assert!(!should_preserve_exit(true, Some(0), false));
+        assert!(!should_preserve_exit(true, None, false));
+
+        // No handoff to cancel: an ordinary exit must never be vetoed.
+        assert!(!should_preserve_exit(false, Some(0), true));
+        assert!(!should_preserve_exit(false, None, true));
+        assert!(!should_preserve_exit(false, Some(0), false));
+        assert!(!should_preserve_exit(false, None, false));
+    }
+
+    /// A non-zero exit code is still a programmatic exit, so it is still worth
+    /// preserving. Only the runtime's `None` is special.
+    #[test]
+    fn a_failing_exit_code_is_still_a_deliberate_exit() {
+        assert!(should_preserve_exit(true, Some(1), true));
+    }
+
+    /// A deep link is only deliverable into a page that exists, has loaded at
+    /// least once, and is not mid-rebuild. Each term rules out a different way
+    /// the window can be unready.
+    #[test]
+    fn a_deep_link_is_delivered_only_into_a_page_that_can_hear_it() {
+        assert!(page_can_receive(true, true, true));
+
+        // Nothing registered: a rebuild was dispatched and has not run yet.
+        assert!(!page_can_receive(false, true, true));
+        // Registered, but this process has never had a page.
+        assert!(!page_can_receive(true, false, true));
+        // Registered and previously loaded, but a rebuild's replacement page has
+        // not loaded - it has no listeners at all yet. This is the case that
+        // `MAIN_PAGE_LOADED` alone cannot see, because a rebuild deliberately
+        // leaves that latch set.
+        assert!(!page_can_receive(true, true, false));
+        assert!(!page_can_receive(false, false, false));
+    }
+
+    /// A rebuild arms this latch and the rebuilt page's load clears it. The
+    /// clear must be a claim rather than a plain store, so that if a second
+    /// clearer is ever added it cannot double-flush the parked activation.
+    #[test]
+    fn a_pending_page_reload_is_claimed_exactly_once() {
+        let latch = AtomicBool::new(false);
+
+        // Nothing armed: an ordinary launch never arms this, so a clear must
+        // report that there was nothing to claim.
+        assert!(!take_pending_page_reload(&latch));
+
+        // A rebuild arms it, and exactly one clearer wins.
+        arm_pending_page_reload(&latch);
+        assert!(take_pending_page_reload(&latch));
+        assert!(!take_pending_page_reload(&latch));
+
+        // Re-armable, because a window can be rebuilt more than once in a run.
+        arm_pending_page_reload(&latch);
+        assert!(take_pending_page_reload(&latch));
+    }
+
+    #[test]
+    fn only_one_caller_at_a_time_owns_window_recovery() {
+        let latch = AtomicBool::new(false);
+
+        // First activation through the door owns the attempt.
+        assert!(begin_recovery(&latch));
+        // Anything arriving while it is in flight must fall through silently
+        // rather than start a second rebuild or report a second failure.
+        assert!(!begin_recovery(&latch));
+        assert!(!begin_recovery(&latch));
+
+        // An attempt that does not end the process re-arms recovery, so a
+        // later activation can try again.
+        finish_recovery(&latch);
+        assert!(begin_recovery(&latch));
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn e2e_webview_profile_is_scoped_to_a_safe_relative_directory() {
+        assert_eq!(
+            e2e_webview_data_directory("123-abc_DEF").unwrap(),
+            PathBuf::from("kalpa-e2e").join("123-abc_DEF")
+        );
+
+        for invalid in ["", ".", "..", "with/slash", "with\\slash", "with space"] {
+            assert!(
+                e2e_webview_data_directory(invalid).is_err(),
+                "accepted unsafe token {invalid:?}"
+            );
+        }
+        assert!(e2e_webview_data_directory(&"a".repeat(129)).is_err());
+    }
 
     #[test]
     fn parse_install_pack() {

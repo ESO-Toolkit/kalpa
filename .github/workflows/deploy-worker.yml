@@ -14,6 +14,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: deploy-worker
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: backend/eso-packs-worker
@@ -52,7 +55,24 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
+      - name: Capture pre-deploy worker version
+        id: pre_deploy
+        run: |
+          VERSION_ID=$(npx wrangler deployments list --json | jq -er '
+            sort_by(.created_on)
+            | last
+            | .versions
+            | map(select(.percentage == 100))
+            | first
+            | .version_id
+          ')
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Deploy to Cloudflare
+        id: deploy
         run: npx wrangler deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -61,12 +81,30 @@ jobs:
       - name: Post-deploy health check
         run: |
           sleep 5
-          HEALTH=$(curl -sf https://kalpa-pack-hub.eso-toolkit.workers.dev/health)
+          HEALTH=$(curl --fail --silent --show-error \
+            --connect-timeout 5 --max-time 15 \
+            --retry 3 --retry-delay 2 --retry-connrefused \
+            https://kalpa-pack-hub.eso-toolkit.workers.dev/health)
           echo "$HEALTH"
-          STATUS=$(echo "$HEALTH" | jq -r '.status')
-          KV=$(echo "$HEALTH" | jq -r '.kv')
+          STATUS=$(echo "$HEALTH" | jq -r '.status // empty')
+          KV=$(echo "$HEALTH" | jq -r '.kv // empty')
           if [ "$STATUS" != "ok" ] || [ "$KV" != "true" ]; then
             echo "::error::Health check failed! status=$STATUS kv=$KV"
             exit 1
           fi
           echo "Health check passed."
+
+      # A separate always-evaluated step still runs when curl itself fails or
+      # emits malformed JSON. Keeping rollback inside the health script missed
+      # both cases under bash's fail-fast behavior.
+      - name: Roll back failed deployment
+        if: ${{ failure() && steps.deploy.outcome == 'success' && steps.pre_deploy.outputs.version_id != '' }}
+        # version_id via env, never spliced into the script text: it is the
+        # output of a command written to $GITHUB_OUTPUT, and GitHub expands
+        # `${{ }}` before the shell parses this line. Same pattern as
+        # release.yml's REF_NAME and ARTIFACT_PATHS steps.
+        run: npx wrangler rollback "$VERSION_ID" --yes --message "Automatic rollback after failed post-deploy validation"
+        env:
+          VERSION_ID: ${{ steps.pre_deploy.outputs.version_id }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

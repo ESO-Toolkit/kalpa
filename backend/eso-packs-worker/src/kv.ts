@@ -108,28 +108,21 @@ export async function deleteVote(
   await env.ESO_PACKS.delete(userVoteKey(userId, packId));
 }
 
-/**
- * Delete every vote record for a pack (and each record's `user-votes` reverse
- * key). Deleted slugs become available again, so leaving the records behind
- * meant a recycled id inherited them and the first vote a previous voter cast
- * on the new pack was silently treated as an unvote. Returns the count removed.
- */
-export async function deleteVotesForPack(env: Env, packId: string): Promise<number> {
+/** Delete one bounded page, keeping primary keys discoverable until cleanup succeeds. */
+export async function deleteVotesForPack(
+  env: Env,
+  packId: string,
+  limit = 10,
+): Promise<{ removed: number; complete: boolean }> {
   const prefix = `${VOTE_PREFIX}${packId}:`;
-  let cursor: string | undefined;
-  let removed = 0;
-  do {
-    const page = await env.ESO_PACKS.list({ prefix, cursor });
-    for (const key of page.keys) {
-      const userId = key.name.slice(prefix.length);
-      if (userId) await env.ESO_PACKS.delete(userVoteKey(userId, packId));
-      // Keep the enumerable primary key until reverse-key cleanup succeeds.
-      await env.ESO_PACKS.delete(key.name);
-      removed++;
-    }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return removed;
+  const page = await env.ESO_PACKS.list({ prefix, limit });
+  for (const key of page.keys) {
+    const userId = key.name.slice(prefix.length);
+    if (userId) await env.ESO_PACKS.delete(userVoteKey(userId, packId));
+    await env.ESO_PACKS.delete(key.name);
+  }
+  // The caller retries from the head; no cursor can skip keys after deletion.
+  return { removed: page.keys.length, complete: page.list_complete };
 }
 
 /**

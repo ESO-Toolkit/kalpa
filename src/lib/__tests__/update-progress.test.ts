@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+import type { AddonPhase } from "@/types";
 
 // Replicate the progress calculation and sorting logic from update-banner.tsx
 

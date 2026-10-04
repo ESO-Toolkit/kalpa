@@ -92,3 +92,17 @@ export class BatchUpdateLatch {
     this.preflight = false;
   }
 }
+
+/**
+ * Removal callbacks can outlive the render that created them. Consult the
+ * synchronous batch latch rather than a captured `updatingAll` value so those
+ * stale callbacks cannot enqueue filesystem work during Update All.
+ */
+export function refuseRemovalWhileBatchActive(
+  latch: Pick<BatchUpdateLatch, "isPreflight" | "isRunning">,
+  onRefused: () => void
+): boolean {
+  if (!latch.isPreflight && !latch.isRunning) return false;
+  onRefused();
+  return true;
+}

@@ -16,8 +16,17 @@ const RELEASES_URL = "https://github.com/ESO-Toolkit/kalpa/releases/latest";
 
 export function useAppUpdate() {
   const [state, setState] = useState<AppUpdateState>({ status: "idle" });
-  // deb/rpm installs can't self-update; they get pointed at the release page.
-  const [selfUpdatable, setSelfUpdatable] = useState(true);
+  // Share the platform probe between mount and a quick click on Update Now.
+  // A failed probe must never fall through to an unsupported in-place update.
+  const selfUpdatableRef = useRef<Promise<boolean> | null>(null);
+  const isSelfUpdatable = useCallback(() => {
+    if (!selfUpdatableRef.current) {
+      selfUpdatableRef.current = import("@tauri-apps/api/core")
+        .then(({ invoke }) => invoke<boolean>("is_portable_update_supported"))
+        .catch(() => false);
+    }
+    return selfUpdatableRef.current;
+  }, []);
   // Synchronous mirror of the current status. `checkForAppUpdate` must keep a
   // stable identity (App holds it in a ref for the deep-link handler), so it
   // cannot read `state` — and a render-lagging mirror would leave the guard
@@ -29,15 +38,24 @@ export function useAppUpdate() {
   }, []);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        setSelfUpdatable(await invoke<boolean>("is_portable_update_supported"));
-      } catch {
-        // keep the self-update default if the probe fails
-      }
-    })();
-  }, []);
+    void isSelfUpdatable();
+  }, [isSelfUpdatable]);
+
+  // Guards against overlapping `check()` calls. Now that a check can be
+  // triggered from three places (mount, interval, focus) rather than just
+  // one, a slow network response to one must not let a second fire on top of
+  // it — e.g. a focus event landing mid-request from the interval.
+  const isCheckingRef = useRef(false);
+  // Claim the action before the asynchronous platform probe. React state alone
+  // cannot stop a second click while that probe is still pending.
+  const isInstallingRef = useRef(false);
+  const updateInProgress = useCallback(
+    () =>
+      isInstallingRef.current ||
+      statusRef.current === "downloading" ||
+      statusRef.current === "ready",
+    []
+  );
 
   const checkForAppUpdate = useCallback(
     async (silent = true) => {
@@ -45,19 +63,30 @@ export function useAppUpdate() {
       // machine. Overwriting it with a fresh "available" would offer a second
       // concurrent downloadAndInstall on a different Update object, or drop the
       // Restart affordance for an update that is already installed.
-      if (statusRef.current === "downloading" || statusRef.current === "ready") {
+      if (updateInProgress()) {
         if (!silent) {
           toast.info(
-            statusRef.current === "downloading"
-              ? "An update is already downloading."
+            isInstallingRef.current || statusRef.current === "downloading"
+              ? "An update is already in progress."
               : "An update is ready — restart to apply it."
           );
         }
         return;
       }
 
+      // Only background checks are suppressed. A user-initiated check
+      // (silent === false) must always run: App.tsx calls it that way from the
+      // deep link and from the Check-for-updates action, and swallowing one
+      // would leave the button the user just pressed with no toast and no
+      // visible effect at all.
+      if (silent && isCheckingRef.current) return;
+      isCheckingRef.current = true;
+
       try {
         const update = await check();
+        // A check started before the user clicked Update Now can finish after
+        // installation began. It must not replace the download or ready state.
+        if (updateInProgress()) return;
         if (update) {
           applyState({ status: "available", update });
         } else if (!silent) {
@@ -67,74 +96,124 @@ export function useAppUpdate() {
         if (!silent) {
           toast.error(`Update check failed: ${e}`);
         }
+      } finally {
+        isCheckingRef.current = false;
       }
     },
-    [applyState]
+    [applyState, updateInProgress]
   );
 
   const downloadAndInstall = useCallback(async () => {
-    if (state.status !== "available") return;
+    if (state.status !== "available" || isInstallingRef.current) return;
+    isInstallingRef.current = true;
     const { update } = state;
 
-    if (!selfUpdatable) {
-      // Package-manager install (deb/rpm): open the release page instead of
-      // attempting an in-place update the updater can't perform.
-      try {
-        const { openUrl } = await import("@tauri-apps/plugin-opener");
-        await openUrl(RELEASES_URL);
-      } catch (e) {
-        toast.error(`Could not open the releases page: ${e}`);
-      }
-      return;
-    }
-
-    applyState({ status: "downloading", progress: 0 });
-
     try {
-      let downloaded = 0;
-      let contentLength = 0;
-
-      await update.downloadAndInstall((event) => {
-        switch (event.event) {
-          case "Started":
-            contentLength = event.data.contentLength ?? 0;
-            break;
-          case "Progress":
-            downloaded += event.data.chunkLength;
-            if (contentLength > 0) {
-              applyState({
-                status: "downloading",
-                progress: Math.round((downloaded / contentLength) * 100),
-              });
-            }
-            break;
-          case "Finished":
-            break;
+      if (!(await isSelfUpdatable())) {
+        // Package-manager install (deb/rpm): open the release page instead of
+        // attempting an in-place update the updater can't perform.
+        try {
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(RELEASES_URL);
+        } catch (e) {
+          toast.error(`Could not open the releases page: ${e}`);
         }
-      });
+        return;
+      }
 
-      applyState({ status: "ready" });
-      toast.success("Update installed. Restart to apply.", {
-        action: {
-          label: "Restart Now",
-          onClick: () => relaunch(),
-        },
-        duration: Infinity,
-      });
-    } catch (e) {
-      applyState({ status: "available", update });
-      toast.error(`Update failed: ${e}`);
+      applyState({ status: "downloading", progress: 0 });
+
+      try {
+        let downloaded = 0;
+        let contentLength = 0;
+
+        await update.downloadAndInstall((event) => {
+          switch (event.event) {
+            case "Started":
+              contentLength = event.data.contentLength ?? 0;
+              break;
+            case "Progress":
+              downloaded += event.data.chunkLength;
+              if (contentLength > 0) {
+                applyState({
+                  status: "downloading",
+                  progress: Math.round((downloaded / contentLength) * 100),
+                });
+              }
+              break;
+            case "Finished":
+              break;
+          }
+        });
+
+        applyState({ status: "ready" });
+        toast.success("Update installed. Restart to apply.", {
+          action: {
+            label: "Restart Now",
+            onClick: () => relaunch(),
+          },
+          duration: Infinity,
+        });
+      } catch (e) {
+        applyState({ status: "available", update });
+        toast.error(`Update failed: ${e}`);
+      }
+    } finally {
+      isInstallingRef.current = false;
     }
-  }, [state, selfUpdatable, applyState]);
+  }, [state, isSelfUpdatable, applyState]);
 
   const restartApp = useCallback(async () => {
     await relaunch();
   }, []);
 
+  // Timestamp of the last check (of any origin), used to throttle the focus
+  // trigger below. A ref, not state — it must not cause a render.
+  const lastCheckedAtRef = useRef(0);
+
   // Check on mount (silent) — scheduled to avoid synchronous setState in effect
   useEffect(() => {
-    const id = setTimeout(() => checkForAppUpdate(true), 0);
-    return () => clearTimeout(id);
+    const id = setTimeout(() => {
+      lastCheckedAtRef.current = Date.now();
+      void checkForAppUpdate(true);
+    }, 0);
+
+    // Kalpa is a desktop app people leave open for days at a stretch, and the
+    // mount check above only ever fires once per session — a long-lived
+    // window would otherwise never learn a new version shipped. Re-check
+    // periodically as a floor under that. Every 8 hours lands comfortably
+    // inside the 6-12h window CLAUDE.md's no-background-spam rule implies:
+    // frequent enough that a multi-day session still notices a release within
+    // the same day, infrequent enough that it reads as "occasional", not
+    // polling.
+    const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+    const intervalId = setInterval(() => {
+      lastCheckedAtRef.current = Date.now();
+      void checkForAppUpdate(true);
+    }, EIGHT_HOURS_MS);
+
+    // The moment a user tabs/alt-tabs back into a long-running window is the
+    // moment a fresh check is most useful — it's exactly when they'd notice
+    // (and act on) an update banner. But window focus fires on every
+    // alt-tab, so without a floor this would turn into exactly the
+    // background-spam the interval above tries to stay clear of: rapidly
+    // refocusing must not fire a check per focus. Skip if the last check
+    // (mount, interval, or a prior focus) was within the last 30 minutes —
+    // long enough that normal window-switching never re-triggers it, short
+    // enough that coming back after a lunch break does.
+    const FOCUS_THROTTLE_MS = 30 * 60 * 1000;
+    const onFocus = () => {
+      if (Date.now() - lastCheckedAtRef.current < FOCUS_THROTTLE_MS) return;
+      lastCheckedAtRef.current = Date.now();
+      void checkForAppUpdate(true);
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      clearTimeout(id);
+      clearInterval(intervalId);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [checkForAppUpdate]);
 
   return { state, checkForAppUpdate, downloadAndInstall, restartApp };

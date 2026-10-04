@@ -26,6 +26,7 @@ import { UploaderIntroCard } from "./components/uploader-intro-card";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { DependencyPickerDialog } from "./components/dependency-picker-dialog";
 import { getSetting, setSetting } from "@/lib/store";
+import { notifyUnmatchedAddons } from "@/lib/auto-link";
 import {
   addSkippedDependencies,
   getAskRequiredDependenciesOnly,
@@ -34,6 +35,8 @@ import {
   isDependencySkipped,
   setDependencyPolicy,
 } from "@/lib/dependency-policy";
+import type { ClientStack, EsoClientLocation } from "@/components/client-stack/types";
+import { reportDependencyFailures } from "@/lib/dependency-failure";
 import { DependencyPromptProvider, type ResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import {
   getTauriErrorMessage,
@@ -43,7 +46,7 @@ import {
 } from "@/lib/tauri";
 import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import { pruneSelection, reconcileSelectedAddon } from "@/lib/addon-selection";
-import { BatchUpdateLatch } from "@/lib/batch-update-latch";
+import { BatchUpdateLatch, refuseRemovalWhileBatchActive } from "@/lib/batch-update-latch";
 import {
   RemovalQueue,
   hideAddon,
@@ -58,9 +61,23 @@ import {
   type PendingRemovalGroup,
 } from "@/lib/removal-queue";
 import { isModKey, isWindows } from "@/lib/platform";
+import {
+  FEATURES,
+  findFeature,
+  sanitizeHiddenIds,
+  visibleToolbar,
+  type ActiveDialog,
+  type DialogId,
+  type FeatureId,
+} from "@/lib/features";
 import { nextTextZoomStop, setTextZoom } from "@/lib/text-zoom";
+import {
+  countUpdatesWithoutProtectedEditsBaseline,
+  shouldPublishProtectedEditsCoverage,
+} from "@/lib/protected-edits";
 import type {
   AddonManifest,
+  AutoLinkResult,
   AuthUser,
   BatchConflictAddon,
   BatchEnableResult,
@@ -69,6 +86,7 @@ import type {
   GameInstance,
   InstallResult,
   PendingDependency,
+  RemoveAddonResult,
   StreamingBatchResult,
   UpdateCheckResult,
   WriteAccessStatus,
@@ -77,26 +95,16 @@ import type {
   FilterMode,
   ViewMode,
   DiscoverTab,
+  AddonPhase,
 } from "./types";
 import type { LogPathDetection } from "@/types/uploader";
+
+const ACTIVE_BATCH_REMOVAL_MESSAGE =
+  "Wait for the current update batch to finish before removing addons.";
 
 const AddonDetail = lazy(() =>
   import("./components/addon-detail").then((m) => ({ default: m.AddonDetail }))
 );
-
-type ActiveDialog =
-  | "settings"
-  | "profiles"
-  | "packs"
-  | "backups"
-  | "api-compat"
-  | "characters"
-  | "saved-variables"
-  | "migration-wizard"
-  | "safety-center"
-  | "shortcuts"
-  | "log-upload"
-  | null;
 
 interface PendingDeepLinkPayload {
   packId: string | null;
@@ -106,8 +114,6 @@ interface PendingDeepLinkPayload {
   logUpload: boolean;
   packHub: boolean;
 }
-
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
 
 /**
  * Merge duplicate entries so the picker asks about each library once, listing
@@ -156,6 +162,12 @@ function App() {
   const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [minionDetected, setMinionDetected] = useState(false);
+  // Whether there is a graphics-mod stack worth a toolbar slot. Only decides
+  // WHERE the button lives (see `pinnedWhen` in features.ts); the panel itself
+  // is always reachable from Settings > Tools, so a false here — including a
+  // detect that simply failed — never hides the feature.
+  const [graphicsStackDetected, setGraphicsStackDetected] = useState(false);
   const [logUploaderMounted, setLogUploaderMounted] = useState(false);
   const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -187,6 +199,10 @@ function App() {
   const [authVerifying, setAuthVerifying] = useState(true);
   const [uploaderIntroDismissed, setUploaderIntroDismissed] = useState(true);
   const [uploaderIntroHasLog, setUploaderIntroHasLog] = useState(false);
+  // Which pinnable features the user has unpinned from the header toolbar.
+  // Surface-only: the feature stays registered, its shortcut and deep link
+  // still work, and it stays listed in Settings › Tools. See lib/features.ts.
+  const [toolbarHidden, setToolbarHidden] = useState<FeatureId[]>([]);
   const [deepLinkPackId, setDeepLinkPackId] = useState<string | null>(null);
   const [deepLinkShareCode, setDeepLinkShareCode] = useState<string | null>(null);
   const [rosterPackInstallId, setRosterPackInstallId] = useState<string | null>(null);
@@ -222,6 +238,7 @@ function App() {
   const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
+  const addonsRef = useRef<AddonManifest[]>([]);
   const viewModeRef = useRef<ViewMode>("installed");
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
@@ -254,8 +271,24 @@ function App() {
   const depPromptPathRef = useRef("");
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
+  const scanAddonsRef = useRef<
+    ((path: string, retryAfterStaleEpoch?: boolean) => Promise<void>) | null
+  >(null);
+  const checkForUpdatesRef = useRef<
+    | ((
+        path: string,
+        autoUpdate?: boolean,
+        notifyOnError?: boolean,
+        retryAfterStaleEpoch?: boolean
+      ) => Promise<void>)
+    | null
+  >(null);
   const activeDialogRef = useRef<ActiveDialog>(null);
   const setupInstancesRef = useRef<GameInstance[] | null>(null);
+  // Synchronous mirror of `toolbarHidden` for callbacks that must not become a
+  // dependency of `initializeApp` (which is guarded to run once per launch) —
+  // e.g. `refreshUploaderIntroDetection` and the deep-link listeners.
+  const toolbarHiddenRef = useRef<FeatureId[]>([]);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
   // events arrive faster than renders during Update All, and deriving the
   // progress counts inside the state updater would call a second setter from
@@ -274,6 +307,7 @@ function App() {
     batchLatchRef.current.syncRunning(updatingAll);
     activeDialogRef.current = activeDialog;
     setupInstancesRef.current = setupInstances;
+    toolbarHiddenRef.current = toolbarHidden;
   });
 
   useEffect(() => {
@@ -287,13 +321,33 @@ function App() {
     };
   }, []);
 
+  // Deep links (`kalpa://install-pack/{id}`, `kalpa://pack`, `kalpa://share`)
+  // are explicit user intent arriving from a browser and must always open
+  // their target, even when the user has unpinned that feature from the
+  // toolbar. `open` performs the site's existing state-setting behavior
+  // unchanged; this helper only adds a one-line toast so a window that didn't
+  // come from a toolbar click isn't confusing. Reads the hidden set through a
+  // ref rather than the `toolbarHidden` state closure so listeners registered
+  // once on mount still see the current preference.
+  //
+  // Returns whether it actually announced anything, so a caller handling a
+  // payload with several fields can keep the announcement to one toast.
+  const openDeepLinkFeature = useCallback((id: FeatureId, open: () => void): boolean => {
+    open();
+    if (!toolbarHiddenRef.current.includes(id)) return false;
+    const label = findFeature(id)?.label;
+    if (!label) return false;
+    toast.info(`${label} is in Settings › Tools — opened it for this link.`);
+    return true;
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     const cleanups: (() => void)[] = [];
 
     void listen<string>("deep-link-pack", (event) => {
       setDeepLinkPackId(event.payload);
-      setActiveDialog("packs");
+      openDeepLinkFeature("packs", () => setActiveDialog("packs"));
     })
       .then((unlisten) => {
         if (disposed) {
@@ -308,7 +362,11 @@ function App() {
 
     void listen<string>("roster-pack-install", (event) => {
       setRosterPackInstallId(event.payload);
-      setActiveDialog(null); // close packs dialog if open to avoid stacking
+      // Deliberately NOT routed through openDeepLinkFeature. RosterPackInstall
+      // is its own surface, not the Pack Hub dialog, so a "Pack Hub is in
+      // Settings › Tools" toast would be a lie: nothing was opened, and this
+      // line in fact CLOSES the packs dialog to avoid stacking.
+      setActiveDialog(null);
     })
       .then((unlisten) => {
         if (disposed) {
@@ -323,7 +381,7 @@ function App() {
 
     void listen<string>("deep-link-share", (event) => {
       setDeepLinkShareCode(event.payload);
-      setActiveDialog("packs");
+      openDeepLinkFeature("packs", () => setActiveDialog("packs"));
     })
       .then((unlisten) => {
         if (disposed) {
@@ -367,23 +425,47 @@ function App() {
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
+        // One payload can set SEVERAL of these fields at once — the native
+        // sidecar exports KALPA_START_PACK_HUB and KALPA_START_PACK_HUB_ID
+        // together, so `packHub` and `packId` both arrive — and each branch
+        // below opens its own target. Every branch must keep opening, but the
+        // "it's in Settings › Tools" note is about the payload, not the branch,
+        // so announce at most once per payload.
+        let announced = false;
+        const openOnce = (id: FeatureId, open: () => void) => {
+          if (announced) {
+            open();
+            return;
+          }
+          announced = openDeepLinkFeature(id, open);
+        };
+
         if (payload.appUpdate) {
           void checkForAppUpdateRef.current(false);
         }
         if (payload.logUpload) {
-          setActiveDialog("log-upload");
+          openOnce("log-upload", () => setActiveDialog("log-upload"));
         }
         if (payload.packHub) {
-          setActiveDialog("packs");
+          openOnce("packs", () => setActiveDialog("packs"));
         }
         if (payload.installPackId) {
-          setRosterPackInstallId(payload.installPackId);
+          const installPackId = payload.installPackId;
+          // Same as the roster-pack-install listener: this opens RosterPackInstall,
+          // not the Pack Hub dialog, so it gets no toast either.
+          setRosterPackInstallId(installPackId);
         } else if (payload.packId) {
-          setDeepLinkPackId(payload.packId);
-          setActiveDialog("packs");
+          const packId = payload.packId;
+          openOnce("packs", () => {
+            setDeepLinkPackId(packId);
+            setActiveDialog("packs");
+          });
         } else if (payload.shareCode) {
-          setDeepLinkShareCode(payload.shareCode);
-          setActiveDialog("packs");
+          const shareCode = payload.shareCode;
+          openOnce("packs", () => {
+            setDeepLinkShareCode(shareCode);
+            setActiveDialog("packs");
+          });
         }
       })
       .catch((invokeError) => {
@@ -409,10 +491,11 @@ function App() {
       disposed = true;
       for (const fn of cleanups) fn();
     };
-  }, []);
+  }, [openDeepLinkFeature]);
 
-  const scanAddons = useCallback(async (path: string) => {
+  const scanAddons = useCallback(async (path: string, retryAfterStaleEpoch = true) => {
     const seq = ++scanSeqRef.current;
+    const removalEpoch = pendingRemovalsRef.current.captureRemovalEpoch(path);
     setLoading(true);
     setError(null);
     setErrorShowSettings(false);
@@ -422,6 +505,15 @@ function App() {
         addonsPath: path,
       });
       if (seq !== scanSeqRef.current) return;
+      if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+        if (retryAfterStaleEpoch) {
+          // A successful removal invalidated this snapshot while it was in
+          // flight. Retry once so an explicit refresh still converges on the
+          // post-removal filesystem state instead of silently disappearing.
+          void scanAddonsRef.current?.(path, false);
+        }
+        return;
+      }
 
       // A queued removal has hidden its row but has not deleted the folder yet,
       // so a rescan inside the 3s undo window reads it straight back off disk.
@@ -429,6 +521,7 @@ function App() {
       // succeeds — the list shows an addon that no longer exists.
       const visible = hidePendingRemovals(result, pendingRemovalsRef.current, path);
 
+      addonsRef.current = visible;
       setAddons(visible);
       if (selectedAddonRef.current) {
         setSelectedAddon(reconcileSelectedAddon(selectedAddonRef.current, visible));
@@ -439,6 +532,7 @@ function App() {
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
+      addonsRef.current = [];
       setAddons([]);
       setSelectedFolders(new Set());
     } finally {
@@ -449,8 +543,14 @@ function App() {
   }, []);
 
   const checkForUpdates = useCallback(
-    async (path: string, autoUpdate = false, notifyOnError = false) => {
+    async (
+      path: string,
+      autoUpdate = false,
+      notifyOnError = false,
+      retryAfterStaleEpoch = true
+    ) => {
       const seq = ++checkSeqRef.current;
+      const removalEpoch = pendingRemovalsRef.current.captureRemovalEpoch(path);
       // Deliberately does NOT clear updatingAll/updateProgress: those belong to
       // the batch path that set them, and a refresh landing mid-Update-All would
       // otherwise hide the progress UI and unlatch the batch re-entry guard.
@@ -460,6 +560,15 @@ function App() {
           addonsPath: path,
         });
         if (seq !== checkSeqRef.current) return;
+        if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+          if (retryAfterStaleEpoch) {
+            // The check's result was observed before a successful removal.
+            // Retry once so the update list is refreshed against the current
+            // filesystem state rather than leaving the refresh incomplete.
+            void checkForUpdatesRef.current?.(path, autoUpdate, notifyOnError, false);
+          }
+          return;
+        }
 
         // Same masking as the scan: an addon inside its undo window is still on
         // disk, so the check still reports it. Its update row must not outlive
@@ -522,6 +631,11 @@ function App() {
     [srAnnounce]
   );
 
+  useEffect(() => {
+    scanAddonsRef.current = scanAddons;
+    checkForUpdatesRef.current = checkForUpdates;
+  }, [checkForUpdates, scanAddons]);
+
   const scanAndCheck = useCallback(
     async (path: string, notifyOnUpdateError = false) => {
       await scanAddons(path);
@@ -535,12 +649,9 @@ function App() {
       if (autoLinkRan.current) return;
       autoLinkRan.current = true;
 
-      const result = await invokeResult<{ linked: string[]; notFound: string[] }>(
-        "auto_link_addons",
-        {
-          addonsPath: path,
-        }
-      );
+      const result = await invokeResult<AutoLinkResult>("auto_link_addons", {
+        addonsPath: path,
+      });
 
       if (!result.ok) {
         toast.error(`Auto-link failed: ${result.error}`);
@@ -553,11 +664,23 @@ function App() {
         );
         await scanAddons(path);
       }
+
+      await notifyUnmatchedAddons(path, result.data.notFound);
     },
     [scanAddons]
   );
 
   const refreshUploaderIntroDetection = useCallback(async () => {
+    // Unpinning the uploader from the toolbar hides its intro card, so there is
+    // no reason to pay for a filesystem probe on every launch/path-change.
+    // Read via the ref (not the `toolbarHidden` state) so this stable
+    // useCallback — also invoked from `initializeApp` — always sees the
+    // current preference instead of the value from whenever it was created.
+    if (toolbarHiddenRef.current.includes("log-upload")) {
+      setUploaderIntroHasLog(false);
+      return;
+    }
+
     const dismissed = await getSetting<boolean>("uploaderIntroDismissed", false);
     setUploaderIntroDismissed(dismissed === true);
     if (dismissed) {
@@ -623,15 +746,59 @@ function App() {
         .finally(() => setAuthVerifying(false));
     }
 
+    // Fire-and-forget: this used to run every time Settings opened, but it
+    // only needs to run once at startup. On error, leave it false.
+    void invokeResult<boolean>("detect_minion").then((result) => {
+      if (result.ok) {
+        setMinionDetected(result.data);
+      }
+    });
+
+    // Same shape, same reason: once at startup, never polled. Kalpa's stack
+    // rules forbid background scraping, and this only decides whether a header
+    // button appears — it is not worth a watcher. `detect_eso_clients` returns
+    // every install it finds; the first is what the panel opens on by default,
+    // so it is the one the toolbar slot would be for.
+    void invokeResult<EsoClientLocation[]>("detect_eso_clients").then(async (result) => {
+      // `ok` does not imply data. `invokeResult` reports success for a command
+      // that resolves to null, which is what an unstubbed command returns under
+      // test — and what a backend that finds nothing may return in production.
+      if (!result.ok || !result.data || result.data.length === 0) return;
+      const first = result.data[0];
+      if (!first) return;
+      const stack = await invokeResult<ClientStack>("inspect_client_stack", {
+        clientDir: first.client_dir,
+      });
+      // Same guard, same reason as the one seven lines up — this one was
+      // missed. `stack.data` is typed non-nullable, so TypeScript says nothing,
+      // and a null resolution would throw inside this un-`catch`ed async
+      // `.then`: an unhandled rejection whose only visible symptom is a toolbar
+      // slot that silently never appears.
+      if (stack.ok && stack.data) {
+        setGraphicsStackDetected(!stack.data.is_empty);
+      }
+    });
+
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
-    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed] = await Promise.all([
-      getSetting<string>("sortMode", "name"),
-      getSetting<string>("filterMode", "all"),
-      getSetting<string>("addonsPath", ""),
-      getSetting<boolean>("autoUpdate", false),
-      getSetting<boolean>("uploaderIntroDismissed", false),
-    ]);
+    const [savedSort, savedFilter, storedPath, autoUpdate, introDismissed, savedToolbarHidden] =
+      await Promise.all([
+        getSetting<string>("sortMode", "name"),
+        getSetting<string>("filterMode", "all"),
+        getSetting<string>("addonsPath", ""),
+        getSetting<boolean>("autoUpdate", false),
+        getSetting<boolean>("uploaderIntroDismissed", false),
+        // Typed `unknown`, not `FeatureId[]`: settings.json is user-editable and
+        // may contain anything, so sanitizeHiddenIds narrows it below.
+        getSetting<unknown>("toolbarHidden", []),
+      ]);
+    const sanitizedToolbarHidden = sanitizeHiddenIds(savedToolbarHidden);
+    // Write the mirror synchronously, not via the passive ref-sync effect: the
+    // `refreshUploaderIntroDetection()` calls further down read
+    // `toolbarHiddenRef.current`, and whether a commit has landed by then would
+    // otherwise be a race between React scheduling and IPC latency.
+    toolbarHiddenRef.current = sanitizedToolbarHidden;
+    setToolbarHidden(sanitizedToolbarHidden);
 
     // A debug build started with KALPA_ADDONS_DIR runs against a throwaway
     // AddOns folder instead of the real ESO install, which is what lets the e2e
@@ -669,8 +836,16 @@ function App() {
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
         void refreshUploaderIntroDetection();
         // Scan (disk) and update check (metadata + network) touch different
-        // state and locks, so run them concurrently instead of in series.
-        await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, autoUpdate, false)]);
+        // state and locks, so run them concurrently unless auto-update needs
+        // scan-derived Protected Edits coverage first.
+        if (autoUpdate) {
+          // Auto-update needs the scan's Protected Edits coverage before it may
+          // disclose risk and begin mutation.
+          await scanAddons(savedPath);
+          await checkForUpdates(savedPath, true, false);
+        } else {
+          await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, false, false)]);
+        }
         void runAutoLink(savedPath);
         // Populate knownInstances so the Settings instance switcher works for
         // returning users. Fire-and-forget — does not block startup.
@@ -713,8 +888,13 @@ function App() {
           // Best-effort persist: this is auto-detection, so if the write fails it
           // self-heals — the same instance is re-detected and re-selected next launch.
           void setSetting("addonsPath", path);
-          // Scan and update check are independent — run concurrently.
-          await Promise.all([scanAddons(path), checkForUpdates(path, autoUpdate, false)]);
+          if (autoUpdate) {
+            await scanAddons(path);
+            await checkForUpdates(path, true, false);
+          } else {
+            // No mutation follows, so the disk scan and network check may overlap.
+            await Promise.all([scanAddons(path), checkForUpdates(path, false, false)]);
+          }
           void runAutoLink(path);
         } catch (initError) {
           setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
@@ -754,7 +934,12 @@ function App() {
         }
         if (activeDialogRef.current !== null || setupInstancesRef.current !== null) return;
         event.preventDefault();
-        setActiveDialog("shortcuts");
+        const shortcutFeature = FEATURES.find(
+          (f) => f.shortcut?.key === "?" && f.shortcut.mod === false
+        );
+        if (shortcutFeature) {
+          setActiveDialog(shortcutFeature.id);
+        }
       }
 
       if (isModKey(event) && key === "r") {
@@ -881,8 +1066,16 @@ function App() {
   // keep dependents' "N missing" badges correct. Returns false in the common
   // case (toggling a non-dependency addon), preserving the no-rescan perf win.
   const togglingAffectsDependencies = useCallback(
-    (toggledFolders: Set<string>) =>
-      addons.some((addon) => addon.dependsOn.some((dep) => toggledFolders.has(dep.name))),
+    (toggledFolders: Set<string>) => {
+      // ESO resolves addon names case-insensitively (normalize_addon_name in
+      // commands.rs is the backend twin), so the manifest's DependsOn token
+      // and the on-disk folder casing may differ; compare both lowercased or
+      // a cased mismatch skips the rescan and leaves dependents' badges stale.
+      const toggled = new Set([...toggledFolders].map((folder) => folder.trim().toLowerCase()));
+      return addons.some((addon) =>
+        addon.dependsOn.some((dep) => toggled.has(dep.name.trim().toLowerCase()))
+      );
+    },
     [addons]
   );
 
@@ -945,9 +1138,10 @@ function App() {
   const handleOpenFolder = useCallback(
     async (folderName: string) => {
       try {
-        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
         const { join } = await import("@tauri-apps/api/path");
-        await revealItemInDir(await join(addonsPath, folderName));
+        await invokeOrThrow("reveal_allowed_path", {
+          path: await join(addonsPath, folderName),
+        });
       } catch (e) {
         toast.error(`Could not open folder: ${getTauriErrorMessage(e)}`);
       }
@@ -1090,45 +1284,27 @@ function App() {
     [presentDependencyBatch]
   );
 
-  const handleSingleUpdate = useCallback(
-    async (folderName: string) => {
-      const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
-      if (!ur) return;
-      if (!(await ensureEsoNotBlocking())) return;
-      try {
-        const result = await invokeOrThrow<InstallResult>("update_addon", {
-          addonsPath,
-          esouiId: ur.esouiId,
-          // Record the version the update CHECK compared against (the filelist
-          // string), not the one the filedetails endpoint reports. When the two
-          // sources disagree the addon otherwise stays permanently "outdated".
-          apiVersion: ur.remoteVersion,
-          dependencyPolicy: await getDependencyPolicy(),
-        });
-        toast.success(`Updated ${folderName}`);
-        srAnnounce(`Updated ${folderName}`);
-        handleAddonUpdated(ur.esouiId);
-        // Empty unless the policy is "ask"; the picker owns the rest. Pass the
-        // same folder this update wrote to, not the live one — the user may
-        // have switched instances while it ran.
-        void resolvePendingDeps(result.pendingDeps, addonsPath);
-      } catch (e) {
-        toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
-      }
-    },
-    [
-      addonsPath,
-      updateResults,
-      srAnnounce,
-      handleAddonUpdated,
-      ensureEsoNotBlocking,
-      resolvePendingDeps,
-    ]
-  );
+  const handleSingleUpdate = useCallback((folderName: string) => {
+    const addon = addonsRef.current.find((candidate) => candidate.folderName === folderName);
+    if (!addon) return;
+    // Route the shortcut through AddonDetail's fresh conflict preflight. The
+    // legacy command snapshots disk only after extraction and cannot safely
+    // infer a migrated addon's pre-existing edits.
+    setSelectedAddon(addon);
+  }, []);
 
   // The optimistic-removal queue. Its group-timer and per-entry AddOns-folder
   // rules live in `lib/removal-queue.ts` so they can be tested without the app.
   const pendingRemovalsRef = useRef(new RemovalQueue());
+
+  // The latch is promoted before React can paint `updatingAll`, so it is the
+  // authority for imperative/stale callbacks as well as the visible controls.
+  const refuseRemovalDuringActiveBatch = useCallback(() => {
+    return refuseRemovalWhileBatchActive(batchLatchRef.current, () => {
+      toast.info(ACTIVE_BATCH_REMOVAL_MESSAGE);
+      srAnnounce(ACTIVE_BATCH_REMOVAL_MESSAGE);
+    });
+  }, [srAnnounce]);
 
   // Bumped the moment `handlePathChange` decides a switch is happening, which is
   // BEFORE it awaits `flushPendingRemovals()` and long before it syncs
@@ -1157,11 +1333,17 @@ function App() {
     await Promise.all(
       entries.map(async (entry) => {
         try {
-          const result = await invokeResult("remove_addon", {
+          const result = await invokeResult<RemoveAddonResult>("remove_addon", {
             addonsPath: entry.addonsPath,
             folderName: entry.addon.folderName,
           });
-          if (result.ok) return;
+          if (result.ok) {
+            pendingRemovalsRef.current.recordSuccessfulRemoval(entry.addonsPath);
+            if (result.data.cleanupWarning) {
+              toast.warning(`Removed with cleanup warning: ${result.data.cleanupWarning}`);
+            }
+            return;
+          }
           toast.error(`Remove failed: ${result.error}`);
           // Only restore into the view the addon belongs to — after an instance
           // switch the row would reappear in a folder that never had it.
@@ -1183,6 +1365,7 @@ function App() {
 
   const handleSingleRemove = useCallback(
     (folderName: string) => {
+      if (refuseRemovalDuringActiveBatch()) return;
       const addon = addons.find((a) => a.folderName === folderName);
       if (!addon) return;
       const updateResult = updateResults.find((r) => r.folderName === folderName) ?? null;
@@ -1209,7 +1392,16 @@ function App() {
         // returns, and a scan landing in that gap would restore a row nothing
         // hides again once the delete succeeds.
         pendingRemovalsRef.current.beginCommit(folderName, queuedPath);
-        void invokeOrThrow("remove_addon", { addonsPath: queuedPath, folderName })
+        void invokeOrThrow<RemoveAddonResult>("remove_addon", {
+          addonsPath: queuedPath,
+          folderName,
+        })
+          .then((result) => {
+            pendingRemovalsRef.current.recordSuccessfulRemoval(queuedPath);
+            if (result.cleanupWarning) {
+              toast.warning(`Removed with cleanup warning: ${result.cleanupWarning}`);
+            }
+          })
           .catch((e) => {
             toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
             if (entry && sameAddonsFolder(queuedPath, addonsPathRef.current)) {
@@ -1241,7 +1433,14 @@ function App() {
       });
       srAnnounce(`Removed ${addon.title}. Press undo to restore.`);
     },
-    [addons, addonsPath, updateResults, srAnnounce, restorePendingRemoval]
+    [
+      addons,
+      addonsPath,
+      updateResults,
+      srAnnounce,
+      restorePendingRemoval,
+      refuseRemovalDuringActiveBatch,
+    ]
   );
 
   const handleRemoveByEsouiId = useCallback(
@@ -1365,7 +1564,11 @@ function App() {
   const installedEsouiIds = useMemo(() => {
     const ids = new Set<number>();
     for (const addon of addons) {
-      if (addon.esouiId != null) ids.add(addon.esouiId);
+      // `> 0`, not just non-null: `record_installed_folders` stamps every
+      // SECONDARY folder of a multi-folder addon with esoui_id 0, so a bare
+      // null check seeds the set with 0 and makes `has(0)` true for every
+      // consumer — Packs and Discover both read this set.
+      if (addon.esouiId != null && addon.esouiId > 0) ids.add(addon.esouiId);
     }
     return ids;
   }, [addons]);
@@ -1374,14 +1577,19 @@ function App() {
   // banner's "Choose" checklist reads like the addon list rather than raw
   // folder names.
   const bannerUpdates = useMemo<BannerUpdate[]>(() => {
-    const titleByFolder = new Map(addons.map((a) => [a.folderName, a.title] as const));
+    const addonByFolder = new Map(addons.map((addon) => [addon.folderName, addon] as const));
     return updatesAvailable
-      .map((u) => ({
-        folderName: u.folderName,
-        title: titleByFolder.get(u.folderName) ?? u.folderName,
-        currentVersion: u.currentVersion,
-        remoteVersion: u.remoteVersion,
-      }))
+      .map((u) => {
+        const addon = addonByFolder.get(u.folderName);
+        return {
+          folderName: u.folderName,
+          title: addon?.title ?? u.folderName,
+          currentVersion: u.currentVersion,
+          remoteVersion: u.remoteVersion,
+          esouiId: u.esouiId,
+          hasProtectedEditsBaseline: addon?.hasProtectedEditsBaseline === true,
+        };
+      })
       .sort((a, b) => a.title.localeCompare(b.title));
   }, [updatesAvailable, addons]);
 
@@ -1402,6 +1610,47 @@ function App() {
       // guard takes over below.
       const latch = batchLatchRef.current;
       if (!latch.tryEnterPreflight()) return;
+
+      // Refresh coverage at action time: a hash manifest may have been removed
+      // or corrupted since the update banner's last installed-addon scan.
+      const removalEpoch = pendingRemovalsRef.current.captureRemovalEpoch(path);
+      const coverage = await invokeResult<AddonManifest[]>("scan_installed_addons", {
+        addonsPath: path,
+      });
+      if (
+        !shouldPublishProtectedEditsCoverage(
+          switchGen,
+          pathSwitchGenRef.current,
+          sameAddonsFolder(path, addonsPathRef.current)
+        )
+      ) {
+        latch.abortPreflight();
+        toast.info("AddOns folder changed — the update was not started.");
+        return;
+      }
+      if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+        latch.abortPreflight();
+        toast.info("Installed addons changed — refresh updates and try again.");
+        return;
+      }
+      const currentAddons = coverage.ok
+        ? hidePendingRemovals(coverage.data, pendingRemovalsRef.current, path)
+        : [];
+      if (coverage.ok) {
+        addonsRef.current = currentAddons;
+        setAddons(currentAddons);
+      }
+
+      const unavailableCount = countUpdatesWithoutProtectedEditsBaseline(updates, currentAddons);
+      if (unavailableCount > 0) {
+        toast.warning(
+          `Protected Edits unavailable for ${unavailableCount} addon${unavailableCount === 1 ? "" : "s"}.`,
+          {
+            description:
+              "No trusted file baseline exists, so Kalpa cannot detect which files you changed. Updating may overwrite those edits.",
+          }
+        );
+      }
 
       if (!(await ensureEsoNotBlocking())) {
         latch.abortPreflight();
@@ -1477,6 +1726,19 @@ function App() {
         return;
       }
 
+      // A removal that was queued before this preflight can finish while the
+      // ESO/write-access/settings awaits are in flight. At that point its queue
+      // mask is gone, so re-masking alone cannot distinguish the deleted addon
+      // from a live update row captured at entry. The epoch is the durable part
+      // of that handoff: abort instead of extracting into a folder that was
+      // successfully removed during the preflight.
+      if (!pendingRemovalsRef.current.isRemovalEpochCurrent(path, removalEpoch)) {
+        setUpdatingAll(false);
+        setUpdateProgress(null);
+        toast.info("Installed addons changed — refresh updates and try again.");
+        return;
+      }
+
       // `updates` was captured before the preamble above, and the preamble can
       // await an ESO-running prompt that waits on the user indefinitely plus
       // three IPC round trips. The list is masked against the removal queue
@@ -1486,14 +1748,9 @@ function App() {
       // and raises dependency prompts for an addon the user just removed. So
       // re-mask here, where nothing awaits between the check and the call.
       //
-      // This closes the window up to the invoke, NOT the batch itself: removal
-      // stays enabled while `updatingAll` is true, so an addon can still be
-      // queued for removal mid-batch and Undo will then restore its pre-update
-      // manifest and update row, showing a freshly-updated addon as outdated
-      // until the next scan. That behaviour predates this module (main restores
-      // the same update row on undo) and closing it properly means deciding
-      // whether removal should be refused or deferred while a batch runs, which
-      // is a UX call rather than a bug fix. Tracked as a follow-up on the PR.
+      // This closes the preflight window up to the invoke. Once the latch is
+      // running, every removal handler refuses new queue entries until the
+      // batch ends, so Undo cannot restore a pre-update manifest or update row.
       const live = hidePendingRemovals(updates, pendingRemovalsRef.current, path);
       if (live.length === 0) {
         setUpdatingAll(false);
@@ -1528,6 +1785,8 @@ function App() {
         srAnnounce("Batch update failed");
         return;
       }
+
+      reportDependencyFailures(batch.data.failedDeps);
 
       const { completed, failed, errors: batchErrors, conflicts: remainingConflicts } = batch.data;
 
@@ -1728,6 +1987,7 @@ function App() {
   }, []);
 
   const handleBatchRemove = useCallback(() => {
+    if (refuseRemovalDuringActiveBatch()) return;
     if (selectedFolders.size === 0) return;
 
     const removedAddons = addons.filter((a) => selectedFolders.has(a.folderName));
@@ -1770,9 +2030,20 @@ function App() {
         folderNames: entries.map((entry) => entry.addon.folderName),
       })
         .then((result) => {
+          const failedSet = new Set(result.failed);
+          if (entries.some((entry) => !failedSet.has(entry.addon.folderName))) {
+            pendingRemovalsRef.current.recordSuccessfulRemoval(queuedPath);
+          }
+          const cleanupWarnings = Object.entries(result.cleanupWarnings);
+          if (cleanupWarnings.length > 0) {
+            toast.warning(
+              `Removed ${cleanupWarnings.length} addon(s) with cleanup warnings: ${cleanupWarnings
+                .map(([name, warning]) => `${name}: ${warning}`)
+                .join("; ")}`
+            );
+          }
           if (result.failed.length > 0) {
             // Restore only the addons that failed to remove
-            const failedSet = new Set(result.failed);
             const details = result.failed
               .map((name) => `${name}: ${result.errors[name] ?? "unknown error"}`)
               .join("; ");
@@ -1820,7 +2091,15 @@ function App() {
       duration: 3000,
     });
     srAnnounce(`Removed ${count} addon${count !== 1 ? "s" : ""}. Press undo to restore.`);
-  }, [addons, addonsPath, selectedFolders, updateResults, srAnnounce, restorePendingRemoval]);
+  }, [
+    addons,
+    addonsPath,
+    selectedFolders,
+    updateResults,
+    srAnnounce,
+    restorePendingRemoval,
+    refuseRemovalDuringActiveBatch,
+  ]);
 
   const handleBatchUpdate = useCallback(async () => {
     const toUpdate = updatesAvailable.filter((update) => selectedFolders.has(update.folderName));
@@ -1976,8 +2255,52 @@ function App() {
   );
 
   const batchMode = selectedFolders.size > 0 && viewMode === "installed";
+  // The hidden set is part of the condition, not just an input to the detection
+  // pass: unpinning the uploader has to hide its intro card on the spot, and
+  // re-pinning has to bring it back (see `handleToolbarHiddenChange`, which
+  // re-runs detection on that transition).
   const showUploaderIntro =
-    uploaderIntroHasLog && authUser === null && !uploaderIntroDismissed && !authVerifying;
+    uploaderIntroHasLog &&
+    authUser === null &&
+    !uploaderIntroDismissed &&
+    !authVerifying &&
+    !toolbarHidden.includes("log-upload");
+
+  const featureCtx = useMemo(
+    () => ({ minionDetected, graphicsStackDetected }),
+    [minionDetected, graphicsStackDetected]
+  );
+  const toolbarFeatures = useMemo(
+    () => visibleToolbar(FEATURES, toolbarHidden, featureCtx),
+    [toolbarHidden, featureCtx]
+  );
+  /**
+   * Single owner of the toolbar preference: state, persistence, and the
+   * synchronous `toolbarHiddenRef` mirror all move here, together.
+   *
+   * Takes an UPDATER, not a value. Callers (the Appearance tab) toggle one
+   * feature at a time, and its log-uploader row awaits a Tauri live-session
+   * check first — long enough for a second toggle to land in between. Computing
+   * the next array from a value the caller captured before its await would
+   * silently discard whatever happened during it; deriving it from the mirror
+   * here cannot go stale, because the mirror is written before this returns.
+   */
+  const handleToolbarHiddenChange = useCallback(
+    (update: (prev: FeatureId[]) => FeatureId[]) => {
+      const previous = toolbarHiddenRef.current;
+      const next = update(previous);
+      toolbarHiddenRef.current = next;
+      setToolbarHidden(next);
+      void setSetting("toolbarHidden", next);
+      // Re-pinning the uploader restores its intro card without a relaunch. The
+      // detection pass is skipped while the feature is hidden, so the "has a
+      // log" flag it feeds is stale (false) until it runs again.
+      if (previous.includes("log-upload") && !next.includes("log-upload")) {
+        void refreshUploaderIntroDetection();
+      }
+    },
+    [refreshUploaderIntroDetection]
+  );
 
   const dismissUploaderIntro = useCallback(() => {
     setUploaderIntroDismissed(true);
@@ -1998,10 +2321,36 @@ function App() {
     [dismissUploaderIntro, srAnnounce]
   );
 
-  const handleOpenDialog = useCallback((dialog: Exclude<ActiveDialog, null>) => {
+  // Deliberately does NOT dismiss the uploader intro. This is the generic
+  // "open a dialog" path, used by AppDialogs' onShowDialog — which covers
+  // Settings > Account's "Upload a log" and UploaderWorkspace's own onOpen.
+  // Neither of those dismissed the intro before the registry refactor, and
+  // dismissal is persisted to settings.json, so folding it in here would
+  // silently retire the intro card for good from surfaces that never did that.
+  const handleOpenDialog = useCallback((dialog: DialogId) => {
     if (dialog === "log-upload") setLogUploaderMounted(true);
     setActiveDialog(dialog);
   }, []);
+
+  // The toolbar/AccountChip/intro-card path. Opening the uploader from one of
+  // these IS the deliberate act the intro card was asking for, so it retires
+  // the card — matching the pre-refactor handleOpenLogUpload.
+  const handleOpenFeature = useCallback(
+    (feature: FeatureId) => {
+      if (feature === "log-upload") dismissUploaderIntro();
+      handleOpenDialog(feature);
+    },
+    [dismissUploaderIntro, handleOpenDialog]
+  );
+
+  const handleOpenSettingsDialog = useCallback(
+    () => handleOpenDialog("settings"),
+    [handleOpenDialog]
+  );
+  const handleOpenLogUploadDialog = useCallback(
+    () => handleOpenFeature("log-upload"),
+    [handleOpenFeature]
+  );
 
   const handleCloseDialog = useCallback(() => {
     setActiveDialog(null);
@@ -2020,15 +2369,10 @@ function App() {
   );
   const handleBatchRemoveClick = useCallback(() => void handleBatchRemove(), [handleBatchRemove]);
   const handleBatchUpdateClick = useCallback(() => void handleBatchUpdate(), [handleBatchUpdate]);
-  const handleOpenPacks = useCallback(() => setActiveDialog("packs"), []);
-  const handleOpenProfiles = useCallback(() => setActiveDialog("profiles"), []);
-  const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
-  const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
-  const handleOpenLogUpload = useCallback(() => {
-    dismissUploaderIntro();
-    setLogUploaderMounted(true);
-    setActiveDialog("log-upload");
-  }, [dismissUploaderIntro]);
+  const handleOpenSupportDialog = useCallback(
+    () => handleOpenDialog("support"),
+    [handleOpenDialog]
+  );
   const handleUpdateAddonClick = useCallback(
     (folderName: string) => void handleSingleUpdate(folderName),
     [handleSingleUpdate]
@@ -2293,11 +2637,10 @@ function App() {
             onBatchRemove={handleBatchRemoveClick}
             onBatchTag={handleBatchTag}
             onBatchUpdate={handleBatchUpdateClick}
-            onOpenPacks={handleOpenPacks}
-            onOpenProfiles={handleOpenProfiles}
-            onOpenSavedVars={handleOpenSavedVars}
-            onOpenSettings={handleOpenSettings}
-            onOpenLogUpload={handleOpenLogUpload}
+            toolbarFeatures={toolbarFeatures}
+            onOpenFeature={handleOpenFeature}
+            onOpenSettings={handleOpenSettingsDialog}
+            onOpenSupport={handleOpenSupportDialog}
             onAuthChange={handleAuthChange}
             onRefresh={handleRefresh}
           />
@@ -2308,7 +2651,7 @@ function App() {
             appUpdateState={appUpdateState}
             onDownload={downloadAndInstall}
             onRestart={restartApp}
-            onOpenSettings={errorShowSettings ? handleOpenSettings : undefined}
+            onOpenSettings={errorShowSettings ? handleOpenSettingsDialog : undefined}
           />
 
           <UpdateBanner
@@ -2324,7 +2667,7 @@ function App() {
 
           {showUploaderIntro && (
             <UploaderIntroCard
-              onOpenLogUpload={handleOpenLogUpload}
+              onOpenLogUpload={handleOpenLogUploadDialog}
               onDismiss={dismissUploaderIntro}
             />
           )}
@@ -2367,6 +2710,7 @@ function App() {
               isOffline={isOffline}
               onUpdateAddon={handleUpdateAddonClick}
               onRemoveAddon={handleRemoveAddonClick}
+              removalBlockedReason={updatingAll ? ACTIVE_BATCH_REMOVAL_MESSAGE : undefined}
               onToggleDisable={handleToggleDisable}
               onOpenFolder={handleOpenFolderClick}
               onToggleFavorite={handleTagsChange}
@@ -2388,6 +2732,7 @@ function App() {
                   addonsPath={addonsPath}
                   onRefresh={handleRefresh}
                   onRemoveAddon={handleSingleRemove}
+                  removalBlockedReason={updatingAll ? ACTIVE_BATCH_REMOVAL_MESSAGE : undefined}
                   onToggleDisable={handleToggleDisable}
                   updateResult={selectedUpdateResult}
                   onAddonUpdated={handleAddonUpdated}
@@ -2406,6 +2751,7 @@ function App() {
                 addonsPath={addonsPath}
                 onInstalled={handleRefresh}
                 onRemoveByEsouiId={handleRemoveByEsouiId}
+                removalBlockedReason={updatingAll ? ACTIVE_BATCH_REMOVAL_MESSAGE : undefined}
                 installedEsouiIds={installedEsouiIds}
                 isOffline={isOffline}
               />
@@ -2431,7 +2777,12 @@ function App() {
             deepLinkPackId={deepLinkPackId}
             deepLinkShareCode={deepLinkShareCode}
             knownInstances={knownInstances}
+            checkingUpdates={checkingUpdates}
+            isOffline={isOffline}
+            lastError={error}
             logUploaderMounted={logUploaderMounted}
+            graphicsStackDetected={graphicsStackDetected}
+            minionDetected={minionDetected}
             onAuthChange={handleAuthChange}
             onCheckForAppUpdate={handleCheckForAppUpdateClick}
             onCloseDialog={handleCloseDialog}
@@ -2439,6 +2790,9 @@ function App() {
             onPathChange={handlePathChangeClick}
             onRefresh={handleRefresh}
             onShowDialog={handleOpenDialog}
+            updateResults={updateResults}
+            toolbarHidden={toolbarHidden}
+            onToolbarHiddenChange={handleToolbarHiddenChange}
           />
 
           <EsoRunningDialog

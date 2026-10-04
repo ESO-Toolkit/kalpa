@@ -366,6 +366,9 @@ export function AccountChip({
         <div className="border-t border-structure-06" />
 
         <div className="grid gap-1.5">
+          {/* Always offered, pinned or not: this popover is already an
+              explicit ESO Logs surface the user opened, so it is the obvious
+              second door to the uploader rather than header clutter. */}
           <Button type="button" variant="outline" size="sm" onClick={onOpenLogUpload}>
             <CloudUpload className="size-3.5" />
             Upload a log

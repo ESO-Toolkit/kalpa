@@ -1,10 +1,12 @@
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   CDP_ENDPOINT,
   CDP_PAGES_URL,
-  assertNoExistingCdp,
+  CDP_VERSION_URL,
   assertNoExistingKalpaProcess,
   httpJson,
   killProcessTree,
@@ -19,13 +21,18 @@ const binaryPath = path.join(repoRoot, "src-tauri", "target", "debug", "kalpa.ex
 const tauriCli = path.join(repoRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
 const playwrightCli = path.join(repoRoot, "node_modules", "@playwright", "test", "cli.js");
 const TAG = "packaged";
+const execFileAsync = promisify(execFile);
+// Derived from CDP_ENDPOINT rather than written out again: netstat matches on
+// the bare number, and a second literal 9222 here would silently stop matching
+// the day the harness moves the port.
+const CDP_PORT = Number(new URL(CDP_ENDPOINT).port);
 
 async function main() {
   if (process.platform !== "win32") {
     throw new Error("The packaged build gate is Windows-only because it verifies WebView2 CDP.");
   }
 
-  await assertNoExistingCdp();
+  await assertNoForeignCdpListener();
   await assertNoExistingKalpaProcess();
   await run(process.execPath, [tauriCli, "build", "--debug", "--no-bundle"], "tauri build", {
     cwd: repoRoot,
@@ -49,6 +56,141 @@ async function main() {
     if (child?.pid) {
       await killProcessTree(child.pid, TAG);
     }
+  }
+}
+
+/**
+ * Refuse to start when something already owns the CDP port, and say WHO owns it.
+ *
+ * Detection is unchanged from the harness's assertNoExistingCdp() -- one probe
+ * of /json/version, and any answer at all is disqualifying. Only the message
+ * is different, and that is the whole point: "Stop tauri dev or any existing
+ * debug Kalpa process first" names no process, and during the beta.23 release
+ * that cost hours. A sibling worktree's dev instance held 9222 and the gate
+ * gave the maintainer nothing to look for on a machine where several checkouts
+ * each run their own app.
+ *
+ * Still fail-closed, deliberately. Attaching to a foreign listener would drive
+ * whatever app is on the other end -- someone else's build, pointed at
+ * whatever AddOns folder THEIR worktree configured -- and report green for
+ * code this gate never loaded. A blocked release is cheaper than a gate that
+ * lies about one.
+ *
+ * The owner is reported as a chain because the process holding the port is
+ * almost never the one anyone recognises: WebView2 binds it from
+ * msedgewebview2.exe, and the thing that has to be closed is its parent.
+ */
+async function assertNoForeignCdpListener() {
+  let version = null;
+  try {
+    version = await httpJson(CDP_VERSION_URL, 1_000);
+  } catch {
+    return;
+  }
+
+  const owners = await describeCdpPortOwners();
+  const browser = typeof version?.Browser === "string" ? version.Browser : "";
+
+  throw new Error(
+    [
+      `${CDP_ENDPOINT} is already answering, so port ${CDP_PORT} was taken before this gate launched anything.`,
+      owners.length
+        ? `Holding it: ${owners.join("; ")}.`
+        : `Could not identify the owner: netstat reported no LISTENING line for port ${CDP_PORT}, or the process belongs to another user. Check by hand with: netstat -ano | findstr :${CDP_PORT}`,
+      browser ? `The listener identifies itself as ${browser}.` : "",
+      "Close it and re-run. It is a `npm run tauri dev`, another `npm run test:packaged`, or a leftover debug Kalpa -- most often from a different worktree on this machine.",
+      "This gate will not attach to a listener it did not launch, because a pass against someone else's app would say nothing about this build.",
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+}
+
+/**
+ * PID, image name and executable path for whatever is LISTENING on the CDP
+ * port, plus the process that spawned it.
+ *
+ * Every lookup degrades to a shorter answer instead of throwing. This only
+ * ever runs while assembling an error message, and letting a secondary failure
+ * ("powershell is not recognized") replace the real one is how a diagnostic
+ * turns back into the terse message it was meant to replace.
+ *
+ * The parent is a hint, not proof: Windows recycles PIDs, so a listener
+ * whose real parent has already exited can be attributed to whatever now
+ * holds that number. The listener line above it is the one to trust.
+ */
+async function describeCdpPortOwners() {
+  const described = [];
+  for (const pid of await findPortListenerPids(CDP_PORT)) {
+    const listener = await describeProcess(pid);
+    const parent = listener?.parentPid ? await describeProcess(listener.parentPid) : null;
+    described.push(
+      parent
+        ? `${formatProcess(pid, listener)}, launched by ${formatProcess(parent.pid, parent)}`
+        : formatProcess(pid, listener)
+    );
+  }
+  return described;
+}
+
+function formatProcess(pid, info) {
+  if (!info) return `PID ${pid} (image and path unavailable)`;
+  const location = info.path || "path unavailable -- elevated or protected process";
+  return `PID ${pid} ${info.name} (${location})`;
+}
+
+/** PIDs LISTENING on a TCP port, or [] if netstat is unavailable. */
+async function findPortListenerPids(port) {
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync("netstat", ["-ano", "-p", "TCP"], { windowsHide: true }));
+  } catch {
+    return [];
+  }
+  const pids = new Set();
+  for (const line of stdout.split(/\r?\n/)) {
+    // Columns are proto, local address, foreign address, state, PID. Match the
+    // LOCAL address only: an outbound connection to some other host's :9222
+    // also contains ":9222" and would otherwise be blamed for holding ours.
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 5 || parts[3].toUpperCase() !== "LISTENING") continue;
+    if (!parts[1].endsWith(`:${port}`)) continue;
+    const pid = Number(parts[4]);
+    if (Number.isInteger(pid) && pid > 0) pids.add(pid);
+  }
+  return [...pids];
+}
+
+/**
+ * Win32_Process rather than tasklist: tasklist reports the image name but
+ * never the full path, and the path is the only thing that distinguishes one
+ * worktree's kalpa.exe from another's -- which is exactly the question that
+ * went unanswered during beta.23.
+ */
+async function describeProcess(pid) {
+  // Guarded before interpolation: this integer is spliced into a PowerShell
+  // filter string, and it arrives from parsed netstat output.
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const script =
+    `Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | ` +
+    "Select-Object -First 1 -Property Name,ExecutablePath,ParentProcessId | ConvertTo-Json -Compress";
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { windowsHide: true, timeout: 10_000 }
+    );
+    const parsed = JSON.parse(stdout.trim());
+    return {
+      pid,
+      name: typeof parsed?.Name === "string" ? parsed.Name : "unknown image",
+      path: typeof parsed?.ExecutablePath === "string" ? parsed.ExecutablePath : "",
+      // 0 reads as "no parent to chase", which is also what a dead or recycled
+      // parent should produce.
+      parentPid: Number.isInteger(parsed?.ParentProcessId) ? parsed.ParentProcessId : 0,
+    };
+  } catch {
+    return null;
   }
 }
 

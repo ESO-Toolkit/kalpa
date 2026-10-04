@@ -3,6 +3,13 @@ interface Dependency {
   min_version: number | null;
 }
 
+export interface AutoLinkResult {
+  linked: string[];
+  notFound: string[];
+  /** Secondary folders managed through the addon that bundled them. */
+  skippedBundled: string[];
+}
+
 export interface AddonManifest {
   folderName: string;
   title: string;
@@ -26,6 +33,9 @@ export interface AddonManifest {
   installedAt: string;
   disabled: boolean;
   modifiedFileCount: number;
+  /** False when no trusted pre-update baseline exists, so Protected Edits
+   * cannot tell user changes from upstream files. */
+  hasProtectedEditsBaseline?: boolean;
 }
 
 export interface EsouiAddonInfo {
@@ -69,6 +79,32 @@ export interface InstallResult {
   pendingDeps: PendingDependency[];
 }
 
+/** Per-addon phase of a batch run, from the `batch-update-progress` event.
+ *  Shared by App's status map and the update banner, which sorts by it. */
+export type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+
+/** Phase of ONE addon's install or update, from the `update-progress` event.
+ *  A different vocabulary from {@link AddonPhase}: this event tracks a single
+ *  operation through its stages, so it has no terminal "completed"/"failed" —
+ *  the command's promise settling is what ends it. */
+export type InstallPhase = "downloading" | "extracting" | "dependencies";
+
+/** Payload of the `update-progress` event (Rust `UpdateProgressEvent`).
+ *
+ *  One event shape covers every phase. `fileIndex`/`fileTotal` count files while
+ *  extracting and dependencies-in-this-round while resolving; the byte fields
+ *  are present only while downloading, and `bytesTotal` is absent when the
+ *  server sent no `Content-Length`. */
+export interface InstallProgressEvent {
+  operationId: string;
+  folderName: string;
+  phase: InstallPhase;
+  fileIndex: number;
+  fileTotal: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+}
+
 export interface UpdateCheckResult {
   folderName: string;
   esouiId: number;
@@ -92,6 +128,11 @@ export interface BatchRemoveResult {
   removed: string[];
   failed: string[];
   errors: Record<string, string>;
+  cleanupWarnings: Record<string, string>;
+}
+
+export interface RemoveAddonResult {
+  cleanupWarning: string | null;
 }
 
 export interface BatchTagResult {
@@ -169,6 +210,17 @@ export interface EsouiAddonDetail {
   created: string;
   screenshots: string[];
   downloadUrl: string;
+  /** Full version history, newest first. Empty when the author published none. */
+  changeLog: string;
+  /** Upload dates for past releases. The current version is not included — its
+   * date is `updated`. Empty when the author archives nothing. */
+  archivedVersions: ArchivedVersion[];
+}
+
+export interface ArchivedVersion {
+  version: string;
+  /** As ESOUI renders it, e.g. `04/23/26 01:16 PM`. */
+  date: string;
 }
 
 export interface EsouiCategory {
@@ -218,6 +270,8 @@ export interface ActivateProfileResult {
 
 /** Read-only preview of what activating a profile would change. */
 export interface ProfilePlan {
+  /** SHA-256 digest of the canonical preview lists. */
+  digest: string;
   toEnable: string[];
   toDisable: string[];
   keptDependencies: string[];
@@ -226,6 +280,10 @@ export interface ProfilePlan {
    * folders exist on disk. */
   blocked: string[];
 }
+
+export type ActivateProfileOutcome =
+  | { status: "applied"; result: ActivateProfileResult }
+  | { status: "planChanged"; plan: ProfilePlan };
 
 export interface CopyAddonsResult {
   copied: string[];
@@ -389,6 +447,44 @@ export type FilterMode =
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;
 export type ViewMode = "installed" | "discover";
+
+/** Which backend answered a Discover search. `esoui` means the worker's
+ *  full-text index could not answer and the title-only scraper was used. */
+export type AddonSearchSource = "index" | "esoui";
+
+/** One addon recommended by the assistant. `fileInfoUri` is rebuilt server-side
+ *  from the index, never taken from model output, so it is safe to link. */
+export interface AskRecommendation {
+  esoui_id: number;
+  title: string;
+  author: string;
+  category: string;
+  file_info_uri: string;
+  reason: string;
+}
+
+export interface AskResponse {
+  /** Prose answer. Empty when `degraded` is set. */
+  answer: string;
+  recommendations: AskRecommendation[];
+  /** Ranked candidates the assistant did not pick. Rendered collapsed so a
+   *  short answer does not look like it missed relevant addons. */
+  also_considered: AskRecommendation[];
+  no_good_match: boolean;
+  /** Ranked candidates shown without model prose — the assistant was
+   *  unavailable, over budget, or returned something ungroundable. */
+  degraded: boolean;
+  cached: boolean;
+}
+
+export interface AddonSearchPage {
+  results: EsouiSearchResult[];
+  hasMore: boolean;
+  source: AddonSearchSource;
+}
+// Search and Ask were separate tabs until they were merged: both ran the same
+// index retrieval, so the split only made the user guess which box to type in.
+// The one Search surface now owns both — typing searches, the Ask button asks.
 export type DiscoverTab = "search" | "popular" | "categories" | "url";
 
 // ── Pack types (from roster-hub-api Pack Hub) ─────────────────────────────
@@ -531,6 +627,7 @@ export interface DryRunAddon {
 }
 
 export interface DryRunResult {
+  planDigest: string;
   willTrack: DryRunAddon[];
   alreadyTracked: DryRunAddon[];
   missingOnDisk: DryRunAddon[];
@@ -543,6 +640,15 @@ export interface SafeMigrationResult {
   skippedMissing: number;
   addonCount: number;
 }
+
+export type MigrationExecuteOutcome =
+  | { status: "applied"; result: SafeMigrationResult }
+  | {
+      status: "planChanged";
+      expectedDigest: string;
+      actualDigest: string;
+      freshPlan: DryRunResult;
+    };
 
 export interface IntegrityResult {
   addonsFolderOk: boolean;
@@ -585,6 +691,13 @@ export interface AuthUser {
 // ── Protected Edits types ──────────────────────────────────────────────
 
 export interface FileConflict {
+  /**
+   * Folder-qualified path, `Folder/relative/path.lua`.
+   *
+   * An archive can write several top-level folders, so a bare path is
+   * ambiguous: two bundled siblings shipping `init.lua` would collide in the
+   * decisions map and in the backup and diff lookups.
+   */
   relativePath: string;
   userHash: string;
   upstreamHash: string;
@@ -592,11 +705,17 @@ export interface FileConflict {
 
 export interface ConflictReport {
   sessionId: string;
+  /** The archive primary. Not the only folder the report covers. */
   folderName: string;
+  /** Every top-level folder this archive writes, sorted. */
+  folders: string[];
   updateVersion: string;
+  /** Folder-qualified paths; see {@link FileConflict.relativePath}. */
   safeFiles: string[];
+  /** Folder-qualified paths; see {@link FileConflict.relativePath}. */
   autoKeptFiles: string[];
   conflicts: FileConflict[];
+  hasHashBaseline: boolean;
 }
 
 export interface DiffData {
