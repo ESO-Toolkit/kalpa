@@ -248,20 +248,20 @@ const AddonListItem = memo(function AddonListItem({
               : "w-0 opacity-0 group-hover:w-6 group-hover:opacity-100 group-focus-within:w-6 group-focus-within:opacity-100"
           )}
         >
-          <button
-            type="button"
-            role="checkbox"
-            aria-checked={isSelected}
+          <Checkbox
+            nativeButton
+            checked={isSelected}
             aria-label={`Select ${addon.title}`}
-            tabIndex={batchMode ? 0 : -1}
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleSelect(addon.folderName);
+            tabIndex={0}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onToggleSelect(addon.folderName);
+              }
             }}
-            className="flex items-center justify-center rounded-[5px] outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/40"
-          >
-            <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
-          </button>
+            onCheckedChange={() => onToggleSelect(addon.folderName)}
+          />
         </div>
         <div className="flex-1 min-w-0">{content}</div>
       </div>
@@ -474,6 +474,7 @@ function AddonListBase({
 
   const handleListKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.target !== e.currentTarget) return;
       if (addons.length === 0) return;
 
       const currentIndex = selectedAddon

@@ -121,6 +121,7 @@ export function Packs({
   const [shareCodeInput, setShareCodeInput] = useState(initialShareCode ?? "");
   const [resolvingCode, setResolvingCode] = useState(false);
   const [importedPack, setImportedPack] = useState<SharedPack | null>(null);
+  const [selectedImportedAddons, setSelectedImportedAddons] = useState<Set<number>>(new Set());
   const [importError, setImportError] = useState<string | null>(null);
   // Settings from a loaded .esopack v2 file (not available via share codes)
   const [importedFileSettings, setImportedFileSettings] = useState<Record<
@@ -536,6 +537,7 @@ export function Packs({
     try {
       const pack = await invokeOrThrow<SharedPack>("resolve_share_code", { code: trimmed });
       setImportedPack(pack);
+      setSelectedImportedAddons(new Set());
     } catch (e) {
       setImportError(getTauriErrorMessage(e));
     } finally {
@@ -555,6 +557,7 @@ export function Packs({
     setImportedFileSettings(null);
     try {
       const result = await invokeOrThrow<EsoPackFile>("import_pack_file", { path });
+      setSelectedImportedAddons(new Set());
       setImportedPack({
         title: result.pack.title,
         description: result.pack.description,
@@ -587,9 +590,9 @@ export function Packs({
   const importedPackAddonsToInstall = useMemo(() => {
     if (!importedPack) return [];
     return importedPack.addons
-      .filter((a) => a.required)
+      .filter((a) => a.required || selectedImportedAddons.has(a.esouiId))
       .filter((a) => !installedEsouiIds.has(a.esouiId));
-  }, [importedPack, installedEsouiIds]);
+  }, [importedPack, installedEsouiIds, selectedImportedAddons]);
 
   const handleInstallImportedPack = async () => {
     if (!importedPack) return;
@@ -1107,6 +1110,15 @@ export function Packs({
                           installProgress={installProgress}
                           installedEsouiIds={installedEsouiIds}
                           importedPackAddonsToInstall={importedPackAddonsToInstall}
+                          selectedImportedAddons={selectedImportedAddons}
+                          onToggleImportedAddon={(id) => {
+                            setSelectedImportedAddons((previous) => {
+                              const next = new Set(previous);
+                              if (next.has(id)) next.delete(id);
+                              else next.add(id);
+                              return next;
+                            });
+                          }}
                           onResolveCode={handleResolveShareCode}
                           onImportFile={handleImportFile}
                           onInstall={handleInstallImportedPack}
