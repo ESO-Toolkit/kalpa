@@ -1292,23 +1292,8 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   // 2. Clear durable membership before retryable KV cleanup.
   const voteCount = await getPackIndexDO(env).deleteUserVotes(userId);
 
-  // 3. Delete all user's share codes
-  let shareCount = 0;
-  let shareCursor: string | undefined;
-  do {
-    const list = await env.ESO_PACKS.list({ prefix: `share-user:${userId}:`, cursor: shareCursor });
-    for (const key of list.keys) {
-      // Extract the share code from key format: share-user:{userId}:{code}
-      const parts = key.name.split(":");
-      const code = parts[parts.length - 1];
-      if (code) {
-        await env.ESO_PACKS.delete(`share:${code}`);
-      }
-      await env.ESO_PACKS.delete(key.name);
-      shareCount++;
-    }
-    shareCursor = list.list_complete ? undefined : list.cursor;
-  } while (shareCursor);
+  // 3. Clear share reservations and record deletion before retryable KV cleanup.
+  const shareCount = await getPackIndexDO(env).deleteUserShares(userId);
 
   if (packIds.length > 0) {
     await invalidatePackListCache(url);

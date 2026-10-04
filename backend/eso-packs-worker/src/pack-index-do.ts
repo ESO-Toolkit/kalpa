@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env, Pack, PackIndex, VoteRecord } from "./types";
+import type { Env, Pack, PackIndex, VoteRecord, SharePackData } from "./types";
 import { deleteVote, deleteVotesForPack, getVote, restoreVote } from "./kv";
+
+import { ShareStore } from "./share-store";
 
 const INDEX_KEY = "index:packs";
 const STORAGE_PACK_PREFIX = "pack:";
@@ -92,6 +94,18 @@ export interface WitnessAdoption {
 
 /** Serializes mutations while migrating authority from KV to DO storage. */
 export class PackIndexDO extends DurableObject<Env> {
+
+  async createShare(user: { id: number; name: string }, pack: SharePackData) {
+    return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).create(user, pack));
+  }
+
+  async getShare(code: string) {
+    return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).get(code));
+  }
+
+  async deleteUserShares(userId: string): Promise<number> {
+    return this.ctx.blockConcurrencyWhile(() => new ShareStore(this.ctx.storage, this.env).deleteUser(userId));
+  }
 
   async addPack(
     pack: Pack,
@@ -416,6 +430,7 @@ export class PackIndexDO extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
+      await new ShareStore(this.ctx.storage, this.env).retry();
       const pending = await this.ctx.storage.list<string>({ prefix: PENDING_PREFIX, limit: MIRROR_BATCH_SIZE });
       for (const operationId of pending.values()) {
         const operation = await this.ctx.storage.get<PendingOperation>(
