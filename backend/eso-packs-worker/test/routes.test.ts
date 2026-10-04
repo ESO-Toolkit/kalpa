@@ -130,13 +130,30 @@ describe("OPTIONS preflight", () => {
 // ── GET /packs ────────────────────────────────────────────────────
 
 describe("GET /packs", () => {
-  it.each(["", "?status=draft", "?status=all", "?author=42"])(
+  it.each(["", "?sort=votes&page=1", "?status=draft", "?status=all", "?author=42"])(
     "prevents downstream caching of personalized lists %s",
     async (query) => {
       await putPackIndex(e, { packs: [makePack("private", { status: "draft", is_anonymous: true })] });
       const response = await call(authedRequest(`${BASE}/packs${query}`));
       expect(response.status).toBe(200);
       expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    },
+  );
+  it.each(["?sort=votes", "?sort=votes&page=1"])(
+    "short-caches the anonymous votes landing view %s",
+    async (query) => {
+      const response = await call(new Request(`${BASE}/packs${query}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("public, max-age=30");
+      expect(await response.json<{ sort: string }>()).toMatchObject({ sort: "votes" });
+    },
+  );
+  it.each(["page=2", "type=addon", "tag=test", "q=test", "status=published", "author=42"])(
+    "bypasses public votes caching for %s",
+    async (query) => {
+      const response = await call(new Request(`${BASE}/packs?sort=votes&${query}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("public, max-age=0");
     },
   );
   it("does not populate an isolate-unsafe manual Cache API entry", async () => {

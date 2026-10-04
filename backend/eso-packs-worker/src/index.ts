@@ -105,14 +105,14 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     url.searchParams.has("status") ||
     url.searchParams.has("author");
 
-  // Only the default landing view receives a short public Cache-Control TTL.
+  // Unfiltered first-page updated and votes views receive a short public Cache-Control TTL.
   // Manual Cache API storage is avoided because cross-isolate invalidation is unsafe.
   const sortParam = url.searchParams.get("sort");
   const pageParam = url.searchParams.get("page");
   const isDefaultView =
     !hasFilters &&
     (pageParam === null || pageParam === "1") &&
-    (sortParam === null || sortParam === "updated");
+    (sortParam === null || sortParam === "updated" || sortParam === "votes");
 
   // Resolve the viewer up front: draft/all filtering, the author filter,
   // anonymity redaction and user_voted all key off it. Free when no Authorization header is
