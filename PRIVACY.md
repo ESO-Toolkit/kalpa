@@ -110,7 +110,8 @@ the install-count rate-limit keys.
 
 **Drafts and deletions:** a pack that is a draft, or that you switch back to
 draft, is actively removed from the shared database rather than copied to it.
-Deleting a pack, or deleting your Pack Hub data, deletes the copied row too.
+Deleting a pack, or deleting your Pack Hub data, also triggers removal of the
+copied row; failed storage writes are retried.
 
 ### Data sent to ESO Logs
 
@@ -166,15 +167,18 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 
 ## Data Retention
 
+**Pack Hub rollout status:** the deletion and backup safeguards described below include audit changes prepared on the current branch that have **not yet been deployed to production**. They do not establish that the live service already provides these safeguards.
+
 | Data | Retention |
 |------|-----------|
 | Published packs | Indefinite (until you delete them) |
-| Copies of published packs in the ESO Log Aggregator database | Deleted together with the pack |
-| Votes | Indefinite (until you remove your vote) |
+| Copies of published packs in the ESO Log Aggregator database | Removal triggered by pack deletion; failed storage writes retried |
+| Votes | Until you remove your vote, delete your Pack Hub data, or the pack lifecycle is deleted |
 | Share codes | 7 days (auto-deleted) |
 | Install rate-limit keys (IP) | 1 hour (auto-deleted) |
 | Pack Hub dated daily backups | 90 days (auto-deleted) |
-| Pack Hub "latest" backup snapshot | Overwritten daily, no expiry; scrubbed of your data when you delete it |
+| Pack Hub "latest" backup snapshot | Overwritten daily, no expiry; account deletion triggers cleanup, with failed storage writes retried |
+| Pack Hub deletion markers | User ID and deletion time retained indefinitely to prevent deleted records from reappearing |
 | Build-evidence records (ESO Log Aggregator) | Indefinite — no automatic deletion yet (see *Your Rights*) |
 | Local backups | Until you delete them manually |
 
@@ -191,21 +195,29 @@ You can delete all your data from the Pack Hub at any time:
 3. In the **Pack Hub Data** section, click **Delete My Pack Hub Data**
 4. Confirm the deletion
 
-This immediately removes your packs, your votes, and your share codes from the
-Pack Hub's live data, and deletes the copies of your published packs from the
-ESO Log Aggregator's database.
+Deletion removes your packs, your votes, and your share codes from the Pack Hub's
+canonical live data. Cleanup of storage mirrors, including copies of published
+packs in the ESO Log Aggregator's database, is retried if storage writes fail;
+those copies can temporarily lag the canonical deletion.
 
 **What happens to backups:** the Pack Hub takes a daily snapshot of its pack
-data for disaster recovery. Deleting your data also scrubs you from the
-non-expiring "latest" snapshot at the time of deletion, but the **dated daily
+data for disaster recovery. Deleting your data triggers cleanup of the
+non-expiring "latest" snapshot; failed storage writes remain queued for retry,
+so physical removal from that snapshot can be delayed. The **dated daily
 snapshots are not rewritten** — your packs and votes remain in those until they
 expire on their own, within **90 days**. Those snapshots are only ever read to
 restore the service after data loss.
 
-Two further limits worth stating plainly:
+The Pack Hub permanently retains a deletion marker containing your ESO Logs
+user ID and deletion time. It uses this marker to prevent older backups or stale
+KV records from restoring deleted data. If you return, records you create after
+that deletion time are allowed; the marker does not permanently block your account.
 
-- Votes **other people** cast on your packs are not deleted, since they are
-  other users' records. They are left behind as orphans once your packs are gone.
+Two further details:
+
+- Votes **other people** cast on a deleted pack lifecycle are also removed,
+  so a later pack using the same ID does not inherit those votes. Failed mirror
+  cleanup is retried.
 - Pack vote totals shown elsewhere are denormalized counters and are not
   recalculated when your votes are removed.
 

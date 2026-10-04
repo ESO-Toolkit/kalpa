@@ -37,6 +37,12 @@ The canonical storage and mirror-retry changes are committed on this branch but 
 
 The D-W1-2 shadow/backfill and parity checks still govern rollout. Do not infer a completed authority flip from these code changes. Recovery must preserve canonical DO records and tombstones; a KV-only restore or authority-flag change is not a rollback strategy.
 
+### Pending backup privacy follow-up (not deployed)
+
+The current backup fix permanently retains per-user deletion cutoffs (user ID and deletion timestamp) in DO storage. Backup writes, latest-snapshot scrubs, and restore finalization are serialized through the DO and exclude records at or before the cutoff while preserving later records from a returning user. Failed latest-snapshot cleanup remains pending for alarm retry. Recovery must preserve these cutoffs alongside canonical data so an older snapshot cannot reintroduce deleted records.
+
+Dated daily snapshots still expire after 90 days and are not rewritten on deletion; `backup:latest` still has no TTL. `PRIVACY.md` now discloses permanent user-ID/deletion-time retention, retryable latest-snapshot and mirror cleanup, and removal of votes on deleted pack lifecycles. Its rollout notice explicitly distinguishes the prepared implementation from the live service; no production deployment or acceptance is recorded here.
+
 ## Decisions
 
 ### D-W1-1 — Durable Object storage is mutation authority
