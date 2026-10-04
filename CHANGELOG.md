@@ -6,6 +6,93 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.27] — 2026-10-04
+
+This release repairs addon and pack actions, preserves SavedVariables data when
+editing or restoring settings, and makes failed installs and uploads easier to
+recover. It integrates the September and October audit fixes, including stronger
+login handling and Pack Hub recovery. The remaining account-binding and Linux
+memory-safety limitations are disclosed below.
+
+### Bug Fixes
+
+- **SavedVariables keep their Lua values and key types.** Numeric keys and
+  string keys with the same spelling remain distinct in the editor, search,
+  previews, backups, and pack settings. Parsing and serialization preserve data
+  that previously changed during a read/write cycle.
+- **Failed installs, migrations, and restores recover more safely.** Extraction
+  and pack-import paths receive stricter validation, failed operations restore
+  previous files, and restoring an old backup no longer lets retention delete
+  the source snapshot before it has been read.
+- **Dependency installation honors minimum versions.** Kalpa detects outdated
+  or unknown dependency versions and checks downloaded manifests before replacing
+  an installed library. Bundled addon folders no longer produce misleading
+  standalone update matches; unmatched local addons receive a one-time explanation.
+- **Discover stops showing stale search results.** Changing or clearing the
+  query retires older requests. Installed results show a status indicator instead
+  of offering another install, and result selection and addon batch selection
+  are reachable by keyboard.
+- **Pack imports let you select optional addons.** The install action reflects
+  your selection and distinguishes an entirely installed pack from one with no
+  selected addons. Switching files in the addon editor resets the previous
+  file's editing state.
+- **Login callbacks must match the active login attempt.** Logout, cancellation,
+  and a new login reject stale session work. Logout and new OAuth logins also
+  invalidate uploader credentials and login-window cookies.
+- **Uploader failures no longer leave history entries stuck in progress.** Log
+  scanning bounds oversized lines, split ranges are validated, and redirects
+  without a readable destination remain retryable errors rather than discarding
+  credentials without evidence that they expired.
+- **Update checks avoid overlapping probes.** Settings, profile, and pack inputs
+  also receive clearer accessible labels.
+
+The desktop fixes are covered by [#488](https://github.com/ESO-Toolkit/kalpa/pull/488)
+and [#492](https://github.com/ESO-Toolkit/kalpa/pull/492).
+
+### Pack Hub and Maintenance
+
+- **Pack Hub recovery code persists pack changes, votes, and mirror-repair work
+  together.** Failed website/KV mirror writes can retry from durable state;
+  share codes are reserved durably, and cleanup proceeds in bounded passes.
+  Signed-in pack lists stay private, malformed addon entries are rejected, and
+  public vote-sorted listings use a short cache.
+- **Account deletion survives backup recovery.** Deletion cutoffs prevent older
+  pack and vote records from being restored. User IDs and deletion timestamps
+  are retained indefinitely for that protection; dated backups expire after
+  90 days, while the latest snapshot has no expiry and failed cleanup retries.
+  See [PRIVACY.md](https://github.com/ESO-Toolkit/kalpa/blob/v0.1.0-beta.27/PRIVACY.md).
+- **macOS now requires Ventura 13.3 or later**, matching the system WebKit
+  baseline required by the app's styling. Linux folder-opening permissions are
+  corrected for ESO installations inside hidden directories.
+- Dependency updates address audited vulnerabilities across the desktop,
+  performance sidecar, frontend, and Worker. JavaScript audits include development
+  dependencies, both Rust dependency graphs are audited, and release tags require
+  successful CI on their main-branch commit. The unused shadcn CLI is replaced by
+  its licensed CSS.
+
+### Known Limitations
+
+- **Uploader cookie sessions are not yet bound to a verified OAuth account.**
+  Invalidating credentials and cookies closes the traced stale-account reuse
+  path, but complete account-switch protection still needs a confirmed identity
+  contract and live account-switch/upload acceptance.
+- **Linux retains a GTK memory-safety concern:** `glib 0.18.5` has unsound
+  `VariantStrIter` implementations
+  ([RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html)).
+  Adopting fixed `glib >=0.20` requires an upstream GTK migration. Other Rust
+  maintenance advisories also remain; successful audits do not erase this
+  unsoundness advisory.
+- **The Pack Hub code is deployed, but its authority migration is not established
+  as complete.** Live authority/parity and authenticated mutation/recovery behavior
+  remain unverified; the parity-gated switch from KV to Durable Object authority
+  remains a separate operator step. Website mirrors may temporarily lag after
+  failed writes.
+- CI and retained local checks establish build and automated-test results, not
+  live desktop OAuth, account-switch uploads, macOS/Linux runtime, or packaged
+  performance-sidecar runtime acceptance. See the
+  [October integration record](https://github.com/ESO-Toolkit/kalpa/blob/v0.1.0-beta.27/docs/audits/2026-10-integration.md)
+  for evidence and remaining acceptance limits.
+
 ## [0.1.0-beta.26] — 2026-09-10
 
 This one is about Kalpa opening when you ask it to.
@@ -1214,7 +1301,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...HEAD
+[0.1.0-beta.27]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...v0.1.0-beta.27
 [0.1.0-beta.26]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...v0.1.0-beta.26
 [0.1.0-beta.25]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.24...v0.1.0-beta.25
 [0.1.0-beta.24]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.23...v0.1.0-beta.24
