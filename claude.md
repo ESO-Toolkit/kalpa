@@ -451,8 +451,9 @@ not have). There are two flavours, and the difference matters:
   here that installs, updates, removes, restores, migrates or applies a profile.
 - `npm run test:e2e:sandbox` — builds the debug binary and runs `@sandbox`
   specs against an owned process with a fresh `AddOns` folder and isolated app
-  profile. This is where destructive addon coverage belongs. Pass `--no-build`
-  only when iterating on specs; release validation must rebuild first.
+  profile. This is where destructive addon coverage belongs. The runner always
+  rebuilds and rejects `--no-build`: a stale binary could write to the production
+  profile before the IPC isolation check runs.
 
   Both this runner and `npm run test:packaged` use `createIsolatedProfile` in
   `scripts/lib/kalpa-app-harness.mjs`. It creates a unique per-run token and
@@ -468,6 +469,12 @@ not have). There are two flavours, and the difference matters:
   owner, verify the launched process and profile, and delete their owned
   directories after killing the app. Specs still need to normalise persisted
   state between tests within one run.
+
+  `npm run test:packaged -- --with-readonly` also runs the read-only specs against
+  this owned profile. Before startup it seeds local addon and library manifests
+  in the throwaway AddOns folder, so those checks exercise populated addon UI
+  without using the developer's installation. These fixtures establish UI smoke
+  coverage, not production addon compatibility or download behavior.
 
   The sandbox suite is a local fixture smoke test, not a CI gate or proof of
   production downloads/installs, live OAuth or authenticated uploads. It does
