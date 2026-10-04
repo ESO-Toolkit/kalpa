@@ -48,7 +48,7 @@ fn describe_extract_error(path: &Path, e: &io::Error) -> String {
 #[derive(Clone, Copy)]
 pub struct ExtractHooks<'a> {
     /// Polled before each entry; when it reads `true` the extraction aborts with
-    /// [`CANCELLED`] and the caller's rollback removes any newly-created folders.
+    /// [`CANCELLED`] and the staged changes are discarded before publication.
     pub cancel: Option<&'a AtomicBool>,
     /// Invoked as `(done, total)` at the start of each entry so the UI can render
     /// "Extracting N of M". `total` is the raw archive entry count (includes
@@ -113,10 +113,10 @@ pub fn extract_addon_zip_with(
     extract_with_rollback(zip_path, addons_dir, &HashSet::new(), hooks)
 }
 
-/// Shared extraction driver: snapshot which top-level folders already exist, run
-/// the inner loop, and on ANY error (including a user cancel) remove only the
-/// folders that were newly created — never the user's pre-existing addon during a
-/// failed/cancelled update. An empty `skip_files` extracts everything.
+/// Build the complete replacement on the destination volume before publishing.
+/// Cancellation, invalid ZIPs and copy failures leave every live byte unchanged.
+/// A failed publish restores all folders already swapped; failed rollback retains
+/// its originals on disk and names their location in the error.
 fn extract_with_rollback(
     zip_path: &Path,
     addons_dir: &Path,
@@ -124,58 +124,164 @@ fn extract_with_rollback(
     hooks: ExtractHooks,
 ) -> Result<Vec<String>, String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
-
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
-
-    // Snapshot which top-level addon folders already exist so we only clean up
-    // genuinely new directories on failure (or cancel). Names come from the
-    // central directory (`file_names`) so this pass doesn't pay a local-header
-    // read per entry, and each unique top-level folder is stat'd only once.
-    // An archive whose files sit at its own root is re-rooted under one folder, so
-    // the top-level name it creates is that wrap — not the entry names. Both the
-    // pre-existing snapshot and the rollback set must use it, or a failed extract
-    // would hunt for folders that were never created and leave the wrap behind.
+    fs::create_dir_all(addons_dir).map_err(|e| describe_write_error(addons_dir, &e))?;
+    // Keep the lock file: unlinking an advisory lock permits two processes to
+    // lock different inodes at the same name. Closing this handle releases it.
+    let lock_path = addons_dir.join(".kalpa-install.lock");
+    reject_link_if_present(&lock_path)?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| describe_write_error(&lock_path, &e))?;
+    lock.lock()
+        .map_err(|e| format!("Failed to lock addon installation: {e}"))?;
+    if is_cancelled(&hooks) {
+        return Err(CANCELLED.into());
+    }
     let wrap_name = flat_archive_wrap_name(&archive);
-
-    let top_level: HashSet<String> = match wrap_name {
+    let top_level = match wrap_name {
         Some(ref name) => HashSet::from([name.clone()]),
         None => collect_zip_top_folders(&archive),
     };
-
-    let mut pre_existing: HashSet<String> = HashSet::new();
-    for folder in &top_level {
-        if addons_dir.join(folder).is_dir() {
-            pre_existing.insert(folder.clone());
-        }
+    if top_level
+        .iter()
+        .any(|name| name.to_ascii_lowercase().starts_with(".kalpa-install"))
+    {
+        return Err("ZIP contains a reserved Kalpa installation path.".into());
     }
-
-    let result = extract_addon_zip_inner(
+    let transaction = tempfile::Builder::new()
+        .prefix(".kalpa-install-")
+        .tempdir_in(addons_dir)
+        .map_err(|e| format!("Create installation staging: {e}"))?;
+    let staged = transaction.path().join("new");
+    let original = transaction.path().join("old");
+    fs::create_dir(&staged).map_err(|e| describe_write_error(&staged, &e))?;
+    fs::create_dir(&original).map_err(|e| describe_write_error(&original, &e))?;
+    for name in &top_level {
+        copy_existing_tree(&addons_dir.join(name), &staged.join(name), &hooks)?;
+    }
+    let folders = extract_addon_zip_inner(
         &mut archive,
-        addons_dir,
+        &staged,
         skip_files,
         hooks,
         wrap_name.as_deref(),
-    );
-
-    if let Err(ref err_msg) = result {
-        // Remove only folders that were newly created (not pre-existing) so a
-        // failed or cancelled update never destroys the user's existing addon.
-        let created = top_level;
-        for folder in &created {
-            if !pre_existing.contains(folder) {
-                let folder_path = addons_dir.join(folder);
-                if folder_path.is_dir() {
-                    eprintln!(
-                        "Cleaning up partially extracted folder {folder:?} after error: {err_msg}"
-                    );
-                    let _ = fs::remove_dir_all(&folder_path);
+    )?;
+    if is_cancelled(&hooks) {
+        return Err(CANCELLED.into());
+    }
+    // Publication is deliberately not cancellable between renames. A Stop is
+    // observed before this short critical section, never halfway through it.
+    let mut names = folders.clone();
+    names.sort();
+    let mut published: Vec<(String, bool)> = Vec::new();
+    let result = (|| {
+        for name in names {
+            let live = addons_dir.join(&name);
+            reject_link_if_present(&live)?;
+            let existed = match fs::symlink_metadata(&live) {
+                Ok(_) => true,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => return Err(describe_write_error(&live, &e)),
+            };
+            if existed {
+                fs::rename(&live, original.join(&name))
+                    .map_err(|e| describe_write_error(&live, &e))?;
+            }
+            // Record the old move before publishing so even this rename's
+            // failure restores the original name.
+            published.push((name.clone(), existed));
+            fs::rename(staged.join(&name), &live).map_err(|e| describe_write_error(&live, &e))?;
+        }
+        Ok::<_, String>(())
+    })();
+    if let Err(error) = result {
+        let mut rollback_errors = Vec::new();
+        for (name, existed) in published.into_iter().rev() {
+            let live = addons_dir.join(&name);
+            // If the staged entry still exists, publication failed before it
+            // reached the live path: do not delete something we didn't publish.
+            let undo = (|| {
+                if !staged.join(&name).exists() {
+                    let metadata = fs::symlink_metadata(&live)?;
+                    if metadata.is_dir() {
+                        fs::remove_dir_all(&live)?;
+                    } else {
+                        fs::remove_file(&live)?;
+                    }
                 }
+                if existed {
+                    fs::rename(original.join(&name), &live)?;
+                }
+                Ok::<_, io::Error>(())
+            })();
+            if let Err(e) = undo {
+                rollback_errors.push(format!("{name}: {e}"));
             }
         }
+        if !rollback_errors.is_empty() {
+            let recovery = transaction.keep();
+            return Err(format!(
+                "{error}. Rollback incomplete ({}). Original files retained at {}",
+                rollback_errors.join("; "),
+                recovery.join("old").display()
+            ));
+        }
+        return Err(error);
     }
+    Ok(folders)
+}
 
-    result
+fn reject_link_if_present(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("Inspect {}: {e}", path.display())),
+    };
+    let link = metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            // FILE_ATTRIBUTE_REPARSE_POINT
+            return Err(format!("Refusing linked addon path: {}", path.display()));
+        }
+    }
+    if link {
+        return Err(format!("Refusing linked addon path: {}", path.display()));
+    }
+    Ok(())
+}
+
+fn copy_existing_tree(source: &Path, target: &Path, hooks: &ExtractHooks) -> Result<(), String> {
+    if is_cancelled(hooks) {
+        return Err(CANCELLED.into());
+    }
+    reject_link_if_present(source)?;
+    let metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("Inspect {}: {e}", source.display())),
+    };
+    if metadata.is_file() {
+        // A fresh file breaks existing hard links: replacing an addon must not
+        // change an unrelated file that happens to share its old inode.
+        fs::copy(source, target).map_err(|e| describe_write_error(target, &e))?;
+    } else if metadata.is_dir() {
+        fs::create_dir(target).map_err(|e| describe_write_error(target, &e))?;
+        for entry in fs::read_dir(source).map_err(|e| format!("Read {}: {e}", source.display()))? {
+            let entry = entry.map_err(|e| format!("Read {}: {e}", source.display()))?;
+            copy_existing_tree(&entry.path(), &target.join(entry.file_name()), hooks)?;
+        }
+    } else {
+        return Err(format!("Unsupported addon file: {}", source.display()));
+    }
+    Ok(())
 }
 
 /// The first path component of a ZIP entry name, or `None` when the name is
@@ -949,10 +1055,7 @@ mod tests {
 
     #[test]
     fn cancel_midway_preserves_pre_existing_addon_files() {
-        // Cancelling midway through an IN-PLACE update (the folder already
-        // exists) must never delete the user's addon — even though it is left
-        // partially updated. Data safety: no file is removed, only some are
-        // overwritten with the new version's bytes.
+        // A cancellation must preserve the complete old version byte for byte.
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
         let existing = addons_dir.join("MyAddon");
@@ -983,9 +1086,9 @@ mod tests {
             "pre-existing addon must survive a midway cancel"
         );
         for n in 0..10 {
-            assert!(
-                existing.join(format!("file{n}.lua")).exists(),
-                "cancel must not delete the user's existing files"
+            assert_eq!(
+                fs::read(existing.join(format!("file{n}.lua"))).unwrap(),
+                b"OLD"
             );
         }
     }
@@ -1069,6 +1172,110 @@ mod tests {
             !addons_dir.join("MyAddon/b.lua").exists(),
             "a skipped (keep-mine) file must not be overwritten"
         );
+    }
+
+    #[test]
+    fn failed_update_preserves_all_existing_bytes_and_no_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        fs::create_dir_all(addons.join("A")).unwrap();
+        fs::create_dir_all(addons.join("B")).unwrap();
+        fs::write(addons.join("A/old.lua"), b"old version").unwrap();
+        fs::write(addons.join("B/sub"), b"existing file").unwrap();
+        let path = tmp.path().join("update.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["A/old.lua", "A/new.lua", "B/sub/fail.lua"] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"new version").unwrap();
+        }
+        zip.finish().unwrap();
+        assert!(extract_addon_zip(&path, &addons).is_err());
+        assert_eq!(fs::read(addons.join("A/old.lua")).unwrap(), b"old version");
+        assert!(!addons.join("A/new.lua").exists());
+        assert_eq!(fs::read(addons.join("B/sub")).unwrap(), b"existing file");
+    }
+
+    #[test]
+    fn update_breaks_hard_links_without_modifying_external_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        fs::create_dir_all(addons.join("MyAddon")).unwrap();
+        let outside = tmp.path().join("outside.lua");
+        fs::write(&outside, b"external").unwrap();
+        fs::hard_link(&outside, addons.join("MyAddon/file0.lua")).unwrap();
+        let archive = create_multi_file_zip(tmp.path(), "update.zip", "MyAddon", 1);
+        extract_addon_zip(&archive, &addons).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"external");
+        assert_eq!(
+            fs::read(addons.join("MyAddon/file0.lua")).unwrap(),
+            b"-- lua"
+        );
+    }
+
+    fn link_directory(source: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(source, target).unwrap();
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.to_string_lossy().replace('/', "\\"))
+                .arg(source.to_string_lossy().replace('/', "\\"))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn update_rejects_nested_linked_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(addons.join("MyAddon")).unwrap();
+        fs::write(outside.join("file0.lua"), b"external").unwrap();
+        link_directory(&outside, &addons.join("MyAddon/sub"));
+        let archive = create_multi_file_zip(tmp.path(), "update.zip", "MyAddon/sub", 1);
+        assert!(extract_addon_zip(&archive, &addons)
+            .unwrap_err()
+            .contains("linked addon path"));
+        assert_eq!(fs::read(outside.join("file0.lua")).unwrap(), b"external");
+    }
+
+    #[test]
+    fn publication_failure_rolls_back_previous_addons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(addons.join("A")).unwrap();
+        fs::write(addons.join("A/file.lua"), b"old").unwrap();
+        let path = tmp.path().join("update.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for name in ["A/file.lua", "B/file.lua"] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(b"new").unwrap();
+        }
+        zip.finish().unwrap();
+        let cb = |done, total| {
+            if done == total {
+                link_directory(&outside, &addons.join("B"));
+            }
+        };
+        let hooks = ExtractHooks {
+            cancel: None,
+            progress: Some(&cb),
+        };
+        assert!(extract_addon_zip_with(&path, &addons, hooks).is_err());
+        assert_eq!(fs::read(addons.join("A/file.lua")).unwrap(), b"old");
+        assert!(!outside.join("file.lua").exists());
     }
 
     #[test]

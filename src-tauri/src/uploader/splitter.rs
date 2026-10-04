@@ -18,65 +18,13 @@ use super::types::{FightSummary, LogSession};
 /// off the stack and bounded in memory.
 const COPY_BUF: usize = 8 * 1024 * 1024;
 
-/// Copy a byte range `[start, end)` from `src` into a new file at `dst`.
-fn copy_range(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String> {
-    discard_partial_on_error(dst, copy_range_inner(src, dst, start, end))
-}
-
-/// Remove a half-written output when its writer failed.
-///
-/// Only the "source shrank" branch used to clean up, so a failed seek, read,
-/// write or flush left a truncated file behind. That was survivable while splits
-/// lived in app data, but they are now written inside the ESO Logs folder and
-/// `discovery::list_log_files` enumerates them — a partial file would appear in
-/// Kalpa's own log list as an ordinary log and could be uploaded as though it
-/// were complete. The inner call owns its file handles and has dropped them by
-/// the time it returns, which Windows requires before the file can be removed.
-fn discard_partial_on_error(dst: &Path, result: Result<(), String>) -> Result<(), String> {
-    if result.is_err() {
-        let _ = std::fs::remove_file(dst);
-    }
-    result
-}
-
-fn copy_range_inner(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String> {
+/// Copy into a private temporary file, publishing only a complete output.
+/// Existing names (including links and the source itself) are never overwritten.
+fn copy_range(src: &Path, dst: &Path, start: u64, end: u64) -> Result<PathBuf, String> {
     if end <= start {
         return Err("Empty byte range".into());
     }
-    let mut reader = BufReader::new(File::open(src).map_err(|e| format!("Open source: {e}"))?);
-    reader
-        .seek(SeekFrom::Start(start))
-        .map_err(|e| format!("Seek: {e}"))?;
-
-    let mut writer = BufWriter::new(File::create(dst).map_err(|e| format!("Create output: {e}"))?);
-
-    let mut remaining = end - start;
-    let mut buf = vec![0u8; COPY_BUF];
-    while remaining > 0 {
-        let want = remaining.min(COPY_BUF as u64) as usize;
-        let n = reader
-            .read(&mut buf[..want])
-            .map_err(|e| format!("Read: {e}"))?;
-        if n == 0 {
-            // The source shrank/rotated mid-copy (e.g. /reloadui+relog on the
-            // active log). A short copy would be a silently-truncated, corrupt
-            // session file — fail loudly and remove the partial output rather
-            // than report success.
-            let _ = writer.flush();
-            drop(writer);
-            let _ = std::fs::remove_file(dst);
-            return Err(format!(
-                "Source log shrank during copy ({remaining} bytes missing) — \
-                 it may have been rotated. Try again."
-            ));
-        }
-        writer
-            .write_all(&buf[..n])
-            .map_err(|e| format!("Write: {e}"))?;
-        remaining -= n as u64;
-    }
-    writer.flush().map_err(|e| format!("Flush: {e}"))?;
-    Ok(())
+    copy_ranges(src, dst, &[(start, end)])
 }
 
 /// Cheaply verify that the supplied preflight offsets still describe THIS file
@@ -276,7 +224,7 @@ pub fn split_latest_session(source_path: &str, out_dir: &str) -> Result<Vec<Stri
         .and_then(|s| s.to_str())
         .unwrap_or("Encounter");
     let dst = out.join(latest_session_file_name(stem, start_time_ms));
-    copy_range(src, &dst, begin_log_offset, snapshot_len)?;
+    let dst = copy_range(src, &dst, begin_log_offset, snapshot_len)?;
     Ok(vec![dst.to_string_lossy().into_owned()])
 }
 
@@ -400,7 +348,7 @@ pub fn split_by_session(
         }
         let name = unique_name(&mut used, session_file_name(stem, session));
         let dst = out.join(&name);
-        copy_range(src, &dst, session.start_offset, end)?;
+        let dst = copy_range(src, &dst, session.start_offset, end)?;
         written.push(dst.to_string_lossy().into_owned());
     }
     Ok(written)
@@ -570,7 +518,7 @@ pub fn split_selected(
         let name = unique_name(&mut used, base);
 
         let dst = out.join(&name);
-        copy_range(src, &dst, session.start_offset, end)?;
+        let dst = copy_range(src, &dst, session.start_offset, end)?;
         written.push(dst.to_string_lossy().into_owned());
     }
 
@@ -618,14 +566,13 @@ fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) 
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (candidate.clone(), String::new()),
     };
-    for n in 2..1000 {
+    for n in 2..usize::MAX {
         let next = format!("{stem}-{n}{ext}");
         if used.insert(next.to_lowercase()) {
             return next;
         }
     }
-    // Pathological fallback (1000 collisions): use the original, accepting overwrite.
-    candidate
+    unreachable!("name space exhausted")
 }
 
 /// Copy a set of byte `segments` (each `[start, end)`) from `src` into a single
@@ -634,43 +581,126 @@ fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) 
 /// ranges of the other fights. Streams in fixed buffers so memory stays flat, and —
 /// like [`copy_range`] — fails loudly (removing the partial output) if the source
 /// shrank under a segment, so a truncated log never yields a silently-corrupt file.
-fn copy_ranges(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<(), String> {
-    discard_partial_on_error(dst, copy_ranges_inner(src, dst, segments))
-}
-
-fn copy_ranges_inner(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<(), String> {
+fn copy_ranges(src: &Path, dst: &Path, segments: &[(u64, u64)]) -> Result<PathBuf, String> {
     let mut reader = BufReader::new(File::open(src).map_err(|e| format!("Open source: {e}"))?);
-    let mut writer = BufWriter::new(File::create(dst).map_err(|e| format!("Create output: {e}"))?);
-    let mut buf = vec![0u8; COPY_BUF];
-    for &(start, end) in segments {
-        if end <= start {
-            continue;
-        }
-        reader
-            .seek(SeekFrom::Start(start))
-            .map_err(|e| format!("Seek: {e}"))?;
-        let mut remaining = end - start;
-        while remaining > 0 {
-            let want = remaining.min(COPY_BUF as u64) as usize;
-            let n = reader
-                .read(&mut buf[..want])
-                .map_err(|e| format!("Read: {e}"))?;
-            if n == 0 {
-                let _ = writer.flush();
-                drop(writer);
-                let _ = std::fs::remove_file(dst);
-                return Err(format!(
-                    "Source log shrank during copy ({remaining} bytes missing) — \
-                     it may have been rotated. Try again."
-                ));
+    let parent = dst.parent().ok_or("Output has no parent directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("Create temporary output: {e}"))?;
+    {
+        let mut writer = BufWriter::new(temporary.as_file_mut());
+        let mut buf = vec![0u8; COPY_BUF];
+        let mut previous_end = None;
+        for &(start, end) in segments {
+            if end <= start {
+                continue;
             }
-            writer
-                .write_all(&buf[..n])
-                .map_err(|e| format!("Write: {e}"))?;
-            remaining -= n as u64;
+            if let Some(previous) = previous_end {
+                // Lazy actor/ability declarations inside an omitted fight still
+                // belong to the session. Replay their state in original order.
+                copy_definitions(&mut reader, &mut writer, previous, start)?;
+            }
+            reader
+                .seek(SeekFrom::Start(start))
+                .map_err(|e| format!("Seek: {e}"))?;
+            let mut remaining = end - start;
+            while remaining > 0 {
+                let want = remaining.min(COPY_BUF as u64) as usize;
+                let n = reader
+                    .read(&mut buf[..want])
+                    .map_err(|e| format!("Read: {e}"))?;
+                if n == 0 {
+                    return Err(format!(
+                        "Source log shrank during copy ({remaining} bytes missing). Try again."
+                    ));
+                }
+                writer
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("Write: {e}"))?;
+                remaining -= n as u64;
+            }
+            previous_end = Some(end);
+        }
+        writer.flush().map_err(|e| format!("Flush: {e}"))?;
+    }
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|e| format!("Sync output: {e}"))?;
+    let stem = dst
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid output name")?;
+    let ext = dst
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    for n in 1..=10_000 {
+        let candidate = if n == 1 {
+            dst.to_path_buf()
+        } else {
+            parent.join(format!("{stem}-{n}{ext}"))
+        };
+        match temporary.persist_noclobber(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temporary = error.file;
+            }
+            Err(error) => return Err(format!("Publish output: {}", error.error)),
         }
     }
-    writer.flush().map_err(|e| format!("Flush: {e}"))?;
+    Err("Too many existing split files with this name".into())
+}
+
+fn copy_definitions(
+    reader: &mut BufReader<File>,
+    writer: &mut impl Write,
+    start: u64,
+    end: u64,
+) -> Result<(), String> {
+    reader
+        .seek(SeekFrom::Start(start))
+        .map_err(|e| format!("Seek: {e}"))?;
+    let mut remaining = end.saturating_sub(start);
+    let mut line = Vec::new();
+    const MAX_LINE: u64 = 1024 * 1024;
+    while remaining > 0 {
+        line.clear();
+        let n = reader
+            .by_ref()
+            .take(remaining.min(MAX_LINE + 1))
+            .read_until(b'\n', &mut line)
+            .map_err(|e| format!("Read definition: {e}"))? as u64;
+        if n == 0 {
+            return Err("Source log shrank during copy".into());
+        }
+        if n > MAX_LINE {
+            return Err("Encounter log line exceeds 1 MiB".into());
+        }
+        remaining -= n;
+        let kind = line
+            .split(|b| *b == b',')
+            .nth(1)
+            .unwrap_or_default()
+            .trim_ascii();
+        if matches!(
+            kind,
+            b"UNIT_ADDED"
+                | b"UNIT_CHANGED"
+                | b"UNIT_REMOVED"
+                | b"ABILITY_INFO"
+                | b"EFFECT_INFO"
+                | b"PLAYER_INFO"
+                | b"ZONE_CHANGED"
+                | b"MAP_CHANGED"
+                | b"ZONE_INFO"
+                | b"MAP_INFO"
+        ) {
+            writer
+                .write_all(&line)
+                .map_err(|e| format!("Write definition: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -756,10 +786,8 @@ fn resolve_scan(
 /// selected fight's own combat block. Earlier fights in the same session are
 /// dropped, so the report isolates exactly one fight while keeping the session
 /// header and the zone/unit/ability definitions that precede it (so ESO Logs can
-/// parse it). Definitions emitted *inside* an earlier fight (lazily, on first use)
-/// are not carried over — a deliberate tradeoff: at worst an ability reused from an
-/// earlier fight shows as "Unknown" in the report; damage/healing numbers, which
-/// come from the combat events themselves, stay correct.
+/// parse it). Lazy unit, ability, and other session definitions inside omitted
+/// fights are retained in original order, without carrying their combat events.
 ///
 /// Like [`split_selected`], a custom name that sanitizes to empty or collides falls
 /// back to a stable auto name, and the written paths are returned in selection order.
@@ -895,7 +923,7 @@ pub fn split_selected_fights(
         let name = unique_name(&mut used, base);
 
         let dst = out.join(&name);
-        copy_ranges(src, &dst, &segments)?;
+        let dst = copy_ranges(src, &dst, &segments)?;
         written.push(dst.to_string_lossy().into_owned());
     }
 
@@ -1064,7 +1092,7 @@ pub fn split_session_fights_selected(
         .unwrap_or_else(|| session_file_name(stem, session));
     let name = unique_name(&mut used, base);
     let dst = out.join(&name);
-    copy_ranges(src, &dst, &segments)?;
+    let dst = copy_ranges(src, &dst, &segments)?;
     Ok(vec![dst.to_string_lossy().into_owned()])
 }
 
@@ -2144,28 +2172,105 @@ mod partial_output_tests {
     use super::*;
     use std::io::Write;
 
-    /// A failure that is NOT the "source shrank" case must still leave no file
-    /// behind. An empty range fails before any bytes are copied, but `File::create`
-    /// has already truncated/created `dst`.
     #[test]
-    fn a_failed_copy_leaves_no_partial_file() {
+    fn copies_never_overwrite_existing_files_or_source_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("Raid.log");
+        let alias = tmp.path().join("alias.log");
+        std::fs::write(&src, b"original").unwrap();
+        std::fs::hard_link(&src, &alias).unwrap();
+        for requested in [&src, &alias] {
+            let first = copy_range(&src, requested, 0, 4).unwrap();
+            let second = copy_range(&src, requested, 0, 4).unwrap();
+            assert_ne!(first, second);
+            assert_eq!(std::fs::read(first).unwrap(), b"orig");
+            assert_eq!(std::fs::read(second).unwrap(), b"orig");
+            assert_eq!(std::fs::read(requested).unwrap(), b"original");
+        }
+        assert_eq!(std::fs::read(src).unwrap(), b"original");
+    }
+
+    #[test]
+    fn concurrent_splits_publish_separate_complete_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src.log");
+        let dst = tmp.path().join("out.log");
+        std::fs::write(&src, b"original").unwrap();
+        let paths = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| copy_range(&src, &dst, 0, 8).unwrap()))
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().unwrap())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        assert_eq!(paths.len(), 8);
+        for path in paths {
+            assert_eq!(std::fs::read(path).unwrap(), b"original");
+        }
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 9);
+    }
+
+    #[test]
+    fn omitted_fights_keep_lazy_definitions_in_both_split_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("Encounter.log");
+        let data = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n11,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T\n12,ABILITY_INFO,12345,\"Lazy ability\"\n13,COMBAT_EVENT,OMIT\n20,END_COMBAT\n30,BEGIN_COMBAT\n31,COMBAT_EVENT,KEEP\n40,END_COMBAT\n50,END_LOG\n";
+        std::fs::write(&src, data).unwrap();
+        let fight = FightSelection {
+            index: 1,
+            name: Some("second".into()),
+            start_offset: None,
+            start_ms: None,
+        };
+        let single = split_selected_fights(
+            src.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+            vec![fight.clone()],
+        )
+        .unwrap();
+        let grouped = split_session_fights_selected(
+            src.to_str().unwrap(),
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+            SessionFightSelection {
+                index: 0,
+                name: Some("second".into()),
+                start_offset: None,
+                start_time_ms: None,
+                fights: vec![fight],
+            },
+        )
+        .unwrap();
+        for path in single.into_iter().chain(grouped) {
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(text.contains("UNIT_ADDED"));
+            assert!(text.contains("Lazy ability"));
+            assert!(!text.contains("OMIT"));
+            assert_eq!(text.matches("BEGIN_COMBAT").count(), 1);
+            assert!(text.find("UNIT_ADDED").unwrap() < text.find("BEGIN_COMBAT").unwrap());
+        }
+    }
+
+    /// Validation failures never remove a file owned by an earlier operation.
+    #[test]
+    fn a_failed_copy_preserves_existing_output() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src.log");
         let dst = tmp.path().join("out.log");
         std::fs::write(&src, b"0,BEGIN_LOG,1,15\n").unwrap();
 
-        // Pre-create dst so we can prove the failure path removes it rather than
-        // merely never creating it.
+        // Existing outputs are never owned by this copy operation.
         let mut f = std::fs::File::create(&dst).unwrap();
         f.write_all(b"stale").unwrap();
         drop(f);
 
         let err = copy_range(&src, &dst, 10, 10).unwrap_err();
         assert!(err.contains("Empty byte range"), "unexpected error: {err}");
-        assert!(
-            !dst.exists(),
-            "a failed split must not leave a file in the Logs folder"
-        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"stale");
     }
 
     /// Truncating the source mid-copy is the original shrank case; it must still

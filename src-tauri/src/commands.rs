@@ -799,6 +799,7 @@ fn build_installed_index_from_parsed(
 
 /// Names-only view of [`build_installed_index`], for callers that don't need
 /// versions (the install-time transitive resolver).
+#[cfg(test)]
 pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
     build_installed_index(addons_dir).0
 }
@@ -5511,14 +5512,22 @@ pub async fn restore_backup_safe(
 ) -> Result<SafeRestoreResult, String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || restore_backup_safe_inner(&addons_dir, &backup_name))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+fn restore_backup_safe_inner(
+    addons_dir: &Path,
+    backup_name: &str,
+) -> Result<SafeRestoreResult, String> {
     // Serialize against every other backup-surface command (create/delete/
     // character-backup) for the whole operation.
     let _mutation_guard = BACKUP_MUTATION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let sv_dir = saved_variables_dir(&addons_dir);
-    let backup_path = backups_dir(&addons_dir).join(&backup_name);
+    let sv_dir = saved_variables_dir(addons_dir);
+    let backup_path = backups_dir(addons_dir).join(backup_name);
 
     if !backup_path.is_dir() {
         return Err(format!("Backup '{backup_name}' not found."));
@@ -5535,10 +5544,21 @@ pub async fn restore_backup_safe(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let snapshot_name = format!("auto-before-restore-{now}");
-            let snapshot_path = backups_dir(&addons_dir).join(&snapshot_name);
-            fs::create_dir_all(&snapshot_path)
-                .map_err(|e| format!("Failed to create safety snapshot folder: {e}"))?;
+            let root = backups_dir(addons_dir);
+            fs::create_dir_all(&root)
+                .map_err(|e| format!("Failed to create backup folder: {e}"))?;
+            // Unique even when two restores happen in the same second; never
+            // reuse or overwrite the source snapshot selected by the user.
+            let snapshot_path = tempfile::Builder::new()
+                .prefix(&format!("auto-before-restore-{now}-"))
+                .tempdir_in(&root)
+                .map_err(|e| format!("Failed to create safety snapshot folder: {e}"))?
+                .keep();
+            let snapshot_name = snapshot_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
 
             let mut file_count: u32 = 0;
             let mut total_size: u64 = 0;
@@ -5571,10 +5591,6 @@ pub async fn restore_backup_safe(
                 kind: BackupKind::AutoBeforeRestore,
                 worlds_spanned: None,
             });
-
-            // Keep only the 3 most recent auto-before-restore snapshots to prevent
-            // unbounded disk growth (SavedVariables can reach 1-2 GB on trade-addon-heavy accounts).
-            prune_auto_snapshots(&backups_dir(&addons_dir), "auto-before-restore-", 3);
         }
     }
 
@@ -5658,13 +5674,14 @@ pub async fn restore_backup_safe(
         ));
     }
 
+    // The source may itself be the oldest retained automatic snapshot. Read
+    // and restore it completely before retention is allowed to remove it.
+    prune_auto_snapshots(&backups_dir(addons_dir), "auto-before-restore-", 3);
+
     Ok(SafeRestoreResult {
         restored_files: restored,
         safety_snapshot,
     })
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Return the absolute path to the kalpa-backups folder so the UI can reveal it.
@@ -10644,6 +10661,37 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn restoring_oldest_auto_snapshot_reads_it_before_retention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let sv = saved_variables_dir(&addons);
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("Example.lua"), b"current").unwrap();
+        for epoch in [1000, 1100, 1200] {
+            let backup = backups_dir(&addons).join(format!("auto-before-restore-{epoch}"));
+            fs::create_dir_all(&backup).unwrap();
+            fs::write(backup.join("Example.lua"), b"selected backup").unwrap();
+        }
+        let restored = restore_backup_safe_inner(&addons, "auto-before-restore-1000").unwrap();
+        assert_eq!(restored.restored_files, 1);
+        assert_eq!(
+            fs::read(sv.join("Example.lua")).unwrap(),
+            b"selected backup"
+        );
+        let first = restored.safety_snapshot.unwrap();
+        assert_eq!(
+            fs::read(backups_dir(&addons).join(&first.name).join("Example.lua")).unwrap(),
+            b"current"
+        );
+        let second = restore_backup_safe_inner(&addons, &first.name)
+            .unwrap()
+            .safety_snapshot
+            .unwrap();
+        assert_ne!(first.name, second.name);
+        assert_eq!(fs::read(sv.join("Example.lua")).unwrap(), b"current");
     }
 
     #[test]
