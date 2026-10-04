@@ -51,7 +51,18 @@ const BASIC_SETUP = {
   highlightActiveLine: true,
 } as const;
 
-export function AddonFileEditor({
+export function AddonFileEditor(props: AddonFileEditorProps) {
+  // Content, errors, edit permission and outstanding requests belong to one
+  // file. Remount synchronously when its identity changes, before any effects.
+  return (
+    <FileEditor
+      key={JSON.stringify([props.addonsPath, props.folderName, props.relativePath])}
+      {...props}
+    />
+  );
+}
+
+function FileEditor({
   addonsPath,
   folderName,
   relativePath,
