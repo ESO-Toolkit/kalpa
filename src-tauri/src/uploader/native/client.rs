@@ -438,9 +438,11 @@ impl<'a> NativeUpload<'a> {
                     }
                     continue;
                 }
+                Ok(SendResult::AuthRejected(AuthRejection::AmbiguousRedirect)) => {
+                    return Err(ambiguous_redirect_error());
+                }
                 Ok(SendResult::AuthRejected(_)) => {
-                    // Rejected twice: the session really is unusable, whichever way the
-                    // rejection was signalled. Drop it so the next upload prompts a login.
+                    // Explicit rejection or repeated login bounce: prompt a new login.
                     self.session.invalidate();
                     return Err(UploadError::Session(SessionError::Expired));
                 }
@@ -851,6 +853,9 @@ fn live_send_with_reauth(
                 }
                 continue;
             }
+            Ok(SendResult::AuthRejected(AuthRejection::AmbiguousRedirect)) => {
+                return Err(ambiguous_redirect_error());
+            }
             Ok(SendResult::AuthRejected(_)) => {
                 session.invalidate();
                 return Err(UploadError::Session(SessionError::Expired));
@@ -958,18 +963,24 @@ enum SendResult {
 
 /// How strongly a response proves the session cookie is dead.
 ///
-/// Both arms engage the single re-auth retry, but only [`AuthRejection::Rejected`]
-/// justifies `SessionProvider::invalidate`, which WIPES the durable credential from the
-/// OS credential store. A `Suspected` redirect is a guess (maintenance/status-page 302,
-/// a load-balancer bounce, a 3xx with no readable `Location`), and acting on a false
-/// positive destroys a still-valid session: a one-shot upload then fails "sign in
-/// again", and a live session enters a mid-raid reauth pause it cannot resolve.
+/// All variants engage the single retry. Only [`AuthRejection::Rejected`] invalidates
+/// immediately; a `Suspected` login bounce must repeat before invalidating. An
+/// `AmbiguousRedirect` never justifies wiping the durable credential or pausing a
+/// live upload for reauthentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthRejection {
     /// A direct `401`/`419` — the server itself rejected the cookie.
     Rejected,
     /// A redirect we only SUSPECT is an auth bounce.
     Suspected,
+    /// A redirect without a readable target; it does not establish auth failure.
+    AmbiguousRedirect,
+}
+
+/// A protocol failure uses the retryable transport path, keeping live uploads out of
+/// NeedsReauth and preserving credentials when the service did not reject them.
+fn ambiguous_redirect_error() -> UploadError {
+    UploadError::Transport("protocol error: repeated redirect without a readable Location".into())
 }
 
 impl AuthRejection {
@@ -998,14 +1009,13 @@ enum StatusClass {
 /// endpoints is anomalous; the dominant cause is an expired session redirecting to the
 /// login page. Under reqwest's default policy that redirect would be followed POST→GET,
 /// return login HTML with `200`, fail JSON extraction, and be misclassified as a fatal
-/// `Server` error — bypassing the re-auth machinery. So a redirect to a login page (or
-/// one whose `Location` we cannot read, failing conservatively toward re-auth) is
-/// reported as [`StatusClass::AuthRejected`] to engage the single re-auth retry and the
-/// live pause-reauth. Everything else defers to a body read.
+/// `Server` error — bypassing the re-auth machinery. A login redirect engages the
+/// single retry and then live pause-reauth. A missing/unreadable target also retries,
+/// but remains a retryable protocol failure if repeated; it never establishes expiry.
+/// Everything else defers to a body read.
 ///
-/// The redirect arm is reported as [`AuthRejection::Suspected`], not `Rejected`: the
-/// conservative classification is deliberate, but only the server's own `401`/`419` may
-/// destroy the stored credential (see [`AuthRejection`]).
+/// Login redirects are [`AuthRejection::Suspected`]; unusable targets are
+/// [`AuthRejection::AmbiguousRedirect`] (see [`AuthRejection`]).
 ///
 /// Pure over `(status, headers)` so the classification is unit-testable without a server.
 fn classify_status(
@@ -1015,16 +1025,23 @@ fn classify_status(
     if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419 {
         return StatusClass::AuthRejected(AuthRejection::Rejected);
     }
-    if status.is_redirection() && redirect_is_auth_related(headers) {
-        return StatusClass::AuthRejected(AuthRejection::Suspected);
+    if status.is_redirection() {
+        if headers
+            .get(reqwest::header::LOCATION)
+            .and_then(|location| location.to_str().ok())
+            .is_none_or(|location| location.trim().is_empty())
+        {
+            return StatusClass::AuthRejected(AuthRejection::AmbiguousRedirect);
+        }
+        if redirect_is_auth_related(headers) {
+            return StatusClass::AuthRejected(AuthRejection::Suspected);
+        }
     }
     StatusClass::ReadBody
 }
 
-/// Whether a `3xx`'s `Location` indicates an auth bounce: it points at a login/auth page,
-/// OR it is missing/unreadable (fail conservatively toward re-auth rather than treat the
-/// redirect as a fatal server error). Same-host redirects are the only ones these
-/// endpoints emit, so a login `Location` is the expired-session signal.
+/// Whether a readable `3xx` target indicates an auth bounce. Same-host redirects are
+/// the only ones these endpoints emit, so a login `Location` is the expiry signal.
 fn redirect_is_auth_related(headers: &reqwest::header::HeaderMap) -> bool {
     match headers.get(reqwest::header::LOCATION) {
         Some(loc) => match loc.to_str() {
@@ -1032,11 +1049,9 @@ fn redirect_is_auth_related(headers: &reqwest::header::HeaderMap) -> bool {
                 let l = s.to_ascii_lowercase();
                 l.contains("/login") || l.contains("signin") || l.contains("sign-in")
             }
-            // An unreadable Location on a redirect: fail toward re-auth.
-            Err(_) => true,
+            Err(_) => false,
         },
-        // No Location on a 3xx: unusual for these endpoints — fail toward re-auth.
-        None => true,
+        None => false,
     }
 }
 
@@ -1591,10 +1606,10 @@ mod tests {
             StatusClass::AuthRejected(AuthRejection::Suspected)
         ));
 
-        // A 3xx with no readable Location → conservatively AuthRejected, still suspected.
+        // A 3xx with no readable Location remains ambiguous after retry exhaustion.
         assert!(matches!(
             classify_status(StatusCode::FOUND, &empty),
-            StatusClass::AuthRejected(AuthRejection::Suspected)
+            StatusClass::AuthRejected(AuthRejection::AmbiguousRedirect)
         ));
         assert!(AuthRejection::Rejected.proves_session_dead());
         assert!(
@@ -1624,6 +1639,82 @@ mod tests {
     }
 
     // ── C4: timeout scaling ──────────────────────────────────────────────────
+
+    #[test]
+    fn repeated_redirects_preserve_credentials_unless_auth_is_rejected() {
+        use std::io::{Read, Write};
+
+        for live in [false, true] {
+            for (response, expired) in [
+                (&b"302 Found\r\n"[..], false),
+                (&b"302 Found\r\nLocation: \xff\r\n"[..], false),
+                (&b"302 Found\r\nLocation: \r\n"[..], false),
+                (&b"302 Found\r\nLocation: /login\r\n"[..], true),
+                (&b"401 Unauthorized\r\n"[..], true),
+            ] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let url = format!("http://{}/terminate", listener.local_addr().unwrap());
+                let server = std::thread::spawn(move || {
+                    for _ in 0..2 {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        let mut stream = loop {
+                            match listener.accept() {
+                                Ok((stream, _)) => break stream,
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    assert!(std::time::Instant::now() < deadline, "missing retry");
+                                    std::thread::sleep(std::time::Duration::from_millis(10));
+                                }
+                                Err(error) => panic!("accept failed: {error}"),
+                            }
+                        };
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut byte = [0];
+                        while !request.ends_with(b"\r\n\r\n") {
+                            stream.read_exact(&mut byte).unwrap();
+                            request.push(byte[0]);
+                        }
+                        assert!(request.starts_with(b"POST /terminate "));
+                        stream.write_all(b"HTTP/1.1 ").unwrap();
+                        stream.write_all(response).unwrap();
+                        stream
+                            .write_all(b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                            .unwrap();
+                    }
+                });
+                let provider = Arc::new(FakeSession {
+                    invalidated: std::sync::Mutex::new(false),
+                });
+                let result = if live {
+                    let session: Arc<dyn SessionProvider> = provider.clone();
+                    live_send_with_reauth(&session, &url, &OwnedLiveRequest::Terminate)
+                } else {
+                    let opts = UploadOptions::default();
+                    NativeUpload::new(&*provider, &opts, Arc::new(AtomicBool::new(false)))
+                        .send(&url, RequestKind::Terminate)
+                };
+                server.join().unwrap();
+                assert_eq!(*provider.invalidated.lock().unwrap(), expired);
+                if expired {
+                    assert!(matches!(
+                        result,
+                        Err(UploadError::Session(SessionError::Expired))
+                    ));
+                } else {
+                    // Transport failures are retryable in the live upload driver.
+                    assert!(
+                        matches!(result, Err(UploadError::Transport(_))),
+                        "{result:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn request_timeout_scales_with_payload_and_is_capped() {
