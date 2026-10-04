@@ -78,6 +78,8 @@ pub struct SvReadResponse {
 pub struct SvChange {
     /// Key path from root, e.g. ["Default", "@Account", "settingName"]
     pub path: Vec<String>,
+    /// Lua key types corresponding to each path segment.
+    pub path_key_types: Vec<Option<SvKeyType>>,
     pub change_type: SvChangeType,
     /// Human-readable old value (None for additions)
     pub old_value: Option<String>,

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTab } from "../saved-variables";
@@ -8,6 +8,7 @@ import { treePathId, treePathSegment, updateTreeNode } from "../../lib/sv-helper
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@/lib/tauri", () => ({ invokeOrThrow: invoke, getTauriErrorMessage: String }));
 vi.mock("@/lib/store", () => ({ getSetting: vi.fn().mockResolvedValue({}), setSetting: vi.fn() }));
+vi.mock("@/hooks/use-capped-animation-rate", () => ({ useCappedAnimationRate: vi.fn() }));
 
 function table(key: string, children: SvTreeNode[], keyType?: "number" | "string"): SvTreeNode {
   return { key, keyType, valueType: "table", children };
@@ -22,6 +23,17 @@ function mount(tree: SvTreeNode) {
     if (command === "write_saved_variable") {
       saved = args.tree;
       return {};
+    }
+    if (command === "preview_sv_save") {
+      return {
+        changes: args.tree?.children?.[0]?.children?.map((node, index) => ({
+          path: ["Addon", node.key],
+          pathKeyTypes: [null, node.keyType],
+          changeType: "modified",
+          oldValue: String(index === 0 ? 10 : 20),
+          newValue: String(node.value),
+        })),
+      };
     }
     return { hints: {} };
   });
@@ -51,6 +63,31 @@ beforeEach(() => {
 });
 
 describe("SavedVariables typed key editing", () => {
+  it("previews both typed sibling edits with distinct labels and correct values", async () => {
+    const errors = vi.spyOn(console, "error");
+    mount(table("", [table("Addon", [leaf("1", 10, "number"), leaf("1", 20, "string")])]));
+    await userEvent.click(await screen.findByRole("button", { name: /Addon/ }));
+    await changeNumber(0, "11");
+    await changeNumber(1, "21");
+    await userEvent.click(screen.getByRole("button", { name: /Preview/ }));
+    const dialog = await screen.findByRole("dialog");
+    for (const [label, before, after] of [
+      ["[1]", "10", "11"],
+      ['["1"]', "20", "21"],
+    ]) {
+      const heading = within(dialog).getByText(label!);
+      const row = heading.parentElement?.parentElement;
+      if (!row) throw new Error("Missing change row");
+      expect(within(row).getByText(before!)).toBeInTheDocument();
+      expect(within(row).getByText(after!)).toBeInTheDocument();
+    }
+    expect(within(dialog).getByText("2 changes will be saved")).toBeInTheDocument();
+    expect(
+      errors.mock.calls.some((args) => args.some((arg) => String(arg).includes("same key")))
+    ).toBe(false);
+    errors.mockRestore();
+  });
+
   it("edits same-spelling numeric and string leaves independently and retains metadata on save", async () => {
     mount(table("", [table("Addon", [leaf("1", 10, "number"), leaf("1", 20, "string")])]));
     await userEvent.click(await screen.findByRole("button", { name: /Addon/ }));

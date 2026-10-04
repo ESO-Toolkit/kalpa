@@ -2226,7 +2226,12 @@ function CopyProfileTab({
 
 /** Format a key path like ["Default", "@Account", "setting"] for display */
 function formatChangePath(change: SvChange): { setting: string; location: string } {
-  const path = change.path;
+  const path = change.path.map((key, index) => {
+    const keyType = change.pathKeyTypes?.[index];
+    if (keyType === "number") return `[${key}]`;
+    if (keyType === "string" && /^-?\d+$/.test(key)) return `[${JSON.stringify(key)}]`;
+    return key;
+  });
   const setting = path[path.length - 1] ?? "unknown";
   const location = path.length > 1 ? path.slice(0, -1).join(" > ") : "";
   return { setting, location };
@@ -2275,7 +2280,7 @@ function DiffPreviewDialog({
             const { setting, location } = formatChangePath(change);
             return (
               <div
-                key={change.path.join("\0")}
+                key={JSON.stringify([change.path, change.pathKeyTypes, change.changeType])}
                 className={`rounded-lg border px-3 py-2 text-xs ${
                   change.changeType === "added"
                     ? "border-status-success-strong/20 bg-status-success-strong/[0.06] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_4%,transparent)]"
