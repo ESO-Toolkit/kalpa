@@ -203,7 +203,7 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 
 ## Data Retention
 
-**Pack Hub rollout status:** the storage, deletion, and backup safeguards described here include audit changes awaiting deployment. Merging Worker changes to main triggers the deployment workflow; no successful production deployment is recorded here. These descriptions do not establish that the live service already provides the safeguards.
+**Pack Hub rollout status:** production code deployment of commit `7af95e5f13cc5774e4b2b07219449be872988ef2` is recorded in [deployment 37180613544](https://github.com/ESO-Toolkit/kalpa/actions/runs/37180613544) (Worker version `7e869fd7-a1fe-414f-ab8b-fbf7398330cb`), verified at 2026-10-04T05:45:30.919Z. Public GET checks provide limited endpoint-response evidence; live authority, parity, and authenticated deletion/backup behavior were not independently verified. The parity-gated `kv` to `do` authority switch remains a separate operator step. D1 reconciliation remains `dry-run`, and addon-index sync remains disabled. Deployment does not establish immediate mirror/latest-snapshot cleanup or remove the backup-retention and permanent deletion-marker limitations described above.
 
 | Data | Retention |
 |------|-----------|

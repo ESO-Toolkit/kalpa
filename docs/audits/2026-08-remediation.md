@@ -30,17 +30,19 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 
 ## Current committed Worker behavior (2026-10-03)
 
-The canonical storage and mirror-retry changes await deployment. Merging Worker-path changes to main triggers the deployment workflow, so deployment is not a separate manual step after merge. No successful production deployment or live acceptance is recorded here. The August session log below is historical evidence, not a statement of the live Worker state.
+The canonical storage and mirror-retry code has been deployed; this does not establish independent live acceptance. The August session log and PR table remain historical evidence, not a statement of the live Worker state.
+
+Deployment evidence: normal main deployment of commit `7af95e5f13cc5774e4b2b07219449be872988ef2` completed successfully in [deployment 37180613544](https://github.com/ESO-Toolkit/kalpa/actions/runs/37180613544), producing Worker version `7e869fd7-a1fe-414f-ab8b-fbf7398330cb`; verified at 2026-10-04T05:45:30.919Z. Public GET checks provide limited endpoint-response evidence. Live authority/parity and authenticated mutation, deletion, backup, and retry behavior were not independently verified. The parity-gated `kv` to `do` switch remains a separate operator step; D1 reconciliation remains `dry-run` and addon-index sync remains disabled. Mirror/latest-snapshot cleanup remains retryable, dated snapshots retain their 90-day expiry, `backup:latest` has no TTL, and permanent user-ID/deletion-time markers must survive recovery.
 
 `PackIndexDO` now commits vote membership, pack counters, and durable repair intent together. KV vote keys are mirrors rather than the authority for an already-owned vote. Pack updates and D1/KV repair run under the same serialized DO gate, using current canonical lifecycle state; failed mirror effects remain queued for alarm retry. D1 is an eventually consistent public website mirror, not an atomic participant in the DO transaction.
 
 The D-W1-2 shadow/backfill and parity checks still govern rollout. Do not infer a completed authority flip from these code changes. Recovery must preserve canonical DO records and tombstones; a KV-only restore or authority-flag change is not a rollback strategy.
 
-### Pending backup privacy follow-up (not deployed)
+### Backup privacy follow-up (code deployed; live behavior not independently verified)
 
 The current backup fix permanently retains per-user deletion cutoffs (user ID and deletion timestamp) in DO storage. Backup writes, latest-snapshot scrubs, and restore finalization are serialized through the DO and exclude records at or before the cutoff while preserving later records from a returning user. Failed latest-snapshot cleanup remains pending for alarm retry. Recovery must preserve these cutoffs alongside canonical data so an older snapshot cannot reintroduce deleted records.
 
-Dated daily snapshots still expire after 90 days and are not rewritten on deletion; `backup:latest` still has no TTL. `PRIVACY.md` now discloses permanent user-ID/deletion-time retention, retryable latest-snapshot and mirror cleanup, and removal of votes on deleted pack lifecycles. Its rollout notice explicitly distinguishes the prepared implementation from the live service; no production deployment or acceptance is recorded here.
+Dated daily snapshots still expire after 90 days and are not rewritten on deletion; `backup:latest` still has no TTL. `PRIVACY.md` discloses permanent user-ID/deletion-time retention, retryable latest-snapshot and mirror cleanup, and removal of votes on deleted pack lifecycles. Its rollout notice distinguishes proven code deployment from live behavior: authenticated deletion/backup acceptance and live authority/parity were not independently verified.
 
 ## Decisions
 
