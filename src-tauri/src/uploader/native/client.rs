@@ -430,7 +430,7 @@ impl<'a> NativeUpload<'a> {
                     // invalidates (which wipes the durable credential). A suspected
                     // bounce retries with the SAME session — see [`AuthRejection`].
                     if rejection.proves_session_dead() {
-                        self.session.invalidate();
+                        self.session.invalidate_if_current(&session);
                         session = match self.session.session() {
                             Ok(s) => s,
                             Err(_) => return Err(UploadError::Session(SessionError::Expired)),
@@ -443,7 +443,7 @@ impl<'a> NativeUpload<'a> {
                 }
                 Ok(SendResult::AuthRejected(_)) => {
                     // Explicit rejection or repeated login bounce: prompt a new login.
-                    self.session.invalidate();
+                    self.session.invalidate_if_current(&session);
                     return Err(UploadError::Session(SessionError::Expired));
                 }
                 Ok(SendResult::ServerError { status, detail }) => {
@@ -845,7 +845,7 @@ fn live_send_with_reauth(
                 // Same rule as the one-shot `send`: only a direct 401/419 wipes the
                 // durable credential; a suspected redirect bounce retries as-is.
                 if rejection.proves_session_dead() {
-                    session.invalidate();
+                    session.invalidate_if_current(&sess);
                     sess = match session.session() {
                         Ok(s) => s,
                         Err(_) => return Err(UploadError::Session(SessionError::Expired)),
@@ -857,7 +857,7 @@ fn live_send_with_reauth(
                 return Err(ambiguous_redirect_error());
             }
             Ok(SendResult::AuthRejected(_)) => {
-                session.invalidate();
+                session.invalidate_if_current(&sess);
                 return Err(UploadError::Session(SessionError::Expired));
             }
             Ok(SendResult::ServerError { status, detail }) => {

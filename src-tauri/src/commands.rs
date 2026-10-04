@@ -7817,12 +7817,19 @@ fn is_session_rejection(err: &str) -> bool {
 }
 
 /// Drop the in-memory session, but only when ESO Logs actually rejected it.
-fn clear_session_if_rejected(state: &tauri::State<'_, AuthState>, err: &str) {
-    if !is_session_rejection(err) {
-        return;
-    }
-    if let Ok(mut guard) = state.tokens.lock() {
-        *guard = None;
+fn clear_session_if_rejected(
+    state: &AuthState,
+    expected: Option<&AuthTokens>,
+    err: &str,
+    app: &tauri::AppHandle,
+) {
+    if is_session_rejection(err) {
+        if let Some(expected) = expected {
+            let _ = state.clear_if_current(expected, || {
+                clear_auth_tokens(app);
+                app.state::<Arc<StoredSessionProvider>>().invalidate();
+            });
+        }
     }
 }
 
@@ -7841,6 +7848,11 @@ async fn authed_pack_hub_token(
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AuthState>();
+        let expected = state
+            .tokens
+            .lock()
+            .map_err(|_| "Auth lock poisoned")?
+            .clone();
         match state.get_valid_token_persisting(|tokens| {
             // Persistence failure is logged in the helper and keeps the
             // refreshed token working in-memory; don't fail the refresh.
@@ -7849,7 +7861,7 @@ async fn authed_pack_hub_token(
             Ok(Some(token)) => Ok(token),
             Ok(None) => Err(not_signed_in.to_string()),
             Err(e) => {
-                clear_session_if_rejected(&state, &e);
+                clear_session_if_rejected(&state, expected.as_ref(), &e, &app);
                 Err(e)
             }
         }
@@ -7869,12 +7881,13 @@ async fn pack_hub_read_token(app: &tauri::AppHandle) -> Option<String> {
     let app = app.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AuthState>();
+        let expected = state.tokens.lock().ok()?.clone();
         match state.get_valid_token_persisting(|tokens| {
             let _ = save_auth_tokens(&app, tokens);
         }) {
             Ok(token) => token,
             Err(e) => {
-                clear_session_if_rejected(&state, &e);
+                clear_session_if_rejected(&state, expected.as_ref(), &e, &app);
                 eprintln!("[auth] pack hub read continuing as anonymous: {e}");
                 None
             }
@@ -7967,7 +7980,7 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
 /// (the live token is still usable this session); they should not hard-fail the
 /// in-flight operation just because persistence hiccuped.
 #[must_use]
-fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) -> bool {
+pub(crate) fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) -> bool {
     let persisted = crate::token_store::save_tokens(tokens);
     if !persisted {
         eprintln!(
@@ -7997,7 +8010,8 @@ fn clear_auth_and_upload_sessions(
 // ── Auth Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn auth_cancel_login() -> Result<bool, String> {
+pub fn auth_cancel_login(state: tauri::State<'_, AuthState>) -> Result<bool, String> {
+    state.cancel_pending_login()?;
     auth::cancel_oauth_flow()
 }
 #[tauri::command]
@@ -8006,32 +8020,19 @@ pub async fn auth_login(
     app: tauri::AppHandle,
     _upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<AuthUser, String> {
+    let generation = state.clear(|| clear_auth_and_upload_sessions(&app, &_upload_session))?;
+    crate::uploader::native::login::clear_login_webview_data(&app).await?;
     let tokens = tokio::task::spawn_blocking(auth::login)
         .await
         .map_err(|e| format!("Task failed: {e}"))??;
-
-    // Save to store first so the login response can report durability. A failure
-    // is logged in the helper and leaves the session memory-only (still usable
-    // this process), so we do NOT fail the login — instead we surface
-    // `sessionPersisted: false` to the UI so it can warn the user that they will
-    // need to sign in again after a restart.
-    let persisted = save_auth_tokens(&app, &tokens);
-
-    let user = AuthUser {
+    let mut user = AuthUser {
         user_id: tokens.user_id.clone(),
         user_name: tokens.user_name.clone(),
-        session_persisted: Some(persisted),
+        session_persisted: None,
     };
-
-    // Update in-memory state
-    *state
-        .tokens
-        .lock()
-        .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(tokens);
-
-    // The native upload cookie is a separate website session. Keep it across
-    // profile sign-in so the shared helper can silently reuse a completed direct
-    // upload setup and make direct upload the default route.
+    let persisted =
+        state.finish_login(generation, tokens, |tokens| save_auth_tokens(&app, tokens))?;
+    user.session_persisted = Some(persisted);
     Ok(user)
 }
 
@@ -8041,18 +8042,9 @@ pub async fn auth_logout(
     app: tauri::AppHandle,
     _upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<(), String> {
-    // Clear in-memory state
-    *state
-        .tokens
-        .lock()
-        .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-
-    // Explicit profile sign-out clears only OAuth tokens. The direct-upload
-    // website session is reused on the next sign-in so users do not repeat a
-    // completed capture step.
-    clear_auth_tokens(&app);
-
-    Ok(())
+    state.clear(|| clear_auth_and_upload_sessions(&app, &_upload_session))?;
+    let _ = auth::cancel_oauth_flow();
+    crate::uploader::native::login::clear_login_webview_data(&app).await
 }
 
 /// Return the signed-in user known from the locally stored token only.
@@ -8142,19 +8134,13 @@ pub async fn auth_get_user(
             // still-valid refresh token in the credential store, or the user is
             // permanently signed out by a transient error.
             if is_session_rejection(&e) {
-                *state
-                    .tokens
-                    .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-                clear_auth_and_upload_sessions(&app, &upload_session);
-                return Ok(None);
+                state.clear_if_current(&tokens, || {
+                    clear_auth_and_upload_sessions(&app, &upload_session)
+                })?;
+                return auth_cached_user(state);
             }
             eprintln!("[auth] keeping the stored session after a transient refresh failure: {e}");
-            Ok(Some(AuthUser {
-                user_id: tokens.user_id,
-                user_name: tokens.user_name,
-                session_persisted: None,
-            }))
+            auth_cached_user(state)
         }
     }
 }
@@ -8356,6 +8342,13 @@ pub async fn delete_pack_hub_account(
 ) -> Result<DeleteAccountSummary, String> {
     let access_token = authed_pack_hub_token(&app, "Not signed in. Please sign in first.").await?;
 
+    let expected = state
+        .tokens
+        .lock()
+        .map_err(|_| "Auth lock poisoned")?
+        .as_ref()
+        .filter(|tokens| tokens.access_token == access_token)
+        .cloned();
     let result = tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
@@ -8395,12 +8388,14 @@ pub async fn delete_pack_hub_account(
     .await
     .map_err(|e| format!("Task failed: {e}"))??;
 
-    // Sign the user out after successful deletion
-    *state
-        .tokens
-        .lock()
-        .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-    clear_auth_and_upload_sessions(&app, &upload_session);
+    // Serialize clearing against a concurrent token refresh.
+    if let Some(expected) = expected {
+        if state.clear_if_current(&expected, || {
+            clear_auth_and_upload_sessions(&app, &upload_session)
+        })? {
+            crate::uploader::native::login::clear_login_webview_data(&app).await?;
+        }
+    }
 
     Ok(result)
 }

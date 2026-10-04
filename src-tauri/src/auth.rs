@@ -52,6 +52,7 @@ pub struct AuthUser {
 pub struct AuthState {
     pub tokens: Mutex<Option<AuthTokens>>,
     refresh_lock: Mutex<()>,
+    generation: AtomicU64,
 }
 
 impl AuthState {
@@ -59,14 +60,54 @@ impl AuthState {
         Self {
             tokens: Mutex::new(tokens),
             refresh_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         }
     }
 
-    /// Get the current access token, refreshing if expired, without persisting a
-    /// refreshed pair. Callers that own a credential store should use
-    /// [`AuthState::get_valid_token_persisting`] instead.
-    pub fn get_valid_token(&self) -> Result<Option<String>, String> {
-        self.get_valid_token_persisting(|_| {})
+    /// Invalidate pending logins and refreshes while clearing credentials under
+    /// the same mutex used to publish a refreshed pair.
+    pub fn clear(&self, clear_credentials: impl FnOnce()) -> Result<u64, String> {
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *guard = None;
+        clear_credentials();
+        Ok(generation)
+    }
+
+    pub fn cancel_pending_login(&self) -> Result<(), String> {
+        let _guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn finish_login(
+        &self,
+        generation: u64,
+        tokens: AuthTokens,
+        persist: impl FnOnce(&AuthTokens) -> bool,
+    ) -> Result<bool, String> {
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err("Sign-in was cancelled because the account changed.".into());
+        }
+        let persisted = persist(&tokens);
+        *guard = Some(tokens);
+        Ok(persisted)
+    }
+
+    pub fn clear_if_current(
+        &self,
+        expected: &AuthTokens,
+        clear_credentials: impl FnOnce(),
+    ) -> Result<bool, String> {
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        if guard.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *guard = None;
+        clear_credentials();
+        Ok(true)
     }
 
     /// Get the current access token, refreshing if expired.
@@ -83,31 +124,36 @@ impl AuthState {
         &self,
         persist: impl FnOnce(&AuthTokens),
     ) -> Result<Option<String>, String> {
-        let _refresh_guard = self
-            .refresh_lock
-            .lock()
-            .map_err(|_| "Internal error.".to_string())?;
+        self.refresh_with(ensure_valid_token, persist)
+    }
 
-        let tokens = {
-            let guard = self
-                .tokens
-                .lock()
-                .map_err(|_| "Internal error.".to_string())?;
-            guard.clone()
+    fn refresh_with(
+        &self,
+        refresh: impl FnOnce(&AuthTokens) -> Result<Option<AuthTokens>, String>,
+        persist: impl FnOnce(&AuthTokens),
+    ) -> Result<Option<String>, String> {
+        let _refresh_guard = self.refresh_lock.lock().map_err(|_| "Auth lock poisoned")?;
+        let (tokens, generation) = {
+            let guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+            (guard.clone(), self.generation.load(Ordering::SeqCst))
         };
-
         let Some(tokens) = tokens else {
             return Ok(None);
         };
-
-        match ensure_valid_token(&tokens)? {
+        let refreshed = refresh(&tokens);
+        let mut guard = self.tokens.lock().map_err(|_| "Auth lock poisoned")?;
+        // A logout or another login supersedes both successful and failed work.
+        if self.generation.load(Ordering::SeqCst) != generation || guard.as_ref() != Some(&tokens) {
+            return Ok(None);
+        }
+        match refreshed? {
             Some(new_tokens) => {
+                if new_tokens.user_id != tokens.user_id {
+                    return Err("Token validation failed".into());
+                }
                 let token = new_tokens.access_token.clone();
                 persist(&new_tokens);
-                *self
-                    .tokens
-                    .lock()
-                    .map_err(|_| "Internal error.".to_string())? = Some(new_tokens);
+                *guard = Some(new_tokens);
                 Ok(Some(token))
             }
             None => Ok(Some(tokens.access_token)),
@@ -657,6 +703,84 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_tokens(access: &str) -> AuthTokens {
+        AuthTokens {
+            access_token: access.into(),
+            refresh_token: "refresh".into(),
+            expires_at: 0,
+            user_id: "1".into(),
+            user_name: "User".into(),
+        }
+    }
+
+    #[test]
+    fn refresh_persists_rotated_pair_and_reuses_it() {
+        let state = AuthState::new(Some(test_tokens("old")));
+        let mut rotated = test_tokens("new");
+        rotated.refresh_token = "rotated".into();
+        let persisted = Mutex::new(None);
+        assert_eq!(
+            state
+                .refresh_with(
+                    |_| Ok(Some(rotated.clone())),
+                    |t| *persisted.lock().unwrap() = Some(t.clone())
+                )
+                .unwrap(),
+            Some("new".into())
+        );
+        assert_eq!(*persisted.lock().unwrap(), Some(rotated.clone()));
+        assert_eq!(
+            state
+                .refresh_with(
+                    |t| {
+                        assert_eq!(t, &rotated);
+                        Ok(None)
+                    },
+                    |_| panic!("no refresh to persist")
+                )
+                .unwrap(),
+            Some("new".into())
+        );
+    }
+
+    #[test]
+    fn logout_during_refresh_cannot_restore_credentials() {
+        let state = AuthState::new(Some(test_tokens("old")));
+        assert_eq!(
+            state
+                .refresh_with(
+                    |_| {
+                        state.clear(|| {}).unwrap();
+                        Ok(Some(test_tokens("new")))
+                    },
+                    |_| panic!("stale refresh persisted")
+                )
+                .unwrap(),
+            None
+        );
+        assert!(state.tokens.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_login_and_rejection_cannot_overwrite_a_new_session() {
+        let state = AuthState::new(None);
+        let old = state.clear(|| {}).unwrap();
+        let current = state.clear(|| {}).unwrap();
+        state
+            .finish_login(current, test_tokens("new"), |_| true)
+            .unwrap();
+        assert!(state
+            .finish_login(old, test_tokens("old"), |_| panic!("stale login persisted"))
+            .is_err());
+        assert!(!state
+            .clear_if_current(&test_tokens("old"), || panic!("cleared new credentials"))
+            .unwrap());
+        assert_eq!(
+            state.tokens.lock().unwrap().as_ref().unwrap().access_token,
+            "new"
+        );
+    }
 
     const POST_HEAD: &str = concat!(
         "POST /callback HTTP/1.1\r\n",

@@ -1109,7 +1109,9 @@ pub async fn uploader_login_esologs(
         .map_err(|e| e.to_string());
     // A just-signed-in user may have orphaned native live reports from a prior crash —
     // sweep them now (off-thread, once-per-process; no-op if none / signed-out).
-    super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
+    if result.is_ok() {
+        super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
+    }
     result
 }
 
@@ -1127,56 +1129,16 @@ pub fn uploader_has_session(
     session.has_session()
 }
 
-/// The two side effects of an EXPLICIT ESO Logs sign-out, as a seam so the ordering
-/// (invalidate the stored session, THEN clear the login webview's cookie jar) is
-/// unit-testable without the live Tauri window API. The mid-upload
-/// `SessionProvider::invalidate` (a 401/419 during an upload) performs ONLY the first
-/// step — clearing the jar there would break the reauth pause→re-login flow — which is
-/// exactly why the jar-clear lives on the explicit-logout path, not in `invalidate`.
-trait SignOut {
-    fn invalidate_session(&self);
-    fn clear_webview_jar(&self);
-}
-
-/// Perform a full sign-out: invalidate the stored session, then clear the webview jar,
-/// in that order. Pinned by the mock test `explicit_sign_out_invalidates_then_clears_jar`.
-fn run_sign_out(actions: &dyn SignOut) {
-    actions.invalidate_session();
-    actions.clear_webview_jar();
-}
-
-/// Clear the native upload session cookie (sign out of uploads): invalidate the stored
-/// session (memory + credential store) AND clear the login webview's persistent cookie
-/// jar (B1). Without the jar-clear, WebView2 keeps a valid ESO Logs web session on disk
-/// and the next sign-in auto-completes — making sign-out cosmetic. Async so the webview
-/// work runs off the Tauri main thread (window build/clear must not block the event
-/// loop). `app` is injected by Tauri, so the frontend invoke is unchanged.
+/// Invalidate pending captures before clearing the dedicated login profile.
 #[tauri::command]
 pub async fn uploader_logout_esologs(
     app: tauri::AppHandle,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
 ) -> Result<(), String> {
-    struct RealSignOut<'a> {
-        app: &'a tauri::AppHandle,
-        session: &'a std::sync::Arc<super::native::session::StoredSessionProvider>,
-    }
-    impl SignOut for RealSignOut<'_> {
-        fn invalidate_session(&self) {
-            use super::native::session::SessionProvider;
-            self.session.invalidate();
-        }
-        fn clear_webview_jar(&self) {
-            super::native::login::clear_login_webview_data(self.app);
-        }
-    }
-    run_sign_out(&RealSignOut {
-        app: &app,
-        session: session.inner(),
-    });
-    Ok(())
+    use super::native::session::SessionProvider;
+    session.invalidate();
+    super::native::login::clear_login_webview_data(&app).await
 }
-
-// ── Manual upload / handoff ─────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1486,7 +1448,11 @@ pub async fn uploader_upload_log(
                         let evidence = evidence.clone();
                         let visibility = options.visibility;
                         std::thread::spawn(move || {
-                            match app.state::<AuthState>().get_valid_token() {
+                            match app
+                                .state::<AuthState>()
+                                .get_valid_token_persisting(|tokens| {
+                                    let _ = crate::commands::save_auth_tokens(&app, tokens);
+                                }) {
                                 Ok(Some(token)) => {
                                     if let Err(e) = super::sidecar::publish_build_evidence(
                                         &report_code,
@@ -1637,7 +1603,12 @@ fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) 
             return;
         }
 
-        match job.app.state::<AuthState>().get_valid_token() {
+        match job
+            .app
+            .state::<AuthState>()
+            .get_valid_token_persisting(|tokens| {
+                let _ = crate::commands::save_auth_tokens(&job.app, tokens);
+            }) {
             Ok(Some(token)) => {
                 if let Err(e) = super::sidecar::publish_build_evidence_unless(
                     &job.report_code,
@@ -3212,8 +3183,8 @@ mod native_live_routing_tests {
 #[cfg(test)]
 mod uploader_command_tests {
     use super::{
-        confine_existing_log_path, path_has_log_extension, run_sign_out,
-        split_output_root_from_logs_root, validate_import_source, SignOut,
+        confine_existing_log_path, path_has_log_extension, split_output_root_from_logs_root,
+        validate_import_source,
     };
     use std::path::Path;
 
@@ -3265,36 +3236,5 @@ mod uploader_command_tests {
         assert!(path_has_log_extension(&link));
         assert!(!path_has_log_extension(&canonical));
         assert!(validate_import_source(&link, &canonical).is_err());
-    }
-
-    // B1: an EXPLICIT sign-out must invalidate the stored session AND clear the webview
-    // cookie jar, in that order. The mock records both calls so the two-step discipline
-    // is pinned without the live Tauri window API. The mid-upload 401/419 path calls
-    // `SessionProvider::invalidate` directly (never `run_sign_out`), and `invalidate`
-    // has no window/AppHandle access, so it structurally cannot clear the jar — the only
-    // jar-clear is `clear_webview_jar` on this explicit-logout seam.
-    #[test]
-    fn explicit_sign_out_invalidates_then_clears_jar() {
-        use std::cell::RefCell;
-        struct MockSignOut {
-            calls: RefCell<Vec<&'static str>>,
-        }
-        impl SignOut for MockSignOut {
-            fn invalidate_session(&self) {
-                self.calls.borrow_mut().push("invalidate");
-            }
-            fn clear_webview_jar(&self) {
-                self.calls.borrow_mut().push("clear_jar");
-            }
-        }
-        let m = MockSignOut {
-            calls: RefCell::new(Vec::new()),
-        };
-        run_sign_out(&m);
-        assert_eq!(
-            *m.calls.borrow(),
-            vec!["invalidate", "clear_jar"],
-            "explicit sign-out must invalidate the session AND clear the webview jar, in order"
-        );
     }
 }
