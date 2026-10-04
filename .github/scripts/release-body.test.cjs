@@ -218,7 +218,8 @@ test("builds the established release body around changelog-authored Changed copy
     /## Changed:\nA focused release\.\n\n### Features\n\n- Add the useful thing\./
   );
   assert.match(body, /## Verify your download\n/);
-  assert.match(body, /## Known issues\nNone known/);
+  assert.match(body, /## Known issues\nReview the release notes above for known issues and limitations\./);
+  assert.doesNotMatch(body, /None known/i);
   assert.doesNotMatch(body, /security and dependency refresh/i);
 });
 
