@@ -140,7 +140,7 @@ export async function validateBearerToken(request: Request): Promise<EsoLogsUser
 function validateSharePayload(data: unknown): ValidationError[] {
   const errors: ValidationError[] = [];
 
-  if (!data || typeof data !== "object") {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
     return [{ field: "body", message: "Body must be a JSON object" }];
   }
 
@@ -175,6 +175,10 @@ function validateSharePayload(data: unknown): ValidationError[] {
     errors.push({ field: "addons", message: `addons must be an array with 1-${MAX_ADDONS} entries` });
   } else {
     for (let i = 0; i < d.addons.length; i++) {
+      if (!d.addons[i] || typeof d.addons[i] !== "object" || Array.isArray(d.addons[i])) {
+        errors.push({ field: `addons[${i}]`, message: "each addon must be a JSON object" });
+        continue;
+      }
       const addon = d.addons[i] as Record<string, unknown>;
       if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({ field: `addons[${i}].esouiId`, message: "esouiId must be a positive number" });

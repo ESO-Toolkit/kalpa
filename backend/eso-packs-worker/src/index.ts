@@ -114,6 +114,8 @@ function json(
   };
   if (cacheMaxAge > 0) {
     headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
+  } else if (cacheScope === "private") {
+    headers["Cache-Control"] = "private, no-store";
   }
   return new Response(JSON.stringify(data), { status, headers });
 }
@@ -274,7 +276,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
   // Sort. The client (pack-constants.ts SortOption) sends votes|newest|updated;
   // popular/installs are kept for backward compatibility.
-  const sort = sortParam ?? "updated";
+  const sort = sortParam ?? "votes";
   if (sort === "votes" || sort === "popular") {
     packs.sort((a, b) => b.vote_count - a.vote_count);
   } else if (sort === "installs") {
@@ -282,7 +284,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   } else if (sort === "newest") {
     packs.sort((a, b) => b.created_at.localeCompare(a.created_at));
   } else {
-    // "updated" (and default) — sort by updated_at descending
+    // "updated" (and unrecognized sorts) — sort by updated_at descending
     packs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
 
@@ -308,7 +310,9 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     ? redacted.map((p) => ({ ...p, user_voted: votedIds.has(p.id) }))
     : redacted;
 
-  const response = json(request, { packs: visible, page, sort }, 200, 30);
+  const response = viewerId === undefined
+    ? json(request, { packs: visible, page, sort }, 200, 30)
+    : json(request, { packs: visible, page, sort }, 200, 0, "private");
 
   if (isSharedCacheable && request.method === "GET") {
     cache.put(defaultViewCacheKey(url), response.clone()).catch(console.error);
@@ -337,7 +341,7 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
     // cacheable.
     const voted = (await getVote(env, id, viewerId)) !== null;
     const view: PackView = { ...redactAnonymousPack(pack, viewerId), user_voted: voted };
-    return json(request, { pack: view }, 200, 0);
+    return json(request, { pack: view }, 200, 0, "private");
   }
 
   // Anonymous viewer: the redacted pack is identical for everyone, so it stays

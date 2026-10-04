@@ -100,6 +100,36 @@ describe("OPTIONS preflight", () => {
 // ── GET /packs ────────────────────────────────────────────────────
 
 describe("GET /packs", () => {
+  it.each(["/packs", "/packs?sort=votes&page=1"])(
+    "shares only votes ordering when %s warms the cache",
+    async (firstPath) => {
+      await putPackIndex(e, { packs: [
+        makePack("recent", { vote_count: 1, updated_at: "2025-12-01T00:00:00.000Z" }),
+        makePack("popular", { vote_count: 10, updated_at: "2025-01-01T00:00:00.000Z" }),
+      ] });
+      const first = await call(new Request(`${BASE}${firstPath}`));
+      const expected = { packs: ["popular", "recent"], sort: "votes" };
+      const firstBody = await first.json<{ packs: Array<{ id: string }>; sort: string }>();
+      expect({ packs: firstBody.packs.map((p) => p.id), sort: firstBody.sort }).toEqual(expected);
+      // Prove the second request reuses the first cached representation.
+      await putPackIndex(e, { packs: [] });
+      const secondPath = firstPath === "/packs" ? "/packs?sort=votes&page=1" : "/packs";
+      const second = await call(new Request(`${BASE}${secondPath}`));
+      const secondBody = await second.json<{ packs: Array<{ id: string }>; sort: string }>();
+      expect({ packs: secondBody.packs.map((p) => p.id), sort: secondBody.sort }).toEqual(expected);
+    },
+  );
+
+  it.each(["", "?status=draft", "?status=all", "?author=42"])(
+    "prevents downstream caching of personalized lists %s",
+    async (query) => {
+      await putPackIndex(e, { packs: [makePack("private", { status: "draft", is_anonymous: true })] });
+      const response = await call(authedRequest(`${BASE}/packs${query}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    },
+  );
+
   it("returns empty list when no index", async () => {
     const res = await call(new Request(`${BASE}/packs`));
     expect(res.status).toBe(200);
@@ -243,6 +273,23 @@ describe("GET /packs", () => {
 // ── POST /packs ───────────────────────────────────────────────────
 
 describe("POST /packs", () => {
+  it.each([null, [], "addon", 1, true])("rejects non-object addon %j with 400", async (addon) => {
+    const response = await call(authedRequest(`${BASE}/packs`, {
+      method: "POST",
+      body: JSON.stringify(validPackBody({ addons: [addon] })),
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ details: [{ field: "addons[0]" }] });
+  });
+
+  it("rejects UTF-8 payloads over the byte limit", async () => {
+    const response = await call(authedRequest(`${BASE}/packs`, {
+      method: "POST",
+      body: JSON.stringify(validPackBody({ junk: "界".repeat(90_000) })),
+    }));
+    expect(response.status).toBe(413);
+  });
+
   it("returns retryable 503 and resumes the same create after a KV mirror failure", async () => {
     const originalPut = e.ESO_PACKS.put.bind(e.ESO_PACKS);
     const put = vi.spyOn(e.ESO_PACKS, "put").mockRejectedValueOnce(
@@ -468,7 +515,7 @@ describe("GET /packs/:id", () => {
     const body = await res.json<{ pack: { user_voted: boolean } }>();
     expect(body.pack.user_voted).toBe(true);
     // Per-viewer state must never be cached.
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("reports user_voted false for a signed-in viewer who has not voted", async () => {
@@ -564,13 +611,22 @@ describe("anonymous pack redaction", () => {
     }>();
     expect(body.pack.author_name).toBe(TEST_USER.name);
     expect(body.pack.author_id).toBe(String(TEST_USER.id));
-    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });
 
 // ── PUT /packs/:id ────────────────────────────────────────────────
 
 describe("PUT /packs/:id", () => {
+  it.each([null, []])("rejects non-object addon %j with 400", async (addon) => {
+    await putPackIndex(e, { packs: [makePack("invalid-addon-update")] });
+    const response = await call(authedRequest(`${BASE}/packs/invalid-addon-update`, {
+      method: "PUT",
+      body: JSON.stringify(validPackBody({ addons: [addon] })),
+    }));
+    expect(response.status).toBe(400);
+  });
+
   it("updates own pack", async () => {
     const pack = makePack("update-me");
     await putPack(e, pack);
