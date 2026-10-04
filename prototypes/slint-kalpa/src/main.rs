@@ -8543,6 +8543,7 @@ fn run_uploader_sign_in(
     if in_flight.swap(true, Ordering::SeqCst) {
         return; // a sign-in window is already open
     }
+    let generation = session.generation();
     if let Some(ui) = ui.upgrade() {
         ui.set_uploader_status_title("Opening ESO Logs sign-in...".into());
         ui.set_uploader_status_detail(
@@ -8554,12 +8555,18 @@ fn run_uploader_sign_in(
         let outcome = run_login_subprocess_capture();
         let _ = slint::invoke_from_event_loop(move || {
             in_flight.store(false, Ordering::SeqCst);
+            // Sign-out invalidates results from an already-open login window.
+            if session.generation() != generation {
+                return;
+            }
             let Some(ui) = ui.upgrade() else {
                 return;
             };
             match outcome {
                 LoginResult::Success(cookie_header) => {
-                    let persisted = session.store(cookie_header);
+                    let Ok(persisted) = session.store_if_current(generation, cookie_header) else {
+                        return;
+                    };
                     apply_uploader_native_state(&ui, session.has_session());
                     ui.set_uploader_status_title("Signed in to ESO Logs".into());
                     ui.set_uploader_status_detail(

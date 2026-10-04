@@ -523,7 +523,7 @@ mod tests {
                             // Test two complete 100-write processes under heavy
                             // Windows CI scheduling without mistaking starvation
                             // for an unbounded wait. Production remains 2s.
-                            timeout: Duration::from_secs(10),
+                            timeout: Duration::from_secs(60),
                             cancel: None,
                         },
                     )
@@ -845,8 +845,10 @@ mod tests {
         std::fs::write(&target, b"0").unwrap();
         let mut a = spawn_helper("increment", &target, None);
         let mut b = spawn_helper("increment", &target, None);
-        assert!(a.wait().unwrap().success());
-        assert!(b.wait().unwrap().success());
+        let a_status = a.wait().unwrap();
+        let b_status = b.wait().unwrap();
+        assert!(a_status.success());
+        assert!(b_status.success());
         assert_eq!(std::fs::read_to_string(target).unwrap(), "200");
     }
 

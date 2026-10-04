@@ -1029,12 +1029,12 @@ impl RestoreCreated {
 fn restore_path_metadata(path: &Path) -> Result<Option<fs::Metadata>, String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            let mut linked = metadata.file_type().is_symlink();
+            let linked = metadata.file_type().is_symlink();
             #[cfg(windows)]
-            {
+            let linked = {
                 use std::os::windows::fs::MetadataExt;
-                linked |= metadata.file_attributes() & 0x400 != 0;
-            }
+                linked || metadata.file_attributes() & 0x400 != 0
+            };
             if linked {
                 return Err(format!("Refusing linked restore path: {}", path.display()));
             }
