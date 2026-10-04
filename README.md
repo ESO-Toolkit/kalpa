@@ -138,7 +138,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 - **Path validation** — path-taking IPC commands canonicalize caller-supplied paths and confine them to the approved AddOns folder before any I/O. The uploader applies its own equivalent check against the ESO Logs folder.
 - **ZIP extraction** rejects absolute paths, drive prefixes, and `..` components, skips symlink entries, and caps total extraction at 500 MB. That is what stops path traversal and zip bombs.
 - **Content-Security-Policy** — strict, with `frame-ancestors 'none'` to block clickjacking and embedding.
-- **Pack Hub worker** rate-limits requests and serializes pack-index mutations through a Durable Object.
+- **Pack Hub worker** rate-limits requests and serializes pack and vote mutations through a Durable Object. The committed canonical-storage and mirror-retry changes have **not been deployed to production**; see [Worker architecture](claude.md#architecture) for rollout and recovery details.
 - **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies, `cargo audit` over the Rust lockfile. Advisories with no upstream fix are assessed one at a time and recorded in [`ci.yml`](.github/workflows/ci.yml). Today that's two quick-xml DoS advisories that none of Kalpa's code paths can reach.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
 
@@ -348,7 +348,7 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 | **File hash tracker**     | Detects locally edited files, which is what drives update conflict resolution                                            |
 | **SavedVariables parser** | Reads and writes ESO's Lua settings files with change tracking                                                           |
 | **Log uploader**          | Scans, splits, encodes, and uploads `Encounter.log` sessions, including live streaming                                   |
-| **Pack Hub worker**       | Cloudflare Worker plus KV backing pack sharing, voting, and share codes                                                  |
+| **Pack Hub worker**       | Cloudflare Worker with Durable Object pack/vote storage, KV data, and a shared D1 website mirror                         |
 
 ---
 
@@ -358,7 +358,7 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 - **Frontend**: React 19, TypeScript, Vite
 - **Styling**: Tailwind CSS v4, shadcn/ui
 - **Native performance UI** (beta, Windows): a [Slint](https://slint.dev/) sidecar, `kalpa-slint`
-- **Backend**: Cloudflare Workers and KV, for Pack Hub
+- **Backend**: Cloudflare Workers, Durable Objects, KV, and shared D1, for Pack Hub (canonical storage rollout pending)
 - **Rust crates**: reqwest, scraper, zip, rusqlite (bundled SQLite)
 - **SavedVariables**: a custom Lua parser
 
@@ -400,7 +400,7 @@ backend/eso-packs-worker/   # Pack Hub API (packs, votes, shares)
   src/types.ts              # Pack types (snake_case)
   src/validate.ts           # Input validation
   src/shares.ts             # Share code generation and resolution
-  src/pack-index-do.ts      # Durable Object for atomic index mutations
+  src/pack-index-do.ts      # Canonical pack/vote storage and mirror repair
 
 prototypes/slint-kalpa/     # Native (Slint) performance UI sidecar
 context/                    # Architecture and design documentation

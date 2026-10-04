@@ -29,6 +29,14 @@ This file is the durable execution record for `2026-08-remediation-master-prompt
 | H5 | todo | - | - | - | - | - | - | Propose branch pruning; do not delete without approval. |
 | H6 | todo | - | - | - | - | - | - | Revisit ignored quick-xml advisories when dependencies permit. |
 
+## Current committed Worker behavior (2026-10-03)
+
+The canonical storage and mirror-retry changes are committed on this branch but have **NOT been deployed to production**. The August session log below is historical evidence, not a statement of the live Worker state.
+
+`PackIndexDO` now commits vote membership, pack counters, and durable repair intent together. KV vote keys are mirrors rather than the authority for an already-owned vote. Pack updates and D1/KV repair run under the same serialized DO gate, using current canonical lifecycle state; failed mirror effects remain queued for alarm retry. D1 is an eventually consistent public website mirror, not an atomic participant in the DO transaction.
+
+The D-W1-2 shadow/backfill and parity checks still govern rollout. Do not infer a completed authority flip from these code changes. Recovery must preserve canonical DO records and tombstones; a KV-only restore or authority-flag change is not a rollback strategy.
+
 ## Decisions
 
 ### D-W1-1 — Durable Object storage is mutation authority
@@ -94,7 +102,6 @@ Wire contract verdict: OK. Bug-class sweep found the restore and account-deletio
 ## Open Questions
 
 - W2: maintainer approval is required before merging any reconciliation path that can delete rows from shared D1.
-- W1: decide whether moving vote-record authority from KV/in-memory memo into DO storage belongs in W1 or W3. The current W1 code prevents resurrection but retains the pre-existing eviction/double-toggle limitation for later hardening.
 - W1: owner sign-off is required before the later manual `kv` → `do` authority flip and must accept backup restore as the post-flip rollback path.
 - P0-A2: lock dependency and user-visible timeout behavior require a Fable recommendation and may require maintainer input.
 - R4/R5: ownership/conflict behavior that changes install outcomes requires explicit design review before implementation.
