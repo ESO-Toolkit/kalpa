@@ -138,7 +138,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 - **Path validation** — path-taking IPC commands canonicalize caller-supplied paths and confine them to the approved AddOns folder before any I/O. The uploader applies its own equivalent check against the ESO Logs folder.
 - **ZIP extraction** rejects absolute paths, drive prefixes, and `..` components, skips symlink entries, and caps total extraction at 500 MB. That is what stops path traversal and zip bombs.
 - **Content-Security-Policy** — strict, with `frame-ancestors 'none'` to block clickjacking and embedding.
-- **Pack Hub worker** rate-limits requests and serializes pack and vote mutations through a Durable Object. The canonical-storage and mirror-retry changes await deployment; merging Worker changes to main triggers the deployment workflow. No successful production deployment is recorded here; see [Worker architecture](claude.md#architecture) for rollout and recovery details.
+- **Pack Hub worker** rate-limits requests and serializes pack and vote mutations through a Durable Object. The canonical-storage and mirror-retry code is deployed; see the [October audit record](docs/audits/2026-10-integration.md) for deployment evidence and acceptance limits. Live authority/parity remain unverified, and the authority switch remains a separate operator step; see [Worker architecture](claude.md#architecture) for rollout and recovery details.
 - **Dependency audits** run in CI on every pull request and every push to main: `npm audit` includes runtime and development dependencies, and `cargo audit` checks both the desktop and Slint lockfiles. The Slint sidecar also rejects any resolved `quick-xml` version below the patched 0.41.0 release. Informational Rust advisories remain visible beside their CI gate.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
 - **`kalpa.log`** sits beside your settings (`%APPDATA%\com.kalpa.desktop` on Windows, `~/Library/Application Support/com.kalpa.desktop` on macOS, `~/.local/share/com.kalpa.desktop` on Linux). It records startup and window-lifecycle events, plus warnings and errors from Kalpa's dependencies — which can include the URLs those dependencies were fetching. It is capped at 512 KB, never leaves your machine on its own, and nothing writes it anywhere else. Skim it before pasting it into a bug report.
@@ -360,7 +360,7 @@ Installers land in `src-tauri/target/release/bundle/`: NSIS `.exe` on Windows, `
 - **Frontend**: React 19, TypeScript, Vite
 - **Styling**: Tailwind CSS v4, shadcn/ui
 - **Native performance UI** (beta, Windows): a [Slint](https://slint.dev/) sidecar, `kalpa-slint`
-- **Backend**: Cloudflare Workers, Durable Objects, KV, and shared D1, for Pack Hub (canonical storage rollout pending)
+- **Backend**: Cloudflare Workers, Durable Objects, KV, and shared D1, for Pack Hub (canonical-storage code deployed; live authority/parity not independently verified; authority switch remains separate)
 - **Rust crates**: reqwest, scraper, zip, rusqlite (bundled SQLite)
 - **SavedVariables**: a custom Lua parser
 
