@@ -132,7 +132,7 @@ ${changed}
 Each release ships an installer per platform, a \`.sig\` (auto-updater signature) for every auto-updatable artifact, one shared \`latest.json\`, and a \`SHA256SUMS.txt\` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/${tag}/docs/verify-download.md) for how to check the integrity of the file you downloaded.
 
 ## Known issues
-None known — please report anything you hit.
+Review the release notes above for known issues and limitations. Please report anything you hit.
 
 ---
 

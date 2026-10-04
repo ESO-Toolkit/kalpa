@@ -7320,9 +7320,16 @@ fn default_profile_mirror_path(addons_dir: &std::path::Path) -> Option<PathBuf> 
         .unwrap_or_else(|_| addons_dir.to_path_buf());
     let key = canonical.to_string_lossy().to_lowercase();
     let name = format!("{:016x}.json", fnv1a64(key.as_bytes()));
+    // Preserve existing production mirrors, but keep test writes beneath the
+    // profile that the owned harness will remove.
+    let namespace = if crate::app_profile::is_e2e() {
+        crate::app_profile::identifier()
+    } else {
+        std::borrow::Cow::Borrowed("kalpa")
+    };
     Some(
         dirs::data_dir()?
-            .join("kalpa")
+            .join(namespace.as_ref())
             .join("profile-mirrors")
             .join(name),
     )

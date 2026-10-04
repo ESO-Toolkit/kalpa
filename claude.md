@@ -286,12 +286,12 @@ fetches the fixture once and scores every ratio offline, so re-running it costs
 60 search requests and zero model calls.
 
 | ratio | overall / concept / name | mean tail | rows losing an expected addon |
-|-------|--------------------------|-----------|-------------------------------|
+| ----- | ------------------------ | --------- | ----------------------------- |
 | 0.00  | 93.3 / 85.7 / 100        | 17.5      | 0                             |
 | 0.40  | 93.3 / 85.7 / 100        | 15.9      | 0                             |
 | 0.50  | 93.3 / 85.7 / 100        | 14.2      | 0                             |
 | 0.60  | 90.0 / **78.6** / 100    | 11.0      | 2                             |
-| 0.70  | 85.0 / **67.9** / 100    |  7.6      | 7                             |
+| 0.70  | 85.0 / **67.9** / 100    | 7.6       | 7                             |
 
 0.5 looks like a free win, but it is not, because the mean hides the failure.
 On the motivating question — "shows if you're flagged in combat" — a floor cuts
@@ -446,26 +446,42 @@ comes from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, which WebKitGTK/WKWebView do
 not have). There are two flavours, and the difference matters:
 
 - `npm run test:e2e` — attaches to whatever `npm run tauri dev` is already
-  running, which is your REAL ESO install. Read-only specs only. Never add a spec
+  running and uses that app's profile, normally your REAL ESO install and saved
+  settings and credentials. Read-only specs only. Never add a spec
   here that installs, updates, removes, restores, migrates or applies a profile.
-- `npm run test:e2e:sandbox` — builds the debug binary, launches it with
-  `KALPA_ADDONS_DIR` pointed at a throwaway `AddOns` folder, and runs the
-  `@sandbox` specs against it. This is where destructive coverage belongs. The
-  override is `debug_addons_dir_override` in `commands.rs`; the env var is read
-  only in debug builds, so no shipped binary can be aimed away from a user's
-  real folder. Pass `--no-build` when iterating on the specs themselves.
+- `npm run test:e2e:sandbox` — builds the debug binary and runs `@sandbox`
+  specs against an owned process with a fresh `AddOns` folder and isolated app
+  profile. This is where destructive addon coverage belongs. The runner always
+  rebuilds and rejects `--no-build`: a stale binary could write to the production
+  profile before the IPC isolation check runs.
 
-  Two things it is **not**. It is not a CI gate — nothing runs it automatically
-  on any platform, so a destructive regression can merge; treat it as local
-  validation you run before a release, not a barrier. And its isolation is
-  **partial**: only the AddOns folder is throwaway. `settings.json`, the manifest
-  cache, uploader history, saved tokens and the WebView2 profile are the
-  developer's real files, because Tauri resolves the app-data dir from the bundle
-  identifier rather than any environment variable — including the WebView2
-  profile, which Tauri always passes explicitly, so `WEBVIEW2_USER_DATA_FOLDER`
-  is inert. Every run also empties the manifest-cache DB, because the first scan
-  of an empty sandbox prunes it against zero folder names. The runner's header
-  documents the exact line. Specs must normalise persisted state they depend on.
+  Both this runner and `npm run test:packaged` use `createIsolatedProfile` in
+  `scripts/lib/kalpa-app-harness.mjs`. It creates a unique per-run token and
+  directories, then supplies `KALPA_ADDONS_DIR` and `KALPA_E2E_TOKEN` to the
+  owned app. In Windows debug builds, `app_profile.rs` selects a separate Tauri
+  identifier and keyring service. `configure_e2e_webview_profile` sets the
+  identifier and explicit window data directories before Tauri starts. Settings,
+  manifest cache, uploader history, logs, credentials and WebView profiles
+  therefore use the test namespace. `WEBVIEW2_USER_DATA_FOLDER` alone is still
+  insufficient because Tauri supplies WebView2's data directory explicitly.
+  Release builds ignore the test token and keep the production namespace; the
+  AddOns override is also debug-only. The runners refuse an existing Kalpa/CDP
+  owner, verify the launched process and profile, and delete their owned
+  directories after killing the app. Specs still need to normalise persisted
+  state between tests within one run.
+
+  `npm run test:packaged -- --with-readonly` also runs the read-only specs against
+  this owned profile. Before startup it seeds local addon and library manifests
+  in the throwaway AddOns folder, so those checks exercise populated addon UI
+  without using the developer's installation. These fixtures establish UI smoke
+  coverage, not production addon compatibility or download behavior.
+
+  The sandbox suite is a local fixture smoke test, not a CI gate or proof of
+  production downloads/installs, live OAuth or authenticated uploads. It does
+  not isolate an entire ESO/game installation, and native client writes remain
+  blocked under the AddOns override. Force-kill teardown does not establish
+  graceful shutdown behavior. Run these checks locally before a release and
+  assess those runtime paths separately.
 
 **CI**
 
