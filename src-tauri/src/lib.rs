@@ -1,3 +1,4 @@
+mod app_profile;
 mod atomic_file;
 mod auth;
 /// Heap high-water-mark allocator for the uploader perf benchmark. The
@@ -330,7 +331,7 @@ fn clear_webview_cache_on_upgrade() {
         Ok(v) => std::path::PathBuf::from(v),
         Err(_) => return,
     };
-    let data_dir = local_app_data.join("com.kalpa.desktop");
+    let data_dir = local_app_data.join(app_profile::identifier().as_ref());
     let marker = data_dir.join(".kalpa-version");
 
     let previous = std::fs::read_to_string(&marker).unwrap_or_default();
@@ -910,38 +911,20 @@ fn finish_webview_startup_after_authority(app: &tauri::AppHandle) {
 }
 
 #[cfg(all(windows, debug_assertions))]
-fn e2e_webview_data_directory(token: &str) -> Result<PathBuf, &'static str> {
-    if token.is_empty() {
-        return Err("the E2E token is empty");
-    }
-    if token.len() > 128 {
-        return Err("the E2E token is longer than 128 bytes");
-    }
-    if !token
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err("the E2E token contains characters unsafe for a profile directory");
-    }
-
-    Ok(PathBuf::from("kalpa-e2e").join(token))
-}
-
-#[cfg(all(windows, debug_assertions))]
 fn configure_e2e_webview_profile(context: &mut tauri::Context<tauri::Wry>) {
-    let Some(token) = std::env::var_os("KALPA_E2E_TOKEN") else {
+    if !app_profile::is_e2e() {
         return;
-    };
-    let token = token
-        .into_string()
-        .expect("KALPA_E2E_TOKEN must contain valid Unicode");
-    let data_directory = e2e_webview_data_directory(&token)
-        .unwrap_or_else(|error| panic!("Invalid KALPA_E2E_TOKEN: {error}"));
+    }
+    let identifier = app_profile::identifier().into_owned();
+    let data_directory = dirs::data_local_dir()
+        .expect("Windows E2E profile requires a local app-data directory")
+        .join(&identifier);
+    context.config_mut().identifier = identifier;
 
     // WEBVIEW2_USER_DATA_FOLDER cannot isolate Tauri's profile because Tauri
     // supplies WebView2's userDataFolder itself. Configure the generated window
-    // definitions instead. The sandbox token makes this unique per owned run;
-    // normal debug launches and every release build retain their usual profile.
+    // definitions instead, using an absolute directory. The identifier also
+    // isolates app_data_dir() consumers, including settings and upload history.
     for window in &mut context.config_mut().app.windows {
         window.data_directory = Some(data_directory.clone());
     }
@@ -1265,7 +1248,11 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
-                let _ = app.deep_link().register_all();
+                // A disposable test executable must not replace the installed
+                // app's kalpa:// protocol registration.
+                if !app_profile::is_e2e() {
+                    let _ = app.deep_link().register_all();
+                }
             }
 
             let show_item = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
@@ -1723,23 +1710,6 @@ mod tests {
         // later activation can try again.
         finish_recovery(&latch);
         assert!(begin_recovery(&latch));
-    }
-
-    #[cfg(all(windows, debug_assertions))]
-    #[test]
-    fn e2e_webview_profile_is_scoped_to_a_safe_relative_directory() {
-        assert_eq!(
-            e2e_webview_data_directory("123-abc_DEF").unwrap(),
-            PathBuf::from("kalpa-e2e").join("123-abc_DEF")
-        );
-
-        for invalid in ["", ".", "..", "with/slash", "with\\slash", "with space"] {
-            assert!(
-                e2e_webview_data_directory(invalid).is_err(),
-                "accepted unsafe token {invalid:?}"
-            );
-        }
-        assert!(e2e_webview_data_directory(&"a".repeat(129)).is_err());
     }
 
     #[test]

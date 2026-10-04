@@ -90,7 +90,7 @@ impl log::Log for FileLogger {
 /// `dirs::data_dir()` is the same base Tauri resolves `app_data_dir()` from, so
 /// this lands beside `settings.json` on every platform.
 fn log_path() -> Option<PathBuf> {
-    let dir = dirs::data_dir()?.join("com.kalpa.desktop");
+    let dir = dirs::data_dir()?.join(crate::app_profile::identifier().as_ref());
     fs::create_dir_all(&dir).ok()?;
     Some(dir.join(LOG_FILE_NAME))
 }

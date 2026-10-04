@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -8,6 +8,7 @@ import {
   CDP_PAGES_URL,
   CDP_VERSION_URL,
   assertNoExistingKalpaProcess,
+  createIsolatedProfile,
   httpJson,
   killProcessTree,
   launchKalpaDetached,
@@ -40,22 +41,45 @@ async function main() {
   });
   assertBuildArtifacts();
 
+  const profile = createIsolatedProfile();
   let child;
   try {
-    child = launchKalpaDetached(binaryPath, { tag: TAG });
+    // Read-only list checks require installed addons. These manifests are
+    // local fixtures; no production addon tree or download is needed.
+    if (process.argv.includes("--with-readonly")) {
+      for (const [folder, library] of [
+        ["KalpaReadOnlyFixture", false],
+        ["LibKalpaReadOnlyFixture", true],
+      ]) {
+        const directory = path.join(profile.addons, folder);
+        mkdirSync(directory);
+        writeFileSync(
+          path.join(directory, `${folder}.txt`),
+          `## Title: ${folder}\n## APIVersion: 101048\n## Version: 1.0\n## Author: Kalpa E2E\n${library ? "## IsLibrary: true\n" : ""}`
+        );
+      }
+    }
+    child = launchKalpaDetached(binaryPath, { tag: TAG, env: profile.env });
     await proveOwnedLaunch(child);
-    await waitForCdp(child);
+    await waitForCdp(child, 120_000);
     await assertPackagedOrigin();
     await run(
       process.execPath,
-      [playwrightCli, "test", "--grep", "@packaged"],
+      process.argv.includes("--with-readonly")
+        ? [playwrightCli, "test", "--grep-invert", "@sandbox"]
+        : [playwrightCli, "test", "--grep", "@packaged"],
       "playwright packaged tests",
-      { cwd: repoRoot, env: { KALPA_CDP_ENDPOINT: CDP_ENDPOINT }, tag: TAG }
+      {
+        cwd: repoRoot,
+        env: { ...profile.testEnv, KALPA_CDP_ENDPOINT: CDP_ENDPOINT },
+        tag: TAG,
+      }
     );
   } finally {
     if (child?.pid) {
       await killProcessTree(child.pid, TAG);
     }
+    await profile.cleanup();
   }
 }
 

@@ -14,7 +14,6 @@
 
 use crate::auth::AuthTokens;
 
-const SERVICE: &str = "kalpa";
 /// Legacy single-entry key (raw JSON). Read for back-compat; never written to
 /// by the chunked format. New data uses `auth_tokens.count` + `auth_tokens.{N}`.
 const USER: &str = "auth_tokens";
@@ -43,7 +42,7 @@ const MAX_CHUNKS: usize = 64;
 const CHUNK_LEN: usize = 1000;
 
 fn entry(user: &str) -> Option<keyring::Entry> {
-    keyring::Entry::new(SERVICE, user).ok()
+    keyring::Entry::new(crate::app_profile::credential_service().as_ref(), user).ok()
 }
 
 // ── Generic chunked blob storage ─────────────────────────────────────────

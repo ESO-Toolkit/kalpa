@@ -93,6 +93,24 @@ async function connectToTauriAt(
       }
       if (!hasIpc) continue;
 
+      // Check the actual Tauri resolver before any fixture command can mutate
+      // state. A stale binary with only AddOns isolation must fail closed.
+      const expectedAppData = process.env.KALPA_E2E_APP_DATA;
+      if (expectedAppData) {
+        const actualAppData = await candidate.evaluate(() => {
+          const internals = (
+            window as unknown as {
+              __TAURI_INTERNALS__: { invoke: (command: string, args: unknown) => Promise<string> };
+            }
+          ).__TAURI_INTERNALS__;
+          return internals.invoke("plugin:path|resolve_directory", { directory: 14 });
+        });
+        if (path.resolve(actualAppData) !== path.resolve(expectedAppData)) {
+          await browser.close();
+          throw new Error(`Unsafe app-data profile: ${actualAppData}; expected ${expectedAppData}`);
+        }
+      }
+
       // CDP and Tauri IPC becoming available are transport-level signals,
       // not proof that App.initializeApp has registered the AddOns root.
       // The sandbox suite mutates that root immediately after connecting,
@@ -294,12 +312,11 @@ export async function readFilterTabCount(page: Page, label: string): Promise<num
  * Call this at the start of each test to prevent state leaks.
  *
  * NOTE: this only closes dialogs and blurs focus — it does NOT reset persisted
- * settings. The sandbox runner's isolation is partial: only the AddOns folder
- * is throwaway, while `settings.json` is the developer's REAL file (Tauri
- * resolves the app-data dir from the bundle identifier, not from any env var —
- * see CLAUDE.md). Any future spec that touches the `toolbarHidden` preference
- * must normalise it itself, or it will mutate the developer's real toolbar
- * layout and leak state into later runs.
+ * settings. The owned sandbox and packaged runners use a fresh Windows debug
+ * profile for app data, caches, credentials and WebView state (see CLAUDE.md).
+ * Persisted preferences still leak between tests within one run, so specs that
+ * touch `toolbarHidden` must normalise it themselves. Direct `test:e2e` attaches
+ * to the running app's profile and can change the developer's real settings.
  */
 export async function resetAppState(page: Page): Promise<void> {
   // Press Escape a few times to close any open dialogs/menus/popovers

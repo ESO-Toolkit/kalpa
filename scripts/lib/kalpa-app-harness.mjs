@@ -9,7 +9,10 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -29,6 +32,64 @@ export const CDP_PAGES_URL = `${CDP_ENDPOINT}/json/list`;
 
 export function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Own a fresh profile and AddOns root; never reuse or clean up an existing one. */
+export function createIsolatedProfile() {
+  if (process.platform !== "win32" || !process.env.APPDATA || !process.env.LOCALAPPDATA) {
+    throw new Error("An isolated Windows profile requires APPDATA and LOCALAPPDATA.");
+  }
+  const token = randomUUID();
+  const identifier = `com.kalpa.desktop.e2e.${token}`;
+  const root = path.resolve(os.tmpdir(), `kalpa-e2e-${token}`);
+  const appData = path.resolve(process.env.APPDATA, identifier);
+  const localData = path.resolve(process.env.LOCALAPPDATA, identifier);
+  const targets = [
+    [root, os.tmpdir()],
+    [appData, process.env.APPDATA],
+    [localData, process.env.LOCALAPPDATA],
+  ];
+  for (const [target, base] of targets) {
+    if (path.dirname(target) !== path.resolve(base)) {
+      throw new Error(`Refusing unsafe test profile path: ${target}`);
+    }
+  }
+  const created = [];
+  try {
+    for (const [target] of targets) {
+      // No recursive mkdir: a collision must fail before launch or deletion.
+      mkdirSync(target);
+      created.push(target);
+    }
+    const addons = path.join(root, "AddOns");
+    mkdirSync(addons);
+    writeFileSync(path.join(addons, ".kalpa-e2e-sandbox"), token);
+    return {
+      root,
+      addons,
+      appData,
+      env: { KALPA_ADDONS_DIR: addons, KALPA_E2E_TOKEN: token },
+      testEnv: { KALPA_E2E_SANDBOX_DIR: addons, KALPA_E2E_APP_DATA: appData },
+      async cleanup() {
+        for (const target of created) await removeOwnedDirectory(target);
+      },
+    };
+  } catch (error) {
+    for (const target of created) rmSync(target, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function removeOwnedDirectory(target) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt === 29) throw error;
+      await delay(300);
+    }
+  }
 }
 
 /** Run a command to completion, inheriting stdio, rejecting on non-zero exit. */
