@@ -565,7 +565,8 @@ pub fn forget_bundled_parent(store: &mut MetadataStore, parent_id: u32) {
 /// without touching `installed_at` (the local download time) or `tags`. Used
 /// when ESOUI metadata changes (e.g. a new upstream version is published) but no
 /// download happened, so the "last downloaded" time must stay put. Keeps a known
-/// `esoui_id`/`download_url` rather than clobbering it with an empty API value.
+/// `esoui_id` rather than clobbering it with an empty API value. A changed
+/// identity replaces the old listing's URL and publication marker.
 pub fn reconcile_addon(
     meta: &mut AddonMetadata,
     esoui_id: u32,
@@ -585,10 +586,19 @@ pub fn reconcile_addon(
 /// artifact: linking an addon must not make a pending update look installed.
 pub fn reconcile_addon_identity(meta: &mut AddonMetadata, esoui_id: u32, download_url: &str) {
     let was_bundled = meta.esoui_id == 0 && !meta.bundled_by.is_empty();
+    let identity_changed = esoui_id > 0 && meta.esoui_id > 0 && meta.esoui_id != esoui_id;
+    if identity_changed {
+        // An installed publication marker belongs to one ESOUI listing. It
+        // cannot establish which release of a different listing is on disk.
+        meta.esoui_last_update = 0;
+        meta.esoui_marker_installed = false;
+    }
     if esoui_id > 0 {
         meta.esoui_id = esoui_id;
     }
-    if (was_bundled || meta.download_url.is_empty()) && !download_url.is_empty() {
+    if identity_changed
+        || ((was_bundled || meta.download_url.is_empty()) && !download_url.is_empty())
+    {
         meta.download_url = download_url.to_string();
     }
 }
@@ -997,6 +1007,26 @@ mod tests {
 
         reconcile_addon(store.addons.get_mut("Addon").unwrap(), 1, 50, "url");
         assert_eq!(store.addons["Addon"].esoui_last_update, 200);
+    }
+
+    #[test]
+    fn identity_change_clears_foreign_url_and_publication_provenance() {
+        let mut store = MetadataStore::default();
+        record_install_ext(&mut store, "BugCatcher", 1083, "042", "original", 300);
+        let meta = store.addons.get_mut("BugCatcher").unwrap();
+        meta.installed_at = "2020-01-01T00:00:00Z".to_string();
+        meta.tags = vec!["favorite".to_string()];
+        reconcile_addon_identity(meta, 2566, "updated");
+        assert_eq!(meta.esoui_id, 2566);
+        assert_eq!(meta.download_url, "updated");
+        assert_eq!(meta.esoui_last_update, 0);
+        assert!(!meta.esoui_marker_installed);
+        assert_eq!(meta.installed_version, "042");
+        assert_eq!(meta.installed_at, "2020-01-01T00:00:00Z");
+        assert_eq!(meta.tags, ["favorite"]);
+        // An empty URI for a replacement must not retain the old listing.
+        reconcile_addon_identity(meta, 1083, "");
+        assert!(meta.download_url.is_empty());
     }
 
     #[test]

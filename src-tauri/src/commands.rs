@@ -2476,7 +2476,7 @@ struct UpdatePending {
 /// lookup table. Must be called under the metadata lock.
 fn check_for_updates_metadata(
     addons_dir: &Path,
-    api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    api_lookup: &esoui::FilelistLookup,
     minion_addons: &[MinionAddon],
 ) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
@@ -2500,21 +2500,38 @@ fn check_for_updates_metadata(
             continue;
         }
 
-        let api_entry = match api_lookup.get(folder_name) {
+        let installed_manifest = find_manifest(addons_dir, folder_name)
+            .and_then(|path| manifest::parse_manifest(folder_name, &path));
+        let api_entry = match esoui::resolve_filelist_entry(
+            api_lookup,
+            folder_name,
+            installed_manifest
+                .as_ref()
+                .map(|manifest| manifest.author.as_str()),
+            meta.esoui_id,
+        ) {
             Some(entry) => entry,
             None => continue,
         };
 
+        // Startup checks run before auto-link, and may immediately download
+        // updates. Repair identity before comparing versions or emitting IDs.
+        if meta.esoui_id != api_entry.esoui_id {
+            metadata::reconcile_addon_identity(
+                &mut meta,
+                api_entry.esoui_id,
+                &api_entry.file_info_uri,
+            );
+            store.addons.insert(folder_name.clone(), meta.clone());
+            metadata_changed = true;
+        }
+
         // Minion can replace an addon without touching kalpa.json. Its
-        // `ui-version` is authoritative when both the folder and ESOUI id match.
-        // Only trust that evidence when the folder-keyed ESOUI lookup still
-        // resolves to the same addon id we track locally; the filelist cache is
-        // keyed by top-level folder name, so a stale or duplicate mapping should
-        // not let unrelated external state rewrite this entry.
-        let api_ids_match = api_entry.esoui_id == meta.esoui_id;
+        // `ui-version` is authoritative when both the folder and resolved ESOUI
+        // identity match.
         let remote_ver = normalized_version(&api_entry.version);
         let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
-        let detected_version = (api_ids_match && !stored_matches_api)
+        let detected_version = (!stored_matches_api)
             .then(|| {
                 let minion_matches_api = minion_version_for_folder(
                     minion_addons,
@@ -2555,7 +2572,6 @@ fn check_for_updates_metadata(
             // the installed release; stamping the remote string here would
             // mark it up to date without downloading anything.
             if !has_update
-                && api_ids_match
                 && !remote_ver.is_empty()
                 && !local_ver.is_empty()
                 && remote_ver == local_ver
@@ -5513,7 +5529,7 @@ pub async fn auto_link_addons(
 
 fn auto_link_addons_blocking(
     addons_dir: &Path,
-    api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
+    api_lookup: &esoui::FilelistLookup,
 ) -> Result<AutoLinkResult, String> {
     let mut store = metadata::load_metadata(addons_dir);
 
@@ -5535,12 +5551,18 @@ fn auto_link_addons_blocking(
         };
 
         // Must have a manifest to be a real addon
-        if find_manifest(addons_dir, &folder_name).is_none() {
+        let Some(installed_manifest) = find_manifest(addons_dir, &folder_name)
+            .and_then(|path| manifest::parse_manifest(&folder_name, &path))
+        else {
             continue;
-        }
-
-        let api_entry = api_lookup.get(&folder_name);
+        };
         let already_tracked = store.addons.get(&folder_name);
+        let api_entry = esoui::resolve_filelist_entry(
+            api_lookup,
+            &folder_name,
+            Some(&installed_manifest.author),
+            already_tracked.map_or(0, |meta| meta.esoui_id),
+        );
 
         // Skip bundled secondary folders: a folder another addon ships is
         // not auto-linked to its own ESOUI entry, because the bundled
@@ -5589,7 +5611,7 @@ fn auto_link_addons_blocking(
                     // newer publication marker when its version matches the
                     // artifact on disk. A stale filelist response must not
                     // trigger metadata churn or regress the marker.
-                    (meta.esoui_id == 0 && api_entry.esoui_id > 0)
+                    (meta.esoui_id != api_entry.esoui_id && api_entry.esoui_id > 0)
                         || (versions_match(&meta.installed_version, &api_entry.version)
                             && api_entry.last_update > meta.esoui_last_update)
                 }
@@ -12193,15 +12215,268 @@ mod tests {
         assert!(artifact_is_newer("v1", "v2", 100, 200));
     }
 
+    const BUGCATCHER_ORIGINAL_MANIFEST: &str =
+        "## Title: BugCatcher\n## Author: Werewolf Finds Dragon\n## APIVersion: 100022\n";
+    const BUGCATCHER_UPDATED_MANIFEST: &str = "## Title: BugCatcher\n## Author: Werewolf Finds Dragon, Shadowfen\n## APIVersion: 101051 101052\n## AddonVersion: 043\n";
+
+    fn bugcatcher_fixture(
+        updated: bool,
+        reverse: bool,
+    ) -> (tempfile::TempDir, esoui::FilelistLookup) {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("BugCatcher");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("BugCatcher.txt"), BUGCATCHER_ORIGINAL_MANIFEST).unwrap();
+        if updated {
+            // Installing the fork over the original can leave the old .txt behind.
+            fs::write(folder.join("BugCatcher.addon"), BUGCATCHER_UPDATED_MANIFEST).unwrap();
+        }
+        let mut candidates = vec![
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 1083,
+                title: "BugCatcher".to_string(),
+                version: "017-100022".to_string(),
+                author: "Werewolf Finds Dragon".to_string(),
+                last_update: 100,
+                file_info_uri: "https://api.mmoui.com/v4/game/ESO/filedetails/1083.json"
+                    .to_string(),
+            }),
+            Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 2566,
+                title: "BugCatcher Updated".to_string(),
+                version: "043".to_string(),
+                author: "Shadowfen".to_string(),
+                last_update: 200,
+                file_info_uri: "https://api.mmoui.com/v4/game/ESO/filedetails/2566.json"
+                    .to_string(),
+            }),
+        ];
+        if reverse {
+            candidates.reverse();
+        }
+        (tmp, HashMap::from([("BugCatcher".to_string(), candidates)]))
+    }
+
+    fn record_stale_bugcatcher(addons_dir: &Path, marker: u64) {
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "BugCatcher",
+            1083,
+            "042",
+            "https://example.invalid/1083.zip",
+            marker,
+        );
+        let meta = store.addons.get_mut("BugCatcher").unwrap();
+        meta.installed_at = "2020-01-01T00:00:00Z".to_string();
+        meta.tags = vec!["favorite".to_string()];
+        meta.bundled_by = vec![9];
+        metadata::save_metadata(addons_dir, &store).unwrap();
+    }
+
+    fn assert_bugcatcher_repaired(addons_dir: &Path) {
+        let store = metadata::load_metadata(addons_dir);
+        let meta = &store.addons["BugCatcher"];
+        assert_eq!(meta.esoui_id, 2566);
+        assert_eq!(
+            meta.download_url,
+            "https://api.mmoui.com/v4/game/ESO/filedetails/2566.json"
+        );
+        assert_eq!(meta.installed_version, "042");
+        assert_eq!(meta.installed_at, "2020-01-01T00:00:00Z");
+        assert_eq!(meta.tags, ["favorite"]);
+        assert_eq!(meta.bundled_by, [9]);
+        assert_eq!(meta.esoui_last_update, 0);
+        assert!(!meta.esoui_marker_installed);
+    }
+
+    #[test]
+    fn bugcatcher_fresh_links_follow_installed_manifests_in_both_catalogue_orders() {
+        for reverse in [false, true] {
+            for (updated, expected_id) in [(false, 1083), (true, 2566)] {
+                let (tmp, lookup) = bugcatcher_fixture(updated, reverse);
+                let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+                assert_eq!(result.linked, ["BugCatcher"]);
+                let store = metadata::load_metadata(tmp.path());
+                let meta = &store.addons["BugCatcher"];
+                assert_eq!(meta.esoui_id, expected_id);
+                // Neither archive declares a release Version. AddonVersion is
+                // a dependency integer, not proof that the remote was installed.
+                assert!(meta.installed_version.is_empty());
+                assert!(meta.installed_at.is_empty());
+                assert_eq!(meta.esoui_last_update, 0);
+                assert!(!meta.esoui_marker_installed);
+                let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+                assert_eq!(pending[0].esoui_id, expected_id);
+            }
+        }
+    }
+
+    #[test]
+    fn bugcatcher_startup_repairs_identity_before_comparing_or_emitting_updates() {
+        for reverse in [false, true] {
+            // Equal, older and newer timestamps cannot prevent ID repair or
+            // carry installed-artifact evidence across unrelated listings.
+            for marker in [100, 200, 300] {
+                let (tmp, lookup) = bugcatcher_fixture(true, reverse);
+                record_stale_bugcatcher(tmp.path(), marker);
+                for _ in 0..2 {
+                    let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+                    assert_eq!(pending.len(), 1);
+                    assert_eq!(pending[0].esoui_id, 2566);
+                    assert_eq!(pending[0].current_version, "042");
+                    assert_eq!(pending[0].remote_version, "043");
+                    assert_eq!(pending[0].remote_last_update, 200);
+                    assert!(pending[0].fallback_url.ends_with("/2566.json"));
+                    assert!(pending[0].has_update);
+                    assert_bugcatcher_repaired(tmp.path());
+                    auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+                    assert_bugcatcher_repaired(tmp.path());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bugcatcher_auto_link_repairs_stale_identity_without_a_download() {
+        for reverse in [false, true] {
+            for marker in [100, 200, 300] {
+                let (tmp, lookup) = bugcatcher_fixture(true, reverse);
+                record_stale_bugcatcher(tmp.path(), marker);
+                let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+                assert_eq!(result.linked, ["BugCatcher"]);
+                assert_bugcatcher_repaired(tmp.path());
+            }
+        }
+    }
+
+    #[test]
+    fn bugcatcher_original_keeps_its_known_identity() {
+        for reverse in [false, true] {
+            let (tmp, lookup) = bugcatcher_fixture(false, reverse);
+            let mut store = metadata::MetadataStore::default();
+            metadata::record_install_ext(
+                &mut store,
+                "BugCatcher",
+                1083,
+                "017-100022",
+                "original",
+                100,
+            );
+            metadata::save_metadata(tmp.path(), &store).unwrap();
+            auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
+            let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+            assert_eq!(pending[0].esoui_id, 1083);
+            assert_eq!(pending[0].remote_version, "017-100022");
+            assert!(!pending[0].has_update);
+            assert_eq!(
+                metadata::load_metadata(tmp.path()).addons["BugCatcher"].esoui_id,
+                1083
+            );
+        }
+    }
+
+    #[test]
+    fn bugcatcher_missing_candidate_does_not_mix_identity_and_release() {
+        let (tmp, mut lookup) = bugcatcher_fixture(true, false);
+        record_stale_bugcatcher(tmp.path(), 100);
+        lookup
+            .get_mut("BugCatcher")
+            .unwrap()
+            .retain(|entry| entry.esoui_id == 2566);
+        assert!(check_for_updates_metadata(tmp.path(), &lookup, &[])
+            .unwrap()
+            .is_empty());
+        assert!(auto_link_addons_blocking(tmp.path(), &lookup)
+            .unwrap()
+            .linked
+            .is_empty());
+        let store = metadata::load_metadata(tmp.path());
+        assert_eq!(store.addons["BugCatcher"].esoui_id, 1083);
+        assert_eq!(store.addons["BugCatcher"].installed_version, "042");
+    }
+
+    #[test]
+    fn generic_collision_preserves_tracked_identity_before_update_and_auto_link() {
+        for (folder_name, installed_author, known_author, other_author) in [
+            (
+                "Fork",
+                "Original Author, Contributor",
+                "Maintainer",
+                "Original Author",
+            ),
+            (
+                "LibFoo",
+                "Library Author",
+                "Former Maintainer",
+                "Library Author",
+            ),
+        ] {
+            let known = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 20,
+                title: folder_name.into(),
+                version: "2".into(),
+                author: known_author.into(),
+                last_update: 200,
+                file_info_uri: "https://example.invalid/standalone".into(),
+            });
+            let other = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 10,
+                title: "Other archive".into(),
+                version: "99".into(),
+                author: other_author.into(),
+                last_update: 999,
+                file_info_uri: "https://example.invalid/other".into(),
+            });
+            for candidates in [
+                vec![known.clone(), other.clone()],
+                vec![other.clone(), known.clone()],
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let folder = tmp.path().join(folder_name);
+                fs::create_dir(&folder).unwrap();
+                fs::write(
+                    folder.join(format!("{folder_name}.txt")),
+                    format!(
+                        "## Title: {folder_name}\n## Author: {installed_author}\n## Version: 1\n"
+                    ),
+                )
+                .unwrap();
+                let mut store = metadata::MetadataStore::default();
+                metadata::record_install_ext(
+                    &mut store,
+                    folder_name,
+                    20,
+                    "1",
+                    &known.file_info_uri,
+                    100,
+                );
+                let before = store.addons[folder_name].clone();
+                metadata::save_metadata(tmp.path(), &store).unwrap();
+                let lookup = esoui::FilelistLookup::from([(folder_name.into(), candidates)]);
+                let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].esoui_id, 20);
+                assert_eq!(pending[0].remote_version, "2");
+                assert!(pending[0].has_update);
+                assert!(auto_link_addons_blocking(tmp.path(), &lookup)
+                    .unwrap()
+                    .linked
+                    .is_empty());
+                assert_eq!(
+                    metadata::load_metadata(tmp.path()).addons[folder_name],
+                    before
+                );
+            }
+        }
+    }
+
     fn update_check_fixture(
         installed_version: &str,
         installed_marker: u64,
         remote_version: &str,
         remote_marker: u64,
-    ) -> (
-        tempfile::TempDir,
-        HashMap<String, Arc<esoui::ApiAddonLookup>>,
-    ) {
+    ) -> (tempfile::TempDir, esoui::FilelistLookup) {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join("Addon")).unwrap();
 
@@ -12219,14 +12494,14 @@ mod tests {
         let mut lookup = HashMap::new();
         lookup.insert(
             "Addon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 1,
                 title: "Addon".to_string(),
                 version: remote_version.to_string(),
                 author: "Test".to_string(),
                 last_update: remote_marker,
                 file_info_uri: "https://example.invalid/file.json".to_string(),
-            }),
+            })],
         );
         (tmp, lookup)
     }
@@ -12300,8 +12575,8 @@ mod tests {
         assert!(!pending[0].has_update);
         assert!(!metadata::load_metadata(tmp.path()).addons["Addon"].esoui_marker_installed);
 
-        Arc::make_mut(lookup.get_mut("Addon").unwrap()).version = "v2".to_string();
-        Arc::make_mut(lookup.get_mut("Addon").unwrap()).last_update = 200;
+        Arc::make_mut(&mut lookup.get_mut("Addon").unwrap()[0]).version = "v2".to_string();
+        Arc::make_mut(&mut lookup.get_mut("Addon").unwrap()[0]).last_update = 200;
         let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
         assert!(pending[0].has_update);
     }
@@ -12339,14 +12614,14 @@ mod tests {
         let mut lookup = HashMap::new();
         lookup.insert(
             "Addon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 7,
                 title: "Addon".to_string(),
                 version: "v2".to_string(),
                 author: "Test".to_string(),
                 last_update: 200,
                 file_info_uri: "https://example.invalid/file.json".to_string(),
-            }),
+            })],
         );
 
         let result = auto_link_addons_blocking(tmp.path(), &lookup).unwrap();
@@ -12658,14 +12933,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 123,
                 title: "My Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let minion_addons = parse_minion_addons(
@@ -12709,14 +12984,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 123,
                 title: "My Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let live_path = BASE64_STANDARD.encode(live_addons_dir.to_string_lossy().as_bytes());
@@ -12763,14 +13038,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 123,
                 title: "My Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
@@ -12804,14 +13079,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 123,
                 title: "My Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let stale_minion_addons = vec![MinionAddon {
@@ -12852,14 +13127,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 123,
                 title: "My Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let results = check_for_updates_metadata(&addons_dir, &api_lookup, &[]).unwrap();
@@ -12893,14 +13168,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 123,
                 title: "My Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let stale_minion_addons = vec![MinionAddon {
@@ -12919,7 +13194,7 @@ mod tests {
     }
 
     #[test]
-    fn update_check_ignores_external_reconciliation_when_api_lookup_points_elsewhere() {
+    fn update_check_skips_a_folder_when_the_known_listing_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
         make_addon_folder(
@@ -12941,14 +13216,14 @@ mod tests {
         let mut api_lookup = HashMap::new();
         api_lookup.insert(
             "MyAddon".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 999,
                 title: "Other Addon".to_string(),
                 version: "2.0".to_string(),
                 author: "Author".to_string(),
                 last_update: 42,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
 
         let minion_addons = vec![MinionAddon {
@@ -12959,10 +13234,14 @@ mod tests {
         }];
         let results = check_for_updates_metadata(&addons_dir, &api_lookup, &minion_addons).unwrap();
 
-        assert_eq!(results[0].current_version, "1.0");
-        assert!(results[0].has_update);
+        assert!(results.is_empty());
         let saved = metadata::load_metadata(&addons_dir);
         assert_eq!(saved.addons["MyAddon"].installed_version, "1.0");
+        assert_eq!(saved.addons["MyAddon"].esoui_id, 123);
+        assert_eq!(
+            saved.addons["MyAddon"].download_url,
+            "https://example.com/old.zip"
+        );
     }
 
     #[test]
@@ -13331,14 +13610,14 @@ mod tests {
         let mut lookup = HashMap::new();
         lookup.insert(
             "LibFoo".into(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 42,
                 title: "LibFoo".into(),
                 version: "2.0.0".into(),
                 author: String::new(),
                 last_update: 0,
                 file_info_uri: String::new(),
-            }),
+            })],
         );
         assert!(!check_for_updates_metadata(dir.path(), &lookup, &[]).unwrap()[0].has_update);
         let mut store = metadata::load_metadata(dir.path());
@@ -13666,14 +13945,14 @@ mod tests {
             if let Some(version) = api_version {
                 api_lookup.insert(
                     "LibFoo".to_string(),
-                    Arc::new(esoui::ApiAddonLookup {
+                    vec![Arc::new(esoui::ApiAddonLookup {
                         esoui_id: 7,
                         title: "LibFoo".to_string(),
                         version: version.to_string(),
                         author: "Test".to_string(),
                         last_update: 2,
                         file_info_uri: "standalone".to_string(),
-                    }),
+                    })],
                 );
             }
 
@@ -13699,14 +13978,14 @@ mod tests {
         metadata::save_metadata(addons_dir, &store).unwrap();
         let lookup = HashMap::from([(
             "LibFoo".to_string(),
-            Arc::new(esoui::ApiAddonLookup {
+            vec![Arc::new(esoui::ApiAddonLookup {
                 esoui_id: 7,
                 title: "LibFoo".to_string(),
                 version: "1.0".to_string(),
                 author: "Test".to_string(),
                 last_update: 2,
                 file_info_uri: "standalone".to_string(),
-            }),
+            })],
         )]);
 
         let result = auto_link_addons_blocking(addons_dir, &lookup).unwrap();

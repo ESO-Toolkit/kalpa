@@ -1574,9 +1574,13 @@ pub struct ApiAddonLookup {
     pub file_info_uri: String,
 }
 
+/// Every archive advertising a folder, retained so collisions can be resolved
+/// against the installed manifest rather than catalogue ordering.
+pub type FilelistLookup = HashMap<String, Vec<Arc<ApiAddonLookup>>>;
+
 struct FilelistCache {
     entries: Vec<ApiFileEntry>,
-    lookup: Arc<HashMap<String, Arc<ApiAddonLookup>>>,
+    lookup: Arc<FilelistLookup>,
     fetched_at: Instant,
 }
 
@@ -1705,7 +1709,7 @@ pub fn invalidate_filelist_cache_if_applied(applied: bool) {
 /// Single HTTP request returns ~4000 addons with all their folder paths,
 /// versions, and last-updated timestamps. Result is cached in-memory for
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
-pub fn fetch_filelist_lookup() -> Result<Arc<HashMap<String, Arc<ApiAddonLookup>>>, String> {
+pub fn fetch_filelist_lookup() -> Result<Arc<FilelistLookup>, String> {
     ensure_filelist_cache(false)?;
     let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
     let cache = guard
@@ -1731,8 +1735,8 @@ fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
         .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))
 }
 
-fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<HashMap<String, Arc<ApiAddonLookup>>> {
-    let mut map = HashMap::new();
+fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<FilelistLookup> {
+    let mut map: FilelistLookup = HashMap::new();
     for entry in entries {
         // One shared allocation per file entry: an entry can map many folder
         // paths, and the cache retains every value for the full TTL — cloning
@@ -1749,18 +1753,408 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<HashMap<String, Arc<Ap
         for addon in &entry.addons {
             // Only use the top-level folder name (before any '/')
             let folder = addon.path.split('/').next().unwrap_or(&addon.path);
-            // Don't overwrite if already mapped (first match wins — the primary entry)
-            map.entry(folder.to_string())
-                .or_insert_with(|| Arc::clone(&lookup));
+            let candidates = map.entry(folder.to_string()).or_default();
+            if !candidates
+                .iter()
+                .any(|candidate| candidate.esoui_id == entry.id)
+            {
+                candidates.push(Arc::clone(&lookup));
+            }
         }
     }
 
     Arc::new(map)
 }
 
+/// Preserve a known identity unless a verified manifest identifies BugCatcher.
+/// Fresh collisions require complete author evidence for one candidate. A known
+/// standalone identity absent from the catalogue cannot become a bundled parent.
+pub fn resolve_filelist_entry<'a>(
+    lookup: &'a FilelistLookup,
+    folder: &str,
+    installed_author: Option<&str>,
+    known_id: u32,
+) -> Option<&'a ApiAddonLookup> {
+    let candidates = lookup.get(folder)?;
+    let known = candidates
+        .iter()
+        .find(|candidate| candidate.esoui_id == known_id && known_id != 0);
+    if known_id != 0 && known.is_none() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates[0].as_ref());
+    }
+
+    if let Some(author) = installed_author {
+        let credits = author_credits(author);
+        // Both verified BugCatcher manifests use the same folder and title. The
+        // maintained fork retains the original author's credit. Require the
+        // observed local credits and both expected catalogue identities, with
+        // no third matching listing. Only these identities can be repaired.
+        if folder == "BugCatcher"
+            && matches!(known_id, 0 | 1083 | 2566)
+            && (credits == ["werewolf finds dragon", "shadowfen"]
+                || credits == ["werewolf finds dragon"])
+        {
+            let original = candidates.iter().find(|candidate| {
+                candidate.esoui_id == 1083
+                    && author_credits(&candidate.author) == ["werewolf finds dragon"]
+            });
+            let updated = candidates.iter().find(|candidate| {
+                candidate.esoui_id == 2566 && author_credits(&candidate.author) == ["shadowfen"]
+            });
+            let third_match = candidates.iter().any(|candidate| {
+                !matches!(candidate.esoui_id, 1083 | 2566)
+                    && author_credits(&candidate.author)
+                        .iter()
+                        .any(|credit| credits.contains(credit))
+            });
+            if original.is_some() && updated.is_some() && !third_match {
+                return if credits.len() == 1 {
+                    original.map(Arc::as_ref)
+                } else {
+                    updated.map(Arc::as_ref)
+                };
+            }
+        }
+        // Catalogue authors identify uploaders, while manifests may retain
+        // earlier authors or credit bundled libraries. Overlap alone cannot
+        // justify changing an existing listing to a fork or bundled parent.
+        if known.is_some() {
+            return known.map(Arc::as_ref);
+        }
+        let mut matching = candidates.iter().filter(|candidate| {
+            author_credits(&candidate.author)
+                .iter()
+                .any(|credit| credits.contains(credit))
+        });
+        if let Some(candidate) = matching.next() {
+            if matching.next().is_none()
+                && credits
+                    .iter()
+                    .all(|credit| author_credits(&candidate.author).contains(credit))
+            {
+                return Some(candidate.as_ref());
+            }
+        }
+    }
+    known.map(Arc::as_ref)
+}
+
+fn author_credits(author: &str) -> Vec<String> {
+    static ESO_CODES: OnceLock<Regex> = OnceLock::new();
+    let codes =
+        ESO_CODES.get_or_init(|| Regex::new(r"(?i)\|c[0-9a-f]{6}|\|r|\|t|\|u[^|]*:\|u").unwrap());
+    let clean = codes.replace_all(author, "");
+    clean
+        .split([',', ';', '&'])
+        .map(|credit| {
+            credit
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
+        .filter(|credit| !credit.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collision_fixture(id: u32, author: &str) -> ApiFileEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "categoryId": 1, "version": "1", "lastUpdate": 42,
+            "title": "BugCatcher", "author": author, "fileInfoUri": "url",
+            "addons": [{"path": "BugCatcher/"}, {"path": "BugCatcher/file.lua"}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn folder_collisions_retain_distinct_ids_and_resolve_maintainer_in_both_orders() {
+        let original = collision_fixture(1083, "Werewolf Finds Dragon");
+        let updated = collision_fixture(2566, "Shadowfen");
+        for entries in [
+            vec![original.clone(), updated.clone(), original.clone()],
+            vec![updated.clone(), original.clone(), updated.clone()],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert_eq!(lookup["BugCatcher"].len(), 2);
+            for known_id in [0, 1083, 2566] {
+                let resolved = resolve_filelist_entry(
+                    &lookup,
+                    "BugCatcher",
+                    Some("Werewolf Finds Dragon, Shadowfen"),
+                    known_id,
+                )
+                .unwrap();
+                assert_eq!(resolved.esoui_id, 2566);
+                let resolved = resolve_filelist_entry(
+                    &lookup,
+                    "BugCatcher",
+                    Some("Werewolf Finds Dragon"),
+                    known_id,
+                )
+                .unwrap();
+                assert_eq!(resolved.esoui_id, 1083);
+            }
+        }
+    }
+
+    #[test]
+    fn collision_author_normalizes_codes_case_whitespace_and_credit_separators() {
+        let lookup = build_filelist_lookup(&[
+            collision_fixture(1083, "Werewolf Finds Dragon"),
+            collision_fixture(2566, "Shadowfen"),
+        ]);
+        for separator in [",", ";", "&"] {
+            let author = format!("Werewolf Finds Dragon{separator} |cffffff SHADOWFEN |r");
+            assert_eq!(
+                resolve_filelist_entry(&lookup, "BugCatcher", Some(&author), 1083)
+                    .unwrap()
+                    .esoui_id,
+                2566
+            );
+        }
+        assert_eq!(author_credits("Wolf and Dragon"), ["wolf and dragon"]);
+        assert_eq!(
+            author_credits(" Werewolf   Finds\tDragon "),
+            ["werewolf finds dragon"]
+        );
+    }
+
+    #[test]
+    fn generic_collision_preserves_known_forks_and_standalone_libraries() {
+        for (installed_author, known_author, other_author) in [
+            (
+                "Original Author, Contributor",
+                "Maintainer",
+                "Original Author",
+            ),
+            ("Library Author", "Former Maintainer", "Library Author"),
+        ] {
+            let known = collision_fixture(20, known_author);
+            let other = collision_fixture(10, other_author);
+            for entries in [
+                vec![known.clone(), other.clone()],
+                vec![other.clone(), known.clone()],
+            ] {
+                let lookup = build_filelist_lookup(&entries);
+                assert_eq!(
+                    resolve_filelist_entry(&lookup, "BugCatcher", Some(installed_author), 20)
+                        .unwrap()
+                        .esoui_id,
+                    20
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_collision_requires_complete_and_unique_author_evidence() {
+        let matching = collision_fixture(10, "Original Author, Contributor");
+        let unrelated = collision_fixture(20, "Maintainer");
+        let partial = collision_fixture(10, "Original Author");
+        for entries in [
+            vec![matching.clone(), unrelated.clone()],
+            vec![unrelated.clone(), matching],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert_eq!(
+                resolve_filelist_entry(
+                    &lookup,
+                    "BugCatcher",
+                    Some("Contributor, Original Author"),
+                    0
+                )
+                .unwrap()
+                .esoui_id,
+                10
+            );
+        }
+        for entries in [
+            vec![partial.clone(), unrelated.clone()],
+            vec![unrelated, partial],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert!(resolve_filelist_entry(
+                &lookup,
+                "BugCatcher",
+                Some("Original Author, Contributor"),
+                0
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn ambiguous_or_missing_author_preserves_only_a_present_known_id() {
+        let lookup = build_filelist_lookup(&[
+            collision_fixture(1083, "Shared Author"),
+            collision_fixture(2566, "Shadowfen, Shared Author"),
+        ]);
+        for author in [None, Some("Unknown"), Some("Shadowfen, Shared Author")] {
+            for known_id in [1083, 2566] {
+                assert_eq!(
+                    resolve_filelist_entry(&lookup, "BugCatcher", author, known_id)
+                        .unwrap()
+                        .esoui_id,
+                    known_id
+                );
+            }
+            for known_id in [0, 999] {
+                assert!(resolve_filelist_entry(&lookup, "BugCatcher", author, known_id).is_none());
+            }
+        }
+        assert!(resolve_filelist_entry(&lookup, "Missing", Some("Shadowfen"), 2566).is_none());
+    }
+
+    #[test]
+    fn lone_archive_cannot_replace_a_missing_known_standalone_identity() {
+        let lookup = build_filelist_lookup(&[collision_fixture(2566, "Shadowfen")]);
+        for author in [None, Some("Shadowfen")] {
+            for known_id in [0, 2566] {
+                assert_eq!(
+                    resolve_filelist_entry(&lookup, "BugCatcher", author, known_id)
+                        .unwrap()
+                        .esoui_id,
+                    2566
+                );
+            }
+            assert!(resolve_filelist_entry(&lookup, "BugCatcher", author, 1083).is_none());
+        }
+    }
+
+    #[test]
+    fn complete_coauthor_set_cannot_choose_between_unrelated_candidates() {
+        for entries in [
+            vec![
+                collision_fixture(10, "Author A"),
+                collision_fixture(20, "Author B"),
+            ],
+            vec![
+                collision_fixture(20, "Author B"),
+                collision_fixture(10, "Author A"),
+            ],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            for author in ["Author A, Author B", "Author B, Author A"] {
+                for known_id in [10, 20] {
+                    assert_eq!(
+                        resolve_filelist_entry(&lookup, "BugCatcher", Some(author), known_id)
+                            .unwrap()
+                            .esoui_id,
+                        known_id
+                    );
+                }
+                for known_id in [0, 999] {
+                    assert!(
+                        resolve_filelist_entry(&lookup, "BugCatcher", Some(author), known_id)
+                            .is_none()
+                    );
+                }
+            }
+            assert!(resolve_filelist_entry(&lookup, "BugCatcher", Some("Author A"), 999).is_none());
+        }
+    }
+
+    #[test]
+    fn third_bugcatcher_candidate_cannot_be_redirected_by_the_verified_exception() {
+        let original = collision_fixture(1083, "Werewolf Finds Dragon");
+        let updated = collision_fixture(2566, "Shadowfen");
+        for third_author in ["Shadowfen", "Unrelated Author"] {
+            let third = collision_fixture(999, third_author);
+            for entries in [
+                vec![original.clone(), updated.clone(), third.clone()],
+                vec![third.clone(), updated.clone(), original.clone()],
+            ] {
+                let lookup = build_filelist_lookup(&entries);
+                for known_id in [0, 1083, 2566, 999] {
+                    let resolved = resolve_filelist_entry(
+                        &lookup,
+                        "BugCatcher",
+                        Some("Werewolf Finds Dragon, Shadowfen"),
+                        known_id,
+                    )
+                    .map(|candidate| candidate.esoui_id);
+                    let expected = if third_author == "Shadowfen" || known_id == 999 {
+                        (known_id != 0).then_some(known_id)
+                    } else {
+                        Some(2566)
+                    };
+                    assert_eq!(resolved, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bugcatcher_exception_requires_verified_folder_catalogue_and_local_credits() {
+        let expected = [
+            collision_fixture(1083, "Werewolf Finds Dragon"),
+            collision_fixture(2566, "Shadowfen"),
+        ];
+        let mut lookup = build_filelist_lookup(&expected).as_ref().clone();
+        lookup.insert("OtherFolder".into(), lookup["BugCatcher"].clone());
+        for (folder, author) in [
+            ("OtherFolder", Some("Werewolf Finds Dragon, Shadowfen")),
+            ("BugCatcher", Some("Shadowfen, Werewolf Finds Dragon")),
+            (
+                "BugCatcher",
+                Some("Werewolf Finds Dragon, Shadowfen, Other Author"),
+            ),
+            ("BugCatcher", None),
+        ] {
+            assert_eq!(
+                resolve_filelist_entry(&lookup, folder, author, 1083)
+                    .unwrap()
+                    .esoui_id,
+                1083
+            );
+            assert!(resolve_filelist_entry(&lookup, folder, author, 0).is_none());
+        }
+        assert!(resolve_filelist_entry(
+            &lookup,
+            "BugCatcher",
+            Some("Werewolf Finds Dragon, Shadowfen"),
+            999
+        )
+        .is_none());
+        for entries in [
+            [
+                collision_fixture(1083, "Werewolf Finds Dragon, Shadowfen"),
+                expected[1].clone(),
+            ],
+            [
+                expected[0].clone(),
+                collision_fixture(2566, "Shadowfen, Other Author"),
+            ],
+            [expected[0].clone(), collision_fixture(999, "Shadowfen")],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert_eq!(
+                resolve_filelist_entry(
+                    &lookup,
+                    "BugCatcher",
+                    Some("Werewolf Finds Dragon, Shadowfen"),
+                    1083
+                )
+                .unwrap()
+                .esoui_id,
+                1083
+            );
+            assert!(resolve_filelist_entry(
+                &lookup,
+                "BugCatcher",
+                Some("Werewolf Finds Dragon, Shadowfen"),
+                0
+            )
+            .is_none());
+        }
+    }
 
     /// Every ESOUI response buffered into memory has to be size-capped. The
     /// 30-second client timeout is not a bound: on a fast link it admits

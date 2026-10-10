@@ -136,7 +136,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
                 "Title" => title = value.to_string(),
                 "Author" => author = value.to_string(),
                 "Version" => version = value.to_string(),
-                "AddOnVersion" => addon_version = value.parse().ok(),
+                "AddOnVersion" | "AddonVersion" => addon_version = value.parse().ok(),
                 "APIVersion" => {
                     api_version = value
                         .split_whitespace()
@@ -256,6 +256,15 @@ mod tests {
         assert_eq!(m.description, "A test addon");
         assert!(!m.is_library);
         assert!(m.depends_on.is_empty());
+    }
+
+    #[test]
+    fn parses_bugcatcher_updated_dependency_version_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_manifest(dir.path(), "BugCatcher", "## Title: BugCatcher\n## Author: Werewolf Finds Dragon, Shadowfen\n## AddonVersion: 043\n");
+        let manifest = parse_manifest("BugCatcher", &path).unwrap();
+        assert_eq!(manifest.addon_version, Some(43));
+        assert!(manifest.version.is_empty());
     }
 
     #[test]

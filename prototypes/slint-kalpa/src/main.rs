@@ -720,6 +720,7 @@ struct NativeAppUpdateInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct NativeAddonUpdateCheck {
     folder_name: String,
+    esoui_id: u32,
     remote_version: String,
     has_update: bool,
     remote_last_update: u64,
@@ -2981,6 +2982,7 @@ fn apply_addon_update_check_results(
             continue;
         };
 
+        addon.esoui_id = update.esoui_id.clone();
         if !update.last_updated.is_empty() {
             addon.last_updated = update.last_updated.clone();
         }
@@ -13249,6 +13251,13 @@ fn check_native_addon_updates_blocking(
 ) -> Result<Vec<NativeAddonUpdateCheck>, String> {
     let api_lookup = esoui::fetch_filelist_lookup()?;
     let _guard = metadata_guard();
+    check_native_addon_updates_metadata(addons_dir, &api_lookup)
+}
+
+fn check_native_addon_updates_metadata(
+    addons_dir: &Path,
+    api_lookup: &esoui::FilelistLookup,
+) -> Result<Vec<NativeAddonUpdateCheck>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let folder_names = store.addons.keys().cloned().collect::<Vec<_>>();
     let mut metadata_changed = false;
@@ -13259,16 +13268,35 @@ fn check_native_addon_updates_blocking(
             continue;
         }
 
-        let Some(meta) = store.addons.get(&folder_name).cloned() else {
+        let Some(mut meta) = store.addons.get(&folder_name).cloned() else {
             continue;
         };
         if meta.esoui_id == 0 {
             continue;
         }
 
-        let Some(api_entry) = api_lookup.get(&folder_name) else {
+        let installed_manifest = find_manifest(addons_dir, &folder_name)
+            .and_then(|path| manifest::parse_manifest(&folder_name, &path));
+        let Some(api_entry) = esoui::resolve_filelist_entry(
+            api_lookup,
+            &folder_name,
+            installed_manifest
+                .as_ref()
+                .map(|manifest| manifest.author.as_str()),
+            meta.esoui_id,
+        ) else {
             continue;
         };
+
+        if meta.esoui_id != api_entry.esoui_id {
+            metadata::reconcile_addon_identity(
+                &mut meta,
+                api_entry.esoui_id,
+                &api_entry.file_info_uri,
+            );
+            store.addons.insert(folder_name.clone(), meta.clone());
+            metadata_changed = true;
+        }
 
         let has_update = native_artifact_has_update(
             &meta.installed_version,
@@ -13289,6 +13317,7 @@ fn check_native_addon_updates_blocking(
 
         results.push(NativeAddonUpdateCheck {
             folder_name,
+            esoui_id: api_entry.esoui_id,
             remote_version: api_entry.version.clone(),
             has_update,
             remote_last_update: api_entry.last_update,
@@ -13321,6 +13350,7 @@ fn update_check_status_message(results: &[NativeAddonUpdateCheck]) -> String {
 fn slint_update_check_entry(result: NativeAddonUpdateCheck) -> AddonUpdateCheckEntry {
     AddonUpdateCheckEntry {
         folder_name: result.folder_name.into(),
+        esoui_id: result.esoui_id.to_string().into(),
         remote_version: result.remote_version.into(),
         has_update: result.has_update,
         last_updated: if result.remote_last_update > 0 {
@@ -13490,6 +13520,7 @@ fn apply_native_pending_conflict_blocking(
     let checks = check_native_addon_updates_blocking(addons_dir).unwrap_or_else(|_| {
         vec![NativeAddonUpdateCheck {
             folder_name: pending.folder_name.clone(),
+            esoui_id: pending.esoui_id,
             remote_version: pending.update_version.clone(),
             has_update: false,
             remote_last_update: 0,
@@ -13694,32 +13725,43 @@ enum NativeSingleUpdateOutcome {
     Pending(Box<NativePendingConflict>),
 }
 
+fn checked_native_update_targets(
+    targets: Vec<NativeAddonUpdateTarget>,
+    checks: &[NativeAddonUpdateCheck],
+) -> Vec<(NativeAddonUpdateTarget, String)> {
+    let checks_by_folder = checks
+        .iter()
+        .filter(|check| check.has_update && check.esoui_id != 0)
+        .map(|check| (check.folder_name.as_str(), check))
+        .collect::<HashMap<_, _>>();
+    targets
+        .into_iter()
+        .filter_map(|mut target| {
+            let check = checks_by_folder.get(target.folder_name.as_str())?;
+            target.esoui_id = check.esoui_id;
+            Some((target, check.remote_version.clone()))
+        })
+        .collect()
+}
+
 fn apply_native_addon_updates_blocking(
     addons_dir: &Path,
     targets: Vec<NativeAddonUpdateTarget>,
     conflict_policy: i32,
 ) -> Result<NativeAddonUpdateApplyResult, String> {
     let initial_checks = check_native_addon_updates_blocking(addons_dir)?;
-    let target_folders = targets
-        .iter()
-        .map(|target| target.folder_name.as_str())
-        .collect::<HashSet<_>>();
-    let remote_versions = initial_checks
-        .iter()
-        .filter(|check| check.has_update && target_folders.contains(check.folder_name.as_str()))
-        .map(|check| (check.folder_name.clone(), check.remote_version.clone()))
-        .collect::<HashMap<_, _>>();
+    let checked_targets = checked_native_update_targets(targets, &initial_checks);
 
     let mut result = NativeAddonUpdateApplyResult::default();
     let mut completed_set = HashSet::new();
 
-    for target in targets {
-        let Some(remote_version) = remote_versions.get(&target.folder_name) else {
-            continue;
-        };
-
-        match apply_native_single_addon_update(addons_dir, &target, remote_version, conflict_policy)
-        {
+    for (target, remote_version) in checked_targets {
+        match apply_native_single_addon_update(
+            addons_dir,
+            &target,
+            &remote_version,
+            conflict_policy,
+        ) {
             Ok(NativeSingleUpdateOutcome::Applied) => {
                 completed_set.insert(target.folder_name.clone());
                 result.completed.push(target.folder_name);
@@ -14295,16 +14337,22 @@ fn install_dependency_blocking(
 fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
     let folder_dir = addons_dir.join(folder_name);
     let txt = folder_dir.join(format!("{folder_name}.txt"));
-    if txt.exists() {
-        return Some(txt);
-    }
-
     let addon = folder_dir.join(format!("{folder_name}.addon"));
-    if addon.exists() {
-        return Some(addon);
+    match (txt.exists(), addon.exists()) {
+        (true, true) => {
+            let version = |path: &PathBuf| {
+                manifest::parse_manifest(folder_name, path).and_then(|m| m.addon_version)
+            };
+            Some(match (version(&txt), version(&addon)) {
+                (Some(t), Some(a)) if a > t => addon,
+                (None, Some(_)) => addon,
+                _ => txt,
+            })
+        }
+        (true, false) => Some(txt),
+        (false, true) => Some(addon),
+        (false, false) => None,
     }
-
-    None
 }
 
 fn export_addon_list_json(addons_dir: &Path) -> Result<String, String> {
@@ -23767,6 +23815,298 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn native_bugcatcher_update_checks_repair_only_verified_updated_installs() {
+        let original = Arc::new(esoui::ApiAddonLookup {
+            esoui_id: 1083,
+            title: "BugCatcher".to_string(),
+            version: "017-100022".to_string(),
+            author: "Werewolf Finds Dragon".to_string(),
+            last_update: 100,
+            file_info_uri: "https://www.esoui.com/downloads/info1083-BugCatcher.html".to_string(),
+        });
+        let updated = Arc::new(esoui::ApiAddonLookup {
+            esoui_id: 2566,
+            title: "BugCatcher Updated".to_string(),
+            version: "043".to_string(),
+            author: "Shadowfen".to_string(),
+            last_update: 200,
+            file_info_uri: "https://www.esoui.com/downloads/info2566-BugCatcherUpdated.html"
+                .to_string(),
+        });
+
+        for candidates in [
+            vec![original.clone(), updated.clone()],
+            vec![updated.clone(), original.clone()],
+            vec![original.clone()],
+        ] {
+            for is_updated in [false, true] {
+                for marker in [100, 200, 300] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let addons_dir = tmp.path();
+                    let folder = addons_dir.join("BugCatcher");
+                    fs::create_dir(&folder).unwrap();
+                    fs::write(
+                        folder.join("BugCatcher.txt"),
+                        "## Title: BugCatcher\n## Author: Werewolf Finds Dragon\n## APIVersion: 100022\n",
+                    ).unwrap();
+                    if is_updated {
+                        fs::write(
+                            folder.join("BugCatcher.addon"),
+                            "## Title: BugCatcher\n## Author: Werewolf Finds Dragon, Shadowfen\n## AddonVersion: 043\n## APIVersion: 101051 101052\n",
+                        ).unwrap();
+                    }
+                    let local_version = if is_updated { "043" } else { "017-100022" };
+                    let mut store = metadata::MetadataStore::default();
+                    metadata::record_install_ext(
+                        &mut store,
+                        "BugCatcher",
+                        1083,
+                        local_version,
+                        &original.file_info_uri,
+                        marker,
+                    );
+                    store
+                        .addons
+                        .get_mut("BugCatcher")
+                        .unwrap()
+                        .tags
+                        .push("favorite".to_string());
+                    let before = store.addons["BugCatcher"].clone();
+                    metadata::save_metadata(addons_dir, &store).unwrap();
+                    let lookup = esoui::FilelistLookup::from([(
+                        "BugCatcher".to_string(),
+                        candidates.clone(),
+                    )]);
+
+                    let results = check_native_addon_updates_metadata(addons_dir, &lookup).unwrap();
+                    let after = metadata::load_metadata(addons_dir).addons["BugCatcher"].clone();
+                    let resolved = if is_updated && candidates.len() == 2 {
+                        &updated
+                    } else {
+                        &original
+                    };
+                    assert_eq!(after.esoui_id, resolved.esoui_id);
+                    assert_eq!(after.download_url, resolved.file_info_uri);
+                    assert_eq!(after.installed_version, before.installed_version);
+                    assert_eq!(after.installed_at, before.installed_at);
+                    assert_eq!(after.tags, before.tags);
+                    assert_eq!(results.len(), 1);
+                    assert_eq!(results[0].esoui_id, resolved.esoui_id);
+                    assert_eq!(results[0].remote_version, resolved.version);
+                    assert_eq!(results[0].remote_last_update, resolved.last_update);
+                    if candidates.len() == 2 || !is_updated {
+                        assert!(!results[0].has_update);
+                    }
+                    if after.esoui_id == 2566 {
+                        assert_eq!(after.esoui_last_update, 200);
+                    } else {
+                        assert_eq!(after.esoui_last_update, marker);
+                    }
+                    assert!(after.esoui_marker_installed);
+                    assert_eq!(
+                        check_native_addon_updates_metadata(addons_dir, &lookup)
+                            .unwrap()
+                            .len(),
+                        1
+                    );
+                }
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("BugCatcher")).unwrap();
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "BugCatcher",
+            1083,
+            "017-100022",
+            &original.file_info_uri,
+            100,
+        );
+        let before = store.addons["BugCatcher"].clone();
+        metadata::save_metadata(tmp.path(), &store).unwrap();
+        let lookup = esoui::FilelistLookup::from([("BugCatcher".to_string(), vec![updated])]);
+        assert!(check_native_addon_updates_metadata(tmp.path(), &lookup)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            metadata::load_metadata(tmp.path()).addons["BugCatcher"],
+            before
+        );
+    }
+
+    #[test]
+    fn native_bugcatcher_pending_update_uses_repaired_download_identity() {
+        let original = Arc::new(esoui::ApiAddonLookup {
+            esoui_id: 1083,
+            title: "BugCatcher".to_string(),
+            version: "017-100022".to_string(),
+            author: "Werewolf Finds Dragon".to_string(),
+            last_update: 100,
+            file_info_uri: "https://www.esoui.com/downloads/info1083-BugCatcher.html".to_string(),
+        });
+        let updated = Arc::new(esoui::ApiAddonLookup {
+            esoui_id: 2566,
+            title: "BugCatcher Updated".to_string(),
+            version: "043".to_string(),
+            author: "Shadowfen".to_string(),
+            last_update: 200,
+            file_info_uri: "https://www.esoui.com/downloads/info2566-BugCatcherUpdated.html"
+                .to_string(),
+        });
+        for candidates in [
+            vec![original.clone(), updated.clone()],
+            vec![updated.clone(), original.clone()],
+        ] {
+            for marker in [100, 200, 300] {
+                let tmp = tempfile::tempdir().unwrap();
+                let folder = tmp.path().join("BugCatcher");
+                fs::create_dir(&folder).unwrap();
+                fs::write(folder.join("BugCatcher.addon"),
+                    "## Title: BugCatcher\n## Author: Werewolf Finds Dragon, Shadowfen\n## AddonVersion: 042\n"
+                ).unwrap();
+                let mut store = metadata::MetadataStore::default();
+                metadata::record_install_ext(
+                    &mut store,
+                    "BugCatcher",
+                    1083,
+                    "042",
+                    &original.file_info_uri,
+                    marker,
+                );
+                metadata::save_metadata(tmp.path(), &store).unwrap();
+                let lookup =
+                    esoui::FilelistLookup::from([("BugCatcher".to_string(), candidates.clone())]);
+                let checks = check_native_addon_updates_metadata(tmp.path(), &lookup).unwrap();
+                assert_eq!(checks.len(), 1);
+                assert!(checks[0].has_update);
+                assert_eq!(checks[0].esoui_id, 2566);
+                assert_eq!(checks[0].remote_version, "043");
+                let repaired = metadata::load_metadata(tmp.path()).addons["BugCatcher"].clone();
+                assert_eq!(repaired.esoui_id, 2566);
+                assert_eq!(repaired.installed_version, "042");
+                assert_eq!(repaired.esoui_last_update, 0);
+                assert!(!repaired.esoui_marker_installed);
+
+                let stale_target = NativeAddonUpdateTarget {
+                    folder_name: "BugCatcher".to_string(),
+                    esoui_id: 1083,
+                };
+                let expected = NativeAddonUpdateTarget {
+                    folder_name: "BugCatcher".to_string(),
+                    esoui_id: 2566,
+                };
+                assert_eq!(
+                    checked_native_update_targets(vec![stale_target.clone()], &checks),
+                    vec![(expected.clone(), "043".to_string())]
+                );
+                assert!(checked_native_update_targets(vec![stale_target], &[]).is_empty());
+
+                let models = test_addon_models(vec![AddonEntry {
+                    folder_name: "BugCatcher".into(),
+                    esoui_id: "1083".into(),
+                    ..AddonEntry::default()
+                }]);
+                let updates = checks
+                    .into_iter()
+                    .map(slint_update_check_entry)
+                    .collect::<Vec<_>>();
+                assert_eq!(apply_addon_update_check_results(&models, &updates), 1);
+                assert_eq!(models.all.borrow()[0].esoui_id.as_str(), "2566");
+                assert_eq!(native_update_targets(&models), vec![expected]);
+            }
+        }
+    }
+
+    #[test]
+    fn native_known_forks_and_libraries_keep_identity_when_author_credits_collide() {
+        for (folder_name, known_id, known_author, installed_author, other_author) in [
+            (
+                "GenericFork",
+                10,
+                "Fork Maintainer",
+                "Original Author",
+                "Original Author",
+            ),
+            (
+                "StandaloneLibrary",
+                30,
+                "Library Author",
+                "Library Author",
+                "Library Author",
+            ),
+        ] {
+            let known = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: known_id,
+                title: folder_name.to_string(),
+                version: "2".to_string(),
+                author: known_author.to_string(),
+                last_update: 200,
+                file_info_uri: format!("https://example.invalid/{known_id}.json"),
+            });
+            let other = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: known_id + 1,
+                title: "Other archive".to_string(),
+                version: "999".to_string(),
+                author: other_author.to_string(),
+                last_update: 300,
+                file_info_uri: "https://example.invalid/other.json".to_string(),
+            });
+            for candidates in [
+                vec![known.clone(), other.clone()],
+                vec![other.clone(), known.clone()],
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let folder = tmp.path().join(folder_name);
+                fs::create_dir(&folder).unwrap();
+                fs::write(
+                    folder.join(format!("{folder_name}.txt")),
+                    format!(
+                        "## Title: {folder_name}\n## Author: {installed_author}\n## Version: 1\n"
+                    ),
+                )
+                .unwrap();
+                let mut store = metadata::MetadataStore::default();
+                metadata::record_install_ext(
+                    &mut store,
+                    folder_name,
+                    known_id,
+                    "1",
+                    &known.file_info_uri,
+                    100,
+                );
+                if folder_name == "StandaloneLibrary" {
+                    store.addons.get_mut(folder_name).unwrap().bundled_by = vec![known_id + 1];
+                }
+                let before = store.addons[folder_name].clone();
+                metadata::save_metadata(tmp.path(), &store).unwrap();
+                let lookup = esoui::FilelistLookup::from([(folder_name.to_string(), candidates)]);
+
+                let checks = check_native_addon_updates_metadata(tmp.path(), &lookup).unwrap();
+                assert_eq!(checks.len(), 1);
+                assert!(checks[0].has_update);
+                assert_eq!(checks[0].esoui_id, known_id);
+                assert_eq!(checks[0].remote_version, "2");
+                assert_eq!(checks[0].remote_last_update, 200);
+                // A pending release cannot replace installed identity, URL, or marker.
+                assert_eq!(
+                    metadata::load_metadata(tmp.path()).addons[folder_name],
+                    before
+                );
+                let target = NativeAddonUpdateTarget {
+                    folder_name: folder_name.to_string(),
+                    esoui_id: known_id,
+                };
+                assert_eq!(
+                    checked_native_update_targets(vec![target.clone()], &checks),
+                    vec![(target, "2".to_string())]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn native_pending_update_preserves_installed_publication_marker() {
         let mut meta = metadata::AddonMetadata {
             esoui_id: 42,
@@ -23865,12 +24205,14 @@ CombatMetrics_SavedVariables = {
         let updates = vec![
             AddonUpdateCheckEntry {
                 folder_name: "CurrentAddon".into(),
+                esoui_id: "1".into(),
                 remote_version: "1.0".into(),
                 has_update: false,
                 last_updated: "Jul 1, 2026".into(),
             },
             AddonUpdateCheckEntry {
                 folder_name: "StaleAddon".into(),
+                esoui_id: "2".into(),
                 remote_version: "2.0".into(),
                 has_update: true,
                 last_updated: "Jul 2, 2026".into(),

@@ -6,6 +6,19 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.28] — 2026-10-10
+
+### Bug Fixes
+
+- **BugCatcher Updated keeps the correct ESOUI listing.** Kalpa distinguishes it
+  from the discontinued original using the installed manifest and repairs
+  previously incorrect links before checking for updates. Existing original
+  BugCatcher installations retain their listing. Repairs preserve installed
+  versions, tags, and download dates.
+- **Shared addon folders no longer depend on catalogue order.** Kalpa preserves
+  tracked fork and library identities and requires clear manifest evidence
+  before linking an untracked folder to one of several listings.
+
 ## [0.1.0-beta.27] — 2026-10-04
 
 This release repairs addon and pack actions, preserves SavedVariables data when
@@ -1302,6 +1315,7 @@ to it.
 -->
 
 [Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...HEAD
+[0.1.0-beta.28]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...v0.1.0-beta.28
 [0.1.0-beta.27]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...v0.1.0-beta.27
 [0.1.0-beta.26]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...v0.1.0-beta.26
 [0.1.0-beta.25]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.24...v0.1.0-beta.25
