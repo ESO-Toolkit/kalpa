@@ -6,6 +6,23 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.29] — 2026-10-10
+
+### Bug Fixes
+
+- **Dependency versions are read consistently.** Installation and startup now
+  accept both `AddOnVersion` and `AddonVersion` and use the final directive in
+  a manifest. Dependencies still have to meet the required numeric version.
+- **Rejected library downloads explain the mismatch.** Manual and automatic
+  dependency installs show the downloaded `AddOnVersion` and the required
+  minimum, or explain that a usable version or manifest is missing. Rejected
+  downloads leave existing library files and metadata intact.
+
+The current LibStatic download declares `AddOnVersion: 2`, while Static's
+Furnishing Improvements requires `LibStatic>=210`. That published mismatch
+requires a corrected addon requirement or a compatible library release from
+the author; this release keeps the dependency check in place.
+
 ## [0.1.0-beta.28] — 2026-10-10
 
 ### Bug Fixes
@@ -1314,7 +1331,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.29...HEAD
+[0.1.0-beta.29]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.28...v0.1.0-beta.29
 [0.1.0-beta.28]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...v0.1.0-beta.28
 [0.1.0-beta.27]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...v0.1.0-beta.27
 [0.1.0-beta.26]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...v0.1.0-beta.26

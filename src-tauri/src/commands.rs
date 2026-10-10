@@ -792,9 +792,14 @@ fn verify_dependency_archive(
     installer::extract_addon_zip(archive, staging.path())?;
     let (installed, versions) = build_installed_index(staging.path());
     if !dependency_satisfied(name, Some(minimum), &installed, &versions) {
-        return Err(format!(
-            "Downloaded {name} does not satisfy AddOnVersion >= {minimum}."
-        ));
+        let key = normalize_addon_name(name);
+        return Err(if !installed.contains(&key) {
+            format!("Downloaded archive has no loadable {name} manifest; AddOnVersion {minimum} or newer is required.")
+        } else if let Some(version) = versions.get(&key).copied().flatten() {
+            format!("Downloaded {name} declares AddOnVersion {version}, but {minimum} or newer is required.")
+        } else {
+            format!("Downloaded {name} has no valid AddOnVersion; {minimum} or newer is required.")
+        });
     }
     Ok(())
 }
@@ -1008,8 +1013,7 @@ fn try_install_dep(
         dep_tmp.path(),
         dep_name,
         dependency_minimum(addons_dir, dep_name),
-    )
-    .map_err(|_| "version_unsatisfied".to_string())?;
+    )?;
     let dep_folders = installer::install_addon_zip_with_hashes(
         dep_tmp.path(),
         addons_dir,
@@ -1131,31 +1135,12 @@ pub(crate) fn normalize_addon_name(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-/// Extract just the `AddOnVersion` number from a manifest file without
-/// parsing the full manifest.  Returns `None` if the file can't be read
-/// or doesn't contain an `AddOnVersion` line.
-///
-/// Matching mirrors `manifest::parse_manifest` exactly (lossy UTF-8 decode,
-/// leading BOM stripped, `## ` directive prefix, `key: value` split) so the
-/// version read here can never disagree with the top-level manifest parse — a
-/// mismatch (e.g. one invalid byte making this stricter) would manufacture a
-/// false "outdated" flag or hide a real one.
+/// Read the numeric version with the same parser and lossy UTF-8 decoding used
+/// for startup manifests, without parsing unrelated fields.
 fn read_addon_version(manifest_path: &Path) -> Option<u32> {
     let bytes = fs::read(manifest_path).ok()?;
     let raw = String::from_utf8_lossy(&bytes);
-    let content: &str = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
-    for line in content.lines() {
-        let Some(line) = line.trim().strip_prefix("## ") else {
-            continue;
-        };
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        if key.trim() == "AddOnVersion" {
-            return value.trim().parse().ok();
-        }
-    }
-    None
+    manifest::parse_addon_version(&raw)
 }
 
 /// Record a discovered library version into the version map, keeping the MAX
@@ -13507,22 +13492,102 @@ mod tests {
     }
 
     fn dependency_archive(version: u32, manifest_version: &str) -> NamedTempFile {
+        dependency_archive_with_manifest(
+            "LibFoo/LibFoo.txt",
+            &format!("## Title: LibFoo\n## AddOnVersion: {version}\n{manifest_version}"),
+        )
+    }
+
+    fn dependency_archive_with_manifest(path: &str, manifest: &str) -> NamedTempFile {
         use std::io::Write;
         let file = NamedTempFile::new().unwrap();
         let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
         archive
-            .start_file(
-                "LibFoo/LibFoo.txt",
-                zip::write::SimpleFileOptions::default(),
-            )
+            .start_file(path, zip::write::SimpleFileOptions::default())
             .unwrap();
-        write!(
-            archive,
-            "## Title: LibFoo\n## AddOnVersion: {version}\n{manifest_version}"
-        )
-        .unwrap();
+        archive.write_all(manifest.as_bytes()).unwrap();
         archive.finish().unwrap();
         file
+    }
+
+    #[test]
+    fn dependency_archive_accepts_alternate_version_spelling() {
+        for (version, accepted) in [(209, false), (210, true)] {
+            let archive = dependency_archive_with_manifest(
+                "LibFoo/LibFoo.addon",
+                &format!("## AddonVersion: {version}\n"),
+            );
+            assert_eq!(
+                verify_dependency_archive(archive.path(), "LibFoo", Some(210)).is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_archive_reports_unknown_version_and_missing_library() {
+        let archive = dependency_archive_with_manifest(
+            "LibFoo/LibFoo.addon",
+            "## Version: 2.1.0\n## AddOnVersion: invalid\n",
+        );
+        assert_eq!(
+            verify_dependency_archive(archive.path(), "LibFoo", Some(210)).unwrap_err(),
+            "Downloaded LibFoo has no valid AddOnVersion; 210 or newer is required."
+        );
+        assert_eq!(
+            verify_dependency_archive(archive.path(), "LibMissing", Some(210)).unwrap_err(),
+            "Downloaded archive has no loadable LibMissing manifest; AddOnVersion 210 or newer is required."
+        );
+    }
+
+    #[test]
+    fn libstatic_published_version_rejection_preserves_install() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(
+            dir.path(),
+            "StaticsFurnishingImprovements",
+            "LibStatic>=210 LibAddonMenu-2.0>=41 LibCustomMenu>=730",
+            "",
+        );
+        make_addon_folder(dir.path(), "LibStatic", "## AddOnVersion: 1\n");
+        let manifest_path = dir.path().join("LibStatic/LibStatic.txt");
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(
+            &mut store,
+            "LibStatic",
+            4367,
+            "1.0.1",
+            "https://www.esoui.com/downloads/info4367-LibStatic.html",
+        );
+        metadata::save_metadata(dir.path(), &store).unwrap();
+        let original_metadata = serde_json::to_value(metadata::load_metadata(dir.path())).unwrap();
+        // Published LibStatic 2.0.0 uses numeric AddOnVersion 2, not 200 or 210.
+        let archive = dependency_archive_with_manifest(
+            "LibStatic/LibStatic.addon",
+            "## Title: LibStatic\n## Author: |cFF0000Static_Recharge|r\n## Version: 2.0.0\n## AddOnVersion: 2\n## APIVersion: 101049\n## IsLibrary: true\n",
+        );
+        let info = EsouiAddonInfo {
+            id: 4367,
+            title: "LibStatic".into(),
+            version: "2.0.0".into(),
+            download_url: "https://example.com/libstatic.zip".into(),
+            updated: String::new(),
+            last_update: 0,
+            checksum: String::new(),
+        };
+        let error = install_dependency_blocking(dir.path(), "LibStatic", 4367, info, archive, None)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Downloaded LibStatic declares AddOnVersion 2, but 210 or newer is required."
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), original_manifest);
+        assert!(!dir.path().join("LibStatic/LibStatic.addon").exists());
+        assert_eq!(
+            serde_json::to_value(metadata::load_metadata(dir.path())).unwrap(),
+            original_metadata
+        );
     }
 
     #[test]
@@ -15475,6 +15540,38 @@ mod tests {
         let path = dir.path().join("a.txt");
         std::fs::write(&path, "\u{FEFF}## Title: A\r\n## AddOnVersion: 7221\r\n").unwrap();
         assert_eq!(read_addon_version(&path), Some(7221));
+    }
+
+    #[test]
+    fn installed_and_startup_versions_agree_for_repeated_directives() {
+        let dir = tempfile::tempdir().unwrap();
+        for (directives, expected) in [
+            ("## AddonVersion: 210\n", Some(210)),
+            ("## AddOnVersion: 209\n## AddonVersion: 210\n", Some(210)),
+            ("## AddonVersion: 210\n## AddOnVersion: 209\n", Some(209)),
+            ("## AddOnVersion: 210\n## AddonVersion: invalid\n", None),
+            (
+                "## AddonVersion: invalid\n## AddOnVersion: 210\n",
+                Some(210),
+            ),
+        ] {
+            make_addon_folder(dir.path(), "LibFoo", directives);
+            let path = dir.path().join("LibFoo/LibFoo.txt");
+            let parsed = manifest::parse_manifest("LibFoo", &path).unwrap();
+            assert_eq!(read_addon_version(&path), expected);
+            assert_eq!(parsed.addon_version, expected);
+            let bundled = dir.path().join("LibFoo/Libs/LibBar");
+            fs::create_dir_all(&bundled).unwrap();
+            fs::write(bundled.join("LibBar.addon"), directives).unwrap();
+            let disk_index = build_installed_index(dir.path());
+            let startup_index = build_installed_index_from_parsed(
+                &[parsed],
+                &[("LibFoo".into(), dir.path().join("LibFoo"), false)],
+            );
+            assert_eq!(disk_index, startup_index);
+            assert_eq!(disk_index.1["libfoo"], expected);
+            assert_eq!(disk_index.1["libbar"], expected);
+        }
     }
 
     #[test]
