@@ -12396,6 +12396,81 @@ mod tests {
         assert_eq!(store.addons["BugCatcher"].installed_version, "042");
     }
 
+    #[test]
+    fn generic_collision_preserves_tracked_identity_before_update_and_auto_link() {
+        for (folder_name, installed_author, known_author, other_author) in [
+            (
+                "Fork",
+                "Original Author, Contributor",
+                "Maintainer",
+                "Original Author",
+            ),
+            (
+                "LibFoo",
+                "Library Author",
+                "Former Maintainer",
+                "Library Author",
+            ),
+        ] {
+            let known = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 20,
+                title: folder_name.into(),
+                version: "2".into(),
+                author: known_author.into(),
+                last_update: 200,
+                file_info_uri: "https://example.invalid/standalone".into(),
+            });
+            let other = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: 10,
+                title: "Other archive".into(),
+                version: "99".into(),
+                author: other_author.into(),
+                last_update: 999,
+                file_info_uri: "https://example.invalid/other".into(),
+            });
+            for candidates in [
+                vec![known.clone(), other.clone()],
+                vec![other.clone(), known.clone()],
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let folder = tmp.path().join(folder_name);
+                fs::create_dir(&folder).unwrap();
+                fs::write(
+                    folder.join(format!("{folder_name}.txt")),
+                    format!(
+                        "## Title: {folder_name}\n## Author: {installed_author}\n## Version: 1\n"
+                    ),
+                )
+                .unwrap();
+                let mut store = metadata::MetadataStore::default();
+                metadata::record_install_ext(
+                    &mut store,
+                    folder_name,
+                    20,
+                    "1",
+                    &known.file_info_uri,
+                    100,
+                );
+                let before = store.addons[folder_name].clone();
+                metadata::save_metadata(tmp.path(), &store).unwrap();
+                let lookup = esoui::FilelistLookup::from([(folder_name.into(), candidates)]);
+                let pending = check_for_updates_metadata(tmp.path(), &lookup, &[]).unwrap();
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].esoui_id, 20);
+                assert_eq!(pending[0].remote_version, "2");
+                assert!(pending[0].has_update);
+                assert!(auto_link_addons_blocking(tmp.path(), &lookup)
+                    .unwrap()
+                    .linked
+                    .is_empty());
+                assert_eq!(
+                    metadata::load_metadata(tmp.path()).addons[folder_name],
+                    before
+                );
+            }
+        }
+    }
+
     fn update_check_fixture(
         installed_version: &str,
         installed_marker: u64,

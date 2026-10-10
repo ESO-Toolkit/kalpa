@@ -1766,8 +1766,8 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<FilelistLookup> {
     Arc::new(map)
 }
 
-/// Resolve a folder only when installed author evidence identifies one candidate.
-/// Ambiguous credits preserve a known identity instead of guessing. A known
+/// Preserve a known identity unless a verified manifest identifies BugCatcher.
+/// Fresh collisions require complete author evidence for one candidate. A known
 /// standalone identity absent from the catalogue cannot become a bundled parent.
 pub fn resolve_filelist_entry<'a>(
     lookup: &'a FilelistLookup,
@@ -1789,13 +1789,13 @@ pub fn resolve_filelist_entry<'a>(
     if let Some(author) = installed_author {
         let credits = author_credits(author);
         // Both verified BugCatcher manifests use the same folder and title. The
-        // maintained fork retains the original author's credit, so generic author
-        // matching is ambiguous. Require the observed local credits and both
-        // expected catalogue identities, with no third matching listing. Only
-        // the two verified identities are eligible for this local repair.
+        // maintained fork retains the original author's credit. Require the
+        // observed local credits and both expected catalogue identities, with
+        // no third matching listing. Only these identities can be repaired.
         if folder == "BugCatcher"
             && matches!(known_id, 0 | 1083 | 2566)
-            && credits == ["werewolf finds dragon", "shadowfen"]
+            && (credits == ["werewolf finds dragon", "shadowfen"]
+                || credits == ["werewolf finds dragon"])
         {
             let original = candidates.iter().find(|candidate| {
                 candidate.esoui_id == 1083
@@ -1811,8 +1811,18 @@ pub fn resolve_filelist_entry<'a>(
                         .any(|credit| credits.contains(credit))
             });
             if original.is_some() && updated.is_some() && !third_match {
-                return updated.map(Arc::as_ref);
+                return if credits.len() == 1 {
+                    original.map(Arc::as_ref)
+                } else {
+                    updated.map(Arc::as_ref)
+                };
             }
+        }
+        // Catalogue authors identify uploaders, while manifests may retain
+        // earlier authors or credit bundled libraries. Overlap alone cannot
+        // justify changing an existing listing to a fork or bundled parent.
+        if known.is_some() {
+            return known.map(Arc::as_ref);
         }
         let mut matching = candidates.iter().filter(|candidate| {
             author_credits(&candidate.author)
@@ -1820,7 +1830,11 @@ pub fn resolve_filelist_entry<'a>(
                 .any(|credit| credits.contains(credit))
         });
         if let Some(candidate) = matching.next() {
-            if matching.next().is_none() {
+            if matching.next().is_none()
+                && credits
+                    .iter()
+                    .all(|credit| author_credits(&candidate.author).contains(credit))
+            {
                 return Some(candidate.as_ref());
             }
         }
@@ -1910,6 +1924,70 @@ mod tests {
             author_credits(" Werewolf   Finds\tDragon "),
             ["werewolf finds dragon"]
         );
+    }
+
+    #[test]
+    fn generic_collision_preserves_known_forks_and_standalone_libraries() {
+        for (installed_author, known_author, other_author) in [
+            (
+                "Original Author, Contributor",
+                "Maintainer",
+                "Original Author",
+            ),
+            ("Library Author", "Former Maintainer", "Library Author"),
+        ] {
+            let known = collision_fixture(20, known_author);
+            let other = collision_fixture(10, other_author);
+            for entries in [
+                vec![known.clone(), other.clone()],
+                vec![other.clone(), known.clone()],
+            ] {
+                let lookup = build_filelist_lookup(&entries);
+                assert_eq!(
+                    resolve_filelist_entry(&lookup, "BugCatcher", Some(installed_author), 20)
+                        .unwrap()
+                        .esoui_id,
+                    20
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_collision_requires_complete_and_unique_author_evidence() {
+        let matching = collision_fixture(10, "Original Author, Contributor");
+        let unrelated = collision_fixture(20, "Maintainer");
+        let partial = collision_fixture(10, "Original Author");
+        for entries in [
+            vec![matching.clone(), unrelated.clone()],
+            vec![unrelated.clone(), matching],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert_eq!(
+                resolve_filelist_entry(
+                    &lookup,
+                    "BugCatcher",
+                    Some("Contributor, Original Author"),
+                    0
+                )
+                .unwrap()
+                .esoui_id,
+                10
+            );
+        }
+        for entries in [
+            vec![partial.clone(), unrelated.clone()],
+            vec![unrelated, partial],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert!(resolve_filelist_entry(
+                &lookup,
+                "BugCatcher",
+                Some("Original Author, Contributor"),
+                0
+            )
+            .is_none());
+        }
     }
 
     #[test]
