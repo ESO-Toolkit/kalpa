@@ -24020,6 +24020,93 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn native_known_forks_and_libraries_keep_identity_when_author_credits_collide() {
+        for (folder_name, known_id, known_author, installed_author, other_author) in [
+            (
+                "GenericFork",
+                10,
+                "Fork Maintainer",
+                "Original Author",
+                "Original Author",
+            ),
+            (
+                "StandaloneLibrary",
+                30,
+                "Library Author",
+                "Library Author",
+                "Library Author",
+            ),
+        ] {
+            let known = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: known_id,
+                title: folder_name.to_string(),
+                version: "2".to_string(),
+                author: known_author.to_string(),
+                last_update: 200,
+                file_info_uri: format!("https://example.invalid/{known_id}.json"),
+            });
+            let other = Arc::new(esoui::ApiAddonLookup {
+                esoui_id: known_id + 1,
+                title: "Other archive".to_string(),
+                version: "999".to_string(),
+                author: other_author.to_string(),
+                last_update: 300,
+                file_info_uri: "https://example.invalid/other.json".to_string(),
+            });
+            for candidates in [
+                vec![known.clone(), other.clone()],
+                vec![other.clone(), known.clone()],
+            ] {
+                let tmp = tempfile::tempdir().unwrap();
+                let folder = tmp.path().join(folder_name);
+                fs::create_dir(&folder).unwrap();
+                fs::write(
+                    folder.join(format!("{folder_name}.txt")),
+                    format!(
+                        "## Title: {folder_name}\n## Author: {installed_author}\n## Version: 1\n"
+                    ),
+                )
+                .unwrap();
+                let mut store = metadata::MetadataStore::default();
+                metadata::record_install_ext(
+                    &mut store,
+                    folder_name,
+                    known_id,
+                    "1",
+                    &known.file_info_uri,
+                    100,
+                );
+                if folder_name == "StandaloneLibrary" {
+                    store.addons.get_mut(folder_name).unwrap().bundled_by = vec![known_id + 1];
+                }
+                let before = store.addons[folder_name].clone();
+                metadata::save_metadata(tmp.path(), &store).unwrap();
+                let lookup = esoui::FilelistLookup::from([(folder_name.to_string(), candidates)]);
+
+                let checks = check_native_addon_updates_metadata(tmp.path(), &lookup).unwrap();
+                assert_eq!(checks.len(), 1);
+                assert!(checks[0].has_update);
+                assert_eq!(checks[0].esoui_id, known_id);
+                assert_eq!(checks[0].remote_version, "2");
+                assert_eq!(checks[0].remote_last_update, 200);
+                // A pending release cannot replace installed identity, URL, or marker.
+                assert_eq!(
+                    metadata::load_metadata(tmp.path()).addons[folder_name],
+                    before
+                );
+                let target = NativeAddonUpdateTarget {
+                    folder_name: folder_name.to_string(),
+                    esoui_id: known_id,
+                };
+                assert_eq!(
+                    checked_native_update_targets(vec![target.clone()], &checks),
+                    vec![(target, "2".to_string())]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn native_pending_update_preserves_installed_publication_marker() {
         let mut meta = metadata::AddonMetadata {
             esoui_id: 42,
