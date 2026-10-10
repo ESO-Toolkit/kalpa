@@ -1791,8 +1791,12 @@ pub fn resolve_filelist_entry<'a>(
         // Both verified BugCatcher manifests use the same folder and title. The
         // maintained fork retains the original author's credit, so generic author
         // matching is ambiguous. Require the observed local credits and both
-        // expected catalogue identities; this is not a global addon redirect.
-        if folder == "BugCatcher" && credits == ["werewolf finds dragon", "shadowfen"] {
+        // expected catalogue identities, with no third matching listing. Only
+        // the two verified identities are eligible for this local repair.
+        if folder == "BugCatcher"
+            && matches!(known_id, 0 | 1083 | 2566)
+            && credits == ["werewolf finds dragon", "shadowfen"]
+        {
             let original = candidates.iter().find(|candidate| {
                 candidate.esoui_id == 1083
                     && author_credits(&candidate.author) == ["werewolf finds dragon"]
@@ -1800,7 +1804,13 @@ pub fn resolve_filelist_entry<'a>(
             let updated = candidates.iter().find(|candidate| {
                 candidate.esoui_id == 2566 && author_credits(&candidate.author) == ["shadowfen"]
             });
-            if original.is_some() && updated.is_some() {
+            let third_match = candidates.iter().any(|candidate| {
+                !matches!(candidate.esoui_id, 1083 | 2566)
+                    && author_credits(&candidate.author)
+                        .iter()
+                        .any(|credit| credits.contains(credit))
+            });
+            if original.is_some() && updated.is_some() && !third_match {
                 return updated.map(Arc::as_ref);
             }
         }
@@ -1970,6 +1980,36 @@ mod tests {
                 }
             }
             assert!(resolve_filelist_entry(&lookup, "BugCatcher", Some("Author A"), 999).is_none());
+        }
+    }
+
+    #[test]
+    fn third_bugcatcher_candidate_cannot_be_redirected_by_the_verified_exception() {
+        let original = collision_fixture(1083, "Werewolf Finds Dragon");
+        let updated = collision_fixture(2566, "Shadowfen");
+        for third_author in ["Shadowfen", "Unrelated Author"] {
+            let third = collision_fixture(999, third_author);
+            for entries in [
+                vec![original.clone(), updated.clone(), third.clone()],
+                vec![third.clone(), updated.clone(), original.clone()],
+            ] {
+                let lookup = build_filelist_lookup(&entries);
+                for known_id in [0, 1083, 2566, 999] {
+                    let resolved = resolve_filelist_entry(
+                        &lookup,
+                        "BugCatcher",
+                        Some("Werewolf Finds Dragon, Shadowfen"),
+                        known_id,
+                    )
+                    .map(|candidate| candidate.esoui_id);
+                    let expected = if third_author == "Shadowfen" || known_id == 999 {
+                        (known_id != 0).then_some(known_id)
+                    } else {
+                        Some(2566)
+                    };
+                    assert_eq!(resolved, expected);
+                }
+            }
         }
     }
 
