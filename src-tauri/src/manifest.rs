@@ -100,6 +100,20 @@ fn parse_dependencies(value: &str) -> Vec<Dependency> {
         .collect()
 }
 
+/// Read the numeric dependency version using the last recognized directive.
+/// Both spellings occur in published addons; a malformed final value is unknown.
+pub(crate) fn parse_addon_version(content: &str) -> Option<u32> {
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    content
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let (key, value) = line.trim().strip_prefix("## ")?.split_once(':')?;
+            matches!(key.trim(), "AddOnVersion" | "AddonVersion").then(|| value.trim().parse().ok())
+        })
+        .flatten()
+}
+
 pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonManifest> {
     let bytes = fs::read(manifest_path).ok()?;
     let raw = String::from_utf8_lossy(&bytes);
@@ -110,7 +124,6 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
     let mut title = String::new();
     let mut author = String::new();
     let mut version = String::new();
-    let mut addon_version: Option<u32> = None;
     let mut api_version: Vec<u32> = Vec::new();
     let mut description = String::new();
     let mut is_library = false;
@@ -136,7 +149,6 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
                 "Title" => title = value.to_string(),
                 "Author" => author = value.to_string(),
                 "Version" => version = value.to_string(),
-                "AddOnVersion" | "AddonVersion" => addon_version = value.parse().ok(),
                 "APIVersion" => {
                     api_version = value
                         .split_whitespace()
@@ -202,7 +214,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
         title,
         author,
         version,
-        addon_version,
+        addon_version: parse_addon_version(content),
         api_version,
         description,
         is_library,

@@ -6,6 +6,36 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.29] — 2026-10-10
+
+### Bug Fixes
+
+- **Published library versions can be installed after a mismatch.** If a
+  dependency download declares a valid numeric version below an addon's
+  requirement, its detail pane shows both versions and offers **Install
+  published version**. This explicit action installs the confirmed download
+  while keeping the unmet requirement visible. It protects same or newer
+  installed copies and newer libraries bundled in the download.
+- **Dependency warnings have a retry path.** **Check again** tries the current
+  download against the current requirement. A compatible installation clears
+  the warning; a continued mismatch updates it. Automatic dependency installs
+  continue to enforce numeric requirements, and missing or invalid manifests
+  cannot use the recovery action. Rejected downloads preserve existing files,
+  metadata, and file hashes.
+- **Each addon shows its own dependency status.** A library that meets one
+  addon's requirement remains satisfied there even when another addon requires
+  a newer version. The warning still explains the higher requirement.
+- **Dependency versions are read consistently.** Installation and startup now
+  accept both `AddOnVersion` and `AddonVersion` and use the final directive in
+  a manifest.
+
+The current LibStatic download declares `AddOnVersion: 2`, while Static's
+Furnishing Improvements requires `LibStatic>=210`. The recovery action lets
+users install the published library despite this version mismatch, but
+ESO still needs a corrected addon requirement or a compatible library release
+from the author to load the addon. Kalpa does not change third-party manifests
+or report that this unmet requirement is satisfied.
+
 ## [0.1.0-beta.28] — 2026-10-10
 
 ### Bug Fixes
@@ -1314,7 +1344,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.29...HEAD
+[0.1.0-beta.29]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.28...v0.1.0-beta.29
 [0.1.0-beta.28]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...v0.1.0-beta.28
 [0.1.0-beta.27]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...v0.1.0-beta.27
 [0.1.0-beta.26]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.25...v0.1.0-beta.26
