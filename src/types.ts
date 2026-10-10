@@ -79,6 +79,25 @@ export interface InstallResult {
   pendingDeps: PendingDependency[];
 }
 
+export interface DependencyVersionMismatch {
+  name: string;
+  minVersion: number;
+  downloadedVersion: number;
+  installedVersion: number | null;
+  esouiId: number;
+  archiveSha256: string;
+  canInstall: boolean;
+  blockedReason: string | null;
+}
+
+export type DependencyInstallOutcome =
+  | {
+      status: "installed";
+      result: InstallResult;
+      versionMismatch: DependencyVersionMismatch | null;
+    }
+  | { status: "versionMismatch"; mismatch: DependencyVersionMismatch };
+
 /** Per-addon phase of a batch run, from the `batch-update-progress` event.
  *  Shared by App's status map and the update banner, which sorts by it. */
 export type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";

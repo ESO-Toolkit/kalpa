@@ -159,7 +159,7 @@ pub fn extract_addon_zip_selective_with(
     skip_files: &HashSet<String>,
     hooks: ExtractHooks,
 ) -> Result<Vec<String>, String> {
-    extract_with_rollback(zip_path, addons_dir, skip_files, hooks, None)
+    extract_with_rollback(zip_path, addons_dir, skip_files, hooks, None, None)
 }
 
 pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<String>, String> {
@@ -172,7 +172,7 @@ pub fn extract_addon_zip_with(
     addons_dir: &Path,
     hooks: ExtractHooks,
 ) -> Result<Vec<String>, String> {
-    extract_with_rollback(zip_path, addons_dir, &HashSet::new(), hooks, None)
+    extract_with_rollback(zip_path, addons_dir, &HashSet::new(), hooks, None, None)
 }
 
 pub fn install_addon_zip_with_hashes(
@@ -181,6 +181,21 @@ pub fn install_addon_zip_with_hashes(
     esoui_id: u32,
     version: &str,
     hooks: ExtractHooks,
+) -> Result<Vec<String>, String> {
+    install_addon_zip_with_hashes_checked(zip_path, addons_dir, esoui_id, version, hooks, None)
+}
+
+/// Runs the final validation while the install transaction owns the AddOns
+/// lock, before publishing any folders or hash baselines.
+pub(crate) type InstallValidator<'a> = &'a dyn Fn(&Path, &Path, &[String]) -> Result<(), String>;
+
+pub(crate) fn install_addon_zip_with_hashes_checked(
+    zip_path: &Path,
+    addons_dir: &Path,
+    esoui_id: u32,
+    version: &str,
+    hooks: ExtractHooks,
+    validate: Option<InstallValidator<'_>>,
 ) -> Result<Vec<String>, String> {
     extract_with_rollback(
         zip_path,
@@ -193,6 +208,7 @@ pub fn install_addon_zip_with_hashes(
             overrides: None,
             root: None,
         }),
+        validate,
     )
 }
 
@@ -240,6 +256,7 @@ pub fn install_addon_zip_selective_with_hashes_and_root(
             overrides: Some(overrides),
             root,
         }),
+        None,
     )
 }
 
@@ -259,6 +276,7 @@ fn extract_with_rollback(
     skip_files: &HashSet<String>,
     hooks: ExtractHooks,
     hash_baseline: Option<HashBaseline<'_>>,
+    validate: Option<InstallValidator<'_>>,
 ) -> Result<Vec<String>, String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
 
@@ -317,6 +335,10 @@ fn extract_with_rollback(
         }
     }
     phase.mark("preserve residual files");
+
+    if let Some(validate) = validate {
+        validate(addons_dir, &stage_dir, &installed)?;
+    }
 
     // A kept root file is absent from staging and must remain untouched live.
     root_files.retain(|relative| stage_dir.join(relative).is_file());
@@ -1159,6 +1181,74 @@ mod tests {
         }
         archive.finish().unwrap();
         zip_path
+    }
+
+    #[test]
+    fn rejected_validation_preserves_live_files_and_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(addons_dir.join("Example")).unwrap();
+        fs::create_dir_all(addons_dir.join(".kalpa-hashes")).unwrap();
+        fs::write(addons_dir.join("Example/Example.txt"), b"old manifest").unwrap();
+        fs::write(addons_dir.join("Example/settings.cfg"), b"user settings").unwrap();
+        fs::write(addons_dir.join("readme.txt"), b"old readme").unwrap();
+        fs::write(
+            addons_dir.join(".kalpa-hashes/Example.json"),
+            b"old baseline",
+        )
+        .unwrap();
+        let zip = create_zip_with_entries(
+            tmp.path(),
+            "rejected.zip",
+            &[
+                "Example/Example.txt",
+                "Example/init.lua",
+                "NewAddon/NewAddon.txt",
+                "readme.txt",
+            ],
+        );
+        let validate = |live: &Path, staged: &Path, folders: &[String]| {
+            assert_eq!(
+                fs::read(live.join("Example/Example.txt")).unwrap(),
+                b"old manifest"
+            );
+            assert_eq!(fs::read(staged.join("Example/Example.txt")).unwrap(), b"x");
+            assert_eq!(
+                fs::read(staged.join("Example/settings.cfg")).unwrap(),
+                b"user settings"
+            );
+            assert_eq!(folders, &["Example".to_string(), "NewAddon".to_string()]);
+            Err("library version changed".to_string())
+        };
+        let err = install_addon_zip_with_hashes_checked(
+            &zip,
+            &addons_dir,
+            4367,
+            "2.0.0",
+            ExtractHooks::NONE,
+            Some(&validate),
+        )
+        .unwrap_err();
+        assert_eq!(err, "library version changed");
+        assert_eq!(
+            fs::read(addons_dir.join("Example/Example.txt")).unwrap(),
+            b"old manifest"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("Example/settings.cfg")).unwrap(),
+            b"user settings"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join("readme.txt")).unwrap(),
+            b"old readme"
+        );
+        assert_eq!(
+            fs::read(addons_dir.join(".kalpa-hashes/Example.json")).unwrap(),
+            b"old baseline"
+        );
+        assert!(!addons_dir.join("Example/init.lua").exists());
+        assert!(!addons_dir.join("NewAddon").exists());
+        assert!(!addons_dir.join(".kalpa-staging").exists());
     }
 
     #[test]

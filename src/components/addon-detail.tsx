@@ -7,6 +7,8 @@ import type {
   BatchConflictAddon,
   UpdateCheckResult,
   InstallResult,
+  DependencyInstallOutcome,
+  DependencyVersionMismatch,
   ConflictReport,
   FileDecision,
   InstallProgressEvent,
@@ -119,6 +121,10 @@ function AddonDetailBase({
   const [updateSuccess, setUpdateSuccess] = useState(false);
   const [installingDep, setInstallingDep] = useState<string | null>(null);
   const [justInstalledDeps, setJustInstalledDeps] = useState<Set<string>>(new Set());
+  const [dependencyMismatches, setDependencyMismatches] = useState<
+    Record<string, DependencyVersionMismatch>
+  >({});
+  const [installedDepFolders, setInstalledDepFolders] = useState<Record<string, string>>({});
   // The mirror of `justInstalledDeps`, for the other direction.
   //
   // Removing a dependency deliberately does NOT call `onRefresh()`: removal is
@@ -250,8 +256,12 @@ function AddonDetailBase({
   // this a removable top-level addon" — required/optional satisfaction comes
   // from the backend (subfolder-aware) fields.
   const installedByLower = useMemo(
-    () => new Map(installedAddons.map((a) => [a.folderName.toLowerCase(), a.folderName])),
-    [installedAddons]
+    () =>
+      new Map([
+        ...installedAddons.map((a) => [a.folderName.toLowerCase(), a.folderName] as const),
+        ...Object.entries(installedDepFolders),
+      ]),
+    [installedAddons, installedDepFolders]
   );
 
   const dependents = useMemo(
@@ -423,7 +433,10 @@ function AddonDetailBase({
     setConflictReport(null);
   };
 
-  const handleInstallDep = async (depName: string) => {
+  const handleInstallDep = async (
+    depName: string,
+    confirmation: DependencyVersionMismatch | null = null
+  ) => {
     // `updating` as well as `installingDep`: one `operationIdRef` serves both
     // flows, and `beginOperation` below overwrites it. Starting a dependency
     // install during an in-flight update therefore orphans the update's
@@ -432,7 +445,8 @@ function AddonDetailBase({
     // `handleStopUpdate` would cancel the dependency instead. Guarded in both
     // places, same as `handleUpdate`/`handleConflictResolve`: the buttons are
     // disabled, and the handler refuses an event that was already queued.
-    if (installingDep || updating) return;
+    if (installingDep || updating || isOffline || (confirmation && !confirmation.canInstall))
+      return;
     setInstallingDep(depName);
     // Installing/updating a dependency also writes to the AddOns folder, so it needs
     // the same ESO-running gate — the game won't load it until /reloadui either way.
@@ -441,15 +455,38 @@ function AddonDetailBase({
       return;
     }
     try {
-      const result = await invokeOrThrow<InstallResult>("install_dependency", {
+      const outcome = await invokeOrThrow<DependencyInstallOutcome>("install_dependency", {
         addonsPath,
         depName,
+        confirmation,
         // Same operation id the update flow uses, so this pane's progress
         // listener picks up the library's download and its own dependencies.
         operationId: beginOperation(),
       });
+      if (outcome.status === "versionMismatch") {
+        setDependencyMismatches((prev) => ({ ...prev, [depName]: outcome.mismatch }));
+        return;
+      }
+      const { result, versionMismatch } = outcome;
+      setDependencyMismatches((prev) => {
+        const next = { ...prev };
+        if (versionMismatch)
+          next[depName] = {
+            ...versionMismatch,
+            installedVersion: versionMismatch.downloadedVersion,
+            canInstall: false,
+            blockedReason:
+              "The published version is already installed. Check ESOUI for a compatible release.",
+          };
+        else delete next[depName];
+        return next;
+      });
       const depCount = result.installedDeps.length;
-      if (depCount > 0) {
+      if (versionMismatch) {
+        toast.warning(`Installed published ${depName}`, {
+          description: `Version ${versionMismatch.downloadedVersion} is still below the required ${versionMismatch.minVersion}.`,
+        });
+      } else if (depCount > 0) {
         toast.success(
           `Installed ${depName} + ${depCount} ${depCount === 1 ? "dependency" : "dependencies"}`
         );
@@ -458,6 +495,15 @@ function AddonDetailBase({
       }
       reportDependencyFailures(result.failedDeps);
       setJustInstalledDeps((prev) => new Set(prev).add(depName));
+      setJustRemovedDeps((prev) => {
+        const next = new Set(prev);
+        next.delete(depName);
+        return next;
+      });
+      const folder = result.installedFolders.find(
+        (name) => name.toLowerCase() === depName.toLowerCase()
+      );
+      if (folder) setInstalledDepFolders((prev) => ({ ...prev, [depName.toLowerCase()]: folder }));
       onRefresh(); // refresh addon list, keeping this addon selected
     } catch (e) {
       toast.error(`Failed to install ${depName}: ${getTauriErrorMessage(e)}`);
@@ -472,6 +518,16 @@ function AddonDetailBase({
    *  "satisfied". `folderName` is the real on-disk spelling; `depName` is the
    *  token the manifest lists, and they can differ in case. */
   const handleRemoveDep = (folderName: string, depName: string) => {
+    setDependencyMismatches((prev) => {
+      const next = { ...prev };
+      delete next[depName];
+      return next;
+    });
+    setInstalledDepFolders((prev) => {
+      const next = { ...prev };
+      delete next[depName.toLowerCase()];
+      return next;
+    });
     setJustInstalledDeps((prev) => {
       if (!prev.has(depName)) return prev;
       const next = new Set(prev);
@@ -480,6 +536,77 @@ function AddonDetailBase({
     });
     setJustRemovedDeps((prev) => new Set(prev).add(depName));
     onRemoveAddon(folderName);
+  };
+
+  const renderDependencyMismatch = (
+    depName: string,
+    minVersion: number | null,
+    required: boolean
+  ) => {
+    const mismatch = dependencyMismatches[depName];
+    if (!mismatch) return null;
+    const locallySatisfied =
+      mismatch.installedVersion !== null &&
+      (minVersion === null || mismatch.installedVersion >= minVersion);
+    const higherRequirement = minVersion === null || mismatch.minVersion > minVersion;
+    const remainingRequirement =
+      mismatch.installedVersion !== null && mismatch.installedVersion >= mismatch.minVersion
+        ? "Keep the installed copy while checking for a compatible published release."
+        : "Another installed addon still needs a compatible library.";
+    return (
+      <Alert className="basis-full border-status-warning-strong/20 bg-status-warning-strong/5 text-status-warning">
+        <p>
+          The published {depName} has version {mismatch.downloadedVersion}, below the required{" "}
+          {mismatch.minVersion}
+          {higherRequirement ? " for another installed addon" : ""}.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {required
+            ? locallySatisfied
+              ? `The installed version satisfies ${addon.title}. ${remainingRequirement}`
+              : `ESO cannot load ${addon.title} until ${depName}${minVersion === null ? "" : ` version ${minVersion} or newer`} is installed.`
+            : locallySatisfied
+              ? `The installed version satisfies ${addon.title}'s optional requirement. ${remainingRequirement}`
+              : "This optional library does not meet the requested version. The addon can still load without it."}
+        </p>
+        {!mismatch.canInstall && (
+          <p className="text-xs text-muted-foreground">
+            {mismatch.blockedReason ??
+              "The published version cannot replace the installed libraries safely. Keep the installed copy and check ESOUI for a compatible release."}
+          </p>
+        )}
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => handleInstallDep(depName)}
+            disabled={Boolean(installingDep) || updating || isOffline}
+          >
+            Check again
+          </Button>
+          {mismatch.canInstall && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleInstallDep(depName, mismatch)}
+              disabled={Boolean(installingDep) || updating || isOffline}
+            >
+              Install published version
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              void openUrl(`https://www.esoui.com/downloads/info${mismatch.esouiId}.html`)
+            }
+            disabled={isOffline}
+          >
+            View on ESOUI <ExternalLink className="size-3" />
+          </Button>
+        </div>
+      </Alert>
+    );
   };
 
   const submitCustomTag = () => {
@@ -862,17 +989,23 @@ function AddonDetailBase({
                   // corrected by what this pane has done since that truth was fetched —
                   // nothing rescans between an install/remove here and the next render.
                   // removeTarget = real top-level folder spelling, if removable
+                  const mismatch = dependencyMismatches[dep.name];
                   const satisfied =
-                    (!addon.missingDependencies.includes(dep.name) ||
+                    (mismatch?.installedVersion != null ||
+                      !addon.missingDependencies.includes(dep.name) ||
                       justInstalledDeps.has(dep.name)) &&
                     !justRemovedDeps.has(dep.name);
                   const removeTarget = installedByLower.get(dep.name.toLowerCase());
-                  const outdated = addon.outdatedDependencies.includes(dep.name);
+                  const outdated = mismatch
+                    ? dep.min_version !== null &&
+                      (mismatch.installedVersion === null ||
+                        mismatch.installedVersion < dep.min_version)
+                    : addon.outdatedDependencies.includes(dep.name);
                   const justInstalled = justInstalledDeps.has(dep.name);
                   return (
                     <div
                       key={dep.name}
-                      className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-structure-03 transition-colors"
+                      className="flex flex-wrap items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-structure-03 transition-colors"
                     >
                       <span
                         className={cn(
@@ -901,7 +1034,7 @@ function AddonDetailBase({
                       </div>
                       {satisfied ? (
                         <div className="flex items-center gap-1">
-                          {outdated && (
+                          {outdated && !mismatch && (
                             <SimpleTooltip
                               content={
                                 isOffline
@@ -952,7 +1085,7 @@ function AddonDetailBase({
                             </SimpleTooltip>
                           )}
                         </div>
-                      ) : (
+                      ) : mismatch ? null : (
                         <SimpleTooltip
                           content={
                             isOffline
@@ -978,6 +1111,7 @@ function AddonDetailBase({
                           </button>
                         </SimpleTooltip>
                       )}
+                      {renderDependencyMismatch(dep.name, dep.min_version, true)}
                     </div>
                   );
                 })}
@@ -993,31 +1127,47 @@ function AddonDetailBase({
                   // present = backend truth (subfolder-aware, case-insensitive),
                   // corrected by this pane's own installs and removals since.
                   // removeTarget = real top-level folder spelling, if removable.
+                  const mismatch = dependencyMismatches[dep.name];
                   const present =
-                    (!addon.missingOptionalDependencies.includes(dep.name) ||
+                    (mismatch?.installedVersion != null ||
+                      !addon.missingOptionalDependencies.includes(dep.name) ||
                       justInstalledDeps.has(dep.name)) &&
                     !justRemovedDeps.has(dep.name);
                   const removeTarget = installedByLower.get(dep.name.toLowerCase());
                   const justInstalled = justInstalledDeps.has(dep.name);
+                  const outdated =
+                    mismatch &&
+                    dep.min_version !== null &&
+                    (mismatch.installedVersion === null ||
+                      mismatch.installedVersion < dep.min_version);
                   return (
                     <div
                       key={dep.name}
-                      className="flex items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-structure-03 transition-colors"
+                      className="flex flex-wrap items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-structure-03 transition-colors"
                     >
                       <span
                         className={cn(
                           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px]",
-                          present
-                            ? "bg-status-success-strong/15 text-status-success font-bold"
-                            : "bg-structure-04 text-muted-foreground"
+                          outdated
+                            ? "bg-status-warning-strong/15 text-status-warning font-bold"
+                            : present
+                              ? "bg-status-success-strong/15 text-status-success font-bold"
+                              : "bg-structure-04 text-muted-foreground"
                         )}
                       >
-                        {present ? "\u2713" : "\u2013"}
+                        {outdated ? "!" : present ? "\u2713" : "\u2013"}
                       </span>
                       <div className={cn("flex-1 min-w-0", !present && "text-muted-foreground")}>
                         <span className="truncate block">{dep.name}</span>
                         {dep.min_version !== null && (
-                          <span className="text-xs text-muted-foreground">v{dep.min_version}+</span>
+                          <span
+                            className={cn(
+                              "text-xs",
+                              outdated ? "text-status-warning" : "text-muted-foreground"
+                            )}
+                          >
+                            v{dep.min_version}+{outdated ? " (outdated)" : ""}
+                          </span>
                         )}
                       </div>
                       {present ? (
@@ -1043,7 +1193,7 @@ function AddonDetailBase({
                             </span>
                           </SimpleTooltip>
                         ) : null
-                      ) : (
+                      ) : mismatch ? null : (
                         <SimpleTooltip
                           content={
                             isOffline
@@ -1069,6 +1219,7 @@ function AddonDetailBase({
                           </button>
                         </SimpleTooltip>
                       )}
+                      {renderDependencyMismatch(dep.name, dep.min_version, false)}
                     </div>
                   );
                 })}

@@ -10,18 +10,31 @@ _Nothing yet._
 
 ### Bug Fixes
 
+- **Published library versions can be installed after a mismatch.** If a
+  dependency download declares a valid numeric version below an addon's
+  requirement, its detail pane shows both versions and offers **Install
+  published version**. This explicit action installs the confirmed download
+  while keeping the unmet requirement visible. It protects same or newer
+  installed copies and newer libraries bundled in the download.
+- **Dependency warnings have a retry path.** **Check again** tries the current
+  download against the current requirement. A compatible installation clears
+  the warning; a continued mismatch updates it. Automatic dependency installs
+  continue to enforce numeric requirements, and missing or invalid manifests
+  cannot use the recovery action. Rejected downloads preserve existing files,
+  metadata, and file hashes.
+- **Each addon shows its own dependency status.** A library that meets one
+  addon's requirement remains satisfied there even when another addon requires
+  a newer version. The warning still explains the higher requirement.
 - **Dependency versions are read consistently.** Installation and startup now
   accept both `AddOnVersion` and `AddonVersion` and use the final directive in
-  a manifest. Dependencies still have to meet the required numeric version.
-- **Rejected library downloads explain the mismatch.** Manual and automatic
-  dependency installs show the downloaded `AddOnVersion` and the required
-  minimum, or explain that a usable version or manifest is missing. Rejected
-  downloads leave existing library files and metadata intact.
+  a manifest.
 
 The current LibStatic download declares `AddOnVersion: 2`, while Static's
-Furnishing Improvements requires `LibStatic>=210`. That published mismatch
-requires a corrected addon requirement or a compatible library release from
-the author; this release keeps the dependency check in place.
+Furnishing Improvements requires `LibStatic>=210`. The recovery action lets
+users install the published library despite this version mismatch, but
+ESO still needs a corrected addon requirement or a compatible library release
+from the author to load the addon. Kalpa does not change third-party manifests
+or report that this unmet requirement is satisfied.
 
 ## [0.1.0-beta.28] — 2026-10-10
 

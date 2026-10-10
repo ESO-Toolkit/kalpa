@@ -478,6 +478,38 @@ pub struct InstallResult {
     pub pending_deps: Vec<PendingDependency>,
 }
 
+/// A valid published library whose numeric version cannot satisfy the current
+/// manifests. The complete snapshot binds explicit consent to these bytes and
+/// requirements; it is recomputed before any installation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyVersionMismatch {
+    pub name: String,
+    pub min_version: u32,
+    pub downloaded_version: u32,
+    pub installed_version: Option<u32>,
+    pub esoui_id: u32,
+    pub archive_sha256: String,
+    pub can_install: bool,
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DependencyInstallOutcome {
+    Installed {
+        result: InstallResult,
+        version_mismatch: Option<DependencyVersionMismatch>,
+    },
+    VersionMismatch {
+        mismatch: DependencyVersionMismatch,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCheckResult {
@@ -790,16 +822,62 @@ fn verify_dependency_archive(
     };
     let staging = tempfile::tempdir().map_err(|e| format!("Dependency staging failed: {e}"))?;
     installer::extract_addon_zip(archive, staging.path())?;
-    let (installed, versions) = build_installed_index(staging.path());
-    if !dependency_satisfied(name, Some(minimum), &installed, &versions) {
-        let key = normalize_addon_name(name);
-        return Err(if !installed.contains(&key) {
-            format!("Downloaded archive has no loadable {name} manifest; AddOnVersion {minimum} or newer is required.")
-        } else if let Some(version) = versions.get(&key).copied().flatten() {
-            format!("Downloaded {name} declares AddOnVersion {version}, but {minimum} or newer is required.")
-        } else {
-            format!("Downloaded {name} has no valid AddOnVersion; {minimum} or newer is required.")
-        });
+    let version = dependency_archive_version(staging.path(), name, minimum)?;
+    if version < minimum {
+        return Err(format!("Downloaded {name} declares AddOnVersion {version}, but {minimum} or newer is required."));
+    }
+    Ok(())
+}
+
+fn dependency_archive_version(staging: &Path, name: &str, minimum: u32) -> Result<u32, String> {
+    let (installed, versions) = build_installed_index(staging);
+    let key = normalize_addon_name(name);
+    if !installed.contains(&key) {
+        return Err(format!("Downloaded archive has no loadable {name} manifest; AddOnVersion {minimum} or newer is required."));
+    }
+    versions.get(&key).copied().flatten().ok_or_else(|| {
+        format!("Downloaded {name} has no valid AddOnVersion; {minimum} or newer is required.")
+    })
+}
+
+/// Compare each actual replacement, rather than the maximum version across
+/// unrelated bundled copies. Inspect the raw archive so residual manifests
+/// cannot disguise a downgrade when an author changes manifest extensions.
+fn check_dependency_downgrades(
+    addons_dir: &Path,
+    staging: &Path,
+    folders: &[String],
+) -> Result<(), String> {
+    let mut pending: Vec<(PathBuf, usize)> = folders.iter().map(|f| (f.into(), 0)).collect();
+    while let Some((relative, depth)) = pending.pop() {
+        let incoming_dir = staging.join(&relative);
+        let Some(name) = relative.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if let Some(current) =
+            find_manifest_in(&addons_dir.join(&relative), name).and_then(|p| read_addon_version(&p))
+        {
+            match find_manifest_in(&incoming_dir, name).and_then(|p| read_addon_version(&p)) {
+                Some(incoming) if incoming < current => {
+                    return Err(format!("Installing the published version would replace {name} version {current} with older version {incoming}."));
+                }
+                None => {
+                    return Err(format!("The downloaded {name} has no valid numeric version to compare with installed version {current}."));
+                }
+                _ => {}
+            }
+        }
+        if depth < 2 {
+            for entry in fs::read_dir(&incoming_dir)
+                .map_err(|e| format!("Failed to inspect downloaded libraries: {e}"))?
+            {
+                let entry =
+                    entry.map_err(|e| format!("Failed to inspect downloaded libraries: {e}"))?;
+                if entry.path().is_dir() {
+                    pending.push((relative.join(entry.file_name()), depth + 1));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2218,7 +2296,8 @@ pub async fn install_dependency(
     // Same opt-in correlation id as `install_addon`; omitted by callers that
     // render no progress for this button.
     operation_id: Option<String>,
-) -> Result<InstallResult, String> {
+    confirmation: Option<DependencyVersionMismatch>,
+) -> Result<DependencyInstallOutcome, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let operation_id = operation_id.unwrap_or_default();
     let lock = meta_lock.0.clone();
@@ -2259,12 +2338,13 @@ pub async fn install_dependency(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        install_dependency_blocking(
+        install_dependency_with_confirmation(
             &addons_dir,
             &dep_name,
             dep_id,
             dep_info,
             dep_tmp,
+            confirmation.as_ref(),
             Some(&dep_progress),
         )
     })
@@ -2272,6 +2352,108 @@ pub async fn install_dependency(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[allow(clippy::too_many_arguments)]
+fn install_dependency_with_confirmation(
+    addons_dir: &Path,
+    dep_name: &str,
+    dep_id: u32,
+    dep_info: EsouiAddonInfo,
+    dep_tmp: NamedTempFile,
+    confirmation: Option<&DependencyVersionMismatch>,
+    on_dep: DepInstallReporter,
+) -> Result<DependencyInstallOutcome, String> {
+    let minimum = dependency_minimum(addons_dir, dep_name);
+    let staging = tempfile::tempdir().map_err(|e| format!("Dependency staging failed: {e}"))?;
+    let folders = installer::extract_addon_zip(dep_tmp.path(), staging.path())?;
+    let downloaded_version = minimum
+        .map(|floor| dependency_archive_version(staging.path(), dep_name, floor))
+        .transpose()?;
+    let mismatch = minimum
+        .zip(downloaded_version)
+        .and_then(|(floor, version)| (version < floor).then_some((floor, version)));
+    let mismatch = if let Some((min_version, downloaded_version)) = mismatch {
+        let (_, installed_versions) = build_installed_index(addons_dir);
+        let installed_version = installed_versions
+            .get(&normalize_addon_name(dep_name))
+            .copied()
+            .flatten();
+        let blocked_reason = if installed_version.is_some_and(|v| v >= downloaded_version) {
+            Some(format!(
+                "The same or a newer {dep_name} version is already installed."
+            ))
+        } else {
+            check_dependency_downgrades(addons_dir, staging.path(), &folders).err()
+        };
+        Some(DependencyVersionMismatch {
+            name: dep_name.to_string(),
+            min_version,
+            downloaded_version,
+            installed_version,
+            esoui_id: dep_id,
+            archive_sha256: file_hashes::hash_file(dep_tmp.path())?,
+            can_install: blocked_reason.is_none(),
+            blocked_reason,
+        })
+    } else {
+        None
+    };
+    if let Some(mismatch) = &mismatch {
+        if !mismatch.can_install || confirmation != Some(mismatch) {
+            return Ok(DependencyInstallOutcome::VersionMismatch {
+                mismatch: mismatch.clone(),
+            });
+        }
+    }
+
+    // This callback runs inside the install transaction's cross-process lock.
+    // A second Kalpa process must not change requirements or replace a library
+    // between the recovery checks and the folder publication.
+    let validate = |live: &Path, staged: &Path, replaced: &[String]| {
+        if dependency_minimum(live, dep_name) != minimum {
+            return Err(
+                "Dependency requirements changed during installation. Check the dependency again."
+                    .to_string(),
+            );
+        }
+        if let Some(mismatch) = &mismatch {
+            let (_, versions) = build_installed_index(live);
+            if versions
+                .get(&normalize_addon_name(dep_name))
+                .copied()
+                .flatten()
+                != mismatch.installed_version
+            {
+                return Err(
+                    "Installed libraries changed during installation. Check the dependency again."
+                        .to_string(),
+                );
+            }
+            check_dependency_downgrades(live, staging.path(), replaced)?;
+            dependency_archive_version(staged, dep_name, mismatch.min_version)?;
+        } else if let Some(floor) = minimum {
+            let version = dependency_archive_version(staged, dep_name, floor)?;
+            if version < floor {
+                return Err(format!("Downloaded {dep_name} declares AddOnVersion {version}, but {floor} or newer is required."));
+            }
+        }
+        Ok(())
+    };
+    let result = commit_dependency_install(
+        addons_dir,
+        dep_name,
+        dep_id,
+        dep_info,
+        dep_tmp,
+        on_dep,
+        Some(&validate),
+    )?;
+    Ok(DependencyInstallOutcome::Installed {
+        result,
+        version_mismatch: mismatch,
+    })
+}
+
+#[cfg(test)]
 fn install_dependency_blocking(
     addons_dir: &Path,
     dep_name: &str,
@@ -2285,15 +2467,31 @@ fn install_dependency_blocking(
         dep_name,
         dependency_minimum(addons_dir, dep_name),
     )?;
+    commit_dependency_install(
+        addons_dir, dep_name, dep_id, dep_info, dep_tmp, on_dep, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_dependency_install(
+    addons_dir: &Path,
+    dep_name: &str,
+    dep_id: u32,
+    dep_info: EsouiAddonInfo,
+    dep_tmp: NamedTempFile,
+    on_dep: DepInstallReporter,
+    validate: Option<installer::InstallValidator<'_>>,
+) -> Result<InstallResult, String> {
     // Surface the real extraction error (installer already explains the common
     // Controlled Folder Access / permission case with fix steps) rather than a
     // generic "extract_failed" the user can't act on.
-    let dep_folders = installer::install_addon_zip_with_hashes(
+    let dep_folders = installer::install_addon_zip_with_hashes_checked(
         dep_tmp.path(),
         addons_dir,
         dep_id,
         &dep_info.version,
         installer::ExtractHooks::NONE,
+        validate,
     )
     .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
@@ -13499,15 +13697,266 @@ mod tests {
     }
 
     fn dependency_archive_with_manifest(path: &str, manifest: &str) -> NamedTempFile {
+        dependency_archive_with_entries(&[(path, manifest)])
+    }
+
+    fn dependency_archive_with_entries(entries: &[(&str, &str)]) -> NamedTempFile {
         use std::io::Write;
         let file = NamedTempFile::new().unwrap();
         let mut archive = zip::ZipWriter::new(file.reopen().unwrap());
-        archive
-            .start_file(path, zip::write::SimpleFileOptions::default())
-            .unwrap();
-        archive.write_all(manifest.as_bytes()).unwrap();
+        // Confirmation binds to the exact bytes, including the ZIP timestamps.
+        let options =
+            zip::write::SimpleFileOptions::default().last_modified_time(zip::DateTime::default());
+        for (path, contents) in entries {
+            archive.start_file(*path, options).unwrap();
+            archive.write_all(contents.as_bytes()).unwrap();
+        }
         archive.finish().unwrap();
         file
+    }
+
+    fn published_libstatic_info() -> EsouiAddonInfo {
+        EsouiAddonInfo {
+            id: 4367,
+            title: "LibStatic".into(),
+            version: "2.0.0".into(),
+            download_url: "https://example.com/libstatic.zip".into(),
+            updated: String::new(),
+            last_update: 0,
+            checksum: String::new(),
+        }
+    }
+
+    fn published_libstatic_archive(extra: &str) -> NamedTempFile {
+        dependency_archive_with_manifest(
+            "LibStatic/LibStatic.addon",
+            &format!("## Title: LibStatic\n## Version: 2.0.0\n## AddOnVersion: 2\n## IsLibrary: true\n{extra}"),
+        )
+    }
+
+    fn request_libstatic(
+        addons_dir: &Path,
+        archive: NamedTempFile,
+        confirmation: Option<&DependencyVersionMismatch>,
+    ) -> DependencyInstallOutcome {
+        install_dependency_with_confirmation(
+            addons_dir,
+            "LibStatic",
+            4367,
+            published_libstatic_info(),
+            archive,
+            confirmation,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn version_mismatch(outcome: DependencyInstallOutcome) -> DependencyVersionMismatch {
+        let DependencyInstallOutcome::VersionMismatch { mismatch } = outcome else {
+            panic!("expected a version mismatch before installation");
+        };
+        mismatch
+    }
+
+    #[test]
+    fn dependency_recovery_requires_confirmation_and_stays_outdated() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=210", "");
+        make_addon_folder(dir.path(), "LibStatic", "## AddOnVersion: 1\n");
+        fs::write(dir.path().join("LibStatic/user.lua"), "user file").unwrap();
+        let original_manifest = fs::read(dir.path().join("LibStatic/LibStatic.txt")).unwrap();
+        let archive = published_libstatic_archive("");
+        let mismatch = version_mismatch(request_libstatic(dir.path(), archive, None));
+        assert_eq!(mismatch.downloaded_version, 2);
+        assert_eq!(mismatch.min_version, 210);
+        assert_eq!(mismatch.installed_version, Some(1));
+        assert!(mismatch.can_install);
+        assert_eq!(
+            fs::read(dir.path().join("LibStatic/LibStatic.txt")).unwrap(),
+            original_manifest
+        );
+        assert!(!dir.path().join("LibStatic/LibStatic.addon").exists());
+        assert!(metadata::load_metadata(dir.path()).addons.is_empty());
+
+        let outcome =
+            request_libstatic(dir.path(), published_libstatic_archive(""), Some(&mismatch));
+        let DependencyInstallOutcome::Installed {
+            result,
+            version_mismatch,
+        } = outcome
+        else {
+            panic!("explicit confirmation should install the published archive");
+        };
+        assert_eq!(result.installed_folders, vec!["LibStatic"]);
+        assert_eq!(version_mismatch, Some(mismatch));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("LibStatic/user.lua")).unwrap(),
+            "user file"
+        );
+        assert_eq!(
+            metadata::load_metadata(dir.path()).addons["LibStatic"].installed_version,
+            "2.0.0"
+        );
+        let (names, versions) = build_installed_index(dir.path());
+        assert!(!dependency_satisfied(
+            "LibStatic",
+            Some(210),
+            &names,
+            &versions
+        ));
+        assert_eq!(dependency_minimum(dir.path(), "LibStatic"), Some(210));
+        assert!(verify_dependency_archive(
+            published_libstatic_archive("").path(),
+            "LibStatic",
+            Some(210)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dependency_recovery_rechecks_archive_and_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=210", "");
+        let mismatch = version_mismatch(request_libstatic(
+            dir.path(),
+            published_libstatic_archive(""),
+            None,
+        ));
+        let changed = version_mismatch(request_libstatic(
+            dir.path(),
+            published_libstatic_archive("-- archive changed\n"),
+            Some(&mismatch),
+        ));
+        assert_ne!(changed.archive_sha256, mismatch.archive_sha256);
+        assert_eq!(changed.downloaded_version, mismatch.downloaded_version);
+        assert!(!dir.path().join("LibStatic").exists());
+
+        write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=211", "");
+        let changed = version_mismatch(request_libstatic(
+            dir.path(),
+            published_libstatic_archive(""),
+            Some(&mismatch),
+        ));
+        assert_eq!(changed.min_version, 211);
+        assert!(!dir.path().join("LibStatic").exists());
+    }
+
+    #[test]
+    fn dependency_recovery_cannot_bypass_invalid_or_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=210", "");
+        let mismatch = version_mismatch(request_libstatic(
+            dir.path(),
+            published_libstatic_archive(""),
+            None,
+        ));
+        for (path, contents) in [
+            (
+                "LibStatic/LibStatic.addon",
+                "## Version: 2.0.0\n## AddOnVersion: invalid\n",
+            ),
+            ("LibStatic/readme.txt", "no manifest"),
+        ] {
+            assert!(install_dependency_with_confirmation(
+                dir.path(),
+                "LibStatic",
+                4367,
+                published_libstatic_info(),
+                dependency_archive_with_manifest(path, contents),
+                Some(&mismatch),
+                None,
+            )
+            .is_err());
+            assert!(!dir.path().join("LibStatic").exists());
+        }
+    }
+
+    #[test]
+    fn dependency_recovery_preserves_same_or_newer_installed_copy() {
+        for version in [2, 100] {
+            let dir = tempfile::tempdir().unwrap();
+            write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=210", "");
+            let confirmation = version_mismatch(request_libstatic(
+                dir.path(),
+                published_libstatic_archive(""),
+                None,
+            ));
+            make_addon_folder(
+                dir.path(),
+                "LibStatic",
+                &format!("## AddOnVersion: {version}\n"),
+            );
+            let blocked = version_mismatch(request_libstatic(
+                dir.path(),
+                published_libstatic_archive(""),
+                Some(&confirmation),
+            ));
+            assert!(!blocked.can_install);
+            assert!(blocked.blocked_reason.unwrap().contains("same or a newer"));
+            assert_eq!(
+                read_addon_version(&dir.path().join("LibStatic/LibStatic.txt")),
+                Some(version)
+            );
+            assert!(!dir.path().join("LibStatic/LibStatic.addon").exists());
+        }
+    }
+
+    #[test]
+    fn dependency_recovery_preserves_newer_bundled_and_additional_libraries() {
+        for relative in ["LibOther", "LibStatic/libs/LibOther"] {
+            for incoming_manifest in [Some("## AddOnVersion: 1\n"), None] {
+                let dir = tempfile::tempdir().unwrap();
+                write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=210", "");
+                let existing = dir.path().join(relative);
+                fs::create_dir_all(&existing).unwrap();
+                fs::write(existing.join("LibOther.txt"), "## AddOnVersion: 100\n").unwrap();
+                fs::write(existing.join("LibOther.lua"), "existing library code").unwrap();
+                let incoming_path = format!("{relative}/LibOther.addon");
+                let incoming_code = format!("{relative}/LibOther.lua");
+                let mut entries = vec![
+                    ("LibStatic/LibStatic.addon", "## AddOnVersion: 2\n"),
+                    (incoming_code.as_str(), "replacement library code"),
+                ];
+                if let Some(manifest) = incoming_manifest {
+                    entries.push((incoming_path.as_str(), manifest));
+                }
+                let archive = dependency_archive_with_entries(&entries);
+                let blocked = version_mismatch(request_libstatic(dir.path(), archive, None));
+                assert!(!blocked.can_install);
+                assert!(blocked.blocked_reason.unwrap().contains("version 100"));
+                assert_eq!(
+                    read_addon_version(&existing.join("LibOther.txt")),
+                    Some(100)
+                );
+                assert_eq!(
+                    fs::read_to_string(existing.join("LibOther.lua")).unwrap(),
+                    "existing library code"
+                );
+                assert!(!existing.join("LibOther.addon").exists());
+                assert!(!dir.path().join("LibStatic/LibStatic.addon").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn dependency_install_accepts_compatible_archive_without_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        write_dep_addon(dir.path(), "NeedsLib", "LibStatic>=210", "");
+        let outcome = request_libstatic(
+            dir.path(),
+            dependency_archive_with_manifest("LibStatic/LibStatic.addon", "## AddOnVersion: 210\n"),
+            None,
+        );
+        let serialized = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(serialized["status"], "installed");
+        assert!(serialized["versionMismatch"].is_null());
+        let (names, versions) = build_installed_index(dir.path());
+        assert!(dependency_satisfied(
+            "LibStatic",
+            Some(210),
+            &names,
+            &versions
+        ));
     }
 
     #[test]
