@@ -15,6 +15,9 @@ _Nothing yet._
   previously incorrect links before checking for updates. Existing original
   BugCatcher installations retain their listing. Repairs preserve installed
   versions, tags, and download dates.
+- **Shared addon folders no longer depend on catalogue order.** Kalpa preserves
+  tracked fork and library identities and requires clear manifest evidence
+  before linking an untracked folder to one of several listings.
 
 ## [0.1.0-beta.27] — 2026-10-04
 
