@@ -1766,9 +1766,9 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<FilelistLookup> {
     Arc::new(map)
 }
 
-/// Resolve a folder collision using the last credited author that matches the
-/// catalogue. Forks commonly retain the original author before their maintainer.
-/// Ambiguous credits preserve a known identity instead of guessing.
+/// Resolve a folder only when installed author evidence identifies one candidate.
+/// Ambiguous credits preserve a known identity instead of guessing. A known
+/// standalone identity absent from the catalogue cannot become a bundled parent.
 pub fn resolve_filelist_entry<'a>(
     lookup: &'a FilelistLookup,
     folder: &str,
@@ -1776,28 +1776,46 @@ pub fn resolve_filelist_entry<'a>(
     known_id: u32,
 ) -> Option<&'a ApiAddonLookup> {
     let candidates = lookup.get(folder)?;
+    let known = candidates
+        .iter()
+        .find(|candidate| candidate.esoui_id == known_id && known_id != 0);
+    if known_id != 0 && known.is_none() {
+        return None;
+    }
     if candidates.len() == 1 {
-        let candidate = candidates[0].as_ref();
-        return (known_id == 0 || candidate.esoui_id == known_id).then_some(candidate);
+        return Some(candidates[0].as_ref());
     }
 
     if let Some(author) = installed_author {
-        for credit in author_credits(author).into_iter().rev() {
-            let mut matching = candidates
+        let credits = author_credits(author);
+        // Both verified BugCatcher manifests use the same folder and title. The
+        // maintained fork retains the original author's credit, so generic author
+        // matching is ambiguous. Require the observed local credits and both
+        // expected catalogue identities; this is not a global addon redirect.
+        if folder == "BugCatcher" && credits == ["werewolf finds dragon", "shadowfen"] {
+            let original = candidates.iter().find(|candidate| {
+                candidate.esoui_id == 1083
+                    && author_credits(&candidate.author) == ["werewolf finds dragon"]
+            });
+            let updated = candidates.iter().find(|candidate| {
+                candidate.esoui_id == 2566 && author_credits(&candidate.author) == ["shadowfen"]
+            });
+            if original.is_some() && updated.is_some() {
+                return updated.map(Arc::as_ref);
+            }
+        }
+        let mut matching = candidates.iter().filter(|candidate| {
+            author_credits(&candidate.author)
                 .iter()
-                .filter(|candidate| author_credits(&candidate.author).contains(&credit));
-            if let Some(candidate) = matching.next() {
-                if matching.next().is_none() {
-                    return Some(candidate.as_ref());
-                }
-                break;
+                .any(|credit| credits.contains(credit))
+        });
+        if let Some(candidate) = matching.next() {
+            if matching.next().is_none() {
+                return Some(candidate.as_ref());
             }
         }
     }
-    candidates
-        .iter()
-        .find(|candidate| candidate.esoui_id == known_id && known_id != 0)
-        .map(Arc::as_ref)
+    known.map(Arc::as_ref)
 }
 
 fn author_credits(author: &str) -> Vec<String> {
@@ -1919,6 +1937,104 @@ mod tests {
                 );
             }
             assert!(resolve_filelist_entry(&lookup, "BugCatcher", author, 1083).is_none());
+        }
+    }
+
+    #[test]
+    fn complete_coauthor_set_cannot_choose_between_unrelated_candidates() {
+        for entries in [
+            vec![
+                collision_fixture(10, "Author A"),
+                collision_fixture(20, "Author B"),
+            ],
+            vec![
+                collision_fixture(20, "Author B"),
+                collision_fixture(10, "Author A"),
+            ],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            for author in ["Author A, Author B", "Author B, Author A"] {
+                for known_id in [10, 20] {
+                    assert_eq!(
+                        resolve_filelist_entry(&lookup, "BugCatcher", Some(author), known_id)
+                            .unwrap()
+                            .esoui_id,
+                        known_id
+                    );
+                }
+                for known_id in [0, 999] {
+                    assert!(
+                        resolve_filelist_entry(&lookup, "BugCatcher", Some(author), known_id)
+                            .is_none()
+                    );
+                }
+            }
+            assert!(resolve_filelist_entry(&lookup, "BugCatcher", Some("Author A"), 999).is_none());
+        }
+    }
+
+    #[test]
+    fn bugcatcher_exception_requires_verified_folder_catalogue_and_local_credits() {
+        let expected = [
+            collision_fixture(1083, "Werewolf Finds Dragon"),
+            collision_fixture(2566, "Shadowfen"),
+        ];
+        let mut lookup = build_filelist_lookup(&expected).as_ref().clone();
+        lookup.insert("OtherFolder".into(), lookup["BugCatcher"].clone());
+        for (folder, author) in [
+            ("OtherFolder", Some("Werewolf Finds Dragon, Shadowfen")),
+            ("BugCatcher", Some("Shadowfen, Werewolf Finds Dragon")),
+            (
+                "BugCatcher",
+                Some("Werewolf Finds Dragon, Shadowfen, Other Author"),
+            ),
+            ("BugCatcher", None),
+        ] {
+            assert_eq!(
+                resolve_filelist_entry(&lookup, folder, author, 1083)
+                    .unwrap()
+                    .esoui_id,
+                1083
+            );
+            assert!(resolve_filelist_entry(&lookup, folder, author, 0).is_none());
+        }
+        assert!(resolve_filelist_entry(
+            &lookup,
+            "BugCatcher",
+            Some("Werewolf Finds Dragon, Shadowfen"),
+            999
+        )
+        .is_none());
+        for entries in [
+            [
+                collision_fixture(1083, "Werewolf Finds Dragon, Shadowfen"),
+                expected[1].clone(),
+            ],
+            [
+                expected[0].clone(),
+                collision_fixture(2566, "Shadowfen, Other Author"),
+            ],
+            [expected[0].clone(), collision_fixture(999, "Shadowfen")],
+        ] {
+            let lookup = build_filelist_lookup(&entries);
+            assert_eq!(
+                resolve_filelist_entry(
+                    &lookup,
+                    "BugCatcher",
+                    Some("Werewolf Finds Dragon, Shadowfen"),
+                    1083
+                )
+                .unwrap()
+                .esoui_id,
+                1083
+            );
+            assert!(resolve_filelist_entry(
+                &lookup,
+                "BugCatcher",
+                Some("Werewolf Finds Dragon, Shadowfen"),
+                0
+            )
+            .is_none());
         }
     }
 
