@@ -6,6 +6,34 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.30] — 2026-10-12
+
+### Improvements
+
+- **Backups are organized by purpose.** New backups use `KalpaBackups/Manual`,
+  `KalpaBackups/Automatic`, and `KalpaBackups/Characters`. Manual settings
+  backups are ZIP archives. Automatic snapshots and character backups keep
+  their existing coverage and formats; addon edit backups stay in each addon's
+  `.kalpa-backups` folder.
+- **Existing backups remain available.** Backups in the old `kalpa-backups`
+  folder and directly inside `KalpaBackups` stay in place and can still be
+  listed, restored, and deleted. Location labels identify each backup's origin,
+  including backups with the same name in different folders.
+- **Copy older backups safely when you choose.** Review and confirmation let
+  you copy eligible full-settings legacy folders into verified ZIPs. Original
+  backups and current settings are kept, timestamps are preserved, and repeat
+  runs recognize identical copies. Unsafe files, changing sources, collisions,
+  and partial cleanup backups are skipped with an explanation.
+- **Recovery controls are clearer and fit smaller screens.** Backups and Safety
+  Center explain what each backup covers, offer loading and error recovery, and
+  keep dialog controls reachable in light and dark themes on short screens.
+
+### Bug Fixes
+
+- An unreadable backup or storage folder no longer hides healthy backups in
+  other locations. Partial automatic cleanup backups retain their limited
+  coverage and are excluded from full-settings consolidation.
+
 ## [0.1.0-beta.29] — 2026-10-10
 
 ### Bug Fixes
@@ -1344,7 +1372,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.29...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.30...HEAD
+[0.1.0-beta.30]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.29...v0.1.0-beta.30
 [0.1.0-beta.29]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.28...v0.1.0-beta.29
 [0.1.0-beta.28]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...v0.1.0-beta.28
 [0.1.0-beta.27]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.26...v0.1.0-beta.27
