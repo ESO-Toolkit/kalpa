@@ -33,6 +33,18 @@ pub fn backups_dir(addons_dir: &Path) -> std::path::PathBuf {
         .join("KalpaBackups")
 }
 
+pub fn manual_backups_dir(addons_dir: &Path) -> std::path::PathBuf {
+    backups_dir(addons_dir).join("Manual")
+}
+
+pub fn automatic_backups_dir(addons_dir: &Path) -> std::path::PathBuf {
+    backups_dir(addons_dir).join("Automatic")
+}
+
+pub fn character_backups_dir(addons_dir: &Path) -> std::path::PathBuf {
+    backups_dir(addons_dir).join("Characters")
+}
+
 /// Older settings backups stay readable in their original location.
 pub fn legacy_backups_dir(addons_dir: &Path) -> std::path::PathBuf {
     addons_dir
@@ -658,13 +670,13 @@ pub fn delete_saved_variables_blocking(
         return Err("SavedVariables folder not found.".to_string());
     }
 
-    // Auto-backup: copy files to KalpaBackups/auto-cleanup-{timestamp}/
+    // Auto-backup: copy files to KalpaBackups/Automatic/auto-cleanup-{timestamp}/
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let backup_name = format!("auto-cleanup-{ts}");
-    let backup_dir = backups_dir(addons_dir).join(&backup_name);
+    let backup_dir = automatic_backups_dir(addons_dir).join(&backup_name);
     fs::create_dir_all(&backup_dir).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
     for name in file_names {

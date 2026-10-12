@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import type { BackupInfo } from "@/types";
+import type { BackupInfo, BackupStorage } from "@/types";
 import { Backups } from "./backups";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -23,8 +23,14 @@ const sharedBackup: BackupInfo = {
   kind: "manual",
   format: "zip",
   legacy: false,
+  storage: "shared",
 };
-const legacyBackup: BackupInfo = { ...sharedBackup, format: "folder", legacy: true };
+const legacyBackup: BackupInfo = {
+  ...sharedBackup,
+  format: "folder",
+  legacy: true,
+  storage: "legacy",
+};
 
 function renderBackups(onSharedOpInFlightChange = vi.fn()) {
   return render(
@@ -78,9 +84,11 @@ describe("Copying older settings backups", () => {
     await user.click(await screen.findByRole("button", { name: "Review older backups" }));
     const review = screen.getByRole("dialog", { name: "Copy older backups to KalpaBackups?" });
     expect(review).toHaveTextContent(
-      "settings folders from kalpa-backups into verified ZIPs in KalpaBackups"
+      "settings folders from kalpa-backups into verified ZIPs in KalpaBackups/Manual"
     );
     expect(review).toHaveTextContent("Your original folders are kept");
+    expect(review).toHaveTextContent("pre-restore backups into KalpaBackups/Automatic");
+    expect(review).toHaveTextContent("Cleanup backups are not copied.");
     expect(review).toHaveTextContent(
       "Character backups remain supported in their original folders"
     );
@@ -164,6 +172,126 @@ describe("Copying older settings backups", () => {
 afterEach(cleanup);
 
 describe("Backups storage compatibility", () => {
+  const locations: { storage: BackupStorage; path: string }[] = [
+    { storage: "manual", path: "KalpaBackups/Manual" },
+    { storage: "automatic", path: "KalpaBackups/Automatic" },
+    { storage: "characters", path: "KalpaBackups/Characters" },
+    { storage: "shared", path: "KalpaBackups" },
+    { storage: "legacy", path: "kalpa-backups" },
+  ];
+
+  it.each(locations)(
+    "restores and deletes the selected $storage location when names match",
+    async ({ storage, path }) => {
+      const user = userEvent.setup();
+      invoke.mockImplementation(async (command: string) => {
+        if (command === "list_backups")
+          return locations.map((location) => ({
+            ...sharedBackup,
+            storage: location.storage,
+            legacy: location.storage === "legacy",
+            format: location.storage === "legacy" ? "folder" : "zip",
+          }));
+        if (command === "restore_backup_safe") return { restoredFiles: 2, safetySnapshot: null };
+        if (command === "delete_backup") return undefined;
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      renderBackups();
+      const restoreButtons = await screen.findAllByRole("button", { name: "Restore" });
+      expect(restoreButtons).toHaveLength(5);
+      for (const location of locations)
+        expect(screen.getAllByText(location.path, { exact: true }).length).toBeGreaterThan(0);
+      await user.click(restoreButtons[locations.findIndex((item) => item.storage === storage)]!);
+      const confirmation = screen.getByRole("dialog", { name: "Restore this backup?" });
+      expect(confirmation).toHaveTextContent(path);
+      await user.click(within(confirmation).getByRole("button", { name: "Yes, Restore" }));
+      const args = {
+        addonsPath: "/eso/live/AddOns",
+        backupName: sharedBackup.name,
+        legacy: storage === "legacy",
+        storage,
+      };
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith("restore_backup_safe", args));
+      const deleteButton = await screen.findByRole("button", {
+        name: `Delete ${sharedBackup.name} (${path})`,
+      });
+      await waitFor(() => expect(deleteButton).toBeEnabled());
+      await user.click(deleteButton);
+      const confirmations = await screen.findAllByRole("button", { name: "Yes" });
+      expect(confirmations).toHaveLength(1);
+      await user.click(confirmations[0]!);
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_backup", args));
+    }
+  );
+
+  it.each([false, true])(
+    "keeps cleanup folders restorable without full protection or consolidation when legacy=%s",
+    async (legacy) => {
+      const user = userEvent.setup();
+      const backup: BackupInfo = {
+        ...sharedBackup,
+        name: "auto-cleanup-2026",
+        kind: "autoCleanup",
+        format: "folder",
+        legacy,
+        storage: legacy ? "legacy" : "shared",
+      };
+      invoke.mockImplementation(async (command: string) => {
+        if (command === "list_backups") return [backup];
+        if (command === "restore_backup_safe") return { restoredFiles: 2, safetySnapshot: null };
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      renderBackups();
+      const restore = await screen.findByRole("button", { name: "Restore" });
+      expect(screen.getByText("Cleanup backup", { exact: true })).toBeInTheDocument();
+      expect(screen.getByText("No full backup yet")).toBeInTheDocument();
+      expect(screen.queryByText("Your settings are protected")).not.toBeInTheDocument();
+      expect(screen.queryByText("Latest", { exact: true })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Review older backups" })
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText(/Selected SavedVariables files saved before cleanup/)
+      ).toHaveTextContent("Not a full settings backup.");
+      await user.click(restore);
+      const confirmation = screen.getByRole("dialog", { name: "Restore this backup?" });
+      expect(confirmation).toHaveTextContent(
+        "restore only the selected SavedVariables files saved before cleanup"
+      );
+      expect(confirmation).toHaveTextContent(
+        "Other addon settings, addon files, and ESO game configuration stay unchanged."
+      );
+      await user.click(within(confirmation).getByRole("button", { name: "Yes, Restore" }));
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("restore_backup_safe", {
+          addonsPath: "/eso/live/AddOns",
+          backupName: backup.name,
+          legacy,
+          storage: legacy ? "legacy" : "shared",
+        })
+      );
+    }
+  );
+
+  it("does not let a fresh cleanup backup refresh old full-backup protection", async () => {
+    invoke.mockResolvedValue([
+      { ...sharedBackup, createdAtEpoch: Math.floor(Date.now() / 1000) - 60 * 86400 },
+      {
+        ...sharedBackup,
+        name: "auto-cleanup-fresh",
+        kind: "autoCleanup",
+        format: "folder",
+      },
+    ]);
+    renderBackups();
+    expect(await screen.findByText("Last backup was a while ago")).toBeInTheDocument();
+    expect(screen.queryByText("Your settings are protected")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Restore" })).toHaveLength(2);
+    const latestRow = screen.getByText("Latest").closest(".flex-1");
+    expect(latestRow).toHaveTextContent(sharedBackup.name);
+    expect(latestRow).not.toHaveTextContent("auto-cleanup-fresh");
+  });
+
   it("reveals shared storage through the native allowed-path command", async () => {
     const user = userEvent.setup();
     invoke.mockImplementation(async (command: string) => {
@@ -202,6 +330,7 @@ describe("Backups storage compatibility", () => {
           addonsPath: "/eso/live/AddOns",
           backupName: sharedBackup.name,
           legacy,
+          storage: legacy ? "legacy" : "shared",
         })
       );
     }
@@ -212,7 +341,7 @@ describe("Backups storage compatibility", () => {
     async (legacy) => {
       const user = userEvent.setup();
       renderBackups();
-      const label = `Delete ${sharedBackup.name}${legacy ? " (legacy folder)" : ""}`;
+      const label = `Delete ${sharedBackup.name} (${legacy ? "kalpa-backups" : "KalpaBackups"})`;
       await user.click(await screen.findByRole("button", { name: label }));
       const confirmations = await screen.findAllByRole("button", { name: "Yes" });
       expect(confirmations).toHaveLength(1);
@@ -222,6 +351,7 @@ describe("Backups storage compatibility", () => {
           addonsPath: "/eso/live/AddOns",
           backupName: sharedBackup.name,
           legacy,
+          storage: legacy ? "legacy" : "shared",
         })
       );
     }
@@ -238,8 +368,13 @@ describe("Backups storage compatibility", () => {
     expect(screen.getByText("Folder", { exact: true })).toBeInTheDocument();
     expect(screen.getByText("Legacy folder", { exact: true })).toBeInTheDocument();
     const dialog = screen.getByRole("dialog", { name: "Backup & Restore" });
-    expect(dialog).toHaveTextContent("KalpaBackups. Character backups use folders there.");
-    expect(dialog).toHaveTextContent("Older kalpa-backups folders remain available below.");
+    expect(dialog).toHaveTextContent("New manual ZIPs are saved in KalpaBackups/Manual.");
+    expect(dialog).toHaveTextContent(
+      "KalpaBackups/Automatic; character folders use KalpaBackups/Characters."
+    );
+    expect(dialog).toHaveTextContent(
+      "Existing backups in KalpaBackups and kalpa-backups remain available below."
+    );
     expect(dialog).toHaveTextContent("6.0 KB of settings");
     expect(dialog).toHaveTextContent("Save all your addon settings in a compressed ZIP.");
   });

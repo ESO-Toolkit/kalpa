@@ -254,7 +254,8 @@ export interface ApiCompatInfo {
   upToDateAddons: string[];
 }
 
-export type BackupKind = "manual" | "autoBeforeRestore" | "character";
+export type BackupKind = "manual" | "autoBeforeRestore" | "autoCleanup" | "character";
+export type BackupStorage = "manual" | "automatic" | "characters" | "shared" | "legacy";
 
 export interface BackupInfo {
   name: string;
@@ -266,6 +267,7 @@ export interface BackupInfo {
   kind: BackupKind;
   format: "zip" | "folder";
   legacy: boolean;
+  storage: BackupStorage;
   worldsSpanned?: number;
 }
 

@@ -84,7 +84,22 @@ function describeBackup(b: BackupInfo): string {
 }
 
 function backupKey(b: BackupInfo): string {
-  return `${b.legacy ? "legacy" : "shared"}:${b.name}`;
+  return `${b.storage}:${b.legacy}:${b.name}`;
+}
+
+function backupStoragePath(b: BackupInfo): string {
+  switch (b.storage) {
+    case "manual":
+      return "KalpaBackups/Manual";
+    case "automatic":
+      return "KalpaBackups/Automatic";
+    case "characters":
+      return "KalpaBackups/Characters";
+    case "legacy":
+      return "kalpa-backups";
+    case "shared":
+      return "KalpaBackups";
+  }
 }
 
 function computeProtection(latest: BackupInfo | null): "none" | "good" | "stale" {
@@ -95,6 +110,7 @@ function computeProtection(latest: BackupInfo | null): "none" | "good" | "stale"
 
 function backupKindLabel(b: BackupInfo): { label: string; color: "violet" | "sky" | "muted" } {
   if (b.kind === "autoBeforeRestore") return { label: "Safety snapshot", color: "violet" };
+  if (b.kind === "autoCleanup") return { label: "Cleanup backup", color: "muted" };
   if (b.kind === "character") return { label: "Character", color: "sky" };
   return { label: "Manual", color: "muted" };
 }
@@ -151,13 +167,13 @@ export function Backups({
   const latest = useMemo(() => {
     return (
       [...backups]
-        .filter((b) => b.kind !== "autoBeforeRestore")
+        .filter((b) => b.kind !== "autoBeforeRestore" && b.kind !== "autoCleanup")
         .sort((a, b) => b.createdAtEpoch - a.createdAtEpoch)[0] ?? null
     );
   }, [backups]);
 
   // Only whole-account (manual) backups count toward the "protected" claim —
-  // a character-only backup doesn't cover the rest of the account.
+  // character and cleanup backups cover only selected settings.
   const latestManual = useMemo(() => {
     return (
       [...backups]
@@ -170,7 +186,8 @@ export function Backups({
 
   const protection = computeProtection(latestManual);
   const hasEligibleLegacyBackups = backups.some(
-    (b) => b.legacy && b.format === "folder" && b.kind !== "character"
+    (b) =>
+      b.legacy && b.format === "folder" && (b.kind === "manual" || b.kind === "autoBeforeRestore")
   );
 
   const handleConsolidate = async () => {
@@ -230,6 +247,7 @@ export function Backups({
         addonsPath,
         backupName: b.name,
         legacy: b.legacy,
+        storage: b.storage,
       });
       const snap = result.safetySnapshot;
       const undoNote = snap
@@ -258,6 +276,7 @@ export function Backups({
         addonsPath,
         backupName: b.name,
         legacy: b.legacy,
+        storage: b.storage,
       });
       toast.success("Backup deleted.");
       void loadBackups();
@@ -297,7 +316,7 @@ export function Backups({
         {loaded && hasCharacterBackups && protection === "none" && (
           <InfoPill color="sky" className="w-fit">
             <User className="size-3" />
-            Character backups only — no full backup yet.
+            Character backups do not cover all addon settings.
           </InfoPill>
         )}
 
@@ -392,10 +411,12 @@ export function Backups({
         </GlassPanel>
 
         <p className="text-xs text-muted-foreground leading-relaxed">
-          New backups and safety ZIPs are saved in{" "}
-          <span className="text-foreground">KalpaBackups</span>. Character backups use folders
-          there. Older <span className="text-foreground">kalpa-backups</span> folders remain
-          available below.
+          New manual ZIPs are saved in <span className="text-foreground">KalpaBackups/Manual</span>.
+          Automatic and pre-restore ZIPs use{" "}
+          <span className="text-foreground">KalpaBackups/Automatic</span>; character folders use{" "}
+          <span className="text-foreground">KalpaBackups/Characters</span>. Existing backups in{" "}
+          <span className="text-foreground">KalpaBackups</span> and{" "}
+          <span className="text-foreground">kalpa-backups</span> remain available below.
         </p>
 
         {/* Backup list */}
@@ -403,8 +424,8 @@ export function Backups({
           {!loading && !loadError && hasEligibleLegacyBackups && (
             <GlassPanel variant="subtle" className="p-3 space-y-2">
               <p className="text-xs text-muted-foreground leading-relaxed">
-                Keep your older settings backups together in KalpaBackups. Copy them to ZIPs while
-                keeping the original folders.
+                Copy older full settings backups to ZIPs in KalpaBackups/Manual, and pre-restore
+                backups to KalpaBackups/Automatic. Your original folders stay in place.
               </p>
               <Button
                 size="sm"
@@ -515,8 +536,10 @@ export function Backups({
           <DialogHeader>
             <DialogTitle>Copy older backups to KalpaBackups?</DialogTitle>
             <DialogDescription>
-              Copy settings folders from kalpa-backups into verified ZIPs in KalpaBackups. Your
-              original folders are kept, and your current settings stay unchanged.
+              Copy full settings folders from kalpa-backups into verified ZIPs in
+              KalpaBackups/Manual, and pre-restore backups into KalpaBackups/Automatic. Your
+              original folders are kept, and your current settings stay unchanged. Cleanup backups
+              are not copied.
             </DialogDescription>
           </DialogHeader>
           <p className="text-xs text-muted-foreground leading-relaxed">
@@ -571,9 +594,9 @@ function StatusHero({
       >
         <ShieldAlert className="size-5 text-status-warning shrink-0" />
         <div className="flex-1">
-          <div className="text-sm font-medium text-status-warning-faint">No backup yet</div>
+          <div className="text-sm font-medium text-status-warning-faint">No full backup yet</div>
           <div className="text-xs text-status-warning-muted">
-            Your addon settings aren't protected. Create your first backup below.
+            Partial backups do not cover all addon settings. Create a full backup below.
           </div>
         </div>
       </GlassPanel>
@@ -675,6 +698,14 @@ function BackupRow({
           <span className="text-muted-foreground">·</span>
           {describeBackup(backup)}
         </div>
+        <div className="text-xs text-muted-foreground mt-1 break-all">
+          {backupStoragePath(backup)}
+        </div>
+        {backup.kind === "autoCleanup" && (
+          <p className="text-xs text-muted-foreground mt-1">
+            Selected SavedVariables files saved before cleanup. Not a full settings backup.
+          </p>
+        )}
       </div>
       <div className="flex gap-1 shrink-0">
         <AnimatePresence mode="wait" initial={false}>
@@ -724,7 +755,7 @@ function BackupRow({
                 onClick={onAskDelete}
                 disabled={anyOpInFlight}
                 title="Delete this backup"
-                aria-label={`Delete ${backup.name}${backup.legacy ? " (legacy folder)" : ""}`}
+                aria-label={`Delete ${backup.name} (${backupStoragePath(backup)})`}
                 className="text-muted-foreground hover:text-status-danger"
               >
                 <Trash2 className="size-3.5" />
@@ -765,9 +796,11 @@ function RestoreConfirmDialog({
               ? (backup?.worldsSpanned ?? 0) > 1
                 ? `This will restore ${backup.name.replace(/^char-/, "")}'s character settings — read the warning below first.`
                 : `This will restore ${backup.name.replace(/^char-/, "")}'s character settings only — your other characters and account-wide settings are left untouched.`
-              : backup?.kind === "autoBeforeRestore"
-                ? "This will restore your safety snapshot, replacing your current addon settings with the ones saved just before your last restore."
-                : "This will replace your current addon settings with the ones in this backup. Addon files and ESO game configuration stay unchanged."}
+              : backup?.kind === "autoCleanup"
+                ? "This will restore only the selected SavedVariables files saved before cleanup. Other addon settings, addon files, and ESO game configuration stay unchanged."
+                : backup?.kind === "autoBeforeRestore"
+                  ? "This will restore your safety snapshot, replacing your current addon settings with the ones saved just before your last restore."
+                  : "This will replace your current addon settings with the ones in this backup. Addon files and ESO game configuration stay unchanged."}
           </DialogDescription>
         </DialogHeader>
 
@@ -796,9 +829,8 @@ function RestoreConfirmDialog({
               {formatRelativeFromEpoch(backup.createdAtEpoch)} · {describeBackup(backup)}
             </div>
             <div className="text-xs text-muted-foreground">
-              {backup.legacy
-                ? "Legacy folder · kalpa-backups"
-                : `${backup.format === "zip" ? "ZIP" : "Folder"} · KalpaBackups`}
+              {backup.legacy ? "Legacy folder" : backup.format === "zip" ? "ZIP" : "Folder"} ·{" "}
+              {backupStoragePath(backup)}
             </div>
           </div>
         )}

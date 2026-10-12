@@ -6733,6 +6733,7 @@ pub struct BackupInfo {
     pub kind: BackupKind,
     pub format: BackupFormat,
     pub legacy: bool,
+    pub storage: BackupStorage,
     /// Distinct megaservers this backup's world-scoped subtrees span (read
     /// from the character-backup metadata sidecar). `> 1` means an
     /// Unknown-server backup silently bundled a same-named twin from another
@@ -6747,6 +6748,7 @@ pub struct BackupInfo {
 pub enum BackupKind {
     Manual,
     AutoBeforeRestore,
+    AutoCleanup,
     Character,
 }
 
@@ -6757,10 +6759,42 @@ pub enum BackupFormat {
     Folder,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupStorage {
+    Manual,
+    Automatic,
+    Characters,
+    Shared,
+    Legacy,
+}
+
 use crate::saved_variables::{backups as sv_backups, io as sv_io};
 
 fn backups_dir(addons_dir: &std::path::Path) -> PathBuf {
     sv_io::backups_dir(addons_dir)
+}
+
+fn settings_backup_roots(addons_dir: &Path) -> [(PathBuf, BackupStorage); 5] {
+    [
+        (sv_io::manual_backups_dir(addons_dir), BackupStorage::Manual),
+        (
+            sv_io::automatic_backups_dir(addons_dir),
+            BackupStorage::Automatic,
+        ),
+        (
+            sv_io::character_backups_dir(addons_dir),
+            BackupStorage::Characters,
+        ),
+        (backups_dir(addons_dir), BackupStorage::Shared),
+        (sv_io::legacy_backups_dir(addons_dir), BackupStorage::Legacy),
+    ]
+}
+
+fn settings_backup_container(name: &str) -> bool {
+    ["Manual", "Automatic", "Characters", "minion-config-backup"]
+        .iter()
+        .any(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 fn saved_variables_dir(addons_dir: &std::path::Path) -> PathBuf {
@@ -6778,22 +6812,45 @@ pub async fn list_backups(
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
-fn settings_backup_directory(path: &Path, legacy: bool) -> bool {
+fn settings_backup_directory(path: &Path, storage: BackupStorage) -> bool {
     path.is_dir()
         && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            !n.starts_with('.') && (legacy || !n.eq_ignore_ascii_case("minion-config-backup"))
+            !n.starts_with('.')
+                && (storage != BackupStorage::Shared || !settings_backup_container(n))
         })
 }
 
 fn list_backups_inner(addons_dir: &Path) -> Result<Vec<BackupInfo>, String> {
+    list_backups_with_folder_stats(addons_dir, backup_folder_stats)
+}
+
+fn backup_folder_stats(path: &Path) -> std::io::Result<(u32, u64)> {
+    let mut count = 0;
+    let mut size = 0;
+    for file in fs::read_dir(path)? {
+        let file = file?;
+        if file.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let metadata = fs::metadata(file.path())?;
+        if metadata.is_file() {
+            count += 1;
+            size += metadata.len();
+        }
+    }
+    Ok((count, size))
+}
+
+fn list_backups_with_folder_stats(
+    addons_dir: &Path,
+    folder_stats: impl Fn(&Path) -> std::io::Result<(u32, u64)>,
+) -> Result<Vec<BackupInfo>, String> {
     let _mutation_guard = BACKUP_MUTATION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut results = Vec::new();
-    for (root, legacy) in [
-        (backups_dir(addons_dir), false),
-        (sv_io::legacy_backups_dir(addons_dir), true),
-    ] {
+    for (root, storage) in settings_backup_roots(addons_dir) {
+        let legacy = storage == BackupStorage::Legacy;
         if !root.is_dir() {
             continue;
         }
@@ -6801,28 +6858,34 @@ fn list_backups_inner(addons_dir: &Path) -> Result<Vec<BackupInfo>, String> {
         for entry in
             fs::read_dir(&root).map_err(|e| format!("Failed to read backups folder: {e}"))?
         {
-            let entry = entry.map_err(|e| format!("Failed to read backup entry: {e}"))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    eprintln!(
+                        "[backups] skipping unreadable entry in {}: {error}",
+                        root.display()
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
             }
-            let (format, file_count, total_size) = if settings_backup_directory(&path, legacy) {
-                let mut count = 0;
-                let mut size = 0;
-                for file in
-                    fs::read_dir(&path).map_err(|e| format!("Failed to read backup {name}: {e}"))?
-                {
-                    let file = file.map_err(|e| format!("Failed to read backup {name}: {e}"))?;
-                    if file.path().is_file() && !file.file_name().to_string_lossy().starts_with('.')
-                    {
-                        count += 1;
-                        size += file
-                            .metadata()
-                            .map_err(|e| format!("Failed to inspect backup {name}: {e}"))?
-                            .len();
+            let (format, file_count, total_size) = if settings_backup_directory(&path, storage) {
+                // A retained folder may be unavailable (for example on OneDrive).
+                // Keep that failure local instead of hiding every healthy backup.
+                let (count, size) = match folder_stats(&path) {
+                    Ok(stats) => stats,
+                    Err(error) => {
+                        eprintln!(
+                            "[backups] skipping unreadable backup {}: {error}",
+                            path.display()
+                        );
+                        continue;
                     }
-                }
+                };
                 (BackupFormat::Folder, count, size)
             } else if path.is_file() && name.to_ascii_lowercase().ends_with(".zip") {
                 // Migration archives use a separate index and have no settings marker.
@@ -6849,6 +6912,8 @@ fn list_backups_inner(addons_dir: &Path) -> Result<Vec<BackupInfo>, String> {
                 BackupKind::Character
             } else if name.starts_with("auto-before-restore-") {
                 BackupKind::AutoBeforeRestore
+            } else if name.starts_with("auto-cleanup-") {
+                BackupKind::AutoCleanup
             } else {
                 BackupKind::Manual
             };
@@ -6866,6 +6931,7 @@ fn list_backups_inner(addons_dir: &Path) -> Result<Vec<BackupInfo>, String> {
                 kind,
                 format,
                 legacy,
+                storage,
                 worlds_spanned,
             });
         }
@@ -6931,17 +6997,14 @@ fn create_backup_inner(addons_dir: &Path, backup_name: &str) -> Result<BackupInf
     } else {
         format!("{backup_name}.zip")
     };
-    for root in [
-        backups_dir(addons_dir),
-        sv_io::legacy_backups_dir(addons_dir),
-    ] {
+    for (root, _) in settings_backup_roots(addons_dir) {
         if root.join(&name).exists() || root.join(backup_name).exists() {
             return Err(format!(
                 "Backup '{backup_name}' already exists. Choose another name."
             ));
         }
     }
-    let stats = sv_backups::create(&sv_dir, &backups_dir(addons_dir).join(&name))?;
+    let stats = sv_backups::create(&sv_dir, &sv_io::manual_backups_dir(addons_dir).join(&name))?;
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -6955,6 +7018,7 @@ fn create_backup_inner(addons_dir: &Path, backup_name: &str) -> Result<BackupInf
         kind: BackupKind::Manual,
         format: BackupFormat::Zip,
         legacy: false,
+        storage: BackupStorage::Manual,
         worlds_spanned: None,
     })
 }
@@ -7009,16 +7073,32 @@ fn consolidate_legacy_backups_inner(
     for entry in entries {
         let source = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !settings_backup_directory(&source, true) || source.join(CHAR_BACKUP_MARKER).is_file() {
+        // Cleanup snapshots contain only selected files, so they must not be
+        // converted into archives that imply a full-settings backup.
+        if !settings_backup_directory(&source, BackupStorage::Legacy)
+            || source.join(CHAR_BACKUP_MARKER).is_file()
+            || name.starts_with("auto-cleanup-")
+        {
             continue;
         }
         // Preserve old names, including internal undo prefixes, without using
         // manual-name restrictions introduced after those backups were made.
         let copied = validate_name(&name).and_then(|()| {
-            sv_backups::consolidate_folder(
-                &source,
-                &backups_dir(addons_dir).join(format!("{name}.zip")),
-            )
+            let archive_name = format!("{name}.zip");
+            let destination_root = if name.starts_with("auto-before-restore-") {
+                sv_io::automatic_backups_dir(addons_dir)
+            } else {
+                sv_io::manual_backups_dir(addons_dir)
+            };
+            // Respect existing archives in the previous shared location too.
+            // Verification reports a collision instead of creating a duplicate.
+            let old_destination = backups_dir(addons_dir).join(&archive_name);
+            let destination = if old_destination.exists() {
+                old_destination
+            } else {
+                destination_root.join(archive_name)
+            };
+            sv_backups::consolidate_folder(&source, &destination)
         });
         match copied {
             Ok(sv_backups::ConsolidationOutcome::Copied) => result.copied += 1,
@@ -7031,32 +7111,50 @@ fn consolidate_legacy_backups_inner(
     Ok(result)
 }
 
-/// Resolve storage explicitly when supplied by the UI; older callers search
-/// the shared root first. Never route migration archives through settings restore.
+/// Resolve an exact storage location from the UI. Older callers still search
+/// every supported root, but must choose an origin if names are ambiguous.
+#[cfg(test)]
 fn resolve_settings_backup(
     addons_dir: &Path,
     name: &str,
     legacy: Option<bool>,
 ) -> Result<PathBuf, String> {
+    resolve_settings_backup_in_storage(addons_dir, name, legacy, None)
+}
+
+fn resolve_settings_backup_in_storage(
+    addons_dir: &Path,
+    name: &str,
+    legacy: Option<bool>,
+    storage: Option<BackupStorage>,
+) -> Result<PathBuf, String> {
     validate_name(name)?;
-    for (root, is_legacy) in [
-        (backups_dir(addons_dir), false),
-        (sv_io::legacy_backups_dir(addons_dir), true),
-    ] {
+    let mut found = None;
+    for (root, origin) in settings_backup_roots(addons_dir) {
+        let is_legacy = origin == BackupStorage::Legacy;
+        if storage.is_some_and(|requested| requested != origin) {
+            continue;
+        }
         if legacy.is_some_and(|requested| requested != is_legacy) {
             continue;
         }
         let path = root.join(name);
-        if settings_backup_directory(&path, is_legacy) {
-            return Ok(path);
-        }
-        if path.is_file() && name.to_ascii_lowercase().ends_with(".zip") {
+        if settings_backup_directory(&path, origin) {
+            // Directory backups predate the marked ZIP format.
+        } else if path.is_file() && name.to_ascii_lowercase().ends_with(".zip") {
             sv_backups::inspect(&path)?
                 .ok_or("Use Safety Center to restore automatic snapshots.")?;
-            return Ok(path);
+        } else {
+            continue;
         }
+        if found.is_some() {
+            return Err(format!(
+                "Multiple backups named '{name}' exist. Select a storage location."
+            ));
+        }
+        found = Some(path);
     }
-    Err(format!("Backup '{name}' not found."))
+    found.ok_or_else(|| format!("Backup '{name}' not found in the selected location."))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7291,20 +7389,31 @@ pub async fn restore_backup_safe(
     addons_path: String,
     backup_name: String,
     legacy: Option<bool>,
+    storage: Option<BackupStorage>,
 ) -> Result<SafeRestoreResult, String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        restore_backup_safe_inner(&addons_dir, &backup_name, legacy)
+        restore_backup_safe_in_storage(&addons_dir, &backup_name, legacy, storage)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[cfg(test)]
 fn restore_backup_safe_inner(
     addons_dir: &Path,
     backup_name: &str,
     legacy: Option<bool>,
+) -> Result<SafeRestoreResult, String> {
+    restore_backup_safe_in_storage(addons_dir, backup_name, legacy, None)
+}
+
+fn restore_backup_safe_in_storage(
+    addons_dir: &Path,
+    backup_name: &str,
+    legacy: Option<bool>,
+    storage: Option<BackupStorage>,
 ) -> Result<SafeRestoreResult, String> {
     // Serialize against every other backup-surface command (create/delete/
     // character-backup) for the whole operation.
@@ -7312,7 +7421,7 @@ fn restore_backup_safe_inner(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sv_dir = saved_variables_dir(addons_dir);
-    let backup_path = resolve_settings_backup(addons_dir, backup_name, legacy)?;
+    let backup_path = resolve_settings_backup_in_storage(addons_dir, backup_name, legacy, storage)?;
     // A corrupt ZIP must fail before any live settings are written.
     let zip_buffer = if backup_path.is_file() {
         Some(sv_backups::read(&backup_path, MAX_RESTORE_BUFFER_BYTES)?)
@@ -7331,7 +7440,7 @@ fn restore_backup_safe_inner(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let root = backups_dir(addons_dir);
+            let root = sv_io::automatic_backups_dir(addons_dir);
             fs::create_dir_all(&root)
                 .map_err(|e| format!("Failed to create backup folder: {e}"))?;
             let snapshot_name = loop {
@@ -7353,6 +7462,7 @@ fn restore_backup_safe_inner(
                 kind: BackupKind::AutoBeforeRestore,
                 format: BackupFormat::Zip,
                 legacy: false,
+                storage: BackupStorage::Automatic,
                 worlds_spanned: None,
             });
         }
@@ -7450,7 +7560,7 @@ fn restore_backup_safe_inner(
     // The source may itself be the oldest retained automatic snapshot. Read
     // and restore it completely before retention is allowed to remove it.
     prune_auto_snapshots(
-        &backups_dir(addons_dir),
+        &sv_io::automatic_backups_dir(addons_dir),
         "auto-before-restore-",
         3,
         safety_snapshot
@@ -7478,7 +7588,9 @@ pub fn get_backups_folder_path(
 ) -> Result<String, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let path = backups_dir(&addons_dir);
-    fs::create_dir_all(&path).map_err(|e| format!("Failed to create backups folder: {e}"))?;
+    for (root, _) in settings_backup_roots(&addons_dir).into_iter().take(3) {
+        fs::create_dir_all(&root).map_err(|e| format!("Failed to create backups folder: {e}"))?;
+    }
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -7488,29 +7600,39 @@ pub async fn delete_backup(
     addons_path: String,
     backup_name: String,
     legacy: Option<bool>,
+    storage: Option<BackupStorage>,
 ) -> Result<(), String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || delete_backup_inner(&addons_dir, &backup_name, legacy))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        delete_backup_in_storage(&addons_dir, &backup_name, legacy, storage)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[cfg(test)]
 fn delete_backup_inner(
     addons_dir: &Path,
     backup_name: &str,
     legacy: Option<bool>,
 ) -> Result<(), String> {
+    delete_backup_in_storage(addons_dir, backup_name, legacy, None)
+}
+
+fn delete_backup_in_storage(
+    addons_dir: &Path,
+    backup_name: &str,
+    legacy: Option<bool>,
+    storage: Option<BackupStorage>,
+) -> Result<(), String> {
     let _mutation_guard = BACKUP_MUTATION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for root in [
-        backups_dir(addons_dir),
-        sv_io::legacy_backups_dir(addons_dir),
-    ] {
+    for (root, _) in settings_backup_roots(addons_dir) {
         recover_orphaned_backups(&root);
     }
-    let path = resolve_settings_backup(addons_dir, backup_name, legacy)?;
+    let path = resolve_settings_backup_in_storage(addons_dir, backup_name, legacy, storage)?;
     if path.is_dir() {
         fs::remove_dir_all(&path).map_err(|e| format!("Failed to delete backup: {e}"))?;
         purge_backup_scratch(
@@ -9135,7 +9257,7 @@ pub async fn backup_character_settings(
         // backup of the same name wholesale rather than mixing into it. A per-call
         // sequence number makes the staging/tombstone unique so concurrent backups
         // don't collide; the `.` prefix keeps them out of `list_backups`.
-        let backups_root = backups_dir(&addons_dir);
+        let backups_root = sv_io::character_backups_dir(&addons_dir);
         // Recover any crash-orphaned backup BEFORE touching scratch paths. The
         // sequence counter resets on restart, so a retried backup of the same name
         // could otherwise reuse a crash leftover's staging name and destroy the proof
@@ -10350,7 +10472,12 @@ pub async fn delete_saved_variables(
         if result.is_ok() {
             // Keep only the 3 most recent auto-cleanup snapshots to prevent
             // unbounded disk growth from repeated deletes; best-effort.
-            prune_auto_snapshots(&backups_dir(&addons_dir), "auto-cleanup-", 3, None);
+            prune_auto_snapshots(
+                &sv_io::automatic_backups_dir(&addons_dir),
+                "auto-cleanup-",
+                3,
+                None,
+            );
         }
         result
     })
@@ -12451,7 +12578,7 @@ mod tests {
         let first = restored.safety_snapshot.unwrap();
         assert_eq!(
             sv_backups::read(
-                &backups_dir(&addons).join(&first.name),
+                &sv_io::automatic_backups_dir(&addons).join(&first.name),
                 MAX_RESTORE_BUFFER_BYTES
             )
             .unwrap()[0]
@@ -12940,7 +13067,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_zip_restore_keeps_an_undo_archive_in_shared_storage() {
+    fn manual_zip_restore_keeps_an_undo_archive_in_organized_storage() {
         let tmp = tempfile::tempdir().unwrap();
         let addons = tmp.path().join("AddOns");
         let sv = saved_variables_dir(&addons);
@@ -12949,9 +13076,12 @@ mod tests {
         let manual = create_backup_inner(&addons, "Before update").unwrap();
         assert_eq!(manual.name, "Before update.zip");
         assert_eq!(manual.format, BackupFormat::Zip);
+        assert_eq!(manual.storage, BackupStorage::Manual);
         assert!(!manual.legacy);
         assert_eq!(backups_dir(&addons), tmp.path().join("KalpaBackups"));
-        assert!(backups_dir(&addons).join(&manual.name).is_file());
+        assert!(sv_io::manual_backups_dir(&addons)
+            .join(&manual.name)
+            .is_file());
         assert!(!sv_io::legacy_backups_dir(&addons).exists());
         assert!(create_backup_inner(&addons, "Before update").is_err());
 
@@ -12964,8 +13094,14 @@ mod tests {
         );
         let undo = restored.safety_snapshot.unwrap();
         assert_eq!(undo.format, BackupFormat::Zip);
+        assert_eq!(undo.storage, BackupStorage::Automatic);
         assert_eq!(
-            sv_backups::read(&backups_dir(&addons).join(&undo.name), 1024).unwrap()[0].1,
+            sv_backups::read(
+                &sv_io::automatic_backups_dir(&addons).join(&undo.name),
+                1024
+            )
+            .unwrap()[0]
+                .1,
             b"current settings"
         );
         restore_backup_safe_inner(&addons, &undo.name, Some(false)).unwrap();
@@ -12974,7 +13110,64 @@ mod tests {
             b"current settings"
         );
         delete_backup_inner(&addons, &manual.name, Some(false)).unwrap();
-        assert!(!backups_dir(&addons).join(&manual.name).exists());
+        assert!(!sv_io::manual_backups_dir(&addons)
+            .join(&manual.name)
+            .exists());
+    }
+
+    #[test]
+    fn organized_storage_keeps_duplicate_names_distinct_and_excludes_containers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let sv = saved_variables_dir(&addons);
+        fs::create_dir_all(&sv).unwrap();
+        for (root, origin) in settings_backup_roots(&addons) {
+            fs::create_dir_all(root.join("SameName")).unwrap();
+            fs::write(root.join("SameName/Example.lua"), format!("{origin:?}")).unwrap();
+        }
+        let listed = list_backups_inner(&addons).unwrap();
+        assert_eq!(
+            listed.len(),
+            5,
+            "category containers must not appear as backups"
+        );
+        assert!(resolve_settings_backup(&addons, "SameName", None).is_err());
+        assert!(resolve_settings_backup(&addons, "SameName", Some(false)).is_err());
+        for backup in listed {
+            fs::write(sv.join("Example.lua"), b"current settings").unwrap();
+            let restored = restore_backup_safe_in_storage(
+                &addons,
+                &backup.name,
+                Some(backup.legacy),
+                Some(backup.storage),
+            )
+            .unwrap();
+            assert_eq!(restored.restored_files, 1);
+            assert_eq!(
+                fs::read_to_string(sv.join("Example.lua")).unwrap(),
+                format!("{:?}", backup.storage)
+            );
+            delete_backup_in_storage(
+                &addons,
+                &backup.name,
+                Some(backup.legacy),
+                Some(backup.storage),
+            )
+            .unwrap();
+            assert!(resolve_settings_backup_in_storage(
+                &addons,
+                &backup.name,
+                Some(backup.legacy),
+                Some(backup.storage)
+            )
+            .is_err());
+        }
+        assert!(settings_backup_roots(&addons)
+            .iter()
+            .all(|(root, _)| !root.join("SameName").exists()));
+        assert!(sv_io::manual_backups_dir(&addons).is_dir());
+        assert!(sv_io::automatic_backups_dir(&addons).is_dir());
+        assert!(sv_io::character_backups_dir(&addons).is_dir());
     }
 
     #[test]
@@ -13037,6 +13230,91 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_backup_folders_do_not_hide_healthy_folders_or_zips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let shared = backups_dir(&addons);
+        let legacy = sv_io::legacy_backups_dir(&addons);
+        for root in [&shared, &legacy] {
+            for name in ["Healthy", "Unreadable"] {
+                fs::create_dir_all(root.join(name)).unwrap();
+                fs::write(root.join(name).join("Example.lua"), b"settings").unwrap();
+            }
+        }
+        let sv = saved_variables_dir(&addons);
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("Example.lua"), b"live settings").unwrap();
+        let zip = create_backup_inner(&addons, "Healthy archive").unwrap();
+
+        // Inject folder I/O failures so this regression also runs on Windows,
+        // where making a directory unreadable depends on the runner's ACLs.
+        for error_kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+        ] {
+            let list = list_backups_with_folder_stats(&addons, |path| {
+                if path.file_name().unwrap() == "Unreadable" {
+                    Err(std::io::Error::new(error_kind, "backup is unavailable"))
+                } else {
+                    backup_folder_stats(path)
+                }
+            })
+            .unwrap();
+            assert_eq!(list.len(), 3);
+            for legacy in [false, true] {
+                let folder = list
+                    .iter()
+                    .find(|b| b.name == "Healthy" && b.legacy == legacy)
+                    .unwrap();
+                assert_eq!(folder.format, BackupFormat::Folder);
+                assert_eq!((folder.file_count, folder.total_size), (1, 8));
+            }
+            assert!(list
+                .iter()
+                .any(|b| b.name == zip.name && b.format == BackupFormat::Zip));
+            assert!(!list.iter().any(|b| b.name == "Unreadable"));
+        }
+        // The skipped folders are retained and reappear when readable again.
+        assert_eq!(list_backups_inner(&addons).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn cleanup_backups_keep_partial_coverage_and_origin_aware_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        let shared = backups_dir(&addons);
+        let legacy = sv_io::legacy_backups_dir(&addons);
+        let name = "auto-cleanup-1000";
+        for (root, contents) in [(&shared, b"shared cleanup"), (&legacy, b"legacy cleanup")] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("Example.lua"), contents).unwrap();
+        }
+        // Also recognize an archive copied by an earlier consolidation attempt.
+        let archive_name = "auto-cleanup-999.zip";
+        sv_backups::create(&legacy.join(name), &shared.join(archive_name)).unwrap();
+        let list = list_backups_inner(&addons).unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(list.iter().all(|b| b.kind == BackupKind::AutoCleanup));
+        assert_eq!(serde_json::to_value(list[0].kind).unwrap(), "autoCleanup");
+
+        let sv = saved_variables_dir(&addons);
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("Other.lua"), b"unrelated live settings").unwrap();
+        for (legacy, expected) in [(false, b"shared cleanup"), (true, b"legacy cleanup")] {
+            let restored = restore_backup_safe_inner(&addons, name, Some(legacy)).unwrap();
+            assert_eq!(restored.restored_files, 1);
+            assert_eq!(fs::read(sv.join("Example.lua")).unwrap(), expected);
+            assert_eq!(
+                fs::read(sv.join("Other.lua")).unwrap(),
+                b"unrelated live settings"
+            );
+        }
+        delete_backup_inner(&addons, name, Some(true)).unwrap();
+        assert!(!legacy.join(name).exists());
+        assert!(shared.join(name).is_dir());
+    }
+
+    #[test]
     fn snapshot_retention_handles_same_second_sequences_and_protects_undo() {
         let tmp = tempfile::tempdir().unwrap();
         let sv = tmp.path().join("SavedVariables");
@@ -13064,7 +13342,13 @@ mod tests {
         let addons = tmp.path().join("AddOns");
         let legacy = sv_io::legacy_backups_dir(&addons);
         let shared = backups_dir(&addons);
-        for name in ["Old manual", "Conflict", "char-Bob"] {
+        for name in [
+            "Old manual",
+            "Conflict",
+            "char-Bob",
+            "auto-cleanup-1000",
+            "auto-before-restore-1000",
+        ] {
             fs::create_dir_all(legacy.join(name)).unwrap();
             fs::write(legacy.join(name).join("Example.lua"), name.as_bytes()).unwrap();
         }
@@ -13077,11 +13361,16 @@ mod tests {
         let first = consolidate_legacy_backups_inner(&addons).unwrap();
         assert_eq!(
             (first.copied, first.already_present, first.skipped.len()),
-            (1, 0, 1)
+            (2, 0, 1)
         );
         assert_eq!(first.skipped[0].name, "Conflict");
         assert_eq!(
-            sv_backups::read(&shared.join("Old manual.zip"), 1024).unwrap()[0].1,
+            sv_backups::read(
+                &sv_io::manual_backups_dir(&addons).join("Old manual.zip"),
+                1024
+            )
+            .unwrap()[0]
+                .1,
             b"Old manual"
         );
         assert_eq!(
@@ -13089,12 +13378,29 @@ mod tests {
             conflict_bytes
         );
         assert!(!shared.join("char-Bob.zip").exists());
+        assert!(!shared.join("auto-cleanup-1000.zip").exists());
+        assert!(sv_io::automatic_backups_dir(&addons)
+            .join("auto-before-restore-1000.zip")
+            .is_file());
+        assert!(!sv_io::manual_backups_dir(&addons)
+            .join("auto-cleanup-1000.zip")
+            .exists());
         let second = consolidate_legacy_backups_inner(&addons).unwrap();
         assert_eq!(
             (second.copied, second.already_present, second.skipped.len()),
-            (0, 1, 1)
+            (0, 2, 1)
         );
-        assert_eq!(fs::read_dir(&legacy).unwrap().count(), 3);
+        assert_eq!(fs::read_dir(&legacy).unwrap().count(), 5);
+        assert_eq!(
+            fs::read(legacy.join("auto-cleanup-1000/Example.lua")).unwrap(),
+            b"auto-cleanup-1000"
+        );
+        assert!(list_backups_inner(&addons)
+            .unwrap()
+            .iter()
+            .any(|backup| backup.name == "auto-cleanup-1000"
+                && backup.legacy
+                && backup.kind == BackupKind::AutoCleanup));
         assert_eq!(
             fs::read(legacy.join("char-Bob/Example.lua")).unwrap(),
             b"char-Bob"

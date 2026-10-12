@@ -217,8 +217,9 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
       <div className="space-y-2 text-xs text-muted-foreground leading-relaxed">
         <p>
           Automatic snapshots protect changes made during migrations and bulk operations. They are
-          compressed ZIPs in <span className="text-foreground">KalpaBackups</span>, alongside your
-          manual settings backups.
+          compressed ZIPs in <span className="text-foreground">KalpaBackups/Automatic</span>. Manual
+          settings ZIPs are saved separately in{" "}
+          <span className="text-foreground">KalpaBackups/Manual</span>.
         </p>
         <p>
           Each snapshot covers the items listed below and may include addon files and ESO game
