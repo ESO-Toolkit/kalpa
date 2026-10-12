@@ -174,8 +174,7 @@ pub struct PreconditionResult {
 
 /// Root directory for Kalpa snapshots: `{live}/KalpaBackups/`
 fn snapshots_root(addons_dir: &Path) -> PathBuf {
-    let parent = addons_dir.parent().unwrap_or(addons_dir);
-    parent.join("KalpaBackups")
+    crate::saved_variables::io::backups_dir(addons_dir)
 }
 
 fn snapshot_store_path(addons_dir: &Path) -> PathBuf {

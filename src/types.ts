@@ -261,9 +261,18 @@ export interface BackupInfo {
   createdAt: string;
   createdAtEpoch: number;
   fileCount: number;
+  /** Original settings bytes, before archive compression. */
   totalSize: number;
   kind: BackupKind;
+  format: "zip" | "folder";
+  legacy: boolean;
   worldsSpanned?: number;
+}
+
+export interface ConsolidateLegacyBackupsResult {
+  copied: number;
+  alreadyPresent: number;
+  skipped: { name: string; reason: string }[];
 }
 
 export interface SafeRestoreResult {

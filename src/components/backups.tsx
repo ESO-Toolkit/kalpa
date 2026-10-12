@@ -15,7 +15,7 @@ import {
   HardDrive,
   User,
 } from "lucide-react";
-import type { BackupInfo, SafeRestoreResult } from "../types";
+import type { BackupInfo, ConsolidateLegacyBackupsResult, SafeRestoreResult } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -80,7 +80,11 @@ function friendlyDefaultName(): string {
 
 function describeBackup(b: BackupInfo): string {
   const filePart = `${b.fileCount} file${b.fileCount === 1 ? "" : "s"}`;
-  return `${filePart} · ${formatBytes(b.totalSize)}`;
+  return `${filePart} · ${formatBytes(b.totalSize)} of settings`;
+}
+
+function backupKey(b: BackupInfo): string {
+  return `${b.legacy ? "legacy" : "shared"}:${b.name}`;
 }
 
 function computeProtection(latest: BackupInfo | null): "none" | "good" | "stale" {
@@ -111,19 +115,29 @@ export function Backups({
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [confirmConsolidate, setConfirmConsolidate] = useState(false);
+  const [consolidating, setConsolidating] = useState(false);
+  const [consolidationResult, setConsolidationResult] =
+    useState<ConsolidateLegacyBackupsResult | null>(null);
 
   // Gates every destructive backup-surface button: local ops here, or an
   // in-flight op on the other backup surface (Characters) after a dialog switch.
-  const anyBackupOpInFlight = sharedOpInFlight || creating || restoring !== null || deleting;
+  const anyBackupOpInFlight =
+    sharedOpInFlight || creating || restoring !== null || deleting || consolidating;
 
   const loadBackups = async () => {
+    setLoading(true);
+    setLoadError(null);
     try {
       const result = await invokeOrThrow<BackupInfo[]>("list_backups", { addonsPath });
       setBackups(result);
     } catch (e) {
-      toast.error(`Couldn't load backups: ${getTauriErrorMessage(e)}`);
+      setLoadError(getTauriErrorMessage(e));
     } finally {
       setLoaded(true);
+      setLoading(false);
     }
   };
 
@@ -155,6 +169,30 @@ export function Backups({
   const hasCharacterBackups = useMemo(() => backups.some((b) => b.kind === "character"), [backups]);
 
   const protection = computeProtection(latestManual);
+  const hasEligibleLegacyBackups = backups.some(
+    (b) => b.legacy && b.format === "folder" && b.kind !== "character"
+  );
+
+  const handleConsolidate = async () => {
+    if (anyBackupOpInFlight) return;
+    setConsolidating(true);
+    setConsolidationResult(null);
+    onSharedOpInFlightChange(true);
+    try {
+      const result = await invokeOrThrow<ConsolidateLegacyBackupsResult>(
+        "consolidate_legacy_backups",
+        { addonsPath }
+      );
+      setConsolidationResult(result);
+      setConfirmConsolidate(false);
+      await loadBackups();
+    } catch (e) {
+      toast.error(getTauriErrorMessage(e));
+    } finally {
+      setConsolidating(false);
+      onSharedOpInFlightChange(false);
+    }
+  };
 
   const handleCreate = async () => {
     // The button disables itself, but the label input's Enter handler calls this
@@ -184,12 +222,14 @@ export function Backups({
   };
 
   const handleRestore = async (b: BackupInfo) => {
-    setRestoring(b.name);
+    if (anyBackupOpInFlight) return;
+    setRestoring(backupKey(b));
     onSharedOpInFlightChange(true);
     try {
       const result = await invokeOrThrow<SafeRestoreResult>("restore_backup_safe", {
         addonsPath,
         backupName: b.name,
+        legacy: b.legacy,
       });
       const snap = result.safetySnapshot;
       const undoNote = snap
@@ -209,11 +249,16 @@ export function Backups({
     }
   };
 
-  const handleDelete = async (name: string) => {
+  const handleDelete = async (b: BackupInfo) => {
+    if (anyBackupOpInFlight) return;
     setDeleting(true);
     onSharedOpInFlightChange(true);
     try {
-      await invokeOrThrow("delete_backup", { addonsPath, backupName: name });
+      await invokeOrThrow("delete_backup", {
+        addonsPath,
+        backupName: b.name,
+        legacy: b.legacy,
+      });
       toast.success("Backup deleted.");
       void loadBackups();
     } catch (e) {
@@ -238,7 +283,7 @@ export function Backups({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Backup & Restore</DialogTitle>
           <DialogDescription>
@@ -248,7 +293,7 @@ export function Backups({
         </DialogHeader>
 
         {/* Status hero */}
-        <StatusHero protection={protection} latest={latestManual} loaded={loaded} />
+        {!loadError && <StatusHero protection={protection} latest={latestManual} loaded={loaded} />}
         {loaded && hasCharacterBackups && protection === "none" && (
           <InfoPill color="sky" className="w-fit">
             <User className="size-3" />
@@ -262,7 +307,7 @@ export function Backups({
             <div>
               <div className="text-sm font-medium">Create a new backup</div>
               <div className="text-xs text-muted-foreground mt-0.5">
-                Takes a snapshot of your current addon settings. Safe to do anytime.
+                Save all your addon settings in a compressed ZIP.
               </div>
             </div>
             <Button
@@ -337,8 +382,8 @@ export function Backups({
                     (technically, the SavedVariables folder).
                   </p>
                   <p>
-                    <span className="text-foreground">Not included:</span> the addons themselves
-                    (those come from ESOUI and can be reinstalled), or your ESO game saves.
+                    <span className="text-foreground">Not included:</span> addon files or ESO game
+                    configuration. Automatic snapshots in the Safety Center can cover those too.
                   </p>
                 </div>
               </motion.div>
@@ -346,21 +391,79 @@ export function Backups({
           </AnimatePresence>
         </GlassPanel>
 
+        <p className="text-xs text-muted-foreground leading-relaxed">
+          New backups and safety ZIPs are saved in{" "}
+          <span className="text-foreground">KalpaBackups</span>. Character backups use folders
+          there. Older <span className="text-foreground">kalpa-backups</span> folders remain
+          available below.
+        </p>
+
         {/* Backup list */}
         <div className="space-y-2">
+          {!loading && !loadError && hasEligibleLegacyBackups && (
+            <GlassPanel variant="subtle" className="p-3 space-y-2">
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Keep your older settings backups together in KalpaBackups. Copy them to ZIPs while
+                keeping the original folders.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={anyBackupOpInFlight}
+                onClick={() => setConfirmConsolidate(true)}
+              >
+                {consolidating ? "Copying older backups…" : "Review older backups"}
+              </Button>
+            </GlassPanel>
+          )}
+          {consolidationResult && (
+            <div className="rounded-xl border border-structure-08 p-3 space-y-2" role="status">
+              <p className="text-sm font-medium">
+                {consolidationResult.copied} copied · {consolidationResult.alreadyPresent} already
+                present · {consolidationResult.skipped.length} skipped
+              </p>
+              <p className="text-xs text-muted-foreground">Original folders were kept.</p>
+              {consolidationResult.skipped.length > 0 && (
+                <ul className="max-h-24 overflow-y-auto text-xs text-muted-foreground space-y-1">
+                  {consolidationResult.skipped.map((item, index) => (
+                    <li key={`${item.name}:${index}`} className="break-words">
+                      <span className="text-foreground">{item.name}</span>: {item.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">
               Your backups
               {backups.length > 0 && (
                 <span className="ml-2 normal-case tracking-normal font-normal text-muted-foreground">
-                  {backups.length} · {formatBytes(totalSize)} total
+                  {backups.length} · {formatBytes(totalSize)} of settings
                 </span>
               )}
             </div>
           </div>
 
           <div className="max-h-[280px] overflow-y-auto space-y-1.5 pr-1">
-            {!loaded ? null : backups.length === 0 ? (
+            {loadError ? (
+              <div className="rounded-xl border border-status-danger/20 p-4 space-y-2" role="alert">
+                <p className="text-sm font-medium">Couldn't load backups</p>
+                <p className="text-xs text-muted-foreground break-words">{loadError}</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void loadBackups()}
+                  disabled={loading}
+                >
+                  Try again
+                </Button>
+              </div>
+            ) : loading ? (
+              <p className="py-4 text-sm text-muted-foreground" role="status">
+                Loading backups…
+              </p>
+            ) : backups.length === 0 ? (
               <Fade>
                 <GlassPanel variant="subtle" className="p-6 text-center">
                   <HardDrive className="size-8 mx-auto text-muted-foreground/60 mb-2" />
@@ -373,16 +476,16 @@ export function Backups({
               </Fade>
             ) : (
               backups.map((b, i) => (
-                <Fade key={b.name} delay={i * 30}>
+                <Fade key={backupKey(b)} delay={i * 30}>
                   <BackupRow
                     backup={b}
-                    isLatest={latest?.name === b.name}
-                    isRestoring={restoring === b.name}
-                    confirmingDelete={confirmDelete === b.name}
+                    isLatest={latest !== null && backupKey(latest) === backupKey(b)}
+                    isRestoring={restoring === backupKey(b)}
+                    confirmingDelete={confirmDelete === backupKey(b)}
                     onAskRestore={() => setConfirmRestore(b)}
-                    onAskDelete={() => setConfirmDelete(b.name)}
+                    onAskDelete={() => setConfirmDelete(backupKey(b))}
                     onCancelDelete={() => setConfirmDelete(null)}
-                    onConfirmDelete={() => handleDelete(b.name)}
+                    onConfirmDelete={() => handleDelete(b)}
                     deleting={deleting}
                     anyOpInFlight={anyBackupOpInFlight}
                   />
@@ -403,7 +506,37 @@ export function Backups({
         </DialogFooter>
       </DialogContent>
 
-      {/* Restore confirmation modal */}
+      {/* Backup confirmation modals */}
+      <Dialog
+        open={confirmConsolidate}
+        onOpenChange={(open) => !consolidating && setConfirmConsolidate(open)}
+      >
+        <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Copy older backups to KalpaBackups?</DialogTitle>
+            <DialogDescription>
+              Copy settings folders from kalpa-backups into verified ZIPs in KalpaBackups. Your
+              original folders are kept, and your current settings stay unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Character backups remain supported in their original folders. They are not converted.
+            Backups that cannot be copied safely are skipped with a reason.
+          </p>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmConsolidate(false)}
+              disabled={consolidating}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleConsolidate} disabled={anyBackupOpInFlight}>
+              {consolidating ? "Copying…" : "Copy older backups"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <RestoreConfirmDialog
         backup={confirmRestore}
         restoring={restoring !== null}
@@ -532,8 +665,11 @@ function BackupRow({
             {kindInfo.label}
           </InfoPill>
           {isLatest && <InfoPill color="emerald">Latest</InfoPill>}
+          <InfoPill color="muted">
+            {backup.legacy ? "Legacy folder" : backup.format === "zip" ? "ZIP" : "Folder"}
+          </InfoPill>
         </div>
-        <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
+        <div className="text-xs text-muted-foreground mt-1 flex flex-wrap items-center gap-1.5">
           <Clock className="size-3" />
           {formatRelativeFromEpoch(backup.createdAtEpoch)}
           <span className="text-muted-foreground">·</span>
@@ -588,6 +724,7 @@ function BackupRow({
                 onClick={onAskDelete}
                 disabled={anyOpInFlight}
                 title="Delete this backup"
+                aria-label={`Delete ${backup.name}${backup.legacy ? " (legacy folder)" : ""}`}
                 className="text-muted-foreground hover:text-status-danger"
               >
                 <Trash2 className="size-3.5" />
@@ -617,7 +754,7 @@ function RestoreConfirmDialog({
 }) {
   return (
     <Dialog open={backup !== null} onOpenChange={(open) => !open && !restoring && onCancel()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-cols-[minmax(0,1fr)] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <RotateCcw className="size-4 text-primary" />
@@ -630,7 +767,7 @@ function RestoreConfirmDialog({
                 : `This will restore ${backup.name.replace(/^char-/, "")}'s character settings only — your other characters and account-wide settings are left untouched.`
               : backup?.kind === "autoBeforeRestore"
                 ? "This will restore your safety snapshot, replacing your current addon settings with the ones saved just before your last restore."
-                : "This will replace your current addon settings with the ones in this backup."}
+                : "This will replace your current addon settings with the ones in this backup. Addon files and ESO game configuration stay unchanged."}
           </DialogDescription>
         </DialogHeader>
 
@@ -657,6 +794,11 @@ function RestoreConfirmDialog({
             </div>
             <div className="text-xs text-muted-foreground">
               {formatRelativeFromEpoch(backup.createdAtEpoch)} · {describeBackup(backup)}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {backup.legacy
+                ? "Legacy folder · kalpa-backups"
+                : `${backup.format === "zip" ? "ZIP" : "Folder"} · KalpaBackups`}
             </div>
           </div>
         )}
