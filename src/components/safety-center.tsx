@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
+import { FolderOpen } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -110,17 +111,23 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
   const [deleting, setDeleting] = useState<string | null>(null);
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // A restore rewrites SavedVariables (and possibly the whole AddOns tree), so
   // no snapshot may be deleted underneath it — and vice versa.
   const anyOpInFlight = restoring !== null || deleting !== null;
 
   const loadSnapshots = async () => {
+    setLoading(true);
+    setLoadError(null);
     try {
       const result = await invokeOrThrow<SnapshotManifest[]>("list_snapshots", { addonsPath });
       setSnapshots(result);
     } catch (e) {
-      toast.error(`Failed to load snapshots: ${getTauriErrorMessage(e)}`);
+      setLoadError(getTauriErrorMessage(e));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -129,9 +136,14 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
     void (async () => {
       try {
         const result = await invokeOrThrow<SnapshotManifest[]>("list_snapshots", { addonsPath });
-        if (!cancelled) setSnapshots(result);
+        if (!cancelled) {
+          setSnapshots(result);
+          setLoadError(null);
+        }
       } catch (e) {
-        if (!cancelled) toast.error(`Failed to load snapshots: ${getTauriErrorMessage(e)}`);
+        if (!cancelled) setLoadError(getTauriErrorMessage(e));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -191,34 +203,83 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
     }
   };
 
+  const handleRevealFolder = async () => {
+    try {
+      const folderPath = await invokeOrThrow<string>("get_backups_folder_path", { addonsPath });
+      await invokeOrThrow("reveal_allowed_path", { path: folderPath });
+    } catch (e) {
+      toast.error(`Couldn't open folder: ${getTauriErrorMessage(e)}`);
+    }
+  };
+
   return (
     <div className="space-y-3 mt-2">
-      <p className="text-xs text-muted-foreground">
-        Snapshots are created automatically before migrations and bulk operations. You can restore
-        to any snapshot to undo changes. Close ESO before restoring — the game rewrites addon
-        settings when it exits, which would undo the restore.
-      </p>
+      <div className="space-y-2 text-xs text-muted-foreground leading-relaxed">
+        <p>
+          Automatic snapshots protect changes made during migrations and bulk operations. They are
+          compressed ZIPs in <span className="text-foreground">KalpaBackups/Automatic</span>. Manual
+          settings ZIPs are saved separately in{" "}
+          <span className="text-foreground">KalpaBackups/Manual</span>.
+        </p>
+        <p>
+          Each snapshot covers the items listed below and may include addon files and ESO game
+          configuration. Restoring replaces those items with the saved copies. Close ESO first.
+        </p>
+      </div>
+      <Button variant="ghost" size="sm" onClick={handleRevealFolder}>
+        <FolderOpen className="size-3.5" />
+        Show in folder
+      </Button>
 
       <div className="max-h-[300px] overflow-y-auto space-y-2">
-        {snapshots.length === 0 ? (
+        {loadError ? (
+          <div className="rounded-xl border border-status-danger/20 p-4 space-y-2" role="alert">
+            <p className="text-sm font-medium">Couldn't load snapshots</p>
+            <p className="text-xs text-muted-foreground break-words">{loadError}</p>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void loadSnapshots()}
+              disabled={loading}
+            >
+              Try again
+            </Button>
+          </div>
+        ) : loading ? (
+          <p className="py-4 text-sm text-muted-foreground" role="status">
+            Loading snapshots…
+          </p>
+        ) : snapshots.length === 0 ? (
           <Fade>
-            <p className="text-sm text-muted-foreground text-center py-4">No snapshots yet.</p>
+            <div className="rounded-xl border border-structure-06 p-6 text-center">
+              <p className="text-sm font-medium">No automatic snapshots yet</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                They appear here when Kalpa protects a migration or bulk operation.
+              </p>
+            </div>
           </Fade>
         ) : (
           snapshots.map((s, i) => (
             <Fade key={s.id} delay={i * 50}>
               <div className="rounded-xl border border-structure-06 bg-structure-02 p-3 transition-all duration-200 hover:border-structure-10">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="font-medium text-sm">{s.label}</div>
+                <div className="space-y-3">
+                  <div className="min-w-0">
+                    <div className="font-medium text-sm break-words">{s.label}</div>
                     <div className="text-xs text-muted-foreground mt-0.5">
-                      {s.fileCount} files &middot; {formatBytes(s.totalSize)} &middot; {s.createdAt}
+                      {s.fileCount} files &middot; {formatBytes(s.totalSize)} before compression
+                      &middot; {s.createdAt}
                     </div>
-                    <div className="mt-0.5 text-xs text-muted-foreground">
+                    <div className="mt-1 text-xs text-muted-foreground break-words">
                       Includes: {s.sourcePaths.join(", ")}
                     </div>
                   </div>
-                  <div className="flex gap-1 shrink-0">
+                  {confirmRestore === s.id && (
+                    <p className="text-xs text-status-warning-faint leading-relaxed">
+                      Replace {s.sourcePaths.join(", ")} with this snapshot? Your current state will
+                      be saved as a Pre-restore snapshot so you can undo.
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
                     <AnimatePresence mode="wait">
                       {confirmRestore === s.id ? (
                         <motion.div
@@ -229,14 +290,13 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                           transition={{ duration: 0.15 }}
                           className="flex items-center gap-1"
                         >
-                          <span className="text-xs text-status-warning mr-1">Restore?</span>
                           <Button
                             size="sm"
                             variant="destructive"
                             onClick={() => handleRestore(s.id)}
                             disabled={anyOpInFlight}
                           >
-                            {restoring === s.id ? "Restoring..." : "Yes"}
+                            {restoring === s.id ? "Restoring…" : "Restore snapshot"}
                           </Button>
                           <Button
                             size="sm"
@@ -244,7 +304,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                             onClick={() => setConfirmRestore(null)}
                             disabled={anyOpInFlight}
                           >
-                            No
+                            Cancel
                           </Button>
                         </motion.div>
                       ) : (
@@ -257,7 +317,10 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                         >
                           <Button
                             size="sm"
-                            onClick={() => setConfirmRestore(s.id)}
+                            onClick={() => {
+                              setConfirmDelete(null);
+                              setConfirmRestore(s.id);
+                            }}
                             disabled={anyOpInFlight}
                           >
                             Restore
@@ -302,8 +365,11 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                         >
                           <Button
                             size="sm"
-                            variant="destructive"
-                            onClick={() => setConfirmDelete(s.id)}
+                            variant="ghost"
+                            onClick={() => {
+                              setConfirmRestore(null);
+                              setConfirmDelete(s.id);
+                            }}
                             disabled={anyOpInFlight}
                           >
                             Delete

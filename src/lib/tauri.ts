@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import type { BackupStorage } from "@/types";
+
+type BackupMutationCommand = "restore_backup" | "restore_backup_safe" | "delete_backup";
+type BackupMutationArgs = {
+  addonsPath: string;
+  backupName: string;
+  legacy?: boolean;
+  storage?: BackupStorage;
+};
 
 export type TauriResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -79,6 +88,14 @@ export function getTauriErrorMessage(error: unknown): string {
   return raw;
 }
 
+export function invokeResult<T>(
+  command: BackupMutationCommand,
+  args: BackupMutationArgs
+): Promise<TauriResult<T>>;
+export function invokeResult<T>(
+  command: string,
+  args?: Record<string, unknown>
+): Promise<TauriResult<T>>;
 export async function invokeResult<T>(
   command: string,
   args?: Record<string, unknown>
@@ -98,6 +115,11 @@ export async function invokeResult<T>(
   }
 }
 
+export function invokeOrThrow<T>(
+  command: BackupMutationCommand,
+  args: BackupMutationArgs
+): Promise<T>;
+export function invokeOrThrow<T>(command: string, args?: Record<string, unknown>): Promise<T>;
 export async function invokeOrThrow<T>(
   command: string,
   args?: Record<string, unknown>

@@ -254,16 +254,27 @@ export interface ApiCompatInfo {
   upToDateAddons: string[];
 }
 
-export type BackupKind = "manual" | "autoBeforeRestore" | "character";
+export type BackupKind = "manual" | "autoBeforeRestore" | "autoCleanup" | "character";
+export type BackupStorage = "manual" | "automatic" | "characters" | "shared" | "legacy";
 
 export interface BackupInfo {
   name: string;
   createdAt: string;
   createdAtEpoch: number;
   fileCount: number;
+  /** Original settings bytes, before archive compression. */
   totalSize: number;
   kind: BackupKind;
+  format: "zip" | "folder";
+  legacy: boolean;
+  storage: BackupStorage;
   worldsSpanned?: number;
+}
+
+export interface ConsolidateLegacyBackupsResult {
+  copied: number;
+  alreadyPresent: number;
+  skipped: { name: string; reason: string }[];
 }
 
 export interface SafeRestoreResult {

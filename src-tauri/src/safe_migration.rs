@@ -174,8 +174,26 @@ pub struct PreconditionResult {
 
 /// Root directory for Kalpa snapshots: `{live}/KalpaBackups/`
 fn snapshots_root(addons_dir: &Path) -> PathBuf {
-    let parent = addons_dir.parent().unwrap_or(addons_dir);
-    parent.join("KalpaBackups")
+    crate::saved_variables::io::backups_dir(addons_dir)
+}
+
+/// Keep the existing index at the root while new archives use Automatic.
+/// Old archives remain usable without moving files on upgraded installations.
+fn snapshot_archive_path(addons_dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let filename = format!("{id}.zip");
+    let organized = crate::saved_variables::io::automatic_backups_dir(addons_dir).join(&filename);
+    let previous = snapshots_root(addons_dir).join(filename);
+    if organized.exists() && previous.exists() {
+        return Err(
+            "Duplicate snapshot archives found. Keep a single archive for this snapshot ID."
+                .to_string(),
+        );
+    }
+    Ok(if organized.exists() {
+        organized
+    } else {
+        previous
+    })
 }
 
 fn snapshot_store_path(addons_dir: &Path) -> PathBuf {
@@ -375,7 +393,7 @@ fn create_zip_snapshot(
     include_saved_vars: bool,
     include_settings: bool,
 ) -> Result<SnapshotManifest, String> {
-    let root = snapshots_root(addons_dir);
+    let root = crate::saved_variables::io::automatic_backups_dir(addons_dir);
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {e}"))?;
 
     let id = snapshot_id(label);
@@ -1158,8 +1176,7 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
         ));
     }
 
-    let root = snapshots_root(addons_dir);
-    let archive_path = root.join(format!("{snapshot_id}.zip"));
+    let archive_path = snapshot_archive_path(addons_dir, snapshot_id)?;
     if !archive_path.is_file() {
         return Err("Snapshot archive file not found.".to_string());
     }
@@ -1183,7 +1200,8 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             // own archive directly via the shared extraction helper (not through
             // restore_snapshot itself), so this can never re-enter the rollback
             // logic or create yet another Pre-restore snapshot.
-            let pre_restore_archive = root.join(format!("{}.zip", pre_restore_manifest.id));
+            let pre_restore_archive = crate::saved_variables::io::automatic_backups_dir(addons_dir)
+                .join(format!("{}.zip", pre_restore_manifest.id));
             let cleanup = created.rollback();
             let restore = extract_archive_entries(
                 &pre_restore_archive,
@@ -1275,8 +1293,7 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
 
 /// Delete a snapshot by ID.
 pub fn delete_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<(), String> {
-    let root = snapshots_root(addons_dir);
-    let archive_path = root.join(format!("{snapshot_id}.zip"));
+    let archive_path = snapshot_archive_path(addons_dir, snapshot_id)?;
 
     // Update and persist the manifest FIRST, and only delete the archive file
     // after that succeeds. Deleting the archive before the store write could
@@ -1627,6 +1644,63 @@ mod tests {
         let loaded = load_snapshot_store(&addons_dir);
         assert_eq!(loaded.snapshots.len(), 1);
         assert_eq!(loaded.snapshots[0].id, "test-id");
+    }
+
+    #[test]
+    fn automatic_archives_restore_and_delete_in_new_and_previous_locations() {
+        for old_location in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let addons = tmp.path().join("AddOns");
+            let sv = tmp.path().join("SavedVariables");
+            fs::create_dir_all(&addons).unwrap();
+            fs::create_dir_all(&sv).unwrap();
+            fs::write(sv.join("Example.lua"), b"original").unwrap();
+            let manifest =
+                create_zip_snapshot("Compatibility", &addons, false, true, false).unwrap();
+            let organized = crate::saved_variables::io::automatic_backups_dir(&addons)
+                .join(format!("{}.zip", manifest.id));
+            assert!(organized.is_file());
+            assert!(snapshot_store_path(&addons).is_file());
+            let previous = snapshots_root(&addons).join(format!("{}.zip", manifest.id));
+            if old_location {
+                fs::rename(&organized, &previous).unwrap();
+            }
+            fs::write(sv.join("Example.lua"), b"current").unwrap();
+            assert_eq!(restore_snapshot(&addons, &manifest.id).unwrap(), 1);
+            assert_eq!(fs::read(sv.join("Example.lua")).unwrap(), b"original");
+            assert!(load_snapshot_store(&addons)
+                .snapshots
+                .iter()
+                .any(|entry| entry.id == manifest.id));
+            delete_snapshot(&addons, &manifest.id).unwrap();
+            assert!(!organized.exists());
+            assert!(!previous.exists());
+            assert!(!load_snapshot_store(&addons)
+                .snapshots
+                .iter()
+                .any(|entry| entry.id == manifest.id));
+            assert!(ops_log_path(&addons).is_file());
+        }
+    }
+
+    #[test]
+    fn duplicate_automatic_archive_paths_preserve_both_files_and_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons).unwrap();
+        let manifest = create_zip_snapshot("Duplicate", &addons, true, false, false).unwrap();
+        let organized = crate::saved_variables::io::automatic_backups_dir(&addons)
+            .join(format!("{}.zip", manifest.id));
+        let previous = snapshots_root(&addons).join(format!("{}.zip", manifest.id));
+        fs::copy(&organized, &previous).unwrap();
+        assert!(delete_snapshot(&addons, &manifest.id)
+            .unwrap_err()
+            .contains("Duplicate"));
+        assert!(organized.is_file() && previous.is_file());
+        assert!(load_snapshot_store(&addons)
+            .snapshots
+            .iter()
+            .any(|entry| entry.id == manifest.id));
     }
 
     #[test]

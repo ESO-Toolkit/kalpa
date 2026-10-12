@@ -1,3 +1,4 @@
+pub mod backups;
 pub mod char_backup;
 pub mod identity_stream;
 pub mod io;

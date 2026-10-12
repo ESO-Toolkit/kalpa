@@ -23273,7 +23273,7 @@ CombatMetrics_SavedVariables = {
         assert_eq!(deleted, 1);
         assert!(sv_dir.join("InstalledAddon.lua").is_file());
         assert!(!sv_dir.join("RemovedAddon.lua").exists());
-        let backup_root = root.join("kalpa-backups");
+        let backup_root = saved_variables::io::automatic_backups_dir(&addons_root);
         let backup_files = fs::read_dir(&backup_root)
             .expect("backup root exists")
             .filter_map(Result::ok)
