@@ -6821,7 +6821,7 @@ fn settings_backup_directory(path: &Path, storage: BackupStorage) -> bool {
 }
 
 fn list_backups_inner(addons_dir: &Path) -> Result<Vec<BackupInfo>, String> {
-    list_backups_with_folder_stats(addons_dir, backup_folder_stats)
+    list_backups_with_readers(addons_dir, |path| fs::read_dir(path), backup_folder_stats)
 }
 
 fn backup_folder_stats(path: &Path) -> std::io::Result<(u32, u64)> {
@@ -6841,8 +6841,9 @@ fn backup_folder_stats(path: &Path) -> std::io::Result<(u32, u64)> {
     Ok((count, size))
 }
 
-fn list_backups_with_folder_stats(
+fn list_backups_with_readers(
     addons_dir: &Path,
+    read_root: impl Fn(&Path) -> std::io::Result<fs::ReadDir>,
     folder_stats: impl Fn(&Path) -> std::io::Result<(u32, u64)>,
 ) -> Result<Vec<BackupInfo>, String> {
     let _mutation_guard = BACKUP_MUTATION_LOCK
@@ -6855,9 +6856,17 @@ fn list_backups_with_folder_stats(
             continue;
         }
         recover_orphaned_backups(&root);
-        for entry in
-            fs::read_dir(&root).map_err(|e| format!("Failed to read backups folder: {e}"))?
-        {
+        let entries = match read_root(&root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!(
+                    "[backups] skipping unreadable storage root {}: {error}",
+                    root.display()
+                );
+                continue;
+            }
+        };
+        for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -13252,13 +13261,17 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             std::io::ErrorKind::NotFound,
         ] {
-            let list = list_backups_with_folder_stats(&addons, |path| {
-                if path.file_name().unwrap() == "Unreadable" {
-                    Err(std::io::Error::new(error_kind, "backup is unavailable"))
-                } else {
-                    backup_folder_stats(path)
-                }
-            })
+            let list = list_backups_with_readers(
+                &addons,
+                |path| fs::read_dir(path),
+                |path| {
+                    if path.file_name().unwrap() == "Unreadable" {
+                        Err(std::io::Error::new(error_kind, "backup is unavailable"))
+                    } else {
+                        backup_folder_stats(path)
+                    }
+                },
+            )
             .unwrap();
             assert_eq!(list.len(), 3);
             for legacy in [false, true] {
@@ -13276,6 +13289,57 @@ mod tests {
         }
         // The skipped folders are retained and reappear when readable again.
         assert_eq!(list_backups_inner(&addons).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn unreadable_storage_roots_do_not_hide_other_origins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("AddOns");
+        for (root, _) in settings_backup_roots(&addons) {
+            fs::create_dir_all(root.join("Healthy")).unwrap();
+            fs::write(root.join("Healthy").join("Example.lua"), b"settings").unwrap();
+        }
+        let sv = saved_variables_dir(&addons);
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("Example.lua"), b"live settings").unwrap();
+        let zip = create_backup_inner(&addons, "Healthy archive").unwrap();
+
+        // Exercise every origin without changing platform-specific directory ACLs.
+        for (unavailable, storage) in settings_backup_roots(&addons) {
+            for error_kind in [
+                std::io::ErrorKind::PermissionDenied,
+                std::io::ErrorKind::NotFound,
+            ] {
+                let list = list_backups_with_readers(
+                    &addons,
+                    |path| {
+                        if path == unavailable {
+                            Err(std::io::Error::new(
+                                error_kind,
+                                "storage root is unavailable",
+                            ))
+                        } else {
+                            fs::read_dir(path)
+                        }
+                    },
+                    backup_folder_stats,
+                )
+                .unwrap();
+                assert!(!list.iter().any(|backup| backup.storage == storage));
+                assert_eq!(
+                    list.iter()
+                        .filter(|backup| backup.name == "Healthy")
+                        .count(),
+                    4
+                );
+                assert_eq!(
+                    list.iter().any(|backup| backup.name == zip.name),
+                    storage != BackupStorage::Manual
+                );
+            }
+        }
+        // No retained root or backup is deleted while it is unavailable.
+        assert_eq!(list_backups_inner(&addons).unwrap().len(), 6);
     }
 
     #[test]
