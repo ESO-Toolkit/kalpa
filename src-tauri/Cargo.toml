@@ -39,7 +39,7 @@ dirs = "7"
 reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
 scraper = "0.27"
-zip = "8"
+zip = "9"
 tempfile = "3"
 regex = "1"
 base64 = "0.23"
