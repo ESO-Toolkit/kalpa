@@ -116,7 +116,11 @@ pub(crate) fn parse_addon_version(content: &str) -> Option<u32> {
 
 pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonManifest> {
     let bytes = fs::read(manifest_path).ok()?;
-    let raw = String::from_utf8_lossy(&bytes);
+    Some(parse_manifest_bytes(folder_name, &bytes))
+}
+
+pub(crate) fn parse_manifest_bytes(folder_name: &str, bytes: &[u8]) -> AddonManifest {
+    let raw = String::from_utf8_lossy(bytes);
     // Strip a leading UTF-8 BOM so the first directive (often `## Title:` or
     // `## AddOnVersion:`) isn't shadowed by an invisible byte-order mark.
     let content: &str = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
@@ -209,7 +213,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
         title = folder_name.to_string();
     }
 
-    Some(AddonManifest {
+    AddonManifest {
         folder_name: folder_name.to_string(),
         title,
         author,
@@ -230,7 +234,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
         disabled: false,
         modified_file_count: 0,
         has_protected_edits_baseline: false,
-    })
+    }
 }
 
 #[cfg(test)]
