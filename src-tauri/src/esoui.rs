@@ -1674,9 +1674,6 @@ fn ensure_filelist_cache(force: bool) -> Result<(), String> {
 ///
 /// Wire this to the explicit Refresh action ONLY; every automatic path must stay
 /// TTL-cached. Returns the fetch error rather than silently serving stale data.
-// Not yet called: the Refresh command lives in commands.rs and still goes
-// through the TTL-cached path.
-#[allow(dead_code)]
 pub fn refresh_filelist_cache() -> Result<(), String> {
     ensure_filelist_cache(true)
 }

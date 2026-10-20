@@ -19,6 +19,8 @@ _Nothing yet._
 - **New external installs are checked on the first refresh.** Addon discovery
   now finishes before scanning and checking updates, and runs again when you
   refresh. This also finds addons installed through Minion while Kalpa is open.
+- **Refresh checks the latest ESOUI release list.** An explicit refresh no
+  longer waits for the 15-minute cache to expire before recognizing a release.
 - **External manifest changes appear reliably.** The scan cache verifies file
   contents and location, including when an update preserves timestamps or
   another game instance has an addon with the same folder name.

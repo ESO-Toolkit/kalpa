@@ -13196,7 +13196,8 @@ fn slint_update_check_model(
 
 fn start_native_addon_update_check(ui_weak: slint::Weak<KalpaWindow>, addons_dir: PathBuf) {
     std::thread::spawn(move || {
-        let result = check_native_addon_updates_blocking(&addons_dir);
+        let result = esoui::refresh_filelist_cache()
+            .and_then(|()| check_native_addon_updates_blocking(&addons_dir));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;

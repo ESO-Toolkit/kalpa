@@ -637,7 +637,7 @@ function App() {
   }, [checkForUpdates, scanAddons]);
 
   const scanAndCheck = useCallback(
-    async (path: string, notifyOnUpdateError = false, autoUpdate = false) => {
+    async (path: string, notifyOnUpdateError = false, autoUpdate = false, forceRefresh = false) => {
       const seq = ++refreshSeqRef.current;
       // Invalidate older reads before awaiting discovery, including reads for a
       // different game instance. They must not land while linking is in flight.
@@ -650,6 +650,7 @@ function App() {
         // the following check includes those folders on its first pass.
         const result = await invokeResult<AutoLinkResult>("auto_link_addons", {
           addonsPath: path,
+          forceRefresh,
         });
         if (seq !== refreshSeqRef.current) return;
         if (!result.ok) {
@@ -933,7 +934,7 @@ function App() {
       if (isModKey(event) && key === "r") {
         event.preventDefault();
         if (addonsPathRef.current && !batchLatchRef.current.isRunning) {
-          void scanAndCheck(addonsPathRef.current, true);
+          void scanAndCheck(addonsPathRef.current, true, false, true);
         }
       }
 
@@ -1042,6 +1043,12 @@ function App() {
     // wholesale — resurrecting rows the batch or an undo window had hidden.
     if (addonsPathRef.current && !batchLatchRef.current.isRunning) {
       void scanAndCheck(addonsPathRef.current, true);
+    }
+  }, [scanAndCheck]);
+
+  const handleExplicitRefresh = useCallback(() => {
+    if (addonsPathRef.current && !batchLatchRef.current.isRunning) {
+      void scanAndCheck(addonsPathRef.current, true, false, true);
     }
   }, [scanAndCheck]);
 
@@ -2628,7 +2635,7 @@ function App() {
             onOpenSettings={handleOpenSettingsDialog}
             onOpenSupport={handleOpenSupportDialog}
             onAuthChange={handleAuthChange}
-            onRefresh={handleRefresh}
+            onRefresh={handleExplicitRefresh}
           />
 
           <StatusBanners

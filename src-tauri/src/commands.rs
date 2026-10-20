@@ -5670,11 +5670,17 @@ pub async fn auto_link_addons(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
+    force_refresh: Option<bool>,
 ) -> Result<AutoLinkResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
         // Fetch filelist outside the lock (network I/O)
+        // Explicit refresh must discover new releases before linking folders;
+        // the following update check then shares this fresh observation.
+        if force_refresh.unwrap_or(false) {
+            esoui::refresh_filelist_cache()?;
+        }
         let api_lookup = esoui::fetch_filelist_lookup()?;
         let _guard = lock
             .lock()
