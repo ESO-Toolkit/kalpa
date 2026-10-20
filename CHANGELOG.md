@@ -24,6 +24,8 @@ _Nothing yet._
 - **External manifest changes appear reliably.** The scan cache verifies file
   contents and location, including when an update preserves timestamps or
   another game instance has an addon with the same folder name.
+- **Archive and networking security fixes.** Updated ZIP extraction, QUIC, and
+  TLS dependencies in both the main app and native interface.
 
 ## [0.1.0-beta.30] — 2026-10-12
 

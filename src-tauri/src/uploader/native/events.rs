@@ -3444,7 +3444,7 @@ mod tests {
         let mut archive =
             zip::ZipArchive::new(std::io::Cursor::new(segment.bytes)).expect("open segment zip");
         let mut file = archive.by_index(0).unwrap();
-        assert_eq!(file.name(), "log.txt");
+        assert_eq!(file.name().unwrap(), "log.txt");
         use std::io::Read;
         let mut got = String::new();
         file.read_to_string(&mut got).unwrap();
