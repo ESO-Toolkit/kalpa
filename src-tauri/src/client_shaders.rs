@@ -765,7 +765,7 @@ pub async fn install_shader_pack(
             (0..zip.len())
                 .map(|i| {
                     zip.by_index(i)
-                        .map(|entry| entry.name().to_string())
+                        .and_then(|entry| entry.name().map(|name| name.into_owned()))
                         .map_err(|e| format!("Could not read the archive: {e}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?

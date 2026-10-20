@@ -6,6 +6,27 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.31] — 2026-10-20
+
+### Bug Fixes
+
+- **Updates installed through Minion 4 are recognized.** Kalpa now reads
+  Minion 4's current ESO database instead of its old Minion 3 import. Release
+  versions are matched to the selected game instance, addon folder, and ESOUI
+  ID, so an update installed in PTS cannot mark the live copy as updated.
+- **Minion migration backups include the Minion 4 database.** Kalpa keeps a
+  copy of the current ESO database alongside legacy Minion configuration files.
+- **New external installs are checked on the first refresh.** Addon discovery
+  now finishes before scanning and checking updates, and runs again when you
+  refresh. This also finds addons installed through Minion while Kalpa is open.
+- **Refresh checks the latest ESOUI release list.** An explicit refresh no
+  longer waits for the 15-minute cache to expire before recognizing a release.
+- **External manifest changes appear reliably.** The scan cache verifies file
+  contents and location, including when an update preserves timestamps or
+  another game instance has an addon with the same folder name.
+- **Archive and networking security fixes.** Updated ZIP extraction, QUIC, and
+  TLS dependencies in both the main app and native interface.
+
 ## [0.1.0-beta.30] — 2026-10-12
 
 ### Improvements
@@ -1372,7 +1393,8 @@ changes are only reachable inside the beta.4 range and both headings resolve
 to it.
 -->
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.30...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.31...HEAD
+[0.1.0-beta.31]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.30...v0.1.0-beta.31
 [0.1.0-beta.30]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.29...v0.1.0-beta.30
 [0.1.0-beta.29]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.28...v0.1.0-beta.29
 [0.1.0-beta.28]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.27...v0.1.0-beta.28

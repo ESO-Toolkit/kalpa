@@ -603,7 +603,7 @@ pub fn check_preconditions(addons_dir: &Path) -> PreconditionResult {
         any_running_or_unknown([KnownProcess::Eso64, KnownProcess::Eso]);
     let (minion_running, minion_unknown) =
         any_running_or_unknown([KnownProcess::Minion, KnownProcess::MinionUnix]);
-    let minion_found = crate::commands::find_minion_xml().is_some();
+    let minion_found = crate::minion::find_minion_data().is_some();
     let addons_path_valid = addons_dir.is_dir();
     let saved_variables_exists = parent.join("SavedVariables").is_dir();
 
@@ -676,29 +676,26 @@ pub fn create_pre_migration_snapshot(
 }
 
 fn minion_addons_for_migration<'a>(
-    minion_addons: &'a [crate::commands::MinionAddon],
+    minion_addons: &'a [crate::minion::MinionAddon],
     addons_dir: &Path,
-) -> Vec<&'a crate::commands::MinionAddon> {
+) -> Vec<&'a crate::minion::MinionAddon> {
     let has_scoped_entries = minion_addons
         .iter()
         .any(|addon| addon.addons_path.is_some());
     minion_addons
         .iter()
         .filter(|addon| {
-            crate::commands::minion_addon_is_for_root(addon, addons_dir, has_scoped_entries)
+            crate::minion::minion_addon_is_for_root(addon, addons_dir, has_scoped_entries)
         })
         .collect()
 }
 
-fn load_minion_addons_for_migration() -> Result<Vec<crate::commands::MinionAddon>, String> {
-    let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
-    let content =
-        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
-    Ok(crate::commands::parse_minion_addons(&content))
+fn load_minion_addons_for_migration() -> Result<Vec<crate::minion::MinionAddon>, String> {
+    crate::minion::load_minion_addons()
 }
 
 fn build_migration_plan_from_addons(
-    minion_addons: &[crate::commands::MinionAddon],
+    minion_addons: &[crate::minion::MinionAddon],
     addons_dir: &Path,
     store: &metadata::MetadataStore,
 ) -> MigrationPlan {
@@ -812,7 +809,7 @@ pub fn execute_migration(
 
 fn execute_migration_from_addons(
     addons_dir: &Path,
-    minion_addons: &[crate::commands::MinionAddon],
+    minion_addons: &[crate::minion::MinionAddon],
     expected_plan_digest: &str,
 ) -> Result<MigrationExecuteOutcome, String> {
     let start = now_timestamp();
@@ -1330,13 +1327,16 @@ pub fn read_ops_log(addons_dir: &Path) -> Vec<OpLogEntry> {
 }
 
 /// Copy Minion's config as a read-only backup (never modifies Minion state).
-/// Only copies regular files in the top-level .minion/ directory (no recursion).
+/// Copies top-level files and Minion 4's config/eso.json database (no recursion).
 /// Skips symlinks and enforces a 50 MB total size cap to avoid copying unexpected data.
 pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
-    const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024; // 50 MB cap
-
     let home = dirs::home_dir().ok_or("Could not determine home directory.")?;
-    let minion_dir = home.join(".minion");
+    backup_minion_config_from(addons_dir, &home.join(".minion"))
+}
+
+fn backup_minion_config_from(addons_dir: &Path, minion_dir: &Path) -> Result<u32, String> {
+    const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+
     if !minion_dir.is_dir() {
         return Err("Minion config directory not found.".to_string());
     }
@@ -1346,32 +1346,40 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
     fs::create_dir_all(&dest)
         .map_err(|e| format!("Failed to create Minion backup directory: {e}"))?;
 
+    let mut files = Vec::new();
+    // Prioritize the active database, and never follow a linked config directory.
+    if fs::symlink_metadata(minion_dir.join("config"))
+        .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+    {
+        files.push(PathBuf::from("config").join("eso.json"));
+    }
+    if let Ok(entries) = fs::read_dir(minion_dir) {
+        files.extend(
+            entries
+                .flatten()
+                .map(|entry| PathBuf::from(entry.file_name())),
+        );
+    }
+
     let mut copied: u32 = 0;
     let mut total_bytes: u64 = 0;
-    if let Ok(entries) = fs::read_dir(&minion_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Skip symlinks (flat-only, no following links to unexpected locations)
-            if path.read_link().is_ok() {
-                continue;
-            }
-            // Only copy regular files at the top level (no directory recursion)
-            if path.is_file() {
-                if let Some(name) = path.file_name() {
-                    let meta = match fs::metadata(&path) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-                    if total_bytes + meta.len() > MAX_TOTAL_BYTES {
-                        break; // Stop copying if we'd exceed the size cap
-                    }
-                    let target = dest.join(name);
-                    if fs::copy(&path, &target).is_ok() {
-                        total_bytes += meta.len();
-                        copied += 1;
-                    }
-                }
-            }
+    for relative_path in files {
+        let path = minion_dir.join(&relative_path);
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => meta,
+            _ => continue,
+        };
+        if total_bytes.saturating_add(meta.len()) > MAX_TOTAL_BYTES {
+            break;
+        }
+        let target = dest.join(relative_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create Minion backup directory: {e}"))?;
+        }
+        if fs::copy(&path, &target).is_ok() {
+            total_bytes += meta.len();
+            copied += 1;
         }
     }
 
@@ -1381,6 +1389,53 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::{any_running_or_unknown_with, KnownProcess};
+
+    #[test]
+    fn minion_backup_includes_current_database_and_legacy_files_without_recursing() {
+        let temp = tempfile::tempdir().unwrap();
+        let minion = temp.path().join(".minion");
+        let addons = temp.path().join("AddOns");
+        std::fs::create_dir_all(minion.join("config")).unwrap();
+        std::fs::create_dir_all(minion.join("downloads")).unwrap();
+        std::fs::write(minion.join("config/eso.json"), b"current database").unwrap();
+        std::fs::write(minion.join("config/other.json"), b"unrelated").unwrap();
+        std::fs::write(minion.join("minion.xml"), b"legacy database").unwrap();
+        std::fs::write(minion.join("downloads/addon.zip"), b"unrelated").unwrap();
+
+        assert_eq!(super::backup_minion_config_from(&addons, &minion), Ok(2));
+        let backup = super::snapshots_root(&addons).join("minion-config-backup");
+        assert_eq!(
+            std::fs::read(backup.join("config/eso.json")).unwrap(),
+            b"current database"
+        );
+        assert_eq!(
+            std::fs::read(backup.join("minion.xml")).unwrap(),
+            b"legacy database"
+        );
+        assert!(!backup.join("config/other.json").exists());
+        assert!(!backup.join("downloads").exists());
+        assert_eq!(
+            std::fs::read(minion.join("config/eso.json")).unwrap(),
+            b"current database"
+        );
+    }
+
+    #[test]
+    fn minion_backup_enforces_size_cap_on_current_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let minion = temp.path().join(".minion");
+        std::fs::create_dir_all(minion.join("config")).unwrap();
+        std::fs::File::create(minion.join("config/eso.json"))
+            .unwrap()
+            .set_len(50 * 1024 * 1024 + 1)
+            .unwrap();
+
+        let addons = temp.path().join("AddOns");
+        assert_eq!(super::backup_minion_config_from(&addons, &minion), Ok(0));
+        assert!(!super::snapshots_root(&addons)
+            .join("minion-config-backup/config/eso.json")
+            .exists());
+    }
 
     #[test]
     fn a_detection_failure_is_reported_as_running_not_as_clear() {
@@ -1426,8 +1481,8 @@ mod tests {
         version: &str,
         folders: &[&str],
         addons_path: &Path,
-    ) -> crate::commands::MinionAddon {
-        crate::commands::MinionAddon {
+    ) -> crate::minion::MinionAddon {
+        crate::minion::MinionAddon {
             uid,
             version: version.to_string(),
             folders: folders.iter().map(|folder| (*folder).to_string()).collect(),
@@ -1444,13 +1499,13 @@ mod tests {
         fs::create_dir_all(&pts_addons_dir).unwrap();
 
         let minion_addons = vec![
-            crate::commands::MinionAddon {
+            crate::minion::MinionAddon {
                 uid: 123,
                 version: "1.0".to_string(),
                 folders: vec!["MyAddon".to_string()],
                 addons_path: Some(pts_addons_dir),
             },
-            crate::commands::MinionAddon {
+            crate::minion::MinionAddon {
                 uid: 123,
                 version: "2.0".to_string(),
                 folders: vec!["MyAddon".to_string()],

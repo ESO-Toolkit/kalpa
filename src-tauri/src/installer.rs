@@ -566,8 +566,9 @@ fn copy_residual_files(
 /// unsafe. Replicates `ZipFile::enclosed_name` exactly — including its
 /// `Utf8WindowsPath` parsing, which on every platform splits on `\` as well as
 /// `/`, strips a *leading* drive prefix or root, and rejects the whole name on
-/// NUL bytes, a mid-path prefix/root, or `..` traversal that escapes the
-/// archive root — then takes the first component of the simplified path. The
+/// NUL bytes, a mid-path prefix/root, separators inside a normal component,
+/// or `..` traversal that escapes the archive root — then takes the first
+/// component of the simplified path. The
 /// extraction loop derives its created-folder names from `enclosed_name`, so
 /// any divergence here could make rollback miss (or mistarget) a folder the
 /// extractor actually created.
@@ -600,6 +601,9 @@ fn enclosed_components(name: &str) -> Option<Vec<String>> {
                 components.pop();
             }
             Utf8WindowsComponent::Normal(s) => {
+                if s.contains(['/', '\\']) {
+                    return None;
+                }
                 depth += 1;
                 components.push(s);
             }
@@ -612,16 +616,18 @@ fn enclosed_components(name: &str) -> Option<Vec<String>> {
 /// Collect top-level folder names from a ZIP archive's central directory.
 fn collect_zip_top_folders(archive: &zip::ZipArchive<fs::File>) -> HashSet<String> {
     let mut folders = HashSet::new();
-    for name in archive.file_names() {
+    // Decode the same names as enclosed_name() in extraction; it also skips
+    // entries whose filenames cannot be decoded.
+    for name in archive.file_names().filter_map(Result::ok) {
         // A one-component directory entry represents a folder, while a
         // one-component file is an AddOns-root write and must not become a
         // phantom addon folder during rollback.
         let is_directory = name.ends_with('/') || name.ends_with('\\');
-        if let Some(components) = enclosed_components(name) {
+        if let Some(components) = enclosed_components(&name) {
             if components.len() > 1 || is_directory {
                 // Keep the top-component helper exercised in production too;
                 // it is the same normalization used by the extraction path.
-                if let Some(folder) = enclosed_top_component(name) {
+                if let Some(folder) = enclosed_top_component(&name) {
                     folders.insert(folder);
                 }
             }
@@ -634,11 +640,12 @@ fn collect_zip_top_folders(archive: &zip::ZipArchive<fs::File>) -> HashSet<Strin
 fn collect_zip_root_files(archive: &zip::ZipArchive<fs::File>) -> HashSet<String> {
     archive
         .file_names()
+        .filter_map(Result::ok)
         .filter_map(|name| {
             if name.ends_with('/') || name.ends_with('\\') {
                 return None;
             }
-            let components = enclosed_components(name)?;
+            let components = enclosed_components(&name)?;
             (components.len() == 1).then(|| components[0].clone())
         })
         .collect()
@@ -676,12 +683,12 @@ pub(crate) fn flat_archive_wrap_name(archive: &zip::ZipArchive<fs::File>) -> Opt
     let mut manifest_stems: Vec<String> = Vec::new();
     let mut root_stems: HashSet<String> = HashSet::new();
 
-    for name in archive.file_names() {
+    for name in archive.file_names().filter_map(Result::ok) {
         // A trailing separator marks a directory entry; those are not root files.
         if name.ends_with('/') || name.ends_with('\\') {
             continue;
         }
-        let Some(components) = enclosed_components(name) else {
+        let Some(components) = enclosed_components(&name) else {
             continue;
         };
         // Exactly one component == the entry sits at the archive root.
@@ -727,8 +734,8 @@ pub(crate) fn flat_archive_wrap_name(archive: &zip::ZipArchive<fs::File>) -> Opt
 /// Whether any top-level directory in the archive is itself a proper addon —
 /// `<Dir>/<Dir>.txt` among the entries, the exact shape ESO loads.
 fn contains_foldered_addon(archive: &zip::ZipArchive<fs::File>) -> bool {
-    archive.file_names().any(|name| {
-        let Some(components) = enclosed_components(name) else {
+    archive.file_names().filter_map(Result::ok).any(|name| {
+        let Some(components) = enclosed_components(&name) else {
             return false;
         };
         let [dir, file] = components.as_slice() else {
@@ -744,8 +751,8 @@ fn contains_foldered_addon(archive: &zip::ZipArchive<fs::File>) -> bool {
 /// Whether a root-level file other than `<stem>.txt` also carries `stem` — the
 /// signal that `stem` names the addon rather than a stray readme.
 fn has_sibling_with_stem(archive: &zip::ZipArchive<fs::File>, stem: &str) -> bool {
-    archive.file_names().any(|name| {
-        enclosed_components(name)
+    archive.file_names().filter_map(Result::ok).any(|name| {
+        enclosed_components(&name)
             .filter(|c| c.len() == 1)
             .and_then(|c| c.into_iter().next())
             .and_then(|f| {
@@ -1024,6 +1031,10 @@ mod tests {
             "foo/../../escape.lua",
             "./MyAddon/file.lua",
             "MyAddon/./file.lua",
+            r"\\?\C:\../b",
+            r"\\?\C:\a/../../b",
+            r"\\?\UNC\server\share\../b",
+            r"\\?\C:\a\..\../b",
         ];
         let mut buf = Vec::new();
         {
@@ -1037,7 +1048,7 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf)).unwrap();
         for i in 0..archive.len() {
             let entry = archive.by_index(i).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().unwrap().into_owned();
             let expected = entry.enclosed_name().and_then(|p| {
                 p.components()
                     .next()

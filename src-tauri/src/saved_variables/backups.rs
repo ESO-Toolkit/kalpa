@@ -87,15 +87,15 @@ fn archive_stats(archive: &mut ZipArchive<File>) -> Result<ArchiveStats, String>
         let entry = archive
             .by_index(index)
             .map_err(|e| format!("Invalid backup entry: {e}"))?;
-        if entry.name() == MARKER {
+        let entry_name = entry
+            .name()
+            .map_err(|e| format!("Invalid backup filename: {e}"))?;
+        if entry_name == MARKER {
             continue;
         }
-        let name = member_name(entry.name())?;
+        let name = member_name(&entry_name)?;
         if entry.is_dir() || entry.is_symlink() || !names.insert(name.to_lowercase()) {
-            return Err(format!(
-                "Invalid or duplicate backup entry: {}",
-                entry.name()
-            ));
+            return Err(format!("Invalid or duplicate backup entry: {entry_name}"));
         }
         stats.file_count = stats
             .file_count
@@ -133,10 +133,13 @@ pub fn read(path: &Path, max_bytes: u64) -> Result<Vec<(String, Vec<u8>)>, Strin
         let mut entry = archive
             .by_index(index)
             .map_err(|e| format!("Invalid backup entry: {e}"))?;
-        if entry.name() == MARKER {
+        let entry_name = entry
+            .name()
+            .map_err(|e| format!("Invalid backup filename: {e}"))?;
+        if entry_name == MARKER {
             continue;
         }
-        let name = member_name(entry.name())?.to_string();
+        let name = member_name(&entry_name)?.to_string();
         let expected = entry.size();
         let mut bytes = Vec::new();
         (&mut entry)
@@ -226,10 +229,13 @@ fn verify_folder_archive(
         let mut entry = archive
             .by_index(index)
             .map_err(|e| format!("Failed to verify ZIP: {e}"))?;
-        if entry.name() == MARKER {
+        let entry_name = entry
+            .name()
+            .map_err(|e| format!("Invalid backup filename: {e}"))?;
+        if entry_name == MARKER {
             continue;
         }
-        let name = member_name(entry.name())?.to_string();
+        let name = member_name(&entry_name)?.to_string();
         let metadata = files
             .get(&name)
             .ok_or_else(|| format!("The folder no longer contains {name}."))?;

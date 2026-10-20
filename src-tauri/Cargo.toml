@@ -1,6 +1,6 @@
 [package]
 name = "kalpa"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 edition = "2021"
 description = "A source-available desktop addon manager for Elder Scrolls Online"
 license = "BUSL-1.1"
@@ -39,7 +39,7 @@ dirs = "7"
 reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
 scraper = "0.27"
-zip = "8"
+zip = "9"
 tempfile = "3"
 regex = "1"
 base64 = "0.23"
@@ -48,7 +48,10 @@ tauri-plugin-dialog = "2.7.0"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-window-state = "2"
-tauri-plugin-updater = "2"
+# Kalpa publishes raw NSIS/AppImage updates and macOS .app.tar.gz bundles.
+# The optional legacy Windows ZIP / Linux tarred-AppImage support pulls zip 4;
+# disabling it preserves our published formats, TLS and system proxy support.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2.5.3"
 tauri-plugin-notification = "2"

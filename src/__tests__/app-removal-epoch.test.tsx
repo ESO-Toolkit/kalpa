@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import type { AddonManifest, UpdateCheckResult } from "../types";
+import type { AddonManifest, AutoLinkResult, UpdateCheckResult } from "../types";
 
 const mocks = vi.hoisted(() => {
   const toast = Object.assign(vi.fn(), {
@@ -77,12 +77,17 @@ vi.mock("@/components/addon-list", () => ({
     addons,
     updateResults,
     onRemoveAddon,
+    onInstalled,
   }: {
     addons: AddonManifest[];
     updateResults: UpdateCheckResult[];
     onRemoveAddon: (folderName: string) => void;
+    onInstalled: () => void;
   }) => (
     <div>
+      <button type="button" onClick={onInstalled}>
+        Finish install
+      </button>
       <output data-testid="addons">{addons.map((addon) => addon.folderName).join(",")}</output>
       <output data-testid="updates">
         {updateResults.map((result) => result.folderName).join(",")}
@@ -175,13 +180,15 @@ async function removeSuccessfully() {
   expect(commandCalls("remove_addon")).toHaveLength(1);
 }
 
-describe("App removal epochs", () => {
+describe("App refresh and removal epochs", () => {
   const scanResponses: Array<Promise<AddonManifest[]>> = [];
   const updateResponses: Array<Promise<UpdateCheckResult[]>> = [];
+  const linkResponses: Array<Promise<{ ok: true; data: AutoLinkResult }>> = [];
 
   beforeEach(() => {
     scanResponses.length = 0;
     updateResponses.length = 0;
+    linkResponses.length = 0;
     vi.clearAllMocks();
 
     mocks.getSetting.mockImplementation(async (key: string, fallback: unknown) =>
@@ -194,7 +201,7 @@ describe("App removal epochs", () => {
         return { ok: true, data: { encounterLogExists: false } };
       }
       if (command === "auto_link_addons") {
-        return { ok: true, data: { linked: [], notFound: [] } };
+        return (await linkResponses.shift()) ?? { ok: true, data: { linked: [], notFound: [] } };
       }
       return { ok: true, data: null };
     });
@@ -220,6 +227,104 @@ describe("App removal epochs", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("links externally installed addons before the first scan and update check", async () => {
+    const linked = deferred<{ ok: true; data: AutoLinkResult }>();
+    linkResponses.push(linked.promise);
+    scanResponses.push(Promise.resolve([addon]));
+    updateResponses.push(Promise.resolve([update]));
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(mocks.invokeResult).toHaveBeenCalledWith("auto_link_addons", {
+        addonsPath: ADDONS_PATH,
+        forceRefresh: false,
+      })
+    );
+    expect(commandCalls("scan_installed_addons")).toHaveLength(0);
+    expect(commandCalls("check_for_updates")).toHaveLength(0);
+
+    await act(async () =>
+      linked.resolve({
+        ok: true,
+        data: { linked: [addon.folderName], notFound: [], skippedBundled: [] },
+      })
+    );
+    await waitFor(() => expect(screen.getByTestId("addons")).toHaveTextContent(addon.folderName));
+    await waitFor(() => expect(screen.getByTestId("updates")).toHaveTextContent(addon.folderName));
+    expect(commandCalls("scan_installed_addons")).toHaveLength(1);
+    expect(commandCalls("check_for_updates")).toHaveLength(1);
+  });
+
+  it("discovers external installs again on refresh and discards an older discovery", async () => {
+    scanResponses.push(Promise.resolve([]), Promise.resolve([addon]));
+    updateResponses.push(Promise.resolve([]), Promise.resolve([update]));
+    render(<App />);
+    await waitFor(() => expect(commandCalls("check_for_updates")).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.getByTestId("active-addons-path")).toHaveTextContent(ADDONS_PATH)
+    );
+
+    const staleLink = deferred<{ ok: true; data: AutoLinkResult }>();
+    const currentLink = deferred<{ ok: true; data: AutoLinkResult }>();
+    linkResponses.push(staleLink.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() =>
+      expect(
+        mocks.invokeResult.mock.calls.filter(([name]) => name === "auto_link_addons")
+      ).toHaveLength(2)
+    );
+    expect(commandCalls("scan_installed_addons")).toHaveLength(1);
+
+    linkResponses.push(currentLink.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await act(async () =>
+      currentLink.resolve({
+        ok: true,
+        data: { linked: [addon.folderName], notFound: [], skippedBundled: [] },
+      })
+    );
+    await waitFor(() => expect(screen.getByTestId("updates")).toHaveTextContent(addon.folderName));
+    await act(async () =>
+      staleLink.resolve({ ok: true, data: { linked: [], notFound: [], skippedBundled: [] } })
+    );
+
+    expect(commandCalls("scan_installed_addons")).toHaveLength(2);
+    expect(commandCalls("check_for_updates")).toHaveLength(2);
+    expect(mocks.invokeResult.mock.calls.filter(([name]) => name === "auto_link_addons")).toEqual([
+      ["auto_link_addons", { addonsPath: ADDONS_PATH, forceRefresh: false }],
+      ["auto_link_addons", { addonsPath: ADDONS_PATH, forceRefresh: true }],
+      ["auto_link_addons", { addonsPath: ADDONS_PATH, forceRefresh: true }],
+    ]);
+    expect(screen.getByTestId("addons")).toHaveTextContent(addon.folderName);
+    expect(screen.getByTestId("updates")).toHaveTextContent(addon.folderName);
+  });
+
+  it.each([
+    ["keyboard refresh", true],
+    ["install completion", false],
+  ] as const)("uses the expected filelist freshness for %s", async (action, forceRefresh) => {
+    scanResponses.push(Promise.resolve([addon]), Promise.resolve([addon]));
+    updateResponses.push(Promise.resolve([]), Promise.resolve([]));
+    render(<App />);
+    await waitFor(() => expect(commandCalls("check_for_updates")).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.getByTestId("active-addons-path")).toHaveTextContent(ADDONS_PATH)
+    );
+
+    if (action === "keyboard refresh") {
+      fireEvent.keyDown(window, { key: "r", ctrlKey: true });
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Finish install" }));
+    }
+
+    await waitFor(() => expect(commandCalls("check_for_updates")).toHaveLength(2));
+    expect(mocks.invokeResult.mock.calls.filter(([name]) => name === "auto_link_addons")).toEqual([
+      ["auto_link_addons", { addonsPath: ADDONS_PATH, forceRefresh: false }],
+      ["auto_link_addons", { addonsPath: ADDONS_PATH, forceRefresh }],
+    ]);
   });
 
   it("does not reintroduce a removed addon when an older scan resolves", async () => {

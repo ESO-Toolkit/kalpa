@@ -80,7 +80,11 @@ mod tests {
             zip::ZipArchive::new(Cursor::new(bytes.to_vec())).expect("open zip archive");
         assert_eq!(archive.len(), 1, "archive must hold exactly one entry");
         let mut file = archive.by_index(0).expect("entry 0");
-        assert_eq!(file.name(), ENTRY_NAME, "entry must be named log.txt");
+        assert_eq!(
+            file.name().unwrap(),
+            ENTRY_NAME,
+            "entry must be named log.txt"
+        );
         let mut out = String::new();
         file.read_to_string(&mut out).expect("read entry");
         out
@@ -128,6 +132,6 @@ mod tests {
     fn entry_is_named_log_txt() {
         let bytes = zip_log_txt("x").expect("zip");
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open");
-        assert_eq!(archive.by_index(0).unwrap().name(), "log.txt");
+        assert_eq!(archive.by_index(0).unwrap().name().unwrap(), "log.txt");
     }
 }
