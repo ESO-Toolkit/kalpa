@@ -234,7 +234,7 @@ function App() {
   } = useAppUpdate();
 
   const initRan = useRef(false);
-  const autoLinkRan = useRef(false);
+  const refreshSeqRef = useRef(0);
   const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
@@ -637,37 +637,43 @@ function App() {
   }, [checkForUpdates, scanAddons]);
 
   const scanAndCheck = useCallback(
-    async (path: string, notifyOnUpdateError = false) => {
-      await scanAddons(path);
-      await checkForUpdates(path, false, notifyOnUpdateError);
+    async (path: string, notifyOnUpdateError = false, autoUpdate = false) => {
+      const seq = ++refreshSeqRef.current;
+      // Invalidate older reads before awaiting discovery, including reads for a
+      // different game instance. They must not land while linking is in flight.
+      ++scanSeqRef.current;
+      ++checkSeqRef.current;
+      setLoading(true);
+      setCheckingUpdates(true);
+      try {
+        // Minion can add folders while Kalpa is open. Link on every refresh so
+        // the following check includes those folders on its first pass.
+        const result = await invokeResult<AutoLinkResult>("auto_link_addons", {
+          addonsPath: path,
+        });
+        if (seq !== refreshSeqRef.current) return;
+        if (!result.ok) {
+          toast.error(`Auto-link failed: ${result.error}`);
+        } else if (result.data.linked.length > 0) {
+          toast.success(
+            `Auto-linked ${result.data.linked.length} addon${result.data.linked.length > 1 ? "s" : ""} to ESOUI`
+          );
+        }
+
+        // Auto-update needs the scan's Protected Edits coverage before mutation.
+        await scanAddons(path);
+        if (seq !== refreshSeqRef.current) return;
+        await checkForUpdates(path, autoUpdate, notifyOnUpdateError);
+        if (seq !== refreshSeqRef.current) return;
+        if (result.ok) await notifyUnmatchedAddons(path, result.data.notFound);
+      } finally {
+        if (seq === refreshSeqRef.current) {
+          setLoading(false);
+          setCheckingUpdates(false);
+        }
+      }
     },
     [checkForUpdates, scanAddons]
-  );
-
-  const runAutoLink = useCallback(
-    async (path: string) => {
-      if (autoLinkRan.current) return;
-      autoLinkRan.current = true;
-
-      const result = await invokeResult<AutoLinkResult>("auto_link_addons", {
-        addonsPath: path,
-      });
-
-      if (!result.ok) {
-        toast.error(`Auto-link failed: ${result.error}`);
-        return;
-      }
-
-      if (result.data.linked.length > 0) {
-        toast.success(
-          `Auto-linked ${result.data.linked.length} addon${result.data.linked.length > 1 ? "s" : ""} to ESOUI`
-        );
-        await scanAddons(path);
-      }
-
-      await notifyUnmatchedAddons(path, result.data.notFound);
-    },
-    [scanAddons]
   );
 
   const refreshUploaderIntroDetection = useCallback(async () => {
@@ -835,18 +841,7 @@ function App() {
         setAddonsPath(savedPath);
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
         void refreshUploaderIntroDetection();
-        // Scan (disk) and update check (metadata + network) touch different
-        // state and locks, so run them concurrently unless auto-update needs
-        // scan-derived Protected Edits coverage first.
-        if (autoUpdate) {
-          // Auto-update needs the scan's Protected Edits coverage before it may
-          // disclose risk and begin mutation.
-          await scanAddons(savedPath);
-          await checkForUpdates(savedPath, true, false);
-        } else {
-          await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, false, false)]);
-        }
-        void runAutoLink(savedPath);
+        await scanAndCheck(savedPath, false, autoUpdate);
         // Populate knownInstances so the Settings instance switcher works for
         // returning users. Fire-and-forget — does not block startup.
         invokeOrThrow<GameInstance[]>("detect_game_instances")
@@ -888,14 +883,7 @@ function App() {
           // Best-effort persist: this is auto-detection, so if the write fails it
           // self-heals — the same instance is re-detected and re-selected next launch.
           void setSetting("addonsPath", path);
-          if (autoUpdate) {
-            await scanAddons(path);
-            await checkForUpdates(path, true, false);
-          } else {
-            // No mutation follows, so the disk scan and network check may overlap.
-            await Promise.all([scanAddons(path), checkForUpdates(path, false, false)]);
-          }
-          void runAutoLink(path);
+          await scanAndCheck(path, false, autoUpdate);
         } catch (initError) {
           setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
           setErrorShowSettings(true);
@@ -907,7 +895,7 @@ function App() {
         setLoading(false);
       }
     }
-  }, [checkForUpdates, refreshUploaderIntroDetection, runAutoLink, scanAddons]);
+  }, [refreshUploaderIntroDetection, scanAndCheck]);
 
   useEffect(() => {
     if (initRan.current) return;
@@ -1036,10 +1024,8 @@ function App() {
         setSetupInstances(null);
         setErrorShowSettings(false);
         setLoading(true);
-        await scanAddons(path);
         const autoUpdate = await getSetting<boolean>("autoUpdate", false);
-        await checkForUpdates(path, autoUpdate, false);
-        void runAutoLink(path);
+        await scanAndCheck(path, false, autoUpdate);
       } catch (pathError) {
         const message = `Could not set addons folder: ${getTauriErrorMessage(pathError)}`;
         setError(message);
@@ -1047,7 +1033,7 @@ function App() {
         toast.error(message);
       }
     },
-    [checkForUpdates, refreshUploaderIntroDetection, runAutoLink, scanAddons]
+    [refreshUploaderIntroDetection, scanAndCheck]
   );
 
   const handleRefresh = useCallback(() => {

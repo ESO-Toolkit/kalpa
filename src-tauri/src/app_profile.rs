@@ -21,6 +21,16 @@ pub fn is_e2e() -> bool {
     e2e_token().is_some()
 }
 
+/// Owned fixtures are available only to isolated Windows debug test launches.
+/// Release builds always read the user's Minion data and the live ESOUI API.
+pub fn e2e_fixture_dir() -> Option<std::path::PathBuf> {
+    #[cfg(all(windows, debug_assertions))]
+    if is_e2e() {
+        return std::env::var_os("KALPA_E2E_FIXTURES").map(std::path::PathBuf::from);
+    }
+    None
+}
+
 #[cfg(all(windows, debug_assertions))]
 fn e2e_token() -> Option<&'static str> {
     // Resolve once, before logging or credentials are opened. Every consumer

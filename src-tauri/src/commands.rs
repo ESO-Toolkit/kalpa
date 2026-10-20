@@ -5,14 +5,19 @@ use crate::installer;
 use crate::manifest::{self, AddonManifest};
 use crate::manifest_cache;
 use crate::metadata;
+use crate::minion::{find_minion_data, load_minion_addons, minion_addon_is_for_root, MinionAddon};
+#[cfg(test)]
+use crate::minion::{
+    find_minion_data_in, load_minion_addons_from, parse_minion4_addons, parse_minion_addons,
+};
 use crate::phase_timer::PhaseTimer;
 use crate::uploader::native::session::{SessionProvider, StoredSessionProvider};
 use crate::MetadataLock;
 use crate::{AllowedAddonsPath, PendingAddonsPathApproval};
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
+#[cfg(test)]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use rayon::prelude::*;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -2603,10 +2608,7 @@ pub async fn check_for_updates(
         // metadata is needed to reconcile versions already tracked in
         // kalpa.json. A missing, unreadable, or malformed file is non-fatal;
         // the normal Kalpa metadata comparison still works without it.
-        let minion_addons = find_minion_xml()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .map(|content| parse_minion_addons(&content))
-            .unwrap_or_default();
+        let minion_addons = load_minion_addons().unwrap_or_default();
 
         // Phase 1: acquire lock for metadata comparison and save
         let pending = {
@@ -2697,8 +2699,8 @@ fn check_for_updates_metadata(
             None => continue,
         };
 
-        // Startup checks run before auto-link, and may immediately download
-        // updates. Repair identity before comparing versions or emitting IDs.
+        // Repair identity before comparing versions or emitting IDs, including
+        // checks invoked without the frontend discovery pass.
         if meta.esoui_id != api_entry.esoui_id {
             metadata::reconcile_addon_identity(
                 &mut meta,
@@ -2710,8 +2712,8 @@ fn check_for_updates_metadata(
         }
 
         // Minion can replace an addon without touching kalpa.json. Its
-        // `ui-version` is authoritative when both the folder and resolved ESOUI
-        // identity match.
+        // recorded release version is authoritative when the game root,
+        // folder, and resolved ESOUI identity match.
         let remote_ver = normalized_version(&api_entry.version);
         let stored_matches_api = normalized_version(&meta.installed_version) == remote_ver;
         let detected_version = (!stored_matches_api)
@@ -2842,33 +2844,6 @@ fn minion_version_for_folder<'a>(
     matches
         .all(|addon| normalized_version(&addon.version) == normalized_version(first))
         .then_some(first)
-}
-
-pub(crate) fn minion_addon_is_for_root(
-    addon: &MinionAddon,
-    addons_dir: &Path,
-    has_scoped_entries: bool,
-) -> bool {
-    match addon.addons_path.as_deref() {
-        Some(path) => paths_refer_to_same_dir(path, addons_dir),
-        None => !has_scoped_entries,
-    }
-}
-
-fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
-    let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
-    let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
-
-    #[cfg(windows)]
-    {
-        left.to_string_lossy()
-            .trim_end_matches(['/', '\\'])
-            .eq_ignore_ascii_case(right.to_string_lossy().trim_end_matches(['/', '\\']))
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
 }
 
 // ── Update cancellation + progress ──────────────────────────────────────
@@ -9374,121 +9349,14 @@ pub async fn backup_character_settings(
 
 // ─── Minion Migration ────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MinionAddon {
-    pub uid: u32,
-    pub version: String,
-    pub folders: Vec<String>,
-    #[serde(skip)]
-    pub addons_path: Option<PathBuf>,
-}
-
-pub fn find_minion_xml() -> Option<PathBuf> {
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".minion").join("minion.xml");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
-    let mut addons: Vec<MinionAddon> = Vec::new();
-    static RE_GAME: OnceLock<Regex> = OnceLock::new();
-    let re_game = RE_GAME.get_or_init(|| Regex::new(r#"<game\s+([^>]*)>"#).unwrap());
-    static RE_ADDON: OnceLock<Regex> = OnceLock::new();
-    let re_addon = RE_ADDON.get_or_init(|| Regex::new(r#"<addon\s+([^>]*)>"#).unwrap());
-    static RE_UID: OnceLock<Regex> = OnceLock::new();
-    let re_uid = RE_UID.get_or_init(|| Regex::new(r#"(?:^|\s)uid="(\d+)""#).unwrap());
-    static RE_VERSION: OnceLock<Regex> = OnceLock::new();
-    let re_version =
-        RE_VERSION.get_or_init(|| Regex::new(r#"(?:^|\s)ui-version="([^"]*)""#).unwrap());
-    static RE_ADDONS_PATH: OnceLock<Regex> = OnceLock::new();
-    let re_addons_path =
-        RE_ADDONS_PATH.get_or_init(|| Regex::new(r#"(?:^|\s)addon-path="([^"]*)""#).unwrap());
-    static RE_DIR: OnceLock<Regex> = OnceLock::new();
-    let re_dir = RE_DIR.get_or_init(|| Regex::new(r"<dir>([^<]+)</dir>").unwrap());
-
-    // Simple state machine parser for Minion XML
-    let mut current_addons_path: Option<PathBuf> = None;
-    let mut current_uid: Option<u32> = None;
-    let mut current_version = String::new();
-    let mut current_dirs: Vec<String> = Vec::new();
-
-    for line in xml_content.lines() {
-        let line = line.trim();
-        if let Some(caps) = re_game.captures(line) {
-            current_addons_path = re_addons_path
-                .captures(&caps[1])
-                .and_then(|path_caps| decode_minion_addons_path(&path_caps[1]));
-        } else if line.contains("</game>") {
-            current_addons_path = None;
-        } else if let Some(caps) = re_addon.captures(line) {
-            // Save previous addon if any
-            if let Some(uid) = current_uid {
-                if !current_dirs.is_empty() {
-                    addons.push(MinionAddon {
-                        uid,
-                        version: current_version.clone(),
-                        folders: current_dirs.clone(),
-                        addons_path: current_addons_path.clone(),
-                    });
-                }
-            }
-            current_uid = re_uid
-                .captures(&caps[1])
-                .and_then(|uid_caps| uid_caps[1].parse::<u32>().ok());
-            current_version = re_version
-                .captures(&caps[1])
-                .map(|version_caps| version_caps[1].to_string())
-                .unwrap_or_default();
-            current_dirs = Vec::new();
-        } else if let Some(caps) = re_dir.captures(line) {
-            current_dirs.push(caps[1].to_string());
-        } else if line.contains("</addon>") {
-            if let Some(uid) = current_uid {
-                if !current_dirs.is_empty() {
-                    addons.push(MinionAddon {
-                        uid,
-                        version: current_version.clone(),
-                        folders: current_dirs.clone(),
-                        addons_path: current_addons_path.clone(),
-                    });
-                }
-            }
-            current_uid = None;
-            current_dirs = Vec::new();
-        }
-    }
-
-    addons
-}
-
-fn decode_minion_addons_path(value: &str) -> Option<PathBuf> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-
-    BASE64_STANDARD
-        .decode(value)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|path| !path.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| Some(PathBuf::from(value)))
-}
-
-/// `(async)` because `find_minion_xml` stats a path under the home directory,
+/// `(async)` because `find_minion_data` stats paths under the home directory,
 /// and a roaming or redirected profile turns that into a network round-trip.
 /// `initializeApp` fires it at startup, so a stall lands while the window is
 /// still empty. The call site is fire-and-forget but the command reads nothing
 /// it also writes, so there is no ordering to preserve.
 #[tauri::command(async)]
 pub fn detect_minion() -> Result<bool, String> {
-    Ok(find_minion_xml().is_some())
+    Ok(find_minion_data().is_some())
 }
 
 // ─── Safe Migration Commands ────────────────────────────────────────
@@ -13716,6 +13584,168 @@ mod tests {
             addons[0].addons_path.as_deref(),
             Some(Path::new(r"C:\Games\ESO\live\AddOns"))
         );
+    }
+
+    // Sanitized schema fixture verified against Minion 4.1.3's ESOPluginData
+    // and ESOLocalAddOnBundleData, distributed at:
+    // https://sir.insidi.at/or/vault/minion-4-open-beta/
+    fn minion4_data(install_path: &Path, version: &str) -> String {
+        serde_json::json!({
+            "installedGames": [{
+                "installPath": install_path,
+                "installedBundles": {"esoui:123": {
+                    "version": version,
+                    "addOns": {
+                        "MyAddon": {"path": "MyAddon", "version": "manifest-version"},
+                        "MyAddon/libs/LibNested": {"path": "MyAddon/libs/LibNested"}
+                    }
+                }}
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn minion4_loader_uses_current_database_instead_of_imported_xml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let minion_dir = tmp.path();
+        fs::create_dir(minion_dir.join("config")).unwrap();
+        let json_path = minion_dir.join("config/eso.json");
+        let xml_path = minion_dir.join("minion.xml");
+        fs::write(
+            &xml_path,
+            "<addon uid=\"123\" ui-version=\"2.0\">\n<dir>MyAddon</dir>\n</addon>",
+        )
+        .unwrap();
+        fs::write(&json_path, minion4_data(&minion_dir.join("live"), "1.0")).unwrap();
+
+        assert_eq!(find_minion_data_in(minion_dir).unwrap(), json_path);
+        assert_eq!(
+            load_minion_addons_from(&json_path).unwrap()[0].version,
+            "1.0"
+        );
+        fs::write(&json_path, "{partial write").unwrap();
+        let selected = find_minion_data_in(minion_dir).unwrap();
+        assert!(load_minion_addons_from(&selected).is_err());
+        fs::write(&json_path, r#"{"installedGames":[]}"#).unwrap();
+        assert!(load_minion_addons_from(&selected).unwrap().is_empty());
+        fs::remove_file(&json_path).unwrap();
+        assert_eq!(find_minion_data_in(minion_dir).unwrap(), xml_path);
+        assert_eq!(
+            load_minion_addons_from(&xml_path).unwrap()[0].version,
+            "2.0"
+        );
+    }
+
+    #[test]
+    fn minion4_versions_require_matching_root_folder_identity_and_agreement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("live");
+        let pts = tmp.path().join("pts");
+        let mut data: serde_json::Value =
+            serde_json::from_str(&minion4_data(&live, "1.0")).unwrap();
+        let pts_data: serde_json::Value = serde_json::from_str(&minion4_data(&pts, "2.0")).unwrap();
+        data["installedGames"]
+            .as_array_mut()
+            .unwrap()
+            .push(pts_data["installedGames"][0].clone());
+        let addons = parse_minion4_addons(&data.to_string()).unwrap();
+        assert_eq!(
+            minion_version_for_folder(&addons, &live.join("AddOns"), "MyAddon", 123),
+            Some("1.0")
+        );
+        assert_eq!(
+            minion_version_for_folder(&addons, &pts.join("AddOns"), "MyAddon", 123),
+            Some("2.0")
+        );
+        assert!(
+            minion_version_for_folder(&addons, &live.join("AddOns"), "LibNested", 123).is_none()
+        );
+        assert!(minion_version_for_folder(&addons, &live.join("AddOns"), "MyAddon", 456).is_none());
+        assert!(minion_version_for_folder(
+            &addons,
+            &tmp.path().join("other/AddOns"),
+            "MyAddon",
+            123
+        )
+        .is_none());
+
+        data["installedGames"][1]["installPath"] = serde_json::json!(live);
+        let conflicting = parse_minion4_addons(&data.to_string()).unwrap();
+        assert!(
+            minion_version_for_folder(&conflicting, &live.join("AddOns"), "MyAddon", 123).is_none()
+        );
+        data["installedGames"][0]["installPath"] = serde_json::Value::Null;
+        data["installedGames"][1]["installedBundles"]["esoui:123"]["version"] =
+            serde_json::Value::Null;
+        assert!(parse_minion4_addons(&data.to_string()).unwrap().is_empty());
+        assert!(parse_minion4_addons(r#"{"installedGames":{}}"#).is_err());
+    }
+
+    #[test]
+    fn update_check_reconciles_minion4_on_discovery_and_after_external_upgrade() {
+        for previously_installed in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let addons_dir = tmp.path().join("AddOns");
+            make_addon_folder(
+                &addons_dir,
+                "MyAddon",
+                "## Title: My Addon\n## Version: manifest-version\n",
+            );
+            if previously_installed {
+                let mut store = metadata::MetadataStore::default();
+                metadata::record_install(
+                    &mut store,
+                    "MyAddon",
+                    123,
+                    "1.0",
+                    "https://example.com/old.zip",
+                );
+                let installed = store.addons.get_mut("MyAddon").unwrap();
+                installed.tags = vec!["keep".to_string()];
+                installed.esoui_last_update = 21;
+                installed.esoui_marker_installed = true;
+                metadata::save_metadata(&addons_dir, &store).unwrap();
+            }
+            let mut lookup = HashMap::new();
+            lookup.insert(
+                "MyAddon".to_string(),
+                vec![Arc::new(esoui::ApiAddonLookup {
+                    esoui_id: 123,
+                    title: "My Addon".to_string(),
+                    version: "2.0".to_string(),
+                    author: "Author".to_string(),
+                    last_update: 42,
+                    file_info_uri: String::new(),
+                })],
+            );
+            auto_link_addons_blocking(&addons_dir, &lookup).unwrap();
+            let before = metadata::load_metadata(&addons_dir).addons["MyAddon"].clone();
+            let minion_path = tmp.path().join("eso.json");
+            for (version, marker) in [("2.0", 42), ("3.0", 84)] {
+                // Reload both sources between external upgrades in one session.
+                // A reused snapshot would miss the second Minion update.
+                fs::write(
+                    &minion_path,
+                    minion4_data(tmp.path(), &format!(" v{version} ")),
+                )
+                .unwrap();
+                let minion = load_minion_addons_from(&minion_path).unwrap();
+                let remote = Arc::make_mut(&mut lookup.get_mut("MyAddon").unwrap()[0]);
+                remote.version = version.to_string();
+                remote.last_update = marker;
+                let results = check_for_updates_metadata(&addons_dir, &lookup, &minion).unwrap();
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].current_version, version);
+                assert!(!results[0].has_update);
+                let saved = metadata::load_metadata(&addons_dir);
+                assert_eq!(saved.addons["MyAddon"].installed_version, version);
+                assert_eq!(saved.addons["MyAddon"].esoui_last_update, marker);
+                assert!(saved.addons["MyAddon"].esoui_marker_installed);
+                assert_eq!(saved.addons["MyAddon"].tags, before.tags);
+                assert_eq!(saved.addons["MyAddon"].installed_at, before.installed_at);
+            }
+        }
     }
 
     #[test]

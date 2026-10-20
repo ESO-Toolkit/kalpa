@@ -1719,6 +1719,12 @@ pub fn fetch_filelist_lookup() -> Result<Arc<FilelistLookup>, String> {
 }
 
 fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
+    if let Some(fixtures) = crate::app_profile::e2e_fixture_dir() {
+        let bytes = std::fs::read(fixtures.join("filelist.json"))
+            .map_err(|e| format!("Failed to read owned ESOUI fixture: {e}"))?;
+        return serde_json::from_slice(&bytes)
+            .map_err(|e| format!("Invalid owned ESOUI fixture: {e}"));
+    }
     let client = http_client();
     let url = "https://api.mmoui.com/v4/game/ESO/filelist.json";
     let response = fetch_with_retry(client, url)?;

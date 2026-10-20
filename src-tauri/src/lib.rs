@@ -31,6 +31,7 @@ mod launch_gate;
 mod manifest;
 mod manifest_cache;
 mod metadata;
+mod minion;
 mod native_boot;
 mod pack_hub;
 mod phase_timer;
