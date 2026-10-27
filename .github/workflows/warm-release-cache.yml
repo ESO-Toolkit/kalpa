@@ -83,7 +83,7 @@ jobs:
       # embeds `frontendDist: ../dist`, so src-tauri does not compile until
       # the frontend has been built at least once.
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ".nvmrc"
           cache: npm
@@ -112,7 +112,7 @@ jobs:
       # produce exactly this restore during a quiet week.
       - name: Rust cache
         id: cache
-        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: release
           workspaces: src-tauri
@@ -180,7 +180,7 @@ jobs:
       # See warm-app's cache step for the cache-hit gating.
       - name: Rust cache
         id: cache
-        uses: swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: release-sidecar
           workspaces: prototypes/slint-kalpa
