@@ -38,7 +38,7 @@ tauri-runtime = "2"
 dirs = "7"
 reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
-scraper = "0.27"
+scraper = "0.29"
 zip = "9"
 tempfile = "3"
 regex = "1"
@@ -60,14 +60,14 @@ rayon = "1.12"
 # Fast non-cryptographic hasher (FxHashMap) for the uploader's per-event hot maps.
 # Already present transitively in the lock file, so this adds no new compilation.
 rustc-hash = "2"
-typed-path = "0.12"
+typed-path = "0.13"
 sha2 = "0.11"
 md-5 = "0.11"
 # "bundled" statically compiles SQLite (~1-2MB binary size increase) to avoid
 # depending on a system SQLite installation. Worth it for portable releases.
 rusqlite = { version = "0.39", features = ["bundled"] }
 # File watching for the live log uploader (tails the active Encounter.log).
-notify = "8"
+notify = "9"
 # Drive-letter canonicalization that avoids Windows verbatim (`\\?\`) prefixes.
 # The uploader round-trips canonical paths through the frontend and back into its
 # own confinement check; std's canonicalize() emits verbatim paths that the check
